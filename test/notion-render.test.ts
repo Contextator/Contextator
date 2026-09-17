@@ -53,6 +53,16 @@ describe('notion renderer', () => {
     );
   });
 
+  it('keeps the blocks folded under a toggleable heading', () => {
+    const md = renderBlocks([
+      block('heading_2', { rich_text: [rt('Troubleshooting')], is_toggleable: true }, [
+        block('paragraph', { rich_text: [rt('Check the logs first.')] }),
+        block('bulleted_list_item', { rich_text: [rt('restart')] }),
+      ]),
+    ]);
+    expect(md).toBe('## Troubleshooting\n\nCheck the logs first.\n\n- restart');
+  });
+
   it('derives titles, file stems and frontmatter', () => {
     expect(pageTitle({ properties: { Name: { type: 'title', title: [rt('Getting '), rt('Started')] } } })).toBe('Getting Started');
     expect(pageFileStem('Çok Güzel Başlık!', '1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d')).toBe('cok-guzel-baslik--1a2b3c4d');

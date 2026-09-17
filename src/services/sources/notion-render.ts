@@ -83,11 +83,12 @@ export function renderBlock(block: NotionBlock, nextNumber: () => number): strin
     case 'paragraph':
       return text + (childrenMd(block) ? `\n\n${childrenMd(block)}` : '');
     case 'heading_1':
-      return `# ${text}`;
     case 'heading_2':
-      return `## ${text}`;
-    case 'heading_3':
-      return `### ${text}`;
+    case 'heading_3': {
+      // A toggleable heading owns the blocks folded under it; dropping them loses the whole section.
+      const kids = childrenMd(block);
+      return `${'#'.repeat(Number(block.type.slice(-1)))} ${text}${kids ? `\n\n${kids}` : ''}`;
+    }
     case 'bulleted_list_item':
       return listItem('-', block, text);
     case 'numbered_list_item':
