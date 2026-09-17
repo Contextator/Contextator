@@ -91,11 +91,62 @@ both queue the same run.
 A source can declare what its files really are, which applies a small transform before chunking:
 
 - **Plain Markdown / text** — no transform.
-- **Obsidian vault** — `[[wikilinks]]`, `[[Page|Alias]]`, `[[Page#Heading]]` and `![[image.png]]` are rewritten to ordinary Markdown links; `.obsidian/` is skipped.
+- **Obsidian vault** — see below.
 - **Notion export** — the 32-hex page id Notion appends to file and folder names (`Getting started 1a2b…5c6d.md`) is stripped from paths and from the links pointing at them.
 
 Upload a Notion **Export → Markdown & CSV** zip with the *Notion export* content type; use the
 **Notion** source type instead when you want the live API.
+
+The content type is applied on the way into the chunker, after the file hash that decides what to
+re-embed — so changing it drops the stored hashes of that source and queues a run, otherwise the new
+transform would never reach a file whose bytes did not change.
+
+### Obsidian vaults
+
+A vault is a folder of Markdown, so it arrives either way:
+
+- **Mounted on the server** — add it as a **Local directory** inside `ALLOWED_DOC_ROOTS` with content type *Obsidian vault*. Nothing is copied and edits show up on the next run.
+- **Not on the server** — the **Obsidian vault** tab takes the folder itself or a zip of it; it is an upload source that carries the content type for you.
+
+Either way the vault's own syntax is flattened so an agent reads plain Markdown:
+
+| In the vault | Indexed as |
+|--------------|-----------|
+| `[[Guides/Install]]` | `[Guides/Install](Guides/Install.md)` |
+| `[[Setup\|the setup guide]]` | `[the setup guide](Setup.md)` |
+| `[[API#Auth]]` | `[API › Auth](API.md#auth)` |
+| `[[#Konular]]` (same note) | `[Konular](#konular)` |
+| `[[Install#^step-3]]` (block ref) | `[Install](Install.md#^step-3)` |
+| `![[diagram.png]]` | `![diagram.png](diagram.png)` — images stay embeds |
+| `![[Release Notes]]` | `[Release Notes](Release%20Notes.md)` — a note embed is a link, not a broken image |
+| `> [!NOTE] Heads up` | `> **Note:** Heads up` — the callout's kind stays searchable |
+| `%% private note %%` | removed; comments are written not to be read |
+
+`.obsidian/`, other dot-directories and every non-document file (attachments, `.canvas`) are skipped.
+Frontmatter is parsed by the chunker, and a `title` in it wins over the first heading.
+
+### Notion
+
+1. Create an **internal integration** at `notion.so/profile/integrations` and copy its token.
+2. In Notion, share the pages or databases you want with that integration (… → Connections).
+3. Add a **Notion** source and paste the token. **Test connection** reads the integration's own user
+   and answers with its name, so a wrong token is obvious before any indexing.
+
+Leave **Root pages or databases** empty to take everything shared with the integration; otherwise paste
+page or database ids (or just their URLs — the id is picked out of them), one per line. Each page becomes
+one Markdown file, nested in a folder named after its parent page, with the title, Notion id, URL and
+`last_edited_time` in frontmatter. A page is re-rendered only when its `last_edited_time` moved, and a
+page that stops being shared has its file removed.
+
+Paragraphs, all three heading levels (including the blocks folded under a toggleable one), bulleted,
+numbered and to-do lists with their nesting, quotes, callouts, code blocks, tables, dividers, equations,
+bookmarks, images and file links are rendered; unknown block types are skipped rather than failing the
+page. Notion's own rate limit is respected (~3 requests/second).
+
+If the token is rejected, or none of the configured roots can be read, the source fails with that
+message instead of reporting an empty workspace — which would otherwise delete every page it had
+already imported. The other sources of the project still index, and the project reports
+`2/3 sources synced; <source>: <reason>`.
 
 ### Private repositories and tokens
 
