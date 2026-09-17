@@ -10,6 +10,7 @@ import {
   createSource,
   deleteSource,
   getSource,
+  invalidateSourceDocuments,
   listSources,
   regenerateWebhookSecret,
   toSourceView,
@@ -72,7 +73,16 @@ export const sourceRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     const { id, sid } = SourceParams.parse(req.params);
     const body = UpdateBody.parse(req.body);
     await requireProject(id);
+    const before = await getSource(db, id, sid);
+    if (!before) throw new NotFoundError('Source not found');
     const row = await updateSource(db, id, sid, body, serviceOpts);
+
+    // A new content type has to reach files whose bytes did not change, so drop their hashes first.
+    // Under the project lock, so an index run in flight cannot write fresh hashes over the reset.
+    if (row.flavor !== before.flavor) await locks.runExclusive(id, () => invalidateSourceDocuments(db, sid));
+    // Settings that change what the source yields (path, branch, subdir, file types, content type)
+    // only take effect on a run; queue one instead of leaving the source silently stale.
+    if (row.flavor !== before.flavor || JSON.stringify(row.config) !== JSON.stringify(before.config)) indexer.enqueue(id);
     return toSourceView(row);
   });
 

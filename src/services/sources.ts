@@ -2,7 +2,7 @@ import { and, asc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { PROJECT_NAME_RE } from '../config.js';
 import type { Db } from '../db/client.js';
-import { documentSources, type DocumentSourceRow } from '../db/schema.js';
+import { documents, documentSources, type DocumentSourceRow } from '../db/schema.js';
 import { encryptSecret, randomSecret } from './crypto.js';
 import { FLAVORS, type Flavor } from './flavors.js';
 import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './fs-scan.js';
@@ -223,6 +223,15 @@ export async function setSourceStatus(
   patch: { status: 'idle' | 'syncing' | 'error'; lastError?: string | null; lastSyncedAt?: Date; config?: Record<string, unknown> },
 ): Promise<void> {
   await db.update(documentSources).set(patch).where(eq(documentSources.id, sourceId));
+}
+
+/**
+ * Drops the stored hashes of a source's documents so the next run re-chunks all of them. The indexer
+ * decides what to skip from the hash of the file as it sits on disk, while the content type is applied
+ * afterwards, on the way into the chunker — so without this a changed content type would reach no file.
+ */
+export async function invalidateSourceDocuments(db: Db, sourceId: string): Promise<void> {
+  await db.update(documents).set({ contentHash: '' }).where(eq(documents.sourceId, sourceId));
 }
 
 /** Refreshes `document_count` of every source of the project from the documents table. */
