@@ -1,8 +1,9 @@
 # Contextator
 
-**Self-hosted, multi-tenant MCP documentation server.** Point it at folders of Markdown/MDX
-files, and every folder becomes its own [Model Context Protocol](https://modelcontextprotocol.io)
-endpoint that AI agents (Cursor, Claude Code, Claude Desktop, …) can search semantically:
+**Self-hosted, multi-tenant MCP documentation server.** Give a project its document sources — mounted
+folders, git repositories, uploaded archives, a Notion workspace — and it becomes its own
+[Model Context Protocol](https://modelcontextprotocol.io) endpoint that AI agents (Cursor, Claude Code,
+Claude Desktop, …) can search semantically:
 
 ```
 http://localhost:3444/mcp/<project-name>
@@ -11,11 +12,14 @@ http://localhost:3444/mcp/<project-name>
 - **One URL per project, fully isolated.** Each project has its own document collection and
   vector embeddings in PostgreSQL + [pgvector](https://github.com/pgvector/pgvector). A client
   connected to `/mcp/billing` never sees `/mcp/mobile`.
+- **Many sources per project.** A local directory, a git repository (or one subdirectory of it), an
+  upload of files/folders/`.zip`/`.tar.gz`/`.rar`, or a Notion workspace — combined into one searchable
+  endpoint. Every source is mounted under its own name, so documents read as `handbook/install.md`.
 - **100 % local by default.** Embeddings are generated on the CPU with
   [transformers.js](https://huggingface.co/docs/transformers.js) (`Xenova/paraphrase-multilingual-MiniLM-L12-v2`,
   50+ languages incl. Turkish). Switch to OpenAI embeddings with two env vars.
 - **Both MCP transports on the same URL.** Streamable HTTP for current clients, legacy HTTP+SSE for older ones.
-- **Admin dashboard** at `http://localhost:3444/` to create/delete projects, trigger re-indexing and watch progress.
+- **Admin dashboard** at `http://localhost:3444/` to manage projects and their sources — add a repository, drop a folder or an archive on the page, test a connection, trigger re-indexing and watch progress.
 - **Incremental indexing.** Files are hashed; only changed files are re-embedded, removed files are deleted.
 
 Stack: TypeScript · Node.js 20+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/sdk` · `@huggingface/transformers`.
@@ -39,7 +43,9 @@ docker compose logs -f            # wait for "embedding model ready"
 
 1. Open **http://localhost:3444/**.
 2. Press **New project** (or `n`): name `demo`, directory `/docs/demo` (the host folder from `DOCS_HOST_PATH` is mounted at `/docs`).
-3. Watch the project's status go `indexing → idle` in the list; the detail panel shows documents, chunks, the last index run and any error.
+   Leaving the directory empty creates an empty project; add its sources afterwards with **Add source**.
+3. Watch the project's status go `indexing → idle` in the list; the **Document sources** panel shows every
+   source with its document count, last sync and any error.
 4. Use the **Connect an agent** tabs (Claude Code, Cursor, Claude Desktop, legacy SSE) for copy-paste snippets, or run the bundled smoke test:
 
 ```bash
@@ -57,9 +63,69 @@ docker build -t contextator .
 docker run -d --name contextator -p 3444:3444 \
   -v contextator-pgdata:/var/lib/postgresql/data \
   -v contextator-models:/app/.cache/models \
+  -v contextator-data:/data \
   -v /path/to/your/docs:/docs:ro \
   contextator
 ```
+
+## Document sources
+
+A project is a set of **sources**. Each one is added in the dashboard (**Add source**), carries a
+URL-safe `name`, and that name becomes the prefix of every document it contributes: a file
+`install.md` in a source named `handbook` is indexed, searched and read as `handbook/install.md`.
+The name is the mount point, so it cannot change after creation; everything else can.
+
+| Type | What it is | Synced by |
+|------|-----------|-----------|
+| **Local directory** | A folder mounted on the server, scanned in place. Must live inside `ALLOWED_DOC_ROOTS`; nothing is copied. | Reading it at index time |
+| **Git repository** | A shallow, single-branch checkout under `DATA_DIR`. Any HTTPS git server: GitHub, GitLab, Bitbucket, Gitea/Forgejo/Codeberg. Optionally only a **subdirectory** of the repository (`docs/`). | `git fetch` of the branch tip at the start of every index run, or a push webhook |
+| **Upload** | Files, whole folders (structure preserved) and archives — `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.rar` — unpacked on the server. Add to the existing files or replace them all. | Nothing to sync; the files live under `DATA_DIR` |
+| **Notion** | Every page shared with an internal integration (or the configured root pages/databases and their descendants), rendered to Markdown, nested by parent page. | The Notion API, re-rendering only pages whose `last_edited_time` changed |
+
+Sources are synced at the start of every index run, one after another; a source that fails to sync is
+reported on its own row and the others still index. **Sync** on a row and **Re-index** in the header
+both queue the same run.
+
+### Content types (flavors)
+
+A source can declare what its files really are, which applies a small transform before chunking:
+
+- **Plain Markdown / text** — no transform.
+- **Obsidian vault** — `[[wikilinks]]`, `[[Page|Alias]]`, `[[Page#Heading]]` and `![[image.png]]` are rewritten to ordinary Markdown links; `.obsidian/` is skipped.
+- **Notion export** — the 32-hex page id Notion appends to file and folder names (`Getting started 1a2b…5c6d.md`) is stripped from paths and from the links pointing at them.
+
+Upload a Notion **Export → Markdown & CSV** zip with the *Notion export* content type; use the
+**Notion** source type instead when you want the live API.
+
+### Private repositories and tokens
+
+Paste an access token into the source's **Access token** field. It is encrypted with `SECRET_KEY`
+(AES-256-GCM) before it is stored and is never returned by the API or shown again — the dialog only
+says a token exists. The username sent with it depends on the provider and is detected from the URL:
+
+| Provider | Username used with the token |
+|----------|------------------------------|
+| GitHub | `x-access-token` (classic PAT, fine-grained PAT, App installation token) |
+| GitLab | `oauth2` (OAuth and personal/project access tokens) |
+| Bitbucket Cloud | `x-token-auth` for repository/workspace access tokens; **app passwords need your real username** in the Username field |
+| Gitea / Forgejo / Codeberg / other | `token`, or whatever you type in Username |
+
+**Test connection** on a git source lists the remote refs without cloning; on a Notion source it reads
+the integration's own user. Credentials pasted into the URL itself are stripped before storage.
+
+### Push webhooks
+
+Every git source gets a webhook URL and a shared secret (shown while editing the source):
+
+```
+POST http://<your-host>/api/webhooks/git/<source-id>
+```
+
+Add it as a **push** webhook in the repository settings with that secret. GitHub
+(`X-Hub-Signature-256`), GitLab (`X-Gitlab-Token`), Gitea/Forgejo (`X-Gitea-Signature`) and Bitbucket
+are recognised; the signature is verified before anything is queued, pushes to other branches are
+ignored, and a valid delivery queues a re-index of the project. **Regenerate** invalidates the old
+secret. The endpoint authenticates with this per-source secret, not with `ADMIN_TOKEN`.
 
 ## Data and persistence
 
@@ -67,6 +133,7 @@ docker run -d --name contextator -p 3444:3444 \
 |------|-----------------------|----------------|-------------------|
 | PostgreSQL cluster: projects, documents, embeddings | `/var/lib/postgresql/data` | `contextator-pgdata` | `CONTEXTATOR_PGDATA_VOLUME` (another volume name) or `CONTEXTATOR_PGDATA_PATH` (absolute host directory) |
 | Downloaded embedding models | `/app/.cache/models` | `contextator-models` | `CONTEXTATOR_MODELS_VOLUME` or `CONTEXTATOR_MODELS_PATH` |
+| Materialised sources: uploaded files, git checkouts, Notion pulls | `/data` | `contextator-data` | `CONTEXTATOR_DATA_VOLUME` or `CONTEXTATOR_DATA_PATH` |
 | Your documentation (read-only) | `/docs` | – | `DOCS_HOST_PATH` (default `./docs`) |
 
 `docker compose down`, `docker compose up --build`, image upgrades and `docker rm contextator` all keep
@@ -127,15 +194,15 @@ request to the same URL and get Streamable HTTP. No client configuration is need
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
 | `search_docs` | `query: string`, `limit?: 1-20` (default 5) | Cosine-similarity search over the project's chunks. Returns ranked excerpts with file path, heading breadcrumb (`Guide > Install > Docker`) and score. |
-| `list_topics` | – | Every indexed document grouped by directory, with title and chunk count. |
-| `read_document` | `path: string` | Full Markdown of one indexed file (path as shown by the other tools). Only indexed paths are served; capped at 512 KB. |
+| `list_topics` | – | Every indexed document grouped by directory, with title and chunk count. The first path segment is the source it came from. |
+| `read_document` | `path: string` | Full Markdown of one indexed file (path as shown by the other tools, e.g. `handbook/install.md`). Only indexed paths are served; capped at 512 KB. |
 
 The server also sends MCP `instructions` describing the project so agents know when to use which tool.
 
 ## How indexing works
 
-1. The project directory is walked for `.md`/`.mdx` files (dotfiles, `node_modules`, `dist`, `build`, symlinks and `IGNORE_GLOBS` are skipped).
-2. Every file is hashed (sha256). Unchanged files are skipped, changed/new files are re-chunked and re-embedded, files that disappeared are deleted. **Force** re-index wipes the project first. Every finished run (mode, counts, duration, error) is stored in `index_runs`; the last 20 per project are kept and shown in the dashboard.
+1. Every source of the project is synced in turn (git fetch, Notion pull; local and upload sources have nothing to fetch), then its directory is walked for the file types the source selected — `.md`/`.mdx` by default, optionally `.txt` (dotfiles, `node_modules`, `dist`, `build`, symlinks and `IGNORE_GLOBS` are skipped). Every path collected is prefixed with the source name, so two sources can both hold an `install.md` without colliding.
+2. The source's content type is applied (Obsidian wikilinks, Notion export ids), and every file is hashed (sha256). Unchanged files are skipped, changed/new files are re-chunked and re-embedded, files that disappeared are deleted. **Force** re-index wipes the project first. Every finished run (mode, counts, duration, error) is stored in `index_runs`; the last 20 per project are kept and shown in the dashboard.
 3. Chunking is Markdown-aware: frontmatter is parsed (`title` wins), MDX `import`/`export` lines and component tags are stripped, the document is split at headings (`#`–`####`) with a breadcrumb kept per chunk, and oversized sections are packed from paragraphs and fenced code blocks (code is never split mid-block when avoidable) with a small overlap.
 4. Each chunk is embedded as `heading breadcrumb + content` and stored in `chunks` with an HNSW cosine index.
 
@@ -158,7 +225,13 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `ALLOWED_DOC_ROOTS` | `/docs` | Comma-separated. Project directories **must** live inside one of these (path-escape protection). On Windows dev: `C:/path/to/docs` |
 | `DOCS_HOST_PATH` | `./docs` | Host folder mounted read-only at `/docs` (docker-compose only) |
 | `MODEL_CACHE_DIR` | `.cache/models` | Model download directory; `/app/.cache/models` inside the container |
-| `IGNORE_GLOBS` | – | e.g. `**/CHANGELOG.md,drafts/**` |
+| `IGNORE_GLOBS` | – | e.g. `**/CHANGELOG.md,drafts/**`. Applies to every source |
+| `DATA_DIR` | `.data` | Writable directory holding the materialised sources (git checkouts, uploads, Notion pulls). `/data` inside the container |
+| `SECRET_KEY` | – | At least 32 characters (`openssl rand -hex 32`). Encrypts git/Notion tokens at rest (AES-256-GCM). Needed only once such a source exists; changing it invalidates stored tokens |
+| `UPLOAD_MAX_FILE_BYTES` | `52428800` (50 MB) | Per uploaded file |
+| `UPLOAD_MAX_FILES_PER_REQUEST` | `500` | The dashboard splits large folders across requests by itself |
+| `UPLOAD_MAX_ARCHIVE_BYTES` | `268435456` (256 MB) | Per uploaded archive |
+| `ARCHIVE_MAX_ENTRIES` / `ARCHIVE_MAX_TOTAL_BYTES` | `20000` / `1073741824` (1 GB) | Zip-bomb guards applied while extracting |
 | `EMBEDDING_PROVIDER` | `local` | `local` or `openai` |
 | `EMBEDDING_MODEL` | `Xenova/paraphrase-multilingual-MiniLM-L12-v2` | Any transformers.js feature-extraction model. English-only & faster: `Xenova/all-MiniLM-L6-v2` (also 384-d) |
 | `EMBEDDING_DIMENSIONS` | `384` | Must match the model. `1536` for `text-embedding-3-small` |
@@ -194,6 +267,20 @@ All endpoints return JSON. With `ADMIN_TOKEN` set, send `Authorization: Bearer <
 | `GET /api/projects/:id/status` | Project row + live job |
 | `GET /api/projects/:id/runs` | The project's last 20 index runs (mode, counts, duration, error), newest first |
 | `DELETE /api/projects/:id` | Delete project, its chunks and open MCP sessions (`409` while indexing) |
+| `GET /api/projects/:id/sources` | The project's sources (type, name, config, status, document count). Secrets are never returned — only `hasSecret` |
+| `POST /api/projects/:id/sources` `{ type, name, label?, flavor?, config?, secret?, index? }` | Add a source. `type` is `local`, `git`, `upload` or `notion`; `config` is type-specific (`path` / `url`+`branch`+`subdir` / `rootIds`) |
+| `PATCH /api/projects/:id/sources/:sid` | Change label, content type, config or token (`secret: null` removes it). Type and name are immutable |
+| `DELETE /api/projects/:id/sources/:sid` | Remove the source, its documents, chunks and materialised directory (`409` while indexing) |
+| `POST /api/projects/:id/sources/:sid/sync` | Queue a re-index (every source is synced at the start of it) → `202 { job }` |
+| `POST /api/projects/:id/sources/:sid/test` | Connectivity check without indexing → `{ ok, message }` |
+| `POST /api/projects/:id/sources/:sid/webhook-secret` | Generate a new push-webhook secret (git only) |
+| `POST /api/projects/:id/sources/:sid/uploads` | Open an upload session → `{ session }` (upload sources only) |
+| `POST …/uploads/:session/files` | `multipart/form-data`; each part's `filename` carries the path inside the source. Archives are unpacked server-side → `{ files, skipped, bytes, errors }` |
+| `POST …/uploads/:session/commit?mode=add\|replace` | Move the staged tree into the source and queue an index run → `202 { files, job }` |
+| `DELETE …/uploads/:session` | Discard a staged upload |
+| `GET /api/projects/:id/sources/:sid/files` | Files currently materialised for an upload source |
+| `DELETE /api/projects/:id/sources/:sid/files?path=…` | Delete one of them and re-index |
+| `POST /api/webhooks/git/:sourceId` | Push webhook. Authenticated by the per-source secret, **not** `ADMIN_TOKEN` |
 
 ## Local development (without Docker for the app)
 
@@ -201,6 +288,8 @@ All endpoints return JSON. With `ADMIN_TOKEN` set, send `Authorization: Bearer <
 docker compose -f docker-compose.dev.yml up -d   # PostgreSQL + pgvector only, on localhost:5432
 cp .env.example .env
 # ALLOWED_DOC_ROOTS=C:/Users/me/docs     (Windows)  or  /home/me/docs
+# DATA_DIR=.data                         (git checkouts, uploads and Notion pulls; gitignored)
+# SECRET_KEY=$(openssl rand -hex 32)     (only needed for private repositories / Notion)
 npm install
 npm run dev                              # tsx watch, http://localhost:3444
 npm test                                 # vitest: chunker + path-safety unit tests
@@ -215,10 +304,17 @@ npm run smoke -- http://localhost:3444/mcp/demo "kurulum" --sse   # exercise the
 ```
 src/server.ts                 Fastify entrypoint / composition root
 src/config.ts                 zod-validated environment
-src/db/schema.ts              Drizzle schema (projects, documents, chunks, settings)
+src/db/schema.ts              Drizzle schema (projects, document_sources, documents, chunks, index_runs, settings)
 src/db/ensure-schema.ts       idempotent DDL applied at startup (extension, tables, HNSW index, dimension guard)
 src/services/chunker.ts       Markdown/MDX-aware chunking with heading breadcrumbs
 src/services/fs-scan.ts       safe directory walking + path-escape checks
+src/services/sources.ts       source CRUD and the zod schema of each type's config
+src/services/sources/         one driver per type: local, git (isomorphic-git), upload, notion
+src/services/flavors.ts       content-type transforms (Obsidian wikilinks, Notion export ids)
+src/services/archives.ts      zip / tar / tar.gz / rar extraction with path and size guards
+src/services/uploads.ts       staged upload sessions and their commit into a source
+src/services/data-dir.ts      layout of DATA_DIR, atomic directory swaps, orphan sweep
+src/services/crypto.ts        AES-256-GCM encryption of source tokens (SECRET_KEY)
 src/services/embeddings/      provider interface, local (transformers.js) and OpenAI implementations
 src/services/indexer.ts       incremental background indexing queue
 src/services/vector-store.ts  pgvector cosine search and chunk persistence
@@ -226,6 +322,9 @@ src/mcp/router.ts             /mcp/:project — Streamable HTTP + legacy SSE on 
 src/mcp/tools.ts              search_docs, list_topics, read_document
 src/mcp/sessions.ts           per-connection McpServer/transport registry + idle reaper
 src/admin/routes.ts           REST API for the dashboard
+src/admin/sources-routes.ts   source CRUD, sync, test, webhook secret
+src/admin/upload-routes.ts    multipart upload sessions (the only multipart-parsing plugin)
+src/admin/webhooks.ts         push webhooks, verified with the per-source secret
 public/                       vanilla HTML/JS dashboard (no build step)
 scripts/smoke-mcp.ts          end-to-end MCP client check
 docs/demo/                    sample documentation (English, Turkish, MDX)
@@ -256,7 +355,11 @@ typed queries and Drizzle Studio.
 
 - The MCP endpoints are **unauthenticated by design** (MCP clients have no standard way to pass a token yet).
   Bind the server to a private network, or put it behind a reverse proxy that handles auth.
-- Project directories are confined to `ALLOWED_DOC_ROOTS`; `..`, symlinks that escape, and non-directories are rejected.
+- Local source directories are confined to `ALLOWED_DOC_ROOTS`; `..`, symlinks that escape, and non-directories are rejected.
+- Git and Notion tokens are encrypted at rest with `SECRET_KEY` (AES-256-GCM) and never returned by the API; credentials pasted into a repository URL are stripped before storage.
+- Push webhooks verify the provider's signature against the per-source secret before anything is queued; the endpoint is otherwise unauthenticated by necessity.
+- Uploads and archives are extracted into a scratch directory first and only then copied in: entries that escape, dot-directories, non-portable names and unselected file types are dropped, and `ARCHIVE_MAX_ENTRIES` / `ARCHIVE_MAX_TOTAL_BYTES` bound a zip bomb. Nested archives are unpacked one level deep.
+- A git subdirectory is resolved inside the checkout; `..` segments are rejected.
 - `read_document` only serves files that were indexed for that project, never arbitrary paths.
 - Set `ADMIN_TOKEN` whenever the dashboard is reachable by anyone but you.
 - Browser `Origin` headers on `/mcp/*` are validated (DNS-rebinding protection); CLI clients send none.
@@ -270,6 +373,10 @@ typed queries and Drizzle Studio.
 | Dashboard shows `model loading` for a long time | First run downloads ~470 MB; check `docker compose logs -f`. Air-gapped hosts: pre-populate the `contextator-models` volume and set `EMBEDDING_OFFLINE=1`. |
 | Container keeps restarting, logs say `PostgreSQL exited during startup` | The PostgreSQL output above that line tells why: usually a data directory from another PostgreSQL major version, or a bind-mounted `CONTEXTATOR_PGDATA_PATH` with wrong permissions. |
 | `Directory is outside the allowed document roots` | Use a path under `ALLOWED_DOC_ROOTS` (`/docs/...` inside Docker). |
+| Adding a private git or Notion source fails on `SECRET_KEY` | Set `SECRET_KEY` (32+ characters) and restart; it is only required once a source stores a token. |
+| A git source's row shows an authentication error | Check the token's scope, and on Bitbucket app passwords put your real username in the Username field. **Test connection** reports the remote's answer verbatim. |
+| `Subdirectory "…" does not exist in the repository` | The path is relative to the repository root and is checked against the branch that was checked out. |
+| A push webhook returns `401 invalid_signature` | The secret in the repository settings is not the one shown while editing the source — copy it again, or **Regenerate** and paste the new one. |
 | `search_docs` says the project was indexed with another model | Re-index the project (it happens automatically on the next index run). |
 | `Could not load the sharp module` in the container | Regenerate `package-lock.json` on Linux or run `npm install --os=linux --cpu=x64 sharp` before building. |
 
