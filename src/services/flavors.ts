@@ -17,14 +17,41 @@ export function transformPath(flavor: Flavor, relativePath: string): string {
     .join('/');
 }
 
-/** `[[Page]]`, `[[Page|Alias]]`, `[[Page#Heading]]`, `![[image.png]]` → standard Markdown links. */
+/** Only these stay embeds; `![[Note]]` embeds another note's text, which flattens to a link. */
+const EMBEDDABLE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|avif)$/i;
+
+/**
+ * `[[Page]]`, `[[Page|Alias]]`, `[[Page#Heading]]`, `[[Page#^block]]`, `[[#Heading]]`, `![[image.png]]`
+ * → standard Markdown links. The target may be empty: a link inside the same note.
+ */
 function obsidianLinks(md: string): string {
-  return md.replace(/(!?)\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]/g, (_m, bang: string, target: string, heading: string | undefined, alias: string | undefined) => {
-    const t = target.trim();
-    const label = (alias ?? (heading ? `${t} › ${heading.trim()}` : t)).trim();
-    const hasExt = /\.[a-z0-9]{1,5}$/i.test(t);
-    const href = (hasExt ? t : `${t}.md`).replace(/ /g, '%20') + (heading ? `#${heading.trim().replace(/ /g, '-').toLowerCase()}` : '');
-    return bang ? `![${label}](${href})` : `[${label}](${href})`;
+  return md.replace(
+    /(!?)\[\[([^\]|#^]*)(?:#(\^?[^\]|]+))?(?:\|([^\]]+))?\]\]/g,
+    (match: string, bang: string, rawTarget: string, rawAnchor: string | undefined, rawAlias: string | undefined) => {
+      const target = rawTarget.trim();
+      const anchor = rawAnchor?.trim() ?? '';
+      const alias = rawAlias?.trim() ?? '';
+      if (!target && !anchor) return match; // `[[]]` and `[[|x]]` are not links
+      const isBlockRef = anchor.startsWith('^');
+      const hasExt = /\.[a-z0-9]{1,5}$/i.test(target);
+      const fragment = anchor ? `#${isBlockRef ? anchor : anchor.replace(/\s+/g, '-').toLowerCase()}` : '';
+      const href = target ? `${(hasExt ? target : `${target}.md`).replace(/ /g, '%20')}${fragment}` : fragment;
+      const label = alias || (target ? (anchor && !isBlockRef ? `${target} › ${anchor}` : target) : anchor);
+      return bang && EMBEDDABLE_EXT.test(target) ? `![${label}](${href})` : `[${label}](${href})`;
+    },
+  );
+}
+
+/** `%%…%%` is Obsidian's "not for readers" comment; it should never reach the index. */
+function stripObsidianComments(md: string): string {
+  return md.replace(/%%[\s\S]*?%%/g, '');
+}
+
+/** `> [!note] Title` → `> **Note:** Title`, so the callout's kind stays a searchable word. */
+function obsidianCallouts(md: string): string {
+  return md.replace(/^(\s*>\s*)\[!([A-Za-z-]+)\][+-]?[ \t]*/gm, (_m: string, quote: string, kind: string) => {
+    const label = kind.charAt(0).toUpperCase() + kind.slice(1).toLowerCase();
+    return `${quote}**${label}:** `;
   });
 }
 
@@ -49,7 +76,7 @@ function notionLinks(md: string): string {
 export function transformContent(flavor: Flavor, content: string): string {
   switch (flavor) {
     case 'obsidian':
-      return obsidianLinks(content);
+      return obsidianLinks(obsidianCallouts(stripObsidianComments(content)));
     case 'notion-export':
       return notionLinks(content);
     default:
