@@ -19,6 +19,21 @@ const ICON = {
   plus: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>',
 };
 
+const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN' };
+const SOURCE_TITLE = { local: 'Local directory', git: 'Git repository', upload: 'Uploaded files', notion: 'Notion workspace' };
+
+/**
+ * Dialog tabs ("kinds") are not server-side types: an Obsidian vault is an upload source that carries
+ * the `obsidian` flavor, so the tab picks both.
+ */
+const SOURCE_KINDS = {
+  local: { type: 'local', title: 'Local directory', subtitle: 'A folder mounted on the server, scanned in place. Nothing is copied.' },
+  git: { type: 'git', title: 'Git repository', subtitle: 'Cloned on the server and fetched at the start of every index run. A push webhook can trigger one.' },
+  upload: { type: 'upload', title: 'Upload files', subtitle: 'Files, folders and archives are unpacked on the server and kept for this source.' },
+  obsidian: { type: 'upload', flavor: 'obsidian', title: 'Obsidian vault', subtitle: 'An uploaded vault; [[wikilinks]] are rewritten to Markdown links.' },
+  notion: { type: 'notion', title: 'Notion', subtitle: 'Pages shared with an internal integration are rendered to Markdown on every sync.' },
+};
+
 const $ = (sel) => document.querySelector(sel);
 const el = (tag, attrs = {}, children = []) => {
   const node = document.createElement(tag);
@@ -42,6 +57,10 @@ const state = {
   runs: [], // index-run history of the selected project
   runsFor: null, // project id the runs belong to
   runsStamp: null, // finishedAt of the newest job seen; refetch when it changes
+  sources: [], // document sources of the selected project
+  sourcesFor: null,
+  sourcesStamp: null,
+  confirmDeleteSource: null,
   filter: '',
   connectTab: 0,
   confirmDelete: null,
@@ -185,11 +204,13 @@ function select(id) {
   state.selectedId = id;
   state.connectTab = 0;
   state.confirmDelete = null;
+  state.confirmDeleteSource = null;
   const p = selectedProject();
   history.replaceState(null, '', p ? `#/${encodeURIComponent(p.name)}` : location.pathname);
   renderList();
   renderDetail();
   void loadRuns();
+  void loadSources();
 }
 
 /** Fetches the selected project's run history when the selection or the newest job changes. */
@@ -208,6 +229,28 @@ async function loadRuns(force = false) {
     const { runs } = await api(`/api/projects/${p.id}/runs`);
     if (state.selectedId !== p.id) return; // selection moved on meanwhile
     state.runs = runs;
+    renderDetail();
+  } catch (err) {
+    if (!(err instanceof ApiError && err.status === 401)) toast(err.message);
+  }
+}
+
+/** Fetches the selected project's sources; re-fetched while indexing so per-source status stays live. */
+async function loadSources(force = false) {
+  const p = selectedProject();
+  if (!p) {
+    state.sources = [];
+    state.sourcesFor = null;
+    return;
+  }
+  const stamp = `${p.sourceCount}:${p.lastIndexedAt ?? ''}:${p.job?.phase ?? ''}`;
+  if (!force && state.sourcesFor === p.id && state.sourcesStamp === stamp) return;
+  state.sourcesFor = p.id;
+  state.sourcesStamp = stamp;
+  try {
+    const sources = await api(`/api/projects/${p.id}/sources`);
+    if (state.selectedId !== p.id) return; // selection moved on meanwhile
+    state.sources = sources;
     renderDetail();
   } catch (err) {
     if (!(err instanceof ApiError && err.status === 401)) toast(err.message);
@@ -269,7 +312,7 @@ function renderList() {
     : '';
 
   const q = state.filter.trim().toLowerCase();
-  const visible = q ? state.projects.filter((p) => p.name.includes(q) || p.rootPath.toLowerCase().includes(q)) : state.projects;
+  const visible = q ? state.projects.filter((p) => p.name.includes(q) || (p.rootPath ?? '').toLowerCase().includes(q)) : state.projects;
 
   if (visible.length === 0) {
     container.append(el('p', { class: 'list-empty', text: state.projects.length ? 'No project matches the filter.' : 'No projects yet.' }));
@@ -305,7 +348,10 @@ function renderList() {
           el('span', { class: 'row-name', text: p.name }),
           el('span', { class: `pill small ${status}`, text: status }),
         ]),
-        el('span', { class: 'row-bottom' }, [el('code', { text: p.rootPath, title: p.rootPath }), el('span', { class: 'meta', text: meta, title: metaTitle || undefined })]),
+        el('span', { class: 'row-bottom' }, [
+          el('code', { text: `${fmt(p.sourceCount)} source${p.sourceCount === 1 ? '' : 's'}` }),
+          el('span', { class: 'meta', text: meta, title: metaTitle || undefined }),
+        ]),
       ],
     );
 
@@ -357,7 +403,7 @@ function renderDetail() {
         el('div', { class: 'url-row' }, [
           el('code', { class: 'url', text: p.mcpUrl }),
           el('button', { type: 'button', class: 'icon', 'aria-label': 'Copy MCP URL', title: 'Copy MCP URL', onclick: () => copyText(p.mcpUrl) }, icon('copy')),
-          el('code', { class: 'path', text: p.rootPath }),
+          el('code', { class: 'path', text: sourceSummary(p), title: sourceSummary(p) }),
         ]),
       ]),
       el('div', { class: 'detail-actions' }, [
@@ -418,12 +464,14 @@ function renderDetail() {
   const modelSub = emb ? [emb.provider, emb.dtype, `${emb.dimensions} dimensions`].filter(Boolean).join(' · ') : '';
   main.append(
     el('div', { class: 'stats' }, [
-      stat('Documents', fmt(p.documentCount), '.md / .mdx files under root'),
+      stat('Documents', fmt(p.documentCount), `across ${fmt(p.sourceCount)} source${p.sourceCount === 1 ? '' : 's'}`),
       stat('Chunks', fmt(p.chunkCount), 'embedded, HNSW cosine index'),
       stat('Last indexed', relativeTime(p.lastIndexedAt), lastRun || (p.lastIndexedAt ? new Date(p.lastIndexedAt).toLocaleString() : 'never indexed'), p.lastIndexedAt),
       stat('Embedding model', model, modelSub, null, true, modelMismatch),
     ]),
   );
+
+  main.append(renderSources(p, busy));
 
   // Connect + tools
   const snippets = snippetsFor(p);
@@ -504,6 +552,81 @@ function renderDetail() {
   );
 }
 
+/** "docs, handbook" for the detail header, falling back to the plain count. */
+function sourceSummary(p) {
+  const mine = state.sourcesFor === p.id ? state.sources : [];
+  if (mine.length) return mine.map((s) => s.name).join(', ');
+  return `${fmt(p.sourceCount)} source${p.sourceCount === 1 ? '' : 's'}`;
+}
+
+/** One line per source: where it comes from, how many documents it contributed, when it last synced. */
+function renderSources(project, busy) {
+  const sources = state.sourcesFor === project.id ? state.sources : [];
+  const rows = sources.map((s) => {
+    const confirming = state.confirmDeleteSource === s.id;
+    const failed = s.status === 'error';
+    const actions = [
+      s.type === 'git' || s.type === 'notion'
+        ? el('button', { type: 'button', class: 'ghost small', title: 'Check the connection without indexing', text: 'Test', onclick: () => testSource(project, s) })
+        : null,
+      el('button', { type: 'button', class: 'ghost small', disabled: busy, title: 'Sync this source and re-index the project', text: 'Sync', onclick: () => syncSource(project, s) }),
+      el('button', { type: 'button', class: 'ghost small', text: s.type === 'upload' ? 'Files' : 'Edit', onclick: () => openSourceDialog(project, s) }),
+      el('button', {
+        type: 'button',
+        class: `danger small${confirming ? ' confirm' : ''}`,
+        disabled: busy,
+        text: confirming ? 'Confirm' : 'Delete',
+        onclick: () => (confirming ? removeSource(project, s) : askDeleteSource(s)),
+      }),
+    ];
+    return el('div', { class: 'source-row' }, [
+      el('span', { class: `source-glyph ${failed ? 'error' : s.type}`, text: SOURCE_GLYPH[s.type] ?? '?' }),
+      el('span', { class: 'source-cell' }, [el('code', { text: s.name }), el('span', { class: 'sub', text: s.label || SOURCE_TITLE[s.type] || s.type })]),
+      el('span', { class: 'source-cell' }, [
+        el('code', { text: sourceOrigin(s), title: sourceOrigin(s) }),
+        el('span', { class: `sub${failed ? ' err' : ''}`, text: failed ? shortError(s.lastError, 80) : sourceDetail(s), title: failed ? s.lastError || '' : '' }),
+      ]),
+      el('span', { class: 'sub', text: s.flavor === 'plain' ? '—' : s.flavor, title: 'Content type' }),
+      el('span', { class: 'sub', text: `${fmt(s.documentCount)} docs` }),
+      el('span', { class: 'sub', text: relativeTime(s.lastSyncedAt), title: s.lastSyncedAt ? new Date(s.lastSyncedAt).toLocaleString() : 'never synced' }),
+      el('span', { class: 'source-actions' }, actions),
+    ]);
+  });
+
+  return el('section', { class: 'panel' }, [
+    el('div', { class: 'sources-head' }, [
+      el('div', {}, [
+        el('h3', { text: 'Document sources' }),
+        el('p', { text: 'Every source is mounted under its own name; a document\u2019s path is <source>/<path inside it>. All of them are synced at the start of an index run.' }),
+      ]),
+      el('button', { type: 'button', class: 'primary small', onclick: () => openSourceDialog(project, null) }, [icon('plus'), 'Add source']),
+    ]),
+    rows.length
+      ? el('div', {}, rows)
+      : el('p', { class: 'sources-empty', text: 'No sources yet. Add a local directory, a git repository, an upload or a Notion workspace to give this project something to index.' }),
+  ]);
+}
+
+/** The identifying string of a source: path, repository URL, or the mount prefix. */
+function sourceOrigin(s) {
+  const c = s.config || {};
+  if (s.type === 'local') return c.path || '—';
+  if (s.type === 'git') return c.url || '—';
+  if (s.type === 'notion') return (c.rootIds || []).length ? `${c.rootIds.length} root page(s)` : 'everything shared with the integration';
+  return `${s.name}/`;
+}
+
+/** The second line: branch/subdir for git, extensions otherwise. */
+function sourceDetail(s) {
+  const c = s.config || {};
+  const ext = (c.extensions || []).map((e) => `.${e}`).join(' ');
+  if (s.type === 'git') {
+    const at = c.lastCommit ? ` @ ${String(c.lastCommit).slice(0, 7)}` : '';
+    return `${c.branch || 'main'}${c.subdir ? `/${c.subdir}` : ''}${at}${ext ? ` \u00b7 ${ext}` : ''}`;
+  }
+  return ext || '—';
+}
+
 function stat(label, value, sub, title, mono = false, warn = false) {
   return el('div', { class: 'stat' }, [
     el('span', { class: 'label', text: label }),
@@ -547,6 +670,7 @@ async function refresh() {
     renderList();
     renderDetail();
     void loadRuns();
+    void loadSources();
   }
   schedule();
 }
@@ -652,6 +776,527 @@ createForm.addEventListener('submit', async (event) => {
   }
 });
 
+// ---------- source actions ----------
+
+function askDeleteSource(source) {
+  state.confirmDeleteSource = source.id;
+  renderDetail();
+  clearTimeout(state.confirmTimer);
+  state.confirmTimer = setTimeout(() => {
+    if (state.confirmDeleteSource === source.id) {
+      state.confirmDeleteSource = null;
+      renderDetail();
+    }
+  }, 6000);
+}
+
+async function removeSource(project, source) {
+  state.confirmDeleteSource = null;
+  try {
+    await api(`/api/projects/${project.id}/sources/${source.id}`, { method: 'DELETE' });
+    toast(`Removed ${source.name}`);
+    await refresh();
+    await loadSources(true);
+  } catch (err) {
+    toast(err.message);
+    renderDetail();
+  }
+}
+
+async function syncSource(project, source) {
+  try {
+    await api(`/api/projects/${project.id}/sources/${source.id}/sync`, { method: 'POST' });
+    toast(`Sync queued for ${source.name}`);
+    await refresh();
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+/** The server answers 200 with `{ ok, message }` either way, so both outcomes land in the same toast. */
+async function testSource(project, source) {
+  toast(`Testing ${source.name}…`);
+  try {
+    const result = await api(`/api/projects/${project.id}/sources/${source.id}/test`, { method: 'POST' });
+    toast(result.message);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+// ---------- source dialog ----------
+
+const srcDialog = $('#source-dialog');
+const srcForm = $('#source-form');
+const srcTabs = [...$('#source-tabs').querySelectorAll('[data-kind]')];
+const SECRET_HINT_HTML = $('#secret-hint').innerHTML;
+const QUEUE_LABEL = { queued: 'queued', busy: 'uploading…', ok: 'uploaded', skip: 'skipped', fail: 'failed' };
+const ARCHIVE_RE = /\.(zip|tar|tgz|tar\.gz|rar)$/i;
+
+const srcUi = { kind: 'local', project: null, editing: null, queue: [], existingFiles: [], busy: false };
+
+const kindOfSource = (s) => (s.type === 'upload' && s.flavor === 'obsidian' ? 'obsidian' : s.type);
+const isUploadKind = (kind) => SOURCE_KINDS[kind].type === 'upload';
+const uploadMode = () => srcForm.elements.mode.value;
+const allowedRoots = () => state.health?.allowedDocRoots || [];
+
+function formatBytes(n) {
+  if (!n) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return `${(n / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+/** Mirrors the New-project directory field: fixed prefix for one allowed root, a select for several. */
+function renderSrcRootPrefix() {
+  const roots = allowedRoots();
+  const prefix = $('#src-root-prefix');
+  const select = $('#src-root-select');
+  const current = select.value;
+  select.replaceChildren(...roots.map((r) => el('option', { value: r, text: `${r.replace(/[\\/]+$/, '')}/` })));
+  if (roots.includes(current)) select.value = current;
+  prefix.hidden = roots.length > 1;
+  select.hidden = roots.length <= 1;
+  if (roots.length <= 1) prefix.textContent = roots[0] ? `${roots[0].replace(/[\\/]+$/, '')}/` : '/';
+}
+
+function srcSelectedRoot() {
+  const roots = allowedRoots();
+  const root = roots.length > 1 ? $('#src-root-select').value : roots[0] || '';
+  return root.replace(/[\\/]+$/, '');
+}
+
+/** Splits a stored absolute path back into (allowed root, remainder) so the prefixed field can show it. */
+function splitRoot(absolute) {
+  const full = String(absolute || '').replace(/\\/g, '/');
+  for (const root of allowedRoots()) {
+    const r = root.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (full === r) return { root, rest: '' };
+    if (full.startsWith(`${r}/`)) return { root, rest: full.slice(r.length + 1) };
+  }
+  return { root: allowedRoots()[0] || '', rest: full };
+}
+
+function setKind(kind) {
+  srcUi.kind = kind;
+  const meta = SOURCE_KINDS[kind];
+  const editing = srcUi.editing;
+  for (const tab of srcTabs) tab.setAttribute('aria-selected', tab.dataset.kind === kind ? 'true' : 'false');
+  for (const box of srcForm.querySelectorAll('.kind-only')) box.hidden = !box.dataset.kind.split(' ').includes(kind);
+  $('#source-title').textContent = editing ? `${meta.title} — ${editing.name}` : `Add source — ${meta.title}`;
+  $('#source-subtitle').textContent = meta.subtitle;
+  if (meta.flavor) srcForm.elements.flavor.value = meta.flavor;
+  srcForm.elements.flavor.disabled = Boolean(meta.flavor);
+  $('#upload-mode-row').hidden = !(isUploadKind(kind) && editing);
+  $('#index-label').textContent = isUploadKind(kind) ? 'Index after upload' : 'Index now';
+  $('#source-test').hidden = !(editing && (meta.type === 'git' || meta.type === 'notion'));
+  $('#webhook-box').hidden = !(editing && meta.type === 'git');
+  $('#source-submit').textContent = editing ? 'Save changes' : 'Add source';
+  renderQueue();
+}
+
+function openSourceDialog(project, source) {
+  srcUi.project = project;
+  srcUi.editing = source;
+  srcUi.queue = [];
+  srcUi.existingFiles = [];
+  srcUi.busy = false;
+  $('#source-error').hidden = true;
+  srcForm.reset();
+  srcForm.elements.secret.placeholder = 'leave empty for public repositories';
+  srcForm.elements.notionSecret.placeholder = 'ntn_… / secret_…';
+  $('#secret-hint').innerHTML = SECRET_HINT_HTML; // static markup restored, never user data
+  renderSrcRootPrefix();
+
+  // Type and name are the mount prefix of every document path, so neither can change after creation.
+  for (const tab of srcTabs) tab.disabled = Boolean(source);
+  srcForm.elements.name.disabled = Boolean(source);
+  srcForm.elements.index.checked = true;
+  if (source) fillSourceForm(source);
+  setKind(source ? kindOfSource(source) : 'local');
+
+  if (typeof srcDialog.showModal === 'function') srcDialog.showModal();
+  else srcDialog.setAttribute('open', '');
+  (source ? srcForm.elements.label : srcForm.elements.name).focus();
+
+  if (source?.type === 'git') renderWebhook(project, source);
+  if (source?.type === 'upload') void loadSourceFiles(project, source);
+}
+
+function closeSourceDialog() {
+  if (srcDialog.open) srcDialog.close();
+  else srcDialog.removeAttribute('open');
+}
+
+function fillSourceForm(s) {
+  const c = s.config || {};
+  srcForm.elements.name.value = s.name;
+  srcForm.elements.label.value = s.label || '';
+  srcForm.elements.flavor.value = s.flavor || 'plain';
+  for (const box of srcForm.querySelectorAll('input[name="ext"]')) box.checked = (c.extensions || []).includes(box.value);
+  if (s.type === 'local') {
+    const { root, rest } = splitRoot(c.path);
+    const select = $('#src-root-select');
+    if ([...select.options].some((o) => o.value === root)) select.value = root;
+    $('#src-path').value = rest;
+  }
+  if (s.type === 'git') {
+    srcForm.elements.url.value = c.url || '';
+    srcForm.elements.branch.value = c.branch || 'main';
+    srcForm.elements.subdir.value = c.subdir || '';
+    srcForm.elements.username.value = c.username || '';
+    if (s.hasSecret) {
+      srcForm.elements.secret.placeholder = 'unchanged — type to replace';
+      $('#secret-hint').textContent = 'A token is stored for this source. Leave the field empty to keep it.';
+    }
+  }
+  if (s.type === 'notion') {
+    srcForm.elements.rootIds.value = (c.rootIds || []).join('\n');
+    if (s.hasSecret) srcForm.elements.notionSecret.placeholder = 'unchanged — type to replace';
+  }
+  updateProviderHint();
+}
+
+function updateProviderHint() {
+  const node = $('#git-provider');
+  const url = srcForm.elements.url.value.trim();
+  if (!url) {
+    node.textContent = '';
+    return;
+  }
+  let host;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    node.textContent = 'Not a valid URL yet.';
+    return;
+  }
+  const provider = host.includes('github')
+    ? 'GitHub'
+    : host.includes('gitlab')
+      ? 'GitLab'
+      : host.includes('bitbucket')
+        ? 'Bitbucket'
+        : host.includes('gitea') || host.includes('codeberg') || host.includes('forgejo')
+          ? 'Gitea/Forgejo'
+          : 'a generic git server';
+  node.textContent = `Detected: ${provider}.`;
+}
+
+function renderWebhook(project, source) {
+  const url = `${location.origin}/api/webhooks/git/${source.id}`;
+  $('#webhook-url').textContent = url;
+  $('#webhook-copy-url').onclick = () => copyText(url);
+  $('#webhook-copy-secret').onclick = () => (source.webhookSecret ? copyText(source.webhookSecret) : toast('This source has no webhook secret'));
+  $('#webhook-regenerate').onclick = async () => {
+    try {
+      const updated = await api(`/api/projects/${project.id}/sources/${source.id}/webhook-secret`, { method: 'POST' });
+      srcUi.editing = updated;
+      renderWebhook(project, updated);
+      toast('New secret generated — update it in the repository settings');
+      await loadSources(true);
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+}
+
+const extensionsFromForm = () => [...srcForm.querySelectorAll('input[name="ext"]:checked')].map((b) => b.value);
+
+const NOTION_ID_RE = /[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}/i;
+
+/** Accepts ids or pasted page URLs, one per line. */
+function parseNotionIds(text) {
+  return String(text || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => (line.match(NOTION_ID_RE) ?? [line])[0])
+    .slice(0, 50);
+}
+
+function configForKind(kind) {
+  const { type } = SOURCE_KINDS[kind];
+  const extensions = extensionsFromForm();
+  if (extensions.length === 0) throw new Error('Pick at least one file type');
+  if (type === 'local') {
+    const rest = $('#src-path').value.trim().replace(/^[\\/]+/, '');
+    const root = srcSelectedRoot();
+    const path = root ? `${root}/${rest}` : rest;
+    if (!path) throw new Error('A directory is required');
+    return { path, extensions };
+  }
+  if (type === 'git') {
+    const url = srcForm.elements.url.value.trim();
+    if (!url) throw new Error('A repository URL is required');
+    return {
+      url,
+      branch: srcForm.elements.branch.value.trim() || 'main',
+      subdir: srcForm.elements.subdir.value.trim().replace(/^[\\/]+|[\\/]+$/g, ''),
+      username: srcForm.elements.username.value.trim(),
+      extensions,
+    };
+  }
+  if (type === 'notion') {
+    const ids = parseNotionIds(srcForm.elements.rootIds.value);
+    return { rootIds: ids, extensions };
+  }
+  return { extensions };
+}
+
+function secretForKind(kind) {
+  const { type } = SOURCE_KINDS[kind];
+  if (type === 'git') return srcForm.elements.secret.value.trim();
+  if (type === 'notion') return srcForm.elements.notionSecret.value.trim();
+  return '';
+}
+
+// ---------- upload queue ----------
+
+function acceptedName(name) {
+  if (ARCHIVE_RE.test(name)) return true;
+  return extensionsFromForm().includes(name.split('.').pop().toLowerCase());
+}
+
+function addFiles(entries) {
+  const seen = new Set(srcUi.queue.map((i) => i.path));
+  for (const entry of entries) {
+    const path = entry.path.replace(/^[\\/]+/, '');
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    srcUi.queue.push({ path, file: entry.file, status: acceptedName(path) ? 'queued' : 'skip' });
+  }
+  renderQueue();
+}
+
+/** Dropped folders arrive as directory entries; walk them so the tree keeps its structure. */
+async function entriesFromDataTransfer(dt) {
+  const roots = [...(dt.items || [])].map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null)).filter(Boolean);
+  if (roots.length === 0) return [...dt.files].map((f) => ({ path: f.name, file: f }));
+  const out = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+      out.push({ path: prefix + entry.name, file });
+      return;
+    }
+    if (!entry.isDirectory) return;
+    const reader = entry.createReader();
+    let batch;
+    do {
+      batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+      for (const child of batch) await walk(child, `${prefix}${entry.name}/`);
+    } while (batch.length > 0);
+  };
+  for (const root of roots) await walk(root, '');
+  return out;
+}
+
+function renderQueue(note) {
+  const queued = srcUi.queue.filter((i) => i.status === 'queued').length;
+  const settled = srcUi.queue.filter((i) => i.status === 'ok' || i.status === 'skip').length;
+  const skipped = srcUi.queue.filter((i) => i.status === 'skip').length;
+  const bytes = srcUi.queue.reduce((n, i) => n + (i.file?.size || 0), 0);
+
+  $('#upload-queue').hidden = srcUi.queue.length === 0 && srcUi.existingFiles.length === 0;
+  $('#upload-summary').textContent = srcUi.queue.length
+    ? `${fmt(srcUi.queue.length)} file${srcUi.queue.length === 1 ? '' : 's'} selected · ${formatBytes(bytes)}`
+    : `${fmt(srcUi.existingFiles.length)} file${srcUi.existingFiles.length === 1 ? '' : 's'} in this source`;
+  $('#upload-detail').textContent = note ?? (skipped ? `${skipped} skipped — unsupported file type` : '');
+  $('#upload-bar').style.width = `${srcUi.queue.length ? Math.round((settled / srcUi.queue.length) * 100) : 0}%`;
+  $('#upload-list').replaceChildren(
+    ...srcUi.queue.map((i) => el('div', {}, [el('span', { text: i.path, title: i.path }), el('span', { class: i.status === 'queued' ? '' : i.status, text: QUEUE_LABEL[i.status] })])),
+    ...srcUi.existingFiles.map((f) => el('div', {}, [el('span', { text: f.path, title: f.path }), el('span', { class: 'ok', text: formatBytes(f.sizeBytes) })])),
+  );
+
+  // Committing an upload always queues an index run, so the checkbox cannot say otherwise.
+  const forced = isUploadKind(srcUi.kind) && queued > 0;
+  srcForm.elements.index.disabled = forced;
+  if (forced) srcForm.elements.index.checked = true;
+}
+
+async function loadSourceFiles(project, source) {
+  try {
+    const { files } = await api(`/api/projects/${project.id}/sources/${source.id}/files`);
+    if (srcUi.editing?.id !== source.id) return; // dialog moved on meanwhile
+    srcUi.existingFiles = files;
+    renderQueue();
+  } catch {
+    /* a source that was never committed has no directory yet */
+  }
+}
+
+/** Multipart sibling of api(): FormData sets its own content-type boundary. */
+async function postForm(path, form) {
+  const headers = { accept: 'application/json' };
+  if (state.token) headers.authorization = `Bearer ${state.token}`;
+  const res = await fetch(path, { method: 'POST', headers, body: form });
+  if (res.status === 401) {
+    state.authFailed = Boolean(state.token);
+    showAuth(true);
+    throw new ApiError(401, { message: 'Admin token required' });
+  }
+  const text = await res.text();
+  const json = text ? JSON.parse(text) : null;
+  if (!res.ok) throw new ApiError(res.status, json);
+  return json;
+}
+
+/**
+ * Uploads the queue into a staging session and commits it. Files go up in batches so a folder of
+ * thousands stays inside the server's per-request limits; archives large enough to matter go alone.
+ */
+async function runUpload(project, source, mode) {
+  const items = srcUi.queue.filter((i) => i.status === 'queued');
+  const total = items.length;
+  const maxFiles = Math.max(1, Math.min(state.health?.uploads?.maxFilesPerRequest ?? 500, 40));
+  const maxBytes = 16 * 1024 * 1024;
+  const { session } = await api(`/api/projects/${project.id}/sources/${source.id}/uploads`, { method: 'POST' });
+  let done = 0;
+  let batch = [];
+  let bytes = 0;
+
+  const flush = async () => {
+    if (batch.length === 0) return;
+    const form = new FormData();
+    for (const item of batch) {
+      item.status = 'busy';
+      form.append('files', item.file, item.path); // preservePath: the server reads the path from `filename`
+    }
+    renderQueue(`Uploading ${done + batch.length}/${total}…`);
+    let result;
+    try {
+      result = await postForm(`/api/projects/${project.id}/sources/${source.id}/uploads/${session}/files`, form);
+    } catch (err) {
+      for (const item of batch) item.status = 'fail';
+      renderQueue();
+      throw err;
+    }
+    for (const item of batch) item.status = 'ok';
+    done += batch.length;
+    batch = [];
+    bytes = 0;
+    renderQueue(`Uploaded ${done}/${total}`);
+    for (const line of result?.errors ?? []) toast(line);
+  };
+
+  try {
+    for (const item of items) {
+      const alone = item.file.size > maxBytes;
+      if (batch.length >= maxFiles || bytes + item.file.size > maxBytes || (alone && batch.length > 0)) await flush();
+      batch.push(item);
+      bytes += item.file.size;
+      if (alone) await flush();
+    }
+    await flush();
+    const { files } = await api(`/api/projects/${project.id}/sources/${source.id}/uploads/${session}/commit?mode=${mode}`, { method: 'POST' });
+    toast(`${fmt(files)} file${files === 1 ? '' : 's'} imported — indexing queued`);
+  } catch (err) {
+    await api(`/api/projects/${project.id}/sources/${source.id}/uploads/${session}`, { method: 'DELETE' }).catch(() => undefined);
+    throw err;
+  }
+}
+
+// ---------- source dialog wiring ----------
+
+for (const tab of srcTabs) tab.addEventListener('click', () => setKind(tab.dataset.kind));
+srcForm.elements.url.addEventListener('input', updateProviderHint);
+for (const box of srcForm.querySelectorAll('input[name="ext"]')) box.addEventListener('change', () => renderQueue());
+$('#source-cancel').addEventListener('click', closeSourceDialog);
+srcDialog.addEventListener('close', () => {
+  srcUi.queue = [];
+  srcUi.existingFiles = [];
+});
+
+$('#source-test').addEventListener('click', () => {
+  if (srcUi.editing) void testSource(srcUi.project, srcUi.editing);
+});
+
+const dropzone = $('#dropzone');
+dropzone.addEventListener('dragover', (event) => {
+  event.preventDefault();
+  dropzone.classList.add('active');
+});
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('active'));
+dropzone.addEventListener('drop', async (event) => {
+  event.preventDefault();
+  dropzone.classList.remove('active');
+  addFiles(await entriesFromDataTransfer(event.dataTransfer));
+});
+dropzone.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    $('#file-files').click();
+  }
+});
+$('#pick-folder').addEventListener('click', () => $('#file-folder').click());
+$('#pick-files').addEventListener('click', () => $('#file-files').click());
+for (const input of [$('#file-folder'), $('#file-files')]) {
+  input.addEventListener('change', () => {
+    addFiles([...input.files].map((f) => ({ path: f.webkitRelativePath || f.name, file: f })));
+    input.value = ''; // so picking the same folder twice fires `change` again
+  });
+}
+
+srcForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (srcUi.busy) return;
+  const errorNode = $('#source-error');
+  const submit = $('#source-submit');
+  const project = srcUi.project;
+  const editing = srcUi.editing;
+  const kind = srcUi.kind;
+  const meta = SOURCE_KINDS[kind];
+  errorNode.hidden = true;
+  srcUi.busy = true;
+  submit.disabled = true;
+  try {
+    const config = configForKind(kind);
+    const secret = secretForKind(kind);
+    const flavor = meta.flavor ?? srcForm.elements.flavor.value;
+    const label = srcForm.elements.label.value.trim();
+    const pending = srcUi.queue.filter((i) => i.status === 'queued').length;
+    let source;
+
+    if (editing) {
+      source = await api(`/api/projects/${project.id}/sources/${editing.id}`, {
+        method: 'PATCH',
+        body: { label, flavor, config, ...(secret ? { secret } : {}) },
+      });
+    } else {
+      const name = srcForm.elements.name.value.trim();
+      if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(name)) {
+        throw new Error('Source name must be 1-63 characters of lowercase letters, digits, "-" or "_", starting with a letter or digit');
+      }
+      source = await api(`/api/projects/${project.id}/sources`, {
+        method: 'POST',
+        body: {
+          type: meta.type,
+          name,
+          label,
+          flavor,
+          config,
+          ...(secret ? { secret } : {}),
+          // An upload commits (and indexes) right after creation; don't queue a run over an empty source.
+          index: pending === 0 && srcForm.elements.index.checked,
+        },
+      });
+    }
+
+    if (pending > 0) await runUpload(project, source, editing ? uploadMode() : 'add');
+    closeSourceDialog();
+    toast(editing ? `Saved ${source.name}` : `Added ${source.name}`);
+    await refresh();
+    await loadSources(true);
+  } catch (err) {
+    errorNode.textContent = err.message;
+    errorNode.hidden = false;
+  } finally {
+    srcUi.busy = false;
+    submit.disabled = false;
+  }
+});
+
 // ---------- auth + filter ----------
 
 $('#auth-form').addEventListener('submit', (event) => {
@@ -667,7 +1312,7 @@ $('#filter').addEventListener('input', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'n' && !event.metaKey && !event.ctrlKey && !event.altKey && !dialog.open && !$('#auth-gate').matches(':not([hidden])')) {
+  if (event.key === 'n' && !event.metaKey && !event.ctrlKey && !event.altKey && !dialog.open && !srcDialog.open && !$('#auth-gate').matches(':not([hidden])')) {
     const tag = document.activeElement?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') return;
     event.preventDefault();

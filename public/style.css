@@ -126,6 +126,11 @@ button:disabled {
   cursor: default;
 }
 
+/* Every `display` below would otherwise beat the hidden attribute the dashboard toggles. */
+[hidden] {
+  display: none !important;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -1453,10 +1458,6 @@ button.danger.small {
 .field select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
-}
-
-.kind-only[hidden] {
-  display: none;
 }
 
 .kind-only {
