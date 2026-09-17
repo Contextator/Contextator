@@ -890,6 +890,12 @@ function setKind(kind) {
   $('#upload-mode-row').hidden = !(isUploadKind(kind) && editing);
   $('#index-label').textContent = isUploadKind(kind) ? 'Index after upload' : 'Index now';
   $('#source-test').hidden = !(editing && (meta.type === 'git' || meta.type === 'notion'));
+  // Clearing a token is only offered where one is actually stored.
+  for (const type of ['git', 'notion']) {
+    const row = clearSecretRow(type);
+    row.hidden = !(editing?.hasSecret && meta.type === type);
+    if (row.hidden) row.querySelector('input').checked = false;
+  }
   $('#webhook-box').hidden = !(editing && meta.type === 'git');
   $('#source-submit').textContent = editing ? 'Save changes' : 'Add source';
   renderQueue();
@@ -1044,11 +1050,16 @@ function configForKind(kind) {
   return { extensions };
 }
 
-function secretForKind(kind) {
+const clearSecretRow = (type) => $(type === 'git' ? '#git-clear-secret-row' : '#notion-clear-secret-row');
+
+/** `{}` keeps the stored token, `{ secret }` replaces it, `{ secret: null }` removes it. */
+function secretPatchForKind(kind) {
   const { type } = SOURCE_KINDS[kind];
-  if (type === 'git') return srcForm.elements.secret.value.trim();
-  if (type === 'notion') return srcForm.elements.notionSecret.value.trim();
-  return '';
+  if (type !== 'git' && type !== 'notion') return {};
+  const row = clearSecretRow(type);
+  if (!row.hidden && row.querySelector('input').checked) return { secret: null };
+  const value = (type === 'git' ? srcForm.elements.secret : srcForm.elements.notionSecret).value.trim();
+  return value ? { secret: value } : {};
 }
 
 // ---------- upload queue ----------
@@ -1260,7 +1271,7 @@ srcForm.addEventListener('submit', async (event) => {
   submit.disabled = true;
   try {
     const config = configForKind(kind);
-    const secret = secretForKind(kind);
+    const secretPatch = secretPatchForKind(kind);
     const flavor = meta.flavor ?? srcForm.elements.flavor.value;
     const label = srcForm.elements.label.value.trim();
     const pending = srcUi.queue.filter((i) => i.status === 'queued').length;
@@ -1269,7 +1280,7 @@ srcForm.addEventListener('submit', async (event) => {
     if (editing) {
       source = await api(`/api/projects/${project.id}/sources/${editing.id}`, {
         method: 'PATCH',
-        body: { label, flavor, config, ...(secret ? { secret } : {}) },
+        body: { label, flavor, config, ...secretPatch },
       });
     } else {
       const name = srcForm.elements.name.value.trim();
@@ -1284,7 +1295,7 @@ srcForm.addEventListener('submit', async (event) => {
           label,
           flavor,
           config,
-          ...(secret ? { secret } : {}),
+          ...(typeof secretPatch.secret === 'string' ? secretPatch : {}), // a new source has nothing to clear
           // An upload commits (and indexes) right after creation; don't queue a run over an empty source.
           index: pending === 0 && srcForm.elements.index.checked,
         },

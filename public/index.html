@@ -153,6 +153,10 @@
                 <input name="secret" type="password" placeholder="leave empty for public repositories" autocomplete="off" />
                 <span class="field-hint" id="secret-hint">Stored encrypted with <code>SECRET_KEY</code>; never shown again.</span>
               </label>
+              <label class="check-inline" id="git-clear-secret-row" hidden>
+                <input type="checkbox" id="git-clear-secret" />
+                <span>Remove the stored token</span>
+              </label>
               <label class="field">
                 <span class="field-label">Username <span class="muted">— optional</span></span>
                 <input name="username" placeholder="only for Bitbucket app passwords" autocomplete="off" spellcheck="false" />
@@ -175,6 +179,10 @@
               <span class="field-label">Integration token</span>
               <input name="notionSecret" type="password" placeholder="ntn_… / secret_…" autocomplete="off" />
               <span class="field-hint">Create an internal integration at notion.so/profile/integrations and share the pages with it. Stored encrypted with <code>SECRET_KEY</code>.</span>
+            </label>
+            <label class="check-inline" id="notion-clear-secret-row" hidden>
+              <input type="checkbox" id="notion-clear-secret" />
+              <span>Remove the stored token</span>
             </label>
             <label class="field">
               <span class="field-label">Root pages or databases <span class="muted">— optional</span></span>
