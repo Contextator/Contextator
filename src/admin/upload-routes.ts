@@ -7,6 +7,22 @@ import type { ImportStats } from '../services/archives.js';
 import { ConflictError, NotFoundError, ValidationError, getProjectById } from '../services/projects.js';
 import { getSource } from '../services/sources.js';
 
+/**
+ * Discards whatever is left of a part so the multipart stream can continue with the next one.
+ * An archive is streamed to disk *before* it is unpacked, so a failure there leaves a part that has
+ * already ended: attaching `end` to it would never fire again and the request would hang forever.
+ */
+export async function drainPart(file: NodeJS.ReadableStream): Promise<void> {
+  const stream = file as NodeJS.ReadableStream & { readableEnded?: boolean; destroyed?: boolean };
+  if (stream.readableEnded || stream.destroyed) return;
+  await new Promise<void>((resolve) => {
+    stream
+      .on('end', resolve)
+      .on('error', () => resolve())
+      .resume();
+  });
+}
+
 const SourceParams = z.object({ id: z.uuid(), sid: z.uuid() });
 const SessionParams = SourceParams.extend({ session: z.string().regex(/^[0-9a-f]{32}$/) });
 const CommitQuery = z.object({ mode: z.enum(['add', 'replace']).default('add') });
@@ -56,10 +72,7 @@ export const uploadRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
         totals.skipped += s.skipped;
         totals.bytes += s.bytes;
       } catch (err) {
-        // Drain the part so the stream can continue with the next file.
-        await new Promise<void>((resolve) => {
-          part.file.on('end', resolve).on('error', () => resolve()).resume();
-        });
+        await drainPart(part.file);
         errors.push(`${part.filename}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
