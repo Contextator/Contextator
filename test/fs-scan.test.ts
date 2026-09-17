@@ -42,8 +42,10 @@ describe('resolveProjectRoot + walkMarkdown', () => {
   let outside: string;
 
   beforeAll(async () => {
-    root = await fs.mkdtemp(path.join(os.tmpdir(), 'contextator-root-'));
-    outside = await fs.mkdtemp(path.join(os.tmpdir(), 'contextator-outside-'));
+    // realpath: on macOS os.tmpdir() is a symlink (/var/... → /private/var/...) and
+    // resolveProjectRoot returns real paths, so the comparison below needs one too.
+    root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'contextator-root-')));
+    outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'contextator-outside-')));
     await fs.mkdir(path.join(root, 'proj', 'guides'), { recursive: true });
     await fs.mkdir(path.join(root, 'proj', 'node_modules', 'pkg'), { recursive: true });
     await fs.mkdir(path.join(root, 'proj', '.hidden'), { recursive: true });
