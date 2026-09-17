@@ -4,6 +4,7 @@ import { Client } from '@notionhq/client';
 import type { DocumentSourceRow } from '../../db/schema.js';
 import { decryptSecret, SecretKeyMissingError } from '../crypto.js';
 import { sourceCurrentDir } from '../data-dir.js';
+import { ValidationError } from '../projects.js';
 import { parseSourceConfig, type NotionConfig } from '../sources.js';
 import { registerDriver, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
 import { frontmatter, pageFileStem, pageTitle, renderBlocks, type NotionBlock } from './notion-render.js';
@@ -31,15 +32,20 @@ type AnyRecord = Record<string, unknown>;
 export class NotionDriver implements SourceDriver {
   private readonly cfg: NotionConfig;
   private lastRequest = 0;
+  /** Roots and databases that could not be read while others could; reported on the run. */
+  private readonly partialFailures: string[] = [];
 
   constructor(
     private readonly source: DocumentSourceRow,
     private readonly ctx: DriverContext,
+    /** Stands in for the API in tests; in production one is built from the stored token. */
+    private readonly injectedClient?: Client,
   ) {
     this.cfg = parseSourceConfig('notion', source.config);
   }
 
   private client(): Client {
+    if (this.injectedClient) return this.injectedClient;
     if (!this.source.secretEnc) throw new SecretKeyMissingError();
     const auth = decryptSecret(this.source.secretEnc, this.ctx.config.SECRET_KEY);
     return new Client({ auth });
@@ -110,15 +116,28 @@ export class NotionDriver implements SourceDriver {
     }
 
     const queue: Array<{ id: string; kind: 'page' | 'database'; depth: number }> = [];
+    const rootFailures: string[] = [];
     for (const id of this.cfg.rootIds) {
       const clean = id.replace(/-/g, '');
       try {
         const page = (await this.throttle(() => client.pages.retrieve({ page_id: clean }))) as AnyRecord;
         if (add(page)) queue.push({ id: clean, kind: 'page', depth: 0 });
+        continue;
       } catch {
-        queue.push({ id: clean, kind: 'database', depth: 0 });
+        /* not a page id — it may name a database */
+      }
+      try {
+        for (const page of await this.databasePages(client, clean, true)) if (add(page)) queue.push({ id: page.id as string, kind: 'page', depth: 1 });
+      } catch (err) {
+        rootFailures.push(`${clean.slice(0, 8)}… (${err instanceof Error ? err.message : String(err)})`);
       }
     }
+    // Every configured root unreadable means a bad token, a revoked share or a wrong id. Reporting
+    // that as an empty workspace would delete every page already imported, so fail the sync instead.
+    if (rootFailures.length > 0 && rootFailures.length === this.cfg.rootIds.length) {
+      throw new ValidationError(`No configured Notion root could be read — ${rootFailures.join('; ')}`);
+    }
+    if (rootFailures.length > 0) this.partialFailures.push(...rootFailures);
     while (queue.length > 0 && pages.size < MAX_PAGES) {
       const item = queue.shift()!;
       if (item.depth > MAX_DEPTH) continue;
@@ -143,7 +162,7 @@ export class NotionDriver implements SourceDriver {
   }
 
   /** Pages of a database: 2025-09 API queries data sources; older tokens still answer `databases.query`. */
-  private async databasePages(client: Client, databaseId: string): Promise<AnyRecord[]> {
+  private async databasePages(client: Client, databaseId: string, required = false): Promise<AnyRecord[]> {
     const out: AnyRecord[] = [];
     const c = client as unknown as {
       databases: { retrieve: (a: AnyRecord) => Promise<AnyRecord>; query?: (a: AnyRecord) => Promise<AnyRecord> };
@@ -154,7 +173,9 @@ export class NotionDriver implements SourceDriver {
       const db = await this.throttle(() => c.databases.retrieve({ database_id: databaseId }));
       dataSourceIds = ((db.data_sources as Array<{ id: string }> | undefined) ?? []).map((d) => d.id);
     } catch (err) {
+      if (required) throw err;
       this.ctx.log.warn({ err, databaseId }, 'notion database not accessible');
+      this.partialFailures.push(`database ${databaseId.slice(0, 8)}… is not accessible`);
       return out;
     }
     const query = async (args: AnyRecord): Promise<AnyRecord> => {
@@ -255,7 +276,8 @@ export class NotionDriver implements SourceDriver {
     };
     await walk(root, []);
 
-    return { note: `${pages.size} pages, ${written} rendered, ${removed} removed` };
+    const note = `${pages.size} pages, ${written} rendered, ${removed} removed`;
+    return { note: this.partialFailures.length ? `${note} (skipped: ${this.partialFailures.join('; ')})` : note };
   }
 }
 
