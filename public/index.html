@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Contextator</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230E6F66'/><text x='50' y='72' font-size='64' text-anchor='middle' fill='white' font-family='Georgia,serif'>C</text></svg>" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+    />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">C</span>
+        <span class="brand-name">Contextator</span>
+        <span class="brand-tag">MCP documentation server</span>
+      </div>
+      <div id="health" class="health" aria-live="polite">
+        <span class="pill queued">connecting…</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <h2>Projects</h2>
+          <span id="project-count" class="muted"></span>
+        </div>
+        <div class="sidebar-tools">
+          <label class="search">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+            <span class="sr-only">Filter projects</span>
+            <input id="filter" type="search" placeholder="Filter projects" autocomplete="off" />
+          </label>
+          <button id="new-btn" class="primary" type="button">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+            New project
+          </button>
+        </div>
+        <nav id="project-list" class="project-list" aria-label="Projects"></nav>
+      </aside>
+
+      <main id="detail" class="detail"></main>
+    </div>
+
+    <footer class="footer">
+      <span id="version"></span>
+    </footer>
+
+    <dialog id="create-dialog" class="dialog">
+      <form id="create-form" method="dialog" novalidate>
+        <div class="dialog-head">
+          <h2>New project</h2>
+          <p class="muted">A folder of Markdown becomes its own MCP endpoint. Indexing runs in the background.</p>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span class="field-label">Project name</span>
+            <input name="name" placeholder="my-docs" pattern="[a-z0-9][a-z0-9_\-]{0,62}" maxlength="63" autocomplete="off" spellcheck="false" required />
+            <span class="field-hint">Lowercase letters, digits, <code>-</code> or <code>_</code>. Becomes the URL <code id="url-preview">…/mcp/my-docs</code></span>
+          </label>
+          <div class="field">
+            <label class="field-label" for="root-relative">Documentation directory <span class="muted">— optional</span></label>
+            <div class="field-prefixed">
+              <span id="root-prefix" class="prefix" aria-hidden="true">/docs/</span>
+              <select id="root-select" class="prefix-select" aria-label="Allowed root" hidden></select>
+              <input id="root-relative" name="rootRelative" placeholder="my-docs" autocomplete="off" spellcheck="false" />
+            </div>
+            <span class="field-hint">A mounted folder inside an allowed root (<code id="allowed-roots">…</code>) becomes the first source. Leave empty to add git repositories, uploads or Notion afterwards.</span>
+          </div>
+          <label class="check">
+            <input type="checkbox" name="index" checked />
+            <span>
+              <span class="check-title">Index now</span>
+              <span class="field-hint">Queue a first index right after creation. You can re-index at any time.</span>
+            </span>
+          </label>
+          <p id="create-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-foot">
+          <button type="button" class="ghost" id="create-cancel">Cancel</button>
+          <button type="submit" class="primary" id="create-btn">Create project</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="source-dialog" class="dialog dialog-wide">
+      <form id="source-form" method="dialog" novalidate>
+        <div class="dialog-head">
+          <h2 id="source-title">Add source</h2>
+          <p class="muted" id="source-subtitle">Documents from this source are indexed under <code>&lt;name&gt;/</code> and synced at the start of every run.</p>
+        </div>
+        <div class="tabs source-tabs" role="tablist" id="source-tabs">
+          <button type="button" class="tab" role="tab" data-kind="local">Local directory</button>
+          <button type="button" class="tab" role="tab" data-kind="git">Git repository</button>
+          <button type="button" class="tab" role="tab" data-kind="upload">Upload files</button>
+          <button type="button" class="tab" role="tab" data-kind="obsidian">Obsidian vault</button>
+          <button type="button" class="tab" role="tab" data-kind="notion">Notion</button>
+        </div>
+        <div class="dialog-body">
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">Name</span>
+              <input name="name" placeholder="docs" pattern="[a-z0-9][a-z0-9_\-]{0,62}" maxlength="63" autocomplete="off" spellcheck="false" required />
+              <span class="field-hint">Path prefix; cannot change later</span>
+            </label>
+            <label class="field">
+              <span class="field-label">Label</span>
+              <input name="label" placeholder="Shown in the list" maxlength="200" autocomplete="off" />
+              <span class="field-hint">Optional</span>
+            </label>
+          </div>
+
+          <div class="kind-only" data-kind="local">
+            <div class="field">
+              <label class="field-label" for="src-path">Directory</label>
+              <div class="field-prefixed">
+                <span id="src-root-prefix" class="prefix" aria-hidden="true">/docs/</span>
+                <select id="src-root-select" class="prefix-select" aria-label="Allowed root" hidden></select>
+                <input id="src-path" name="path" placeholder="my-docs" autocomplete="off" spellcheck="false" />
+              </div>
+              <span class="field-hint">Must live inside an allowed root. Symlinks, dotfiles and <code>node_modules</code> are skipped.</span>
+            </div>
+          </div>
+
+          <div class="kind-only" data-kind="git">
+            <label class="field">
+              <span class="field-label">Repository URL</span>
+              <input name="url" type="url" placeholder="https://github.com/org/repo.git" autocomplete="off" spellcheck="false" />
+              <span class="field-hint">GitHub, GitLab, Bitbucket, Gitea/Forgejo or any HTTPS git server. <span id="git-provider"></span></span>
+            </label>
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Branch</span>
+                <input name="branch" value="main" autocomplete="off" spellcheck="false" />
+              </label>
+              <div class="field">
+                <label class="field-label" for="src-subdir">Subdirectory</label>
+                <div class="field-prefixed">
+                  <span class="prefix" aria-hidden="true">repo/</span>
+                  <input id="src-subdir" name="subdir" placeholder="whole repository" autocomplete="off" spellcheck="false" />
+                </div>
+              </div>
+            </div>
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Access token <span class="muted">— private repositories</span></span>
+                <input name="secret" type="password" placeholder="leave empty for public repositories" autocomplete="off" />
+                <span class="field-hint" id="secret-hint">Stored encrypted with <code>SECRET_KEY</code>; never shown again.</span>
+              </label>
+              <label class="field">
+                <span class="field-label">Username <span class="muted">— optional</span></span>
+                <input name="username" placeholder="only for Bitbucket app passwords" autocomplete="off" spellcheck="false" />
+              </label>
+            </div>
+            <div id="webhook-box" class="webhook-box" hidden>
+              <span class="field-label">Push webhook</span>
+              <span class="field-hint">Add this URL as a push webhook in the repository settings with the secret below; every push to the branch queues a re-index.</span>
+              <div class="webhook-row">
+                <code id="webhook-url"></code>
+                <button type="button" class="ghost small" id="webhook-copy-url">Copy URL</button>
+                <button type="button" class="ghost small" id="webhook-copy-secret">Copy secret</button>
+                <button type="button" class="ghost small" id="webhook-regenerate" title="Invalidates the current secret">Regenerate</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="kind-only" data-kind="notion">
+            <label class="field">
+              <span class="field-label">Integration token</span>
+              <input name="notionSecret" type="password" placeholder="ntn_… / secret_…" autocomplete="off" />
+              <span class="field-hint">Create an internal integration at notion.so/profile/integrations and share the pages with it. Stored encrypted with <code>SECRET_KEY</code>.</span>
+            </label>
+            <label class="field">
+              <span class="field-label">Root pages or databases <span class="muted">— optional</span></span>
+              <textarea name="rootIds" rows="2" placeholder="Page or database ids or URLs, one per line. Empty = everything shared with the integration."></textarea>
+              <span class="field-hint">Have a Notion “Export → Markdown &amp; CSV” zip instead? Use <strong>Upload files</strong> with content type <em>Notion export</em>.</span>
+            </label>
+          </div>
+
+          <div class="kind-only" data-kind="obsidian">
+            <p class="field-hint">A vault is a folder of Markdown files. Drop the vault folder (or a zip of it) below; <code>[[wikilinks]]</code> are rewritten to Markdown links and <code>.obsidian/</code> is skipped. If the vault is mounted on the server, add it as a <strong>Local directory</strong> with content type <em>Obsidian vault</em> instead.</p>
+          </div>
+
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">Content type</span>
+              <select name="flavor">
+                <option value="plain">Plain Markdown / text</option>
+                <option value="obsidian">Obsidian vault (rewrites [[wikilinks]])</option>
+                <option value="notion-export">Notion export (cleans page ids from names)</option>
+              </select>
+            </label>
+            <div class="field">
+              <span class="field-label">File types</span>
+              <div class="check-row">
+                <label><input type="checkbox" name="ext" value="md" checked /> .md</label>
+                <label><input type="checkbox" name="ext" value="mdx" checked /> .mdx</label>
+                <label><input type="checkbox" name="ext" value="txt" /> .txt</label>
+              </div>
+            </div>
+          </div>
+
+          <div class="kind-only" data-kind="upload obsidian">
+            <div id="dropzone" class="dropzone" tabindex="0">
+              <span class="dropzone-icon" aria-hidden="true">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0-4 4m4-4 4 4"></path><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"></path></svg>
+              </span>
+              <span class="dropzone-title">Drop files, folders or archives here</span>
+              <span class="field-hint">.md, .mdx, .txt · folders keep their structure · .zip, .tar.gz and .rar are unpacked on the server</span>
+              <span class="dropzone-actions">
+                <button type="button" class="ghost" id="pick-folder">Choose folder</button>
+                <button type="button" class="ghost" id="pick-files">Choose files</button>
+              </span>
+              <input type="file" id="file-folder" webkitdirectory multiple hidden />
+              <input type="file" id="file-files" multiple hidden />
+            </div>
+            <div id="upload-queue" class="upload-queue" hidden>
+              <div class="upload-head"><span id="upload-summary" class="bold"></span><span id="upload-detail" class="muted"></span></div>
+              <div class="bar"><span id="upload-bar"></span></div>
+              <div id="upload-list" class="upload-list"></div>
+            </div>
+            <div class="radio-row" id="upload-mode-row">
+              <label><input type="radio" name="mode" value="add" checked /> Add to existing files</label>
+              <label><input type="radio" name="mode" value="replace" /> Replace all files</label>
+            </div>
+          </div>
+
+          <p id="source-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-foot space-between">
+          <label class="check-inline"><input type="checkbox" name="index" checked /> <span id="index-label">Index now</span></label>
+          <span class="btn-row">
+            <button type="button" class="ghost" id="source-test" hidden>Test connection</button>
+            <button type="button" class="ghost" id="source-cancel">Cancel</button>
+            <button type="submit" class="primary" id="source-submit">Add source</button>
+          </span>
+        </div>
+      </form>
+    </dialog>
+
+    <section id="auth-gate" class="gate" hidden>
+      <form id="auth-form" class="gate-card">
+        <span class="gate-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>
+        </span>
+        <h1>Admin token required</h1>
+        <p class="muted">This server runs with <code>ADMIN_TOKEN</code> set. Paste it once; it stays in this browser only.</p>
+        <label class="field">
+          <span class="field-label">Token</span>
+          <input id="auth-token" type="password" placeholder="ADMIN_TOKEN" autocomplete="off" required />
+        </label>
+        <p id="auth-error" class="form-error" role="alert" hidden></p>
+        <button type="submit" class="primary block">Unlock dashboard</button>
+        <p class="field-hint center">The MCP endpoints under <code>/mcp/*</code> are not affected by this token.</p>
+      </form>
+    </section>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,49 @@
+---
+title: MCP tools reference
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+export const toc = [{ value: 'search_docs' }, { value: 'list_topics' }, { value: 'read_document' }];
+
+# MCP tools
+
+Every Contextator project exposes the same three read-only tools. All of them are scoped
+to the project named in the endpoint URL.
+
+## search_docs
+
+Performs a cosine-similarity search over the project's chunk embeddings.
+
+<Tabs>
+<TabItem value="input">
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `query` | string | Natural-language question or keywords |
+| `limit` | integer 1-20 | Maximum number of excerpts, default 5 |
+
+</TabItem>
+</Tabs>
+
+The result lists ranked excerpts. Each entry shows the file path, the heading breadcrumb
+(for example `Getting started > Create a project`) and the similarity score.
+
+```json
+{ "name": "search_docs", "arguments": { "query": "how do I re-index", "limit": 3 } }
+```
+
+## list_topics
+
+Takes no arguments and returns every indexed document grouped by directory, with the
+document title and the number of chunks. Use it to discover what documentation exists.
+
+## read_document
+
+Returns the complete Markdown of one indexed file. The `path` argument must be a relative
+path exactly as shown by `search_docs` or `list_topics`, such as `guides/kurulum.md`.
+Paths that were not indexed for the project are rejected, so an agent can never read
+arbitrary files from the server.
+
+{/* Files larger than 512 KB are truncated. */}

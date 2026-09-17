@@ -1,0 +1,9 @@
+node_modules
+dist
+.cache
+.env
+.git
+docs
+test
+drizzle
+*.log

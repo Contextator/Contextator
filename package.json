@@ -1,0 +1,48 @@
+{
+  "name": "contextator",
+  "version": "0.1.0",
+  "description": "Multi-tenant MCP documentation server: index Markdown docs into PostgreSQL + pgvector and expose each project as its own MCP endpoint.",
+  "license": "MIT",
+  "type": "module",
+  "private": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "smoke": "tsx scripts/smoke-mcp.ts",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/multipart": "^10.1.1",
+    "@fastify/static": "^10.1.4",
+    "@huggingface/transformers": "^4.3.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@notionhq/client": "^5.26.0",
+    "dotenv": "^17.0.0",
+    "drizzle-orm": "^0.45.2",
+    "fastify": "^5.12.5",
+    "isomorphic-git": "^1.42.2",
+    "node-stream-zip": "^1.16.0",
+    "node-unrar-js": "^2.0.2",
+    "openai": "^7.17.0",
+    "pg": "^8.23.0",
+    "picomatch": "^4.0.0",
+    "tar": "^7.5.22",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.15.0",
+    "@types/picomatch": "^4.0.0",
+    "drizzle-kit": "^0.31.10",
+    "tsx": "^4.23.13",
+    "typescript": "~5.9.3",
+    "vitest": "^5.0.0"
+  }
+}

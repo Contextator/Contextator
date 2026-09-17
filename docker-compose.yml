@@ -1,0 +1,54 @@
+# Contextator: one container with PostgreSQL 16 + pgvector and the app.
+#
+#   docker compose up -d          start (builds the image on first run)
+#   docker compose logs -f        follow logs
+#   docker compose down           stop and remove the container; data stays in the volumes below
+#
+# Persistent data lives in Docker volumes named contextator-pgdata (database), contextator-models
+# (downloaded embedding models) and contextator-data (uploaded files, git checkouts, Notion pulls).
+# Rename them with CONTEXTATOR_*_VOLUME, or point CONTEXTATOR_*_PATH at absolute host directories
+# instead (see .env.example).
+name: contextator
+
+services:
+  contextator:
+    build: .
+    image: contextator:latest
+    container_name: contextator
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3444}:3444"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Container-specific values that must win over .env
+      HOST: 0.0.0.0
+      PORT: "3444"
+      ALLOWED_DOC_ROOTS: /docs
+      MODEL_CACHE_DIR: /app/.cache/models
+      DATA_DIR: /data
+      # The app talks to the embedded PostgreSQL (the entrypoint sets the PG* variables).
+      # A DATABASE_URL from .env is for `npm run dev` on the host and is cleared here.
+      DATABASE_URL: ""
+      # Used when the database cluster is created on the first start.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-contextator}
+    volumes:
+      # Database cluster
+      - ${CONTEXTATOR_PGDATA_PATH:-pgdata}:/var/lib/postgresql/data
+      # Downloaded embedding models (re-downloadable, but ~500 MB)
+      - ${CONTEXTATOR_MODELS_PATH:-models}:/app/.cache/models
+      # Materialised sources: uploaded files, git checkouts, Notion pulls
+      - ${CONTEXTATOR_DATA_PATH:-data}:/data
+      # Your documentation. Create projects with paths like /docs/<subfolder>.
+      - ${DOCS_HOST_PATH:-./docs}:/docs:ro
+    # App shutdown + PostgreSQL fast shutdown
+    stop_grace_period: 30s
+
+volumes:
+  pgdata:
+    name: ${CONTEXTATOR_PGDATA_VOLUME:-contextator-pgdata}
+  models:
+    name: ${CONTEXTATOR_MODELS_VOLUME:-contextator-models}
+  data:
+    name: ${CONTEXTATOR_DATA_VOLUME:-contextator-data}
