@@ -1145,6 +1145,7 @@ async function postForm(path, form) {
 /**
  * Uploads the queue into a staging session and commits it. Files go up in batches so a folder of
  * thousands stays inside the server's per-request limits; archives large enough to matter go alone.
+ * Returns the per-file failures the server reported; they do not fail the upload as a whole.
  */
 async function runUpload(project, source, mode) {
   const items = srcUi.queue.filter((i) => i.status === 'queued');
@@ -1152,6 +1153,7 @@ async function runUpload(project, source, mode) {
   const maxFiles = Math.max(1, Math.min(state.health?.uploads?.maxFilesPerRequest ?? 500, 40));
   const maxBytes = 16 * 1024 * 1024;
   const { session } = await api(`/api/projects/${project.id}/sources/${source.id}/uploads`, { method: 'POST' });
+  const rejected = [];
   let done = 0;
   let batch = [];
   let bytes = 0;
@@ -1172,12 +1174,17 @@ async function runUpload(project, source, mode) {
       renderQueue();
       throw err;
     }
-    for (const item of batch) item.status = 'ok';
-    done += batch.length;
+    // The server reports per-file failures (a corrupt archive, a rejected name) without failing the
+    // request, so mark those rows instead of leaving them green behind a toast that scrolls past.
+    const sent = batch;
+    const failures = result?.errors ?? [];
+    rejected.push(...failures);
+    for (const item of sent) item.status = failures.some((line) => line.startsWith(`${item.path}: `)) ? 'fail' : 'ok';
+    done += sent.length;
     batch = [];
     bytes = 0;
-    renderQueue(`Uploaded ${done}/${total}`);
-    for (const line of result?.errors ?? []) toast(line);
+    renderQueue(failures.length ? `${done}/${total} · ${failures.length} failed` : `Uploaded ${done}/${total}`);
+    for (const line of failures) toast(line);
   };
 
   try {
@@ -1191,6 +1198,7 @@ async function runUpload(project, source, mode) {
     await flush();
     const { files } = await api(`/api/projects/${project.id}/sources/${source.id}/uploads/${session}/commit?mode=${mode}`, { method: 'POST' });
     toast(`${fmt(files)} file${files === 1 ? '' : 's'} imported — indexing queued`);
+    return rejected;
   } catch (err) {
     await api(`/api/projects/${project.id}/sources/${source.id}/uploads/${session}`, { method: 'DELETE' }).catch(() => undefined);
     throw err;
@@ -1283,7 +1291,22 @@ srcForm.addEventListener('submit', async (event) => {
       });
     }
 
-    if (pending > 0) await runUpload(project, source, editing ? uploadMode() : 'add');
+    const rejected = pending > 0 ? await runUpload(project, source, editing ? uploadMode() : 'add') : [];
+    if (rejected.length > 0) {
+      // The source and the files that did go up are saved; keep the dialog open on the ones that did
+      // not, in edit mode so a second submit patches the source instead of colliding with its name.
+      srcUi.editing = source;
+      srcUi.queue = srcUi.queue.filter((i) => i.status === 'fail');
+      for (const tab of srcTabs) tab.disabled = true;
+      srcForm.elements.name.disabled = true;
+      setKind(kindOfSource(source));
+      void loadSourceFiles(project, source);
+      errorNode.textContent = `Saved, but ${rejected.length} file${rejected.length === 1 ? '' : 's'} could not be read — ${rejected.join(' · ')}`;
+      errorNode.hidden = false;
+      await refresh();
+      await loadSources(true);
+      return;
+    }
     closeSourceDialog();
     toast(editing ? `Saved ${source.name}` : `Added ${source.name}`);
     await refresh();
