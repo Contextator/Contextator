@@ -56,7 +56,9 @@ export const sourceRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
   app.get('/api/projects/:id/sources', async (req) => {
     const { id } = ProjectParams.parse(req.params);
     await requireProject(id);
-    return (await listSources(db, id)).map(toSourceView);
+    // A viewer sees that a webhook exists; only an editor sees what it is signed with.
+    const revealWebhookSecret = req.projectAccess !== 'viewer';
+    return (await listSources(db, id)).map((row) => toSourceView(row, { revealWebhookSecret }));
   });
 
   app.post('/api/projects/:id/sources', async (req, reply) => {

@@ -32,7 +32,8 @@
   <li><strong>Self-hosted first.</strong> One Docker container holds the database and the app. Your documents stay on your infrastructure.</li>
   <li><strong>Local by default.</strong> The default setup makes no outbound call once the embedding model has been downloaded.</li>
   <li><strong>Boring on purpose.</strong> The dashboard is vanilla HTML, CSS and ES modules with no build step; the server is TypeScript on Node.js.</li>
-  <li><strong>Honest about limits.</strong> The MCP endpoints are unauthenticated by design — the operator is expected to put them on a private network or behind a proxy. See the <a href="/terms">Terms of Use</a>.</li>
+  <li><strong>Accounts and roles.</strong> The dashboard signs people in with their own account. <code>root</code> and <code>admin</code> manage everything; a <code>member</code> sees only the projects it is added to, reading them or editing them.</li>
+  <li><strong>Honest about limits.</strong> Those roles govern the dashboard, not the MCP endpoints — those are unauthenticated by design, and the operator is expected to put them on a private network or behind a proxy. See the <a href="/terms">Terms of Use</a>.</li>
 </ul>
 
 <h2>Built with</h2>

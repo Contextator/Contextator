@@ -1,50 +1,69 @@
 <h1>Cookie Policy</h1>
 <p class="page-meta">Last updated: 18 September 2026</p>
 <p class="page-lead">
-  Contextator sets no cookies. Not for sessions, not for preferences, not for analytics. There is nothing to consent
-  to, which is why you are not being asked.
+  Contextator sets exactly one cookie, and only after you sign in. It carries no personal data and no identifier that
+  follows you anywhere: it names your session on this server and nothing else. There is no analytics cookie, no
+  advertising cookie and no third-party cookie. That is why you are not asked to consent — a strictly necessary cookie
+  does not need consent, and there is nothing else here to ask about.
 </p>
 
-<h2>1. What is used instead</h2>
-<p>
-  The dashboard keeps one value in your browser's <code>localStorage</code>, and only when the server is protected by
-  an admin token:
-</p>
+<h2>1. The cookie</h2>
 <div class="page-table-wrap">
   <table class="page-table">
     <thead>
-      <tr><th>Key</th><th>Purpose</th><th>Lifetime</th><th>Category</th></tr>
+      <tr><th>Name</th><th>Purpose</th><th>Lifetime</th><th>Category</th></tr>
     </thead>
     <tbody>
       <tr>
-        <td><code>contextator_admin_token</code></td>
-        <td>Holds the admin token you typed so the dashboard can send it as an <code>Authorization</code> header on every request instead of asking again on each page load.</td>
-        <td>Until you clear the site data or the dashboard removes it after the token is rejected.</td>
+        <td><code>contextator_session</code></td>
+        <td>
+          Keeps you signed in. Its value is a random, opaque session id — not your name, not your password, nothing
+          derived from them. It is <code>HttpOnly</code> (no script on the page can read it), <code>SameSite=Lax</code>
+          (browsers do not attach it to requests started by another site) and <code>Secure</code> whenever the instance
+          is served over HTTPS.
+        </td>
+        <td>
+          Until you sign out, twelve hours after you stop using the dashboard, or thirty days at the outside — whichever
+          comes first. It is refreshed while you keep working. The operator can shorten both.
+        </td>
         <td>Strictly necessary</td>
       </tr>
     </tbody>
   </table>
 </div>
 <p>
-  <code>localStorage</code> is not a cookie: it is never attached to requests automatically, it is readable only by
-  pages from this same origin, and it is not sent to any third party. The token is transmitted only to this server, on
-  requests you trigger.
+  There is no second cookie for cross-site request forgery. The dashboard is served from the same origin as the API, the
+  cookie is <code>SameSite=Lax</code>, and the server additionally checks that a request which changes something really
+  came from a page on this site. A hidden token cookie would add nothing to that.
 </p>
 
-<h2>2. How to remove it</h2>
+<h2>2. What is no longer used</h2>
 <p>
-  Clear site data for this origin in your browser settings, or use a private window. The dashboard will ask for the
-  token again the next time it needs one. Nothing else about your visit is remembered.
+  Earlier versions of Contextator had no accounts: they were protected, if at all, by a single shared admin token, and
+  the dashboard kept that token in this browser's <code>localStorage</code> under the key
+  <code>contextator_admin_token</code>. That mechanism is gone. You now sign in with an account of your own, and the
+  dashboard deletes the leftover key the first time it loads. Clearing site data removes it too.
+</p>
+<p>
+  <code>ADMIN_TOKEN</code> still exists on the server as a way for scripts and CI to reach the API, but it is a
+  server-side credential now: it is never stored in, or typed into, a browser.
 </p>
 
-<h2>3. No tracking</h2>
+<h2>3. How to remove it</h2>
 <p>
-  There are no analytics scripts, no tracking pixels, no advertising identifiers, no session recording and no
-  third-party cookies set by us — in the dashboard, on these pages, or on
+  Sign out from the menu in the top right. The cookie is deleted and the session is destroyed on the server as well, so
+  the id in it stops meaning anything even if someone kept a copy. Clearing site data for this origin has the same
+  effect in your browser; the server-side session then simply expires on its own.
+</p>
+
+<h2>4. No tracking</h2>
+<p>
+  Beyond the session cookie above, there are no analytics scripts, no tracking pixels, no advertising identifiers, no
+  session recording and no third-party cookies set by us — in the dashboard, on these pages, or on
   <a href="https://contextator.com" target="_blank" rel="noopener">contextator.com</a>.
 </p>
 
-<h2>4. Third-party requests</h2>
+<h2>5. Third-party requests</h2>
 <p>
   The dashboard and these pages load typefaces from Google Fonts (<code>fonts.googleapis.com</code> and
   <code>fonts.gstatic.com</code>). Those requests are made by your browser to Google, which receives your IP address
@@ -56,8 +75,9 @@
   Beyond that, the pages load nothing from anywhere else: no CDN scripts, no embedded players, no social widgets.
 </p>
 
-<h2>5. Changes</h2>
+<h2>6. Changes</h2>
 <p>
-  If cookies are ever introduced — they are not planned — this page will say so before they are set, and the date at
-  the top will change. See the <a href="/privacy">Privacy Policy</a> for what the software stores on the server side.
+  This page names every cookie the software sets. If another one is ever added, it appears in the table above before it
+  is set, and the date at the top changes. See the <a href="/privacy">Privacy Policy</a> for what the server stores
+  about your account.
 </p>

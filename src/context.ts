@@ -6,6 +6,8 @@ import type { Indexer } from './services/indexer.js';
 import type { KeyedMutex } from './services/locks.js';
 import type { UploadService } from './services/uploads.js';
 import type { SessionRegistry } from './mcp/sessions.js';
+import type { SetupGate } from './services/auth/setup.js';
+import type { SlidingWindow } from './services/rate-limit.js';
 
 /** pino-compatible logger (Fastify's). Services receive it instead of importing a global. */
 export type Logger = FastifyBaseLogger;
@@ -21,6 +23,10 @@ export interface AppContext {
   locks: KeyedMutex;
   uploads: UploadService;
   sessions: SessionRegistry;
+  /** First-run state: whether any account exists and, until one does, the one-time code. */
+  setup: SetupGate;
+  /** Per-IP budget for sign-in and setup attempts. */
+  loginLimiter: SlidingWindow;
   version: string;
   startedAt: number;
 }

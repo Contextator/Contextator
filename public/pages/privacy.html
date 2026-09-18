@@ -1,8 +1,9 @@
 <h1>Privacy Policy</h1>
 <p class="page-meta">Last updated: 18 September 2026</p>
 <p class="page-lead">
-  Contextator is self-hosted software. It has no accounts, no analytics and no telemetry: it never reports anything
-  back to its authors, and the people who wrote it have no access to any data in your installation.
+  Contextator is self-hosted software. It has no analytics and no telemetry: it never reports anything back to its
+  authors, and the people who wrote it have no access to any data in your installation. It does manage user accounts —
+  but those exist only inside your own installation, and nothing about them leaves it.
 </p>
 
 <h2>1. Two different things</h2>
@@ -22,18 +23,25 @@
   <li><strong>Index run history</strong> — start and finish times, file and chunk counts, and the error message of a failed run.</li>
   <li><strong>Access tokens</strong> for private git repositories and Notion integrations — encrypted at rest with AES-256-GCM using the deployment's <code>SECRET_KEY</code>, never returned by the API and never displayed again after they are saved. Credentials pasted into a repository URL are stripped before the URL is stored.</li>
   <li><strong>Webhook secrets</strong>, one per git source, used to verify that a push notification really came from the provider.</li>
+  <li><strong>User accounts</strong> — a username, an optional display name and e-mail address, the role (<code>root</code>, <code>admin</code> or <code>member</code>), whether the account is active, when it was created and when it last signed in.</li>
+  <li><strong>Password hashes</strong> — passwords themselves are never stored. Only a salted <code>scrypt</code> hash is kept, and it cannot be turned back into the password. Passwords never appear in the logs, and the API never returns one.</li>
+  <li><strong>Sessions</strong> — one row per signed-in browser: a hash of the session token (not the token), the browser's user-agent string, the IP address the session was opened from, when it started and when it was last used.</li>
+  <li><strong>Project memberships</strong> — which account may read, and which may change, which project.</li>
 </ul>
 <p>
-  Deleting a project or a source deletes its documents, chunks, embeddings and materialised files. The database and
-  the data directory are ordinary volumes: backups, retention and access control are the operator's responsibility.
+  Deleting a project or a source deletes its documents, chunks, embeddings and materialised files. Deleting a user
+  account deletes its sessions and memberships immediately; documents that person uploaded belong to the project and
+  stay with it. Signing out, changing a password and "sign out everywhere" each delete the sessions they end. The
+  database and the data directory are ordinary volumes: backups, retention and access control are the operator's
+  responsibility.
 </p>
 
 <h2>3. What your browser stores</h2>
 <p>
-  The dashboard sets <strong>no cookies</strong>. If the server runs with an admin token, the token you type is kept in
-  this browser's <code>localStorage</code> under the key <code>contextator_admin_token</code> so you do not have to
-  retype it, and it is sent to this server only, as an <code>Authorization</code> header. Clearing the site data
-  removes it. Details are on the <a href="/cookies">Cookie Policy</a> page.
+  After you sign in, the dashboard sets one cookie, <code>contextator_session</code>. It holds an opaque session id, is
+  <code>HttpOnly</code> and <code>SameSite=Lax</code>, and is deleted when you sign out. Nothing else is kept in the
+  browser: the <code>localStorage</code> key that older versions used for the admin token is gone, and the dashboard
+  clears any leftover automatically. Details are on the <a href="/cookies">Cookie Policy</a> page.
 </p>
 
 <h2>4. Logs</h2>
@@ -41,6 +49,11 @@
   The server writes operational logs to standard output: startup information, index run progress and errors. Per-request
   HTTP logging is off unless the log level is set to <code>debug</code> or <code>trace</code>. Where those logs go and
   how long they are kept is decided by whoever runs the container.
+</p>
+<p>
+  Failed sign-in attempts are logged with the username that was tried and the address it came from, so an operator can
+  see an attack in progress; account creation, password resets and deletions are logged with the administrator who did
+  them. Passwords, password hashes and session tokens never reach the log.
 </p>
 
 <h2>5. When data leaves the machine</h2>
@@ -53,7 +66,21 @@
 </ul>
 <p>There is no usage tracking, no crash reporting and no update check.</p>
 
-<h2>6. MCP clients</h2>
+<h2>6. Who can see what</h2>
+<p>
+  An account is one of three roles. <strong>root</strong> and <strong>admin</strong> reach every project and manage
+  accounts; a <strong>member</strong> reaches only the projects it has been added to, as a <em>viewer</em> that reads or
+  an <em>editor</em> that can add sources, upload files and re-index. Every one of those rules is enforced on the
+  server, not in the browser.
+</p>
+<p>
+  <strong>Accounts do not protect the MCP endpoints.</strong> <code>/mcp/&lt;project&gt;</code> is unauthenticated by
+  design, so anyone who can reach that URL can read that project's indexed documents whatever their role here — or
+  without an account at all. Membership governs the dashboard and the admin API. Keep the server on a private network,
+  or put it behind a reverse proxy that authenticates.
+</p>
+
+<h2>7. MCP clients</h2>
 <p>
   An AI agent connected to <code>/mcp/&lt;project&gt;</code> receives the excerpts and documents it searches for, and
   whatever the agent does with them is governed by that client's own privacy policy. The MCP endpoints are
@@ -61,22 +88,22 @@
   on a private network, or put it behind a reverse proxy that authenticates.
 </p>
 
-<h2>7. Personal data</h2>
+<h2>8. Personal data</h2>
 <p>
-  Contextator is a documentation indexer; it does not ask for personal data and does not profile anyone. If the
-  documents you index happen to contain personal data, you are the controller of that data and this software is a
-  processor running on your own hardware — the usual duties (lawful basis, retention, deletion, access requests) stay
-  with you.
+  Contextator is a documentation indexer; it does not profile anyone. The names and e-mail addresses of the people you
+  give accounts to are personal data, and so is anything personal inside the documents you index. In both cases you are
+  the controller and this software is a processor running on your own hardware — the usual duties (lawful basis,
+  retention, deletion, access requests) stay with you.
 </p>
 
-<h2>8. The product website</h2>
+<h2>9. The product website</h2>
 <p>
   <a href="https://contextator.com" target="_blank" rel="noopener">contextator.com</a> is a separate, static product
   site. It is served with no advertising and no cross-site tracking; any server-side request logs it keeps are used
   only to operate the site and to keep it available.
 </p>
 
-<h2>9. Changes and contact</h2>
+<h2>10. Changes and contact</h2>
 <p>
   This policy may change as the software changes; the date at the top always says when it was last revised, and a
   revision applies from the moment it is published. Questions about the software or this policy go to

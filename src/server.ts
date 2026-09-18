@@ -2,8 +2,10 @@ import 'dotenv/config';
 import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import Fastify, { LogController } from 'fastify';
+import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
+import { authPageRoutes } from './admin/auth-pages.js';
 import { pageRoutes } from './admin/pages.js';
 import { adminRoutes } from './admin/routes.js';
 import { webhookRoutes } from './admin/webhooks.js';
@@ -21,6 +23,10 @@ import { createEmbeddingProvider } from './services/embeddings/index.js';
 import { Indexer } from './services/indexer.js';
 import { KeyedMutex } from './services/locks.js';
 import { listProjects } from './services/projects.js';
+import { countUsers } from './services/auth/users.js';
+import { startSessionReaper } from './services/auth/sessions.js';
+import { SetupGate } from './services/auth/setup.js';
+import { SlidingWindow } from './services/rate-limit.js';
 import { listAllSources } from './services/sources.js';
 import { UploadService } from './services/uploads.js';
 import { APP_VERSION } from './version.js';
@@ -45,26 +51,34 @@ async function main(): Promise<void> {
   const locks = new KeyedMutex();
   const indexer = new Indexer({ db, embeddings, config, log, locks });
   const uploads = new UploadService(config);
-  const ctx: AppContext = { config, db, log, embeddings, indexer, locks, uploads, sessions, version: APP_VERSION, startedAt: Date.now() };
+  const setup = new SetupGate();
+  const loginLimiter = new SlidingWindow(config.AUTH_LOGIN_MAX_ATTEMPTS, config.AUTH_LOGIN_WINDOW_MIN * 60_000);
+  const ctx: AppContext = { config, db, log, embeddings, indexer, locks, uploads, sessions, setup, loginLimiter, version: APP_VERSION, startedAt: Date.now() };
 
+  // No `credentials: true`: ALLOWED_ORIGINS exists for browser MCP clients, and granting them
+  // credentialed reads of /api/* would hand them the dashboard of whoever is signed in.
   await app.register(cors, {
     origin: config.ALLOWED_ORIGINS.length > 0 ? config.ALLOWED_ORIGINS : false,
     exposedHeaders: ['mcp-session-id', 'mcp-protocol-version'],
     allowedHeaders: ['content-type', 'authorization', 'accept', 'mcp-session-id', 'mcp-protocol-version', 'last-event-id'],
   });
+  await app.register(cookie); // the session cookie; registered on the root app so every plugin can read it
   await app.register(fastifyStatic, {
     root: fileURLToPath(new URL('../public', import.meta.url)), // works from src/ (tsx) and dist/ (node)
     prefix: '/',
-    index: ['index.html'],
+    index: false, // `/` is an explicit, guarded route in auth-pages.ts
   });
   // Explicit page routes win over the static wildcard, so /about and the legal pages keep clean URLs.
   await app.register(pageRoutes, { version: APP_VERSION });
+  await app.register(authPageRoutes, { ctx });
   await app.register(adminRoutes, { ctx });
   await app.register(webhookRoutes, { ctx });
   await app.register(mcpRoutes, { ctx });
 
+  let stopSessionReaper: (() => void) | undefined;
   app.addHook('onClose', async () => {
     sessions.stopReaper();
+    stopSessionReaper?.();
     await sessions.closeAll();
     await pool.end();
   });
@@ -81,6 +95,18 @@ async function main(): Promise<void> {
     }
     throw err;
   }
+
+  // Accounts: with none, the dashboard is a setup wizard and /api/* is closed to everything but
+  // ADMIN_TOKEN. The one-time code lives in memory, so a restart prints a fresh one.
+  const userCount = await countUsers(db);
+  setup.arm(userCount, config.SETUP_CODE);
+  if (setup.needsSetup) {
+    log.warn(setup.banner(config.PUBLIC_BASE_URL?.replace(/\/+$/, '') ?? `http://localhost:${config.PORT}`));
+    if (!config.ADMIN_TOKEN) {
+      log.warn('Until that account exists, every /api/* endpoint answers 401 setup_required.');
+    }
+  }
+  stopSessionReaper = startSessionReaper(db, log, config.AUTH_SESSION_IDLE_MS, 15 * 60_000, () => loginLimiter.sweep());
 
   // Data directory for materialised sources; drop directories whose project/source rows are gone.
   await fs.mkdir(config.DATA_DIR, { recursive: true });

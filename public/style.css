@@ -1840,3 +1840,363 @@ a.btn:focus-visible {
     padding: 12px 16px 14px;
   }
 }
+
+/* ---------- top bar: the account menu ---------- */
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  /* The account menu keeps its width; the health chips are what wraps when space runs out. */
+  flex: 1;
+  justify-content: flex-end;
+}
+
+.topbar-right .health {
+  min-width: 0;
+  flex-shrink: 1;
+  flex-wrap: nowrap;
+}
+
+/* The model id is the longest thing up here; let it ellipsise rather than push the version down. */
+.topbar-right .health .chip.mono {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Until app.js knows who is signed in, the chrome stays out of the way rather than flashing empty. */
+body.booting .layout,
+body.booting .topbar-right {
+  visibility: hidden;
+}
+
+.user-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+
+button.user-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+button.user-btn:hover {
+  border-color: var(--border-strong);
+}
+
+.avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--neutral-tint);
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+
+.avatar.root {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.avatar.admin {
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 30;
+  min-width: 220px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-dialog);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.menu-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.menu-head .bold {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.menu-head .sub {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font-size: 13.5px;
+  font-family: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.menu-item:hover,
+.menu-item:focus-visible {
+  background: var(--surface-2);
+}
+
+.menu-sep {
+  display: block;
+  height: 1px;
+  margin: 4px 0;
+  background: var(--border);
+}
+
+.menu-item.danger-text {
+  color: var(--err-text);
+}
+
+/* ---------- role pills ---------- */
+
+.pill.root {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.pill.root::before {
+  background: var(--on-accent);
+}
+
+.pill.admin,
+.pill.editor {
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.pill.admin::before,
+.pill.editor::before {
+  background: var(--accent);
+}
+
+.pill.member,
+.pill.viewer,
+.pill.you {
+  background: var(--neutral-tint);
+  color: var(--muted);
+}
+
+.pill.member::before,
+.pill.viewer::before,
+.pill.you::before {
+  background: var(--faint);
+}
+
+/* ---------- users view ---------- */
+
+body.no-sidebar .sidebar {
+  display: none;
+}
+
+.back-link {
+  display: inline-block;
+  margin-bottom: 14px;
+  font-size: 13px;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.back-link:hover {
+  color: var(--text);
+}
+
+.users-lead {
+  max-width: 62ch;
+  margin-top: 6px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.user-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1.4fr) auto minmax(0, 0.9fr) minmax(0, 0.8fr) minmax(0, 0.8fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.user-row:last-child {
+  border-bottom: 0;
+}
+
+.user-glyph {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11.5px;
+  font-weight: 600;
+  background: var(--neutral-tint);
+  color: var(--muted);
+}
+
+.user-glyph.root {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.user-glyph.admin {
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.user-role {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.users-empty {
+  padding: 18px 0;
+  color: var(--muted);
+  font-size: 13.5px;
+}
+
+#user-password-field .btn-row {
+  display: flex;
+  gap: 8px;
+}
+
+#user-password-field .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------- members panel ---------- */
+
+.member-row {
+  grid-template-columns: 34px minmax(0, 2fr) auto minmax(0, 0.8fr) auto;
+}
+
+.role-select {
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+}
+
+.members-note {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--warn-tint);
+  color: var(--warn-text);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.members-note code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+/* ---------- auth pages (/login, /setup, /change-password) ---------- */
+
+/* These documents have no dashboard layout, so the card centres in the whole page. */
+body.auth {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+body.auth .gate {
+  position: static;
+  flex: 1;
+  padding: 48px 24px;
+}
+
+body.auth .gate-card h1 {
+  margin-bottom: 2px;
+}
+
+body.auth .gate-card .btn-row,
+body.auth .gate-card .field + .field {
+  margin-top: 0;
+}
+
+body.auth .gate-card a {
+  color: var(--accent);
+}
+
+/* ---------- responsive: accounts ---------- */
+
+@media (max-width: 900px) {
+  .topbar-right {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .user-row,
+  .member-row {
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+    row-gap: 8px;
+  }
+  .user-row > :nth-child(n + 4):not(.source-actions),
+  .member-row > :nth-child(n + 4):not(.source-actions) {
+    display: none;
+  }
+  .user-row .source-actions,
+  .member-row .source-actions {
+    grid-column: 1 / -1;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 560px) {
+  button.user-btn .user-name,
+  button.user-btn .pill {
+    display: none;
+  }
+  .menu {
+    min-width: 200px;
+  }
+}

@@ -1,16 +1,23 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
+import { installAuth } from '../auth/plugin.js';
+import type { Principal } from '../auth/types.js';
 import type { AppContext } from '../context.js';
 import { pingDb } from '../db/client.js';
 import type { ProjectRow } from '../db/schema.js';
 import { SecretDecryptError, SecretKeyMissingError } from '../services/crypto.js';
 import { removeProjectDir } from '../services/data-dir.js';
+import { ForbiddenError, RateLimitedError, UnauthorizedError } from '../services/errors.js';
 import { PathNotAllowedError } from '../services/fs-scan.js';
 import { listIndexRuns } from '../services/index-runs.js';
+import { PasswordPolicyError } from '../services/passwords.js';
+import { listProjectsForUser, membershipMap } from '../services/auth/memberships.js';
 import { ConflictError, NotFoundError, ValidationError, createProject, deleteProject, getProjectById, listProjects } from '../services/projects.js';
 import { countSourcesByProject, createSource, slugifySourceName } from '../services/sources.js';
+import { authRoutes } from './auth-routes.js';
+import { memberRoutes } from './members-routes.js';
 import { sourceRoutes } from './sources-routes.js';
+import { usersRoutes } from './users-routes.js';
 
 const CreateProjectBody = z.object({
   name: z.string().min(1).max(63),
@@ -21,31 +28,34 @@ const CreateProjectBody = z.object({
 const IdParams = z.object({ id: z.uuid() });
 const ReindexQuery = z.object({ force: z.enum(['true', 'false', '1', '0']).optional() });
 
-function safeEqual(a: string, b: string): boolean {
-  const ha = createHash('sha256').update(a).digest();
-  const hb = createHash('sha256').update(b).digest();
-  return timingSafeEqual(ha, hb);
-}
-
-/** REST API consumed by the dashboard in public/. Optional bearer auth via ADMIN_TOKEN. */
+/**
+ * REST API consumed by the dashboard in public/. Every request is authenticated either by the
+ * session cookie of a user account or by `Authorization: Bearer <ADMIN_TOKEN>` (machine access with
+ * root permissions); src/auth/plugin.ts resolves and enforces both for this plugin and every
+ * plugin nested below it.
+ */
 export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
   const { config, db, indexer, sessions, embeddings } = ctx;
 
-  app.addHook('onRequest', async (req, reply) => {
-    if (!config.ADMIN_TOKEN || req.routeOptions.url === '/api/health') return;
-    const header = req.headers.authorization ?? '';
-    const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : '';
-    if (!token || !safeEqual(token, config.ADMIN_TOKEN)) {
-      return reply.code(401).send({ error: 'unauthorized' });
-    }
-  });
+  installAuth(app, ctx);
 
   app.setErrorHandler((err, req, reply) => {
     if (err instanceof z.ZodError) {
       return reply.code(400).send({ error: 'validation_failed', message: z.prettifyError(err), issues: err.issues });
     }
-    if (err instanceof ValidationError || err instanceof PathNotAllowedError || err instanceof SecretKeyMissingError || err instanceof SecretDecryptError) {
+    if (
+      err instanceof ValidationError ||
+      err instanceof PathNotAllowedError ||
+      err instanceof SecretKeyMissingError ||
+      err instanceof SecretDecryptError ||
+      err instanceof PasswordPolicyError
+    ) {
       return reply.code(400).send({ error: 'invalid_request', message: err.message });
+    }
+    if (err instanceof UnauthorizedError) return reply.code(401).send({ error: err.code, message: err.message });
+    if (err instanceof ForbiddenError) return reply.code(403).send({ error: err.code, message: err.message });
+    if (err instanceof RateLimitedError) {
+      return reply.code(429).header('retry-after', String(err.retryAfterSec)).send({ error: 'rate_limited', message: err.message, retryAfterSec: err.retryAfterSec });
     }
     if (err instanceof NotFoundError) return reply.code(404).send({ error: 'not_found', message: err.message });
     if (err instanceof ConflictError) return reply.code(409).send({ error: 'conflict', message: err.message });
@@ -59,12 +69,20 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
 
   const baseUrl = (req: FastifyRequest): string => (config.PUBLIC_BASE_URL ?? `${req.protocol}://${req.host}`).replace(/\/+$/, '');
   /** `names` (id → name) lets a queued job say which project it is waiting for without another query. */
-  const toView = (req: FastifyRequest, project: ProjectRow, names?: Map<string, string>, sourceCounts?: Map<string, number>) => {
+  const toView = (
+    req: FastifyRequest,
+    project: ProjectRow,
+    names?: Map<string, string>,
+    sourceCounts?: Map<string, number>,
+    access: 'viewer' | 'editor' | 'manager' = 'manager',
+  ) => {
     const job = indexer.getJob(project.id) ?? null;
     const queue = job?.phase === 'queued' ? indexer.queueInfo(project.id) : undefined;
     return {
       ...project,
       mcpUrl: `${baseUrl(req)}/mcp/${project.name}`,
+      /** What the caller may do here; the dashboard hides what it cannot use. */
+      access,
       sourceCount: sourceCounts?.get(project.id) ?? 0,
       job: job
         ? {
@@ -77,35 +95,63 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     };
   };
 
-  app.get('/api/health', async () => ({
-    ok: true,
-    version: ctx.version,
-    uptimeSec: Math.round((Date.now() - ctx.startedAt) / 1000),
-    db: (await pingDb(db)) ? 'up' : 'down',
-    embeddings: {
-      /** Provider-qualified id as stored on each project (`projects.embedding_model`). */
-      id: embeddings.id,
-      provider: embeddings.provider,
-      model: embeddings.model,
-      dimensions: embeddings.dimensions,
-      dtype: embeddings.provider === 'local' ? config.EMBEDDING_DTYPE : null,
-      ready: embeddings.ready,
-    },
-    sessions: sessions.stats(),
-    allowedDocRoots: config.ALLOWED_DOC_ROOTS,
-    dataDir: config.DATA_DIR,
-    secretKeyConfigured: Boolean(config.SECRET_KEY),
-    uploads: {
-      maxFileBytes: config.UPLOAD_MAX_FILE_BYTES,
-      maxFilesPerRequest: config.UPLOAD_MAX_FILES_PER_REQUEST,
-      maxArchiveBytes: config.UPLOAD_MAX_ARCHIVE_BYTES,
-    },
-  }));
+  /**
+   * Public, because the sign-in page, the setup page and the container's HEALTHCHECK all need it
+   * before there is anyone to be. The anonymous shape keeps `ok`, `version` and `db` exactly where
+   * they were, so an external monitor watching this endpoint does not notice; everything that says
+   * something about the machine (document roots, data directory, model, open sessions) waits for a
+   * principal, and the filesystem paths wait for an administrator.
+   */
+  app.get('/api/health', async (req) => {
+    const principal = req.principal;
+    const base = {
+      ok: true,
+      version: ctx.version,
+      db: (await pingDb(db)) ? 'up' : 'down',
+      authRequired: true,
+      needsSetup: ctx.setup.needsSetup,
+    };
+    if (!principal) return base;
+
+    const detail = {
+      ...base,
+      uptimeSec: Math.round((Date.now() - ctx.startedAt) / 1000),
+      embeddings: {
+        /** Provider-qualified id as stored on each project (`projects.embedding_model`). */
+        id: embeddings.id,
+        provider: embeddings.provider,
+        model: embeddings.model,
+        dimensions: embeddings.dimensions,
+        dtype: embeddings.provider === 'local' ? config.EMBEDDING_DTYPE : null,
+        ready: embeddings.ready,
+      },
+      sessions: sessions.stats(),
+      uploads: {
+        maxFileBytes: config.UPLOAD_MAX_FILE_BYTES,
+        maxFilesPerRequest: config.UPLOAD_MAX_FILES_PER_REQUEST,
+        maxArchiveBytes: config.UPLOAD_MAX_ARCHIVE_BYTES,
+      },
+    };
+    if (principal.role === 'member') return detail;
+
+    return {
+      ...detail,
+      allowedDocRoots: config.ALLOWED_DOC_ROOTS,
+      dataDir: config.DATA_DIR,
+      secretKeyConfigured: Boolean(config.SECRET_KEY),
+    };
+  });
 
   app.get('/api/projects', async (req) => {
-    const [rows, sourceCounts] = await Promise.all([listProjects(db), countSourcesByProject(db)]);
+    const principal = req.principal as Principal;
+    const member = principal.kind === 'session' && principal.role === 'member' ? principal.userId : null;
+    const [rows, sourceCounts, roles] = await Promise.all([
+      member ? listProjectsForUser(db, member) : listProjects(db),
+      countSourcesByProject(db),
+      member ? membershipMap(db, member) : Promise.resolve({} as Record<string, 'viewer' | 'editor'>),
+    ]);
     const names = new Map(rows.map((p) => [p.id, p.name]));
-    return rows.map((p) => toView(req, p, names, sourceCounts));
+    return rows.map((p) => toView(req, p, names, sourceCounts, member ? (roles[p.id] ?? 'viewer') : 'manager'));
   });
 
   app.get('/api/projects/:id/runs', async (req) => {
@@ -157,5 +203,8 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     return reply.code(204).send();
   });
 
+  await app.register(authRoutes, { ctx });
+  await app.register(usersRoutes, { ctx });
+  await app.register(memberRoutes, { ctx });
   await app.register(sourceRoutes, { ctx });
 };

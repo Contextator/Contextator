@@ -20,6 +20,9 @@ http://localhost:3444/mcp/<project-name>
   50+ languages incl. Turkish). Switch to OpenAI embeddings with two env vars.
 - **Both MCP transports on the same URL.** Streamable HTTP for current clients, legacy HTTP+SSE for older ones.
 - **Admin dashboard** at `http://localhost:3444/` to manage projects and their sources — add a repository, drop a folder or an archive on the page, test a connection, trigger re-indexing and watch progress.
+- **Accounts and roles.** People sign in with their own account. `root` and `admin` manage everything and everyone; a
+  `member` sees only the projects it is assigned to, as a read-only `viewer` or an `editor` that adds sources, uploads
+  files and re-indexes. `ADMIN_TOKEN` stays for scripts and CI. See [Accounts and permissions](#accounts-and-permissions).
 - **Incremental indexing.** Files are hashed; only changed files are re-embedded, removed files are deleted.
 
 Stack: TypeScript · Node.js 20+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/sdk` · `@huggingface/transformers`.
@@ -42,12 +45,23 @@ docker compose up -d
 docker compose logs -f            # wait for "embedding model ready"
 ```
 
-1. Open **http://localhost:3444/**.
-2. Press **New project** (or `n`): name `demo`, directory `/docs/demo` (the host folder from `DOCS_HOST_PATH` is mounted at `/docs`).
+1. **Create the first account.** With no account yet, the log prints a one-time setup code:
+
+   ```
+   ┌─ Contextator first-run setup ────────────────────────────
+   │ No user accounts exist yet. Open http://localhost:3444/setup
+   │
+   │   Setup code:  K7QM-92QX-VBHT
+   ```
+
+   Open **http://localhost:3444/setup**, paste the code and create the `root` account. Lost the code? Restart the
+   container — a fresh one is printed on every start until an account exists.
+2. Sign in at **http://localhost:3444/**.
+3. Press **New project** (or `n`): name `demo`, directory `/docs/demo` (the host folder from `DOCS_HOST_PATH` is mounted at `/docs`).
    Leaving the directory empty creates an empty project; add its sources afterwards with **Add source**.
-3. Watch the project's status go `indexing → idle` in the list; the **Document sources** panel shows every
+4. Watch the project's status go `indexing → idle` in the list; the **Document sources** panel shows every
    source with its document count, last sync and any error.
-4. Use the **Connect an agent** tabs (Claude Code, Cursor, Claude Desktop, legacy SSE) for copy-paste snippets, or run the bundled smoke test:
+5. Use the **Connect an agent** tabs (Claude Code, Cursor, Claude Desktop, legacy SSE) for copy-paste snippets, or run the bundled smoke test:
 
 ```bash
 npm install && npm run smoke -- http://localhost:3444/mcp/demo "how do I re-index"
@@ -179,6 +193,48 @@ are recognised; the signature is verified before anything is queued, pushes to o
 ignored, and a valid delivery queues a re-index of the project. **Regenerate** invalidates the old
 secret. The endpoint authenticates with this per-source secret, not with `ADMIN_TOKEN`.
 
+## Accounts and permissions
+
+The dashboard and the admin API are behind a personal account. The first one is created at `/setup` with the one-time
+code the server prints while no account exists; after that, accounts are managed from **Users** in the top-right menu.
+
+There are three instance roles, and on top of them a per-project role for members:
+
+| | root | admin | editor | viewer |
+|---|:--:|:--:|:--:|:--:|
+| See the project list | all | all | its own | its own |
+| Create / delete a project | ✓ | ✓ | – | – |
+| Re-index (incremental or full) | ✓ | ✓ | ✓ | – |
+| See a project's sources | ✓ | ✓ | ✓ | ✓ |
+| Add, edit, delete, sync or test a source | ✓ | ✓ | ✓ | – |
+| Upload and delete files | ✓ | ✓ | ✓ | – |
+| See and regenerate a webhook secret | ✓ | ✓ | ✓ | – |
+| See a project's members | ✓ | ✓ | ✓ | ✓ |
+| Add, change or remove a member | ✓ | ✓ | – | – |
+| Manage accounts | ✓ | ✓ (not root ones) | – | – |
+
+`editor` and `viewer` are memberships, not roles: a `member` account gets one per project from **Members** on the
+project page. `root` and `admin` reach every project without being listed.
+
+Three rules are enforced no matter who asks:
+
+- **The last active root account cannot be deleted, demoted or disabled.** An instance can never lock itself out of its
+  own user management.
+- **An admin cannot touch a root account** and cannot hand out the `root` role. Only another root can.
+- **Nobody can disable, demote or delete themselves.**
+
+New accounts get a temporary password — either one you type or one the server generates and shows exactly once. Until
+the person replaces it at their next sign-in, every endpoint except the password-change loop answers `403
+password_change_required`.
+
+`ADMIN_TOKEN` is unchanged and still works: `Authorization: Bearer <token>` acts with **root** permissions, so scripts
+and CI that predate accounts keep running. Treat it like a root password and keep it out of browsers.
+
+> **Accounts do not protect `/mcp/*`.** The MCP endpoints are unauthenticated by design, so anyone who can reach
+> `http://host:3444/mcp/<project>` can read that project's indexed documents whatever their role here — or without an
+> account at all. Roles govern the dashboard and the admin API. Keep the server on a private network or behind an
+> authenticating proxy.
+
 ## Data and persistence
 
 | What | Path in the container | Default volume | Override (`.env`) |
@@ -290,7 +346,14 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `EMBEDDING_DTYPE` | `fp32` | `q8` downloads a ~4× smaller quantized model |
 | `OPENAI_API_KEY`, `OPENAI_EMBEDDING_MODEL` | – / `text-embedding-3-small` | Used when the provider is `openai` |
 | `CHUNK_MAX_TOKENS` / `CHUNK_OVERLAP_TOKENS` | `400` / `50` | |
-| `ADMIN_TOKEN` | – | When set, `/api/*` requires `Authorization: Bearer …`; the dashboard asks for it once |
+| `ADMIN_TOKEN` | – | **Machine access** to `/api/*` via `Authorization: Bearer …`, acting with root permissions. Browsers sign in with an account instead; treat this token like a root password |
+| `AUTH_SESSION_IDLE_MS` | `43200000` (12 h) | A dashboard session unused for this long has to sign in again. Refreshed while the dashboard is in use |
+| `AUTH_SESSION_TTL_DAYS` | `30` | Hard ceiling on a session's life, however actively it is used |
+| `AUTH_COOKIE_SECURE` | `auto` | `auto` sets `Secure` when the request arrives over HTTPS (`trustProxy` is on). Force with `1`; use `0` for a plain-HTTP LAN install, or the browser drops the cookie |
+| `AUTH_LOGIN_MAX_ATTEMPTS` | `10` | Failed sign-ins per account and per IP before a lockout / `429` |
+| `AUTH_LOGIN_WINDOW_MIN` | `15` | The IP window, and the first lockout step (it doubles, capped at an hour) |
+| `PASSWORD_MIN_LENGTH` | `12` | Applies to every password, temporary ones included. No composition rules |
+| `SETUP_CODE` | – | Pins the first-run setup code instead of generating a random one, for automated provisioning. Ignored once an account exists |
 | `ALLOWED_ORIGINS` | – | Extra browser origins allowed on `/mcp/*` (non-browser clients are always allowed) |
 | `PUBLIC_BASE_URL` | – | e.g. `https://docs.example.com` for the URLs shown in the dashboard |
 | `SESSION_IDLE_TTL_MS` | `1800000` | Idle Streamable HTTP sessions are closed after 30 min |
@@ -308,7 +371,13 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 
 ## Admin API
 
-All endpoints return JSON. With `ADMIN_TOKEN` set, send `Authorization: Bearer <token>` (health is exempt).
+All endpoints return JSON. Every request is authenticated either by the session cookie the dashboard receives at
+sign-in, or by `Authorization: Bearer <ADMIN_TOKEN>` (machine access, root permissions). `GET /api/health` is exempt,
+and answers with less detail when nobody is signed in.
+
+A cookie-authenticated request that changes something must come from this site: the server checks `Sec-Fetch-Site`
+(falling back to `Origin`/`Referer`) and answers `403 csrf_blocked` otherwise. Bearer requests are exempt — they carry
+no ambient credential.
 
 | Method & path | Description |
 |---------------|-------------|
@@ -334,6 +403,30 @@ All endpoints return JSON. With `ADMIN_TOKEN` set, send `Authorization: Bearer <
 | `DELETE /api/projects/:id/sources/:sid/files?path=…` | Delete one of them and re-index |
 | `POST /api/webhooks/git/:sourceId` | Push webhook. Authenticated by the per-source secret, **not** `ADMIN_TOKEN` |
 
+### Accounts
+
+| Method & path | Description |
+|---------------|-------------|
+| `GET /api/setup/status` | `{ needsSetup }` — true while no account exists. Public |
+| `POST /api/setup` `{ code, username, displayName?, email?, password }` | Creates the first `root` account and signs it in. `403` on a wrong code, `409` once an account exists. Public |
+| `POST /api/auth/login` `{ username, password }` | Sets the session cookie. `401 invalid_credentials` for both a wrong password and an unknown username, `403 account_disabled`, `429` with `Retry-After` when rate-limited |
+| `POST /api/auth/logout` | Destroys the session and clears the cookie. Idempotent |
+| `GET /api/auth/me` | The signed-in account, its role and — for a member — its per-project roles |
+| `POST /api/auth/password` `{ currentPassword, newPassword }` | Change own password; clears `mustChangePassword` and revokes this account's **other** sessions |
+| `GET /api/auth/sessions` · `DELETE /api/auth/sessions?scope=others\|all` | List or end your own sessions |
+| `GET /api/users` | Every account with role, status, project count, last sign-in and active session count (root/admin) |
+| `POST /api/users` `{ username, displayName?, email?, role?, password?, mustChangePassword? }` | Create an account → `201 { user, temporaryPassword }`; the password is generated when omitted and returned **once** |
+| `GET /api/users/:id` · `PATCH /api/users/:id` | Read, or change display name, e-mail, role and active flag |
+| `POST /api/users/:id/password` `{ password? }` | Set a new temporary password → `{ temporaryPassword }`, forces a change at next sign-in and ends that account's sessions |
+| `DELETE /api/users/:id` | Delete the account, its sessions and its memberships |
+| `DELETE /api/users/:id/sessions` | Sign that account out everywhere |
+| `GET /api/projects/:id/members` | Accounts with access to this project and their role (any member of it) |
+| `PUT /api/projects/:id/members/:userId` `{ role }` | Grant or change `viewer` / `editor` (root/admin) |
+| `DELETE /api/projects/:id/members/:userId` | Revoke access (root/admin) |
+
+A project a member has no access to answers `404`, not `403`, so project ids cannot be probed. `409` guards the last
+root account; `403` guards an admin reaching for a root one.
+
 ## Local development (without Docker for the app)
 
 ```bash
@@ -356,7 +449,7 @@ npm run smoke -- http://localhost:3444/mcp/demo "kurulum" --sse   # exercise the
 ```
 src/server.ts                 Fastify entrypoint / composition root
 src/config.ts                 zod-validated environment
-src/db/schema.ts              Drizzle schema (projects, document_sources, documents, chunks, index_runs, settings)
+src/db/schema.ts              Drizzle schema (projects, document_sources, documents, chunks, index_runs, settings, users, user_sessions, project_members)
 src/db/ensure-schema.ts       idempotent DDL applied at startup (extension, tables, HNSW index, dimension guard)
 src/services/chunker.ts       Markdown/MDX-aware chunking with heading breadcrumbs
 src/services/fs-scan.ts       safe directory walking + path-escape checks
@@ -373,14 +466,32 @@ src/services/vector-store.ts  pgvector cosine search and chunk persistence
 src/mcp/router.ts             /mcp/:project — Streamable HTTP + legacy SSE on one URL
 src/mcp/tools.ts              search_docs, list_topics, read_document
 src/mcp/sessions.ts           per-connection McpServer/transport registry + idle reaper
+src/auth/policy.ts            every authorization rule as data — no DB, no Fastify, fully unit-tested
+src/auth/authorize.ts         the request checks that need no database, in the order they must happen
+src/auth/plugin.ts            resolves the principal (cookie or ADMIN_TOKEN) and applies the policy
+src/auth/cookies.ts           the session cookie's name, flags and Secure decision
+src/auth/csrf.ts              same-site check for cookie-authenticated writes
+src/services/passwords.ts     scrypt hashing (node:crypto), policy and temporary passwords
+src/services/auth/            accounts, sessions, memberships and the first-run setup gate
+src/services/rate-limit.ts    in-memory sliding window for sign-in attempts
 src/admin/routes.ts           REST API for the dashboard
 src/admin/sources-routes.ts   source CRUD, sync, test, webhook secret
 src/admin/upload-routes.ts    multipart upload sessions (the only multipart-parsing plugin)
 src/admin/webhooks.ts         push webhooks, verified with the per-source secret
+src/admin/auth-routes.ts      /api/auth/* and /api/setup/*
+src/admin/users-routes.ts     /api/users/*
+src/admin/members-routes.ts   /api/projects/:id/members/*
 src/admin/pages.ts            /about, /privacy, /cookies, /terms, /license rendered into one shell
+src/admin/auth-pages.ts       /login, /setup, /change-password and the guard on `/`
 public/                       vanilla HTML/JS dashboard (no build step)
+public/core.js                shared helpers: el(), api(), state, the event bus
+public/auth.js                the signed-in account, the top-bar menu, permission helpers
+public/users.js               the account list at #/~users
+public/members.js             a project's Members panel
+public/auth-page.js           /login, /setup and /change-password — imports nothing from the dashboard
 public/pages/                 body of each product/legal page + the shell they share
 scripts/smoke-mcp.ts          end-to-end MCP client check
+scripts/reset-password.ts     last-resort password reset straight against the database
 docs/demo/                    sample documentation (English, Turkish, MDX)
 Dockerfile                    one image: postgres:16 + pgvector + Node 22 + the app
 docker/entrypoint.sh          starts PostgreSQL, then the app; stops both in order on SIGTERM
@@ -403,7 +514,8 @@ The vector column's dimension is a deployment setting (`vector(384)` vs `vector(
 generated migrations would hard-code. Instead `ensure-schema.ts` runs idempotent `CREATE … IF NOT EXISTS`
 DDL on every start under an advisory lock and records the dimension in a `settings` table so a
 mismatch fails fast with a clear message. `src/db/schema.ts` is kept in sync by hand and powers Drizzle's
-typed queries and Drizzle Studio.
+typed queries and Drizzle Studio. Schema version 4 added `users`, `user_sessions` and `project_members`;
+an existing database picks them up on the next start with nothing to run by hand.
 
 ## Security notes
 
@@ -415,7 +527,22 @@ typed queries and Drizzle Studio.
 - Uploads and archives are extracted into a scratch directory first and only then copied in: entries that escape, dot-directories, non-portable names and unselected file types are dropped, and `ARCHIVE_MAX_ENTRIES` / `ARCHIVE_MAX_TOTAL_BYTES` bound a zip bomb. Nested archives are unpacked one level deep.
 - A git subdirectory is resolved inside the checkout; `..` segments are rejected.
 - `read_document` only serves files that were indexed for that project, never arbitrary paths.
-- Set `ADMIN_TOKEN` whenever the dashboard is reachable by anyone but you.
+- The dashboard requires an account. Roles are `root`, `admin` and `member`, with a per-project `viewer`/`editor` role
+  on top; every rule is enforced server-side from a single policy table, and a route that forgets to declare one fails
+  the test suite. Hiding a button in the browser is cosmetic and the code says so.
+- Passwords are stored as salted `scrypt` hashes (`node:crypto`, N=2¹⁵). They are never logged, never returned by the
+  API and cannot be reversed. An unknown username is answered with the same message, and after the same amount of work,
+  as a wrong password.
+- Sign-in is rate-limited per IP and per account; the account lockout backs off by doubling, capped at an hour.
+- The session cookie is `HttpOnly`, `SameSite=Lax`, `Path=/` and `Secure` over HTTPS. Sessions are rows that can be
+  revoked: changing a password ends that account's other sessions, and disabling, deleting or resetting an account ends
+  all of them. Only a hash of the cookie's token is stored.
+- Cookie-authenticated writes must come from this site (`Sec-Fetch-Site`, falling back to `Origin`/`Referer`). CORS is
+  deliberately left without `credentials`, so `ALLOWED_ORIGINS` cannot be used to read the API as a signed-in user.
+- The last active root account cannot be deleted, demoted or disabled, and an admin cannot touch a root account.
+- `ADMIN_TOKEN` bypasses the account system with root permissions. It is meant for scripts; do not paste it into a browser.
+- **Accounts do not protect `/mcp/*`.** The MCP endpoints stay unauthenticated by design; a project a `viewer` can only
+  read in the dashboard is still readable in full by anyone who can reach its MCP URL.
 - Browser `Origin` headers on `/mcp/*` are validated (DNS-rebinding protection); CLI clients send none.
 - The embedded PostgreSQL is reachable only from inside the container (`listen_addresses=127.0.0.1`, no published port).
 
@@ -433,6 +560,15 @@ typed queries and Drizzle Studio.
 | A push webhook returns `401 invalid_signature` | The secret in the repository settings is not the one shown while editing the source — copy it again, or **Regenerate** and paste the new one. |
 | `search_docs` says the project was indexed with another model | Re-index the project (it happens automatically on the next index run). |
 | `Could not load the sharp module` in the container | Regenerate `package-lock.json` on Linux or run `npm install --os=linux --cpu=x64 sharp` before building. |
+| I missed the first-run setup code | Restart the server. While no account exists a fresh code is printed on every start: `docker compose restart contextator && docker compose logs -f`. |
+| I forgot my password | Any root or admin can reset it from **Users → Reset password**, which hands them a temporary one for you. |
+| Nobody can sign in any more | On the server: `npm run reset-password -- <username>` (inside the container: `docker compose exec contextator node --import tsx scripts/reset-password.ts <username>`). It prints a new temporary password and ends that account's sessions. With `ADMIN_TOKEN` set, `curl -XPOST -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:3444/api/users/<id>/password` does the same. |
+| I cannot delete the last root account | By design — the server answers `409` and the dashboard disables the button. Promote somebody else to `root` first. |
+| Sign-in says *too many attempts* | Rate limiting. Wait out `AUTH_LOGIN_WINDOW_MIN`, or raise `AUTH_LOGIN_MAX_ATTEMPTS`. |
+| The dashboard bounces between `/` and `/login` | The cookie is not coming back. Usually `AUTH_COOKIE_SECURE=1` on a plain-HTTP origin, or a reverse proxy dropping `Set-Cookie`. Set `AUTH_COOKIE_SECURE=0` for an HTTP-only LAN install. |
+| `403 csrf_blocked` from my own script | The script is sending the session cookie from another origin. Use `Authorization: Bearer $ADMIN_TOKEN` instead; bearer requests are exempt. |
+| After upgrading, `/api/*` answers `401 setup_required` | This instance had no `ADMIN_TOKEN` and was therefore open. It is now closed: open `/setup` with the code from the log and create the first account. Projects, sources and indexes are untouched. |
+| A member reads a project in `/mcp/…` they are not a member of | Expected. MCP endpoints are unauthenticated; roles govern the dashboard and the admin API only. |
 
 ## License
 

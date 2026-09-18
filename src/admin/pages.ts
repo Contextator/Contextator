@@ -14,8 +14,8 @@ export interface PageMeta {
 /** Order is the footer order. */
 export const PAGES: readonly PageMeta[] = [
   { slug: 'about', nav: 'About', title: 'About', description: 'What Contextator is, how it indexes documentation into an MCP endpoint, and who builds it.' },
-  { slug: 'privacy', nav: 'Privacy', title: 'Privacy Policy', description: 'What a Contextator installation stores, what stays on your machine and when data leaves it.' },
-  { slug: 'cookies', nav: 'Cookies', title: 'Cookie Policy', description: 'Contextator sets no cookies; the one value it keeps in the browser and how to remove it.' },
+  { slug: 'privacy', nav: 'Privacy', title: 'Privacy Policy', description: 'What a Contextator installation stores about its accounts and documents, what stays on your machine and when data leaves it.' },
+  { slug: 'cookies', nav: 'Cookies', title: 'Cookie Policy', description: 'The single session cookie the Contextator dashboard sets after you sign in: its name, purpose, lifetime and category.' },
   { slug: 'terms', nav: 'Terms of Use', title: 'Terms of Use', description: 'Warranty disclaimer, limitation of liability and what running a Contextator instance makes you responsible for.' },
   { slug: 'license', nav: 'License', title: 'License', description: 'The GNU AGPL v3 of Contextator, the commercial alternative, and the licenses of its third-party components.' },
 ];
