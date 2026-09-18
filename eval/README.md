@@ -18,7 +18,28 @@ npm run eval -- --json > run.json # the same numbers for a machine
 EVAL_DATABASE_URL=postgres://… npm run eval   # use a server you already have
 ```
 
-The Phase 0 baseline, and what the first Phase 1 change did to it, are in [BASELINE.md](BASELINE.md).
+The Phase 0 baseline, and what each Phase 1 change did to it, are in [BASELINE.md](BASELINE.md).
+
+## It is also a gate
+
+Given a floor, the run fails instead of merely reporting ([ADR-0044](../../.ssot/ADR.md#adr-0044)):
+
+```bash
+npm run eval -- --min-recall5=0.855 --min-heading5=0.825   # what CI runs
+```
+
+Below either number the run exits `2` and prints both figures, the questions behind them and the
+configuration they were measured at. A harness failure — a malformed question, a corpus file that
+produced no chunks — is still exit `1`: "retrieval got worse" and "this run measured nothing" are
+different news and should not share an exit code. With no floor the command is the report it always
+was and exits `0` whatever it finds, which is what sweeping a setting on a laptop needs.
+
+**Two floors, because they fail differently.** `recall@5` asks whether the right page came back;
+`heading@5` asks whether the right *chunk* of it did. A chunk budget the model cannot read to the end
+of keeps the first and loses the second — measured, not supposed: `CHUNK_MAX_TOKENS=496` measures
+`recall@5` 85.9 %, over the floor, and `heading@5` 78.1 %, four questions under it. Cross-lingual
+retrieval is deliberately **not** gated: it is a known regression at 14.3 % ([ROADMAP.md](../../.ssot/ROADMAP.md)
+Item 12), and a gate that is red before anybody changes anything is a gate that gets switched off.
 
 ## The one rule that makes this worth anything
 
@@ -68,7 +89,7 @@ Append one line to `golden.jsonl`:
 | `lang` | yes | `en` or `tr` — the language of **the question**, not of the answer. This is what the per-language breakdown groups by, so a Turkish question about an English page is `tr`. |
 | `query` | yes | What somebody types. |
 | `expectFile` | yes | The corpus path that answers it, relative to `corpus/`, exactly as written on disk. |
-| `expectHeading` | no | The heading breadcrumb of the chunk that answers it, matched as a **suffix**: `Docker olmadan` matches `Tek sunucuya kurulum > Docker olmadan`. Scored separately and gates nothing. |
+| `expectHeading` | no | The heading breadcrumb of the chunk that answers it, matched as a **suffix**: `Docker olmadan` matches `Tek sunucuya kurulum > Docker olmadan`. Scored apart from the file-level metrics, never folded into them — and since [ADR-0044](../../.ssot/ADR.md#adr-0044) it carries a floor of its own. Every question in the set has one. |
 | `tags` | no | Free-form. Every tag gets its own row in the report, which is how "identifier queries are the weak spot" becomes visible rather than suspected. |
 | `note` | no | Why this question is here, when that is not obvious. Ignored by the scorer. |
 

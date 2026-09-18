@@ -580,3 +580,123 @@ SEARCH_NEIGHBOR_CONTEXT=0 npm run eval                     # without the context
 
 The corpus, the model, the budget, the prefixes and the search are all unchanged from the section above,
 so the only difference between these runs is what is selected out of what the search found.
+
+---
+
+# The floor this is now a gate over
+
+[ADR-0044](../../.ssot/ADR.md#adr-0044), [ROADMAP.md](../../.ssot/ROADMAP.md) Item 3's last bullet.
+Nothing here changes retrieval. What changes is that a run can fail.
+
+| | |
+|---|---|
+| Measured at | `7bc4f51`, the last commit of Phase 1's implementation |
+| Date | 2026-09-18 |
+| Provider | `local:Xenova/multilingual-e5-small:fp32:"query: "+"passage: "` |
+| `CHUNK_MAX_TOKENS` / `CHUNK_OVERLAP_TOKENS` | 96 / 24 |
+| Corpus | 26 documents, 577 chunks |
+| Questions | 64 (31 `en`, 33 `tr`; 10 cross-lingual) |
+| Search | `ef_search=100, iterative_scan=relaxed_order, max_scan_tuples=20000`, `to_tsvector('simple', …)`, `max_per_document=2, neighbor_context=1, score_floor=0.82` |
+
+| metric | shipped | floor | slack |
+|---|--:|--:|---|
+| `recall@5` | **87.5 %** (56 of 64) | **85.5 %** | one question |
+| `heading@5` | **84.4 %** (54 of 64) | **82.5 %** | one question |
+
+```bash
+npm run eval -- --min-recall5=0.855 --min-heading5=0.825
+```
+
+## The measurement has no variance, so the tolerance is not for noise
+
+Six runs, each starting its own pgvector container and carving its own database out of it, at
+`7bc4f51` with no arguments. Not merely the same headline: the same ten hits in the same order with the
+same scores to six decimal places, for all sixty-four questions, in every run — `recall@1` 75.0 %,
+`recall@5` 87.5 %, `MRR` 0.8017361111111112, `heading@5` 84.4 %, mean score 0.881141835322228, 577
+chunks.
+
+That is worth stating because it was not true three changes ago. Before the lexical tie-breaking was
+fixed, `ts_rank_cd` returned the same score for a great many chunks and the order among them was decided
+by a random uuid, so five runs of one configuration spread `recall@1` across nine points
+([ADR-0041](../../.ssot/ADR.md#adr-0041)). A gate is worth exactly what the measurement's variance says
+it is worth, and a gate built on that measurement would have been a coin toss with a percentage printed
+on it.
+
+So the tolerance below is **not** an error bar. It exists for the two things that move a number without
+anybody intending to move retrieval: an edit to the corpus or the question set, and a dependency bump
+that changes what the model computes.
+
+## Why one question, and not two
+
+Sixty-four questions means the metric is quantised: one question is 1.5625 points, and nothing smaller
+can happen. A floor is therefore a choice of how many questions may regress, and the only sensible
+choices are one and two — zero would fail on a corpus edit, and two is three points, which is most of
+the distance Item 2 bought for the whole of hybrid search.
+
+One question it is. `87.5 − 1.5625 = 85.9375`, rounded down to the nearest half point for a number a
+human can hold: **85.5 %**. Two questions (84.375 %) fails, which is the point. The same rule gives
+`84.375 − 1.5625 = 82.8125` → **82.5 %** for `heading@5`.
+
+The plan for this change proposed a tolerance of 0.02, and 0.02 is what this works out to. It is worth
+saying that the two arrived independently: the band that lets exactly one question through is
+`(84.375 %, 85.9375 %]` and 85.5 % sits inside it with room on both sides, so the floor survives the
+question set growing — at 70 questions one miss is 1.43 points and two are 2.9, and 85.5 % still
+separates them.
+
+## Why two numbers, and why not the other three
+
+`recall@5` alone does not cover the largest thing this phase fixed. Measured, at the shipped
+configuration except for the one setting named in each row:
+
+| | `recall@1` | `recall@5` | `MRR` | `heading@5` | chunks |
+|---|--:|--:|--:|--:|--:|
+| **shipped — 96 / 24** | 75.0 % | **87.5 %** | 0.802 | **84.4 %** | 577 |
+| `CHUNK_MAX_TOKENS=496` (what the window allows) | 71.9 % | 85.9 % | 0.776 | **78.1 %** | 176 |
+| `CHUNK_MAX_TOKENS=400` (the pre-Phase-1 default) | 71.9 % | 85.9 % | 0.780 | **78.1 %** | 177 |
+| `CHUNK_MAX_TOKENS=256` | 67.2 % | 84.4 % | 0.752 | 78.1 % | 212 |
+| `SEARCH_MAX_PER_DOCUMENT=20` (cap off) | 75.0 % | 85.9 % | 0.799 | 82.8 % | 577 |
+
+**The second row is the argument.** Raising the budget to what the model's window allows — the obvious
+move, and the one the product's own chunk-budget check suggests — measures `recall@5` 85.9 %, which
+clears a 85.5 % floor, and `heading@5` 78.1 %, which is four questions under it. The right document,
+found through the wrong chunk of it: exactly the defect ROADMAP.md Item 1 existed to fix, and exactly
+what a file-level gate cannot see. It is also not hypothetical — it is the previous default, one line of
+a `.env` away. With both floors that run exits 2:
+
+```
+eval: the retrieval gate failed.
+  recall@5    85.9% (55 of 64)  above the 85.5% floor
+  heading@5   78.1% (50 of 64)  BELOW the 82.5% floor
+```
+
+The last row is the one that says the floors are not set too tight: turning off the per-document cap
+costs one question on each metric and still passes, which is what "one question of slack" has to mean
+to be worth having.
+
+The other three numbers are reported and deliberately not gated.
+
+- **`cross-lingual` is a known regression, not a guard.** 14.3 % on the original seven questions since
+  the model swap, 20 % on the ten the set now has. A floor over it would be red on the commit that
+  introduced it, before anybody changed anything, and a gate that is red by construction is a gate that
+  gets switched off. It is [ROADMAP.md](../../.ssot/ROADMAP.md) Item 12 instead, with a number to beat.
+- **`recall@1` was deliberately traded away inside this phase.** Hybrid search took it from 78.1 % to
+  75.0 % to buy `recall@5` 82.8 % → 85.9 %, and that trade was argued and accepted
+  ([ADR-0041](../../.ssot/ADR.md#adr-0041)). A floor on `recall@1` would have blocked a change this
+  repository decided was right, which is the clearest possible evidence that it is the wrong number to
+  gate on.
+- **`MRR` and the mean score are diagnostics.** `MRR` is largely a restatement of the two floors over a
+  window of ten, and the mean similarity of a correct hit is a property of the encoder — it jumped from
+  0.483 to 0.881 with the model swap without retrieval improving by anything like that factor.
+
+## Reproducing it
+
+```bash
+npm run eval -- --min-recall5=0.855 --min-heading5=0.825   # exits 0 at 87.5 / 84.4
+npm run eval -- --min-recall5=0.90  --min-heading5=0.825   # exits 2, and says which number was short
+CHUNK_MAX_TOKENS=496 CHUNK_OVERLAP_TOKENS=124 \
+  npm run eval -- --min-recall5=0.855 --min-heading5=0.825 # exits 2 on heading@5 alone
+```
+
+A change that means to move a floor moves the two numbers in this table and the two in
+`.github/workflows/ci.yml` in the same commit, and says why the new figure is the right one. That is the
+only mechanism there is; nothing enforces it, which is why it is written here rather than assumed.
