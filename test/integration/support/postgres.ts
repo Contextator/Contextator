@@ -1,6 +1,7 @@
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'drizzle-orm';
 import type pg from 'pg';
+import { type ContainerRuntimeClient, getContainerRuntimeClient } from 'testcontainers';
 
 import { bootstrapDatabase } from '../../../src/db/bootstrap.js';
 import type { Logger } from '../../../src/context.js';
@@ -30,6 +31,14 @@ export interface RunningPostgres {
   baseUrl: string;
   /** The tag or digest the container was started from, for a failure message worth reading. */
   image: string;
+  /**
+   * The Docker id of the running container, so a test can run a command **inside** it.
+   *
+   * It is an id and not a handle because `globalSetup` and the test workers are different processes:
+   * only serialisable values cross `project.provide`. `execInPostgres` below turns it back into a
+   * handle in whichever worker needs one.
+   */
+  containerId: string;
   stop(): Promise<void>;
 }
 
@@ -51,10 +60,47 @@ export async function startPostgres(): Promise<RunningPostgres> {
   return {
     baseUrl: container.getConnectionUri(),
     image: PGVECTOR_IMAGE,
+    containerId: container.getId(),
     stop: async () => {
       await container.stop();
     },
   };
+}
+
+/**
+ * What `client.container.exec` resolves to — `{ output, stdout, stderr, exitCode }`. Derived from the
+ * method rather than imported from `testcontainers/build/…`, which is a path inside somebody else's
+ * package and not an entry point they promised.
+ */
+export type ExecResult = Awaited<ReturnType<ContainerRuntimeClient['container']['exec']>>;
+
+/**
+ * Runs a command inside the PostgreSQL container and returns what it printed.
+ *
+ * This exists for one reason: `pg_dump` and `pg_restore` ship **in the image** and have to match the
+ * server they are pointed at. Running the host's copy — if there is one, at whatever version Homebrew
+ * last installed — would make the backup test a test of the developer's laptop. So the tools run where
+ * the server does, over its own Unix socket, and the dump file never leaves the container.
+ *
+ * `getContainerRuntimeClient()` is testcontainers' own way back to a container it started; the id
+ * comes from `inject('postgresContainerId')`.
+ */
+export async function execInPostgres(containerId: string, command: string[]): Promise<ExecResult> {
+  const client = await getContainerRuntimeClient();
+  return client.container.exec(client.container.getById(containerId), command);
+}
+
+/**
+ * `execInPostgres`, but a failure is an error rather than a non-zero number nobody looked at. Every
+ * caller in the backup suite wants this one: a `pg_restore` that half worked and returned 1 would
+ * otherwise be discovered three assertions later as a missing table.
+ */
+export async function execInPostgresOrThrow(containerId: string, command: string[]): Promise<ExecResult> {
+  const result = await execInPostgres(containerId, command);
+  if (result.exitCode !== 0) {
+    throw new Error(`\`${command.join(' ')}\` exited ${result.exitCode} inside the container:\n${result.output}`);
+  }
+  return result;
 }
 
 /** Database names are interpolated into DDL that cannot take a parameter, so they are constrained. */

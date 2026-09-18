@@ -320,6 +320,26 @@ docker exec contextator pg_dump -U contextator -Fc contextator > contextator.dum
 docker exec -i contextator pg_restore -U contextator -d contextator --clean --if-exists < contextator.dump
 ```
 
+Those two commands are the ones the test suite runs. `test/integration/backup-restore.itest.ts` seeds a
+real PostgreSQL, dumps it, **drops the database**, restores it, and then asserts that the schema, the
+search results — identical rows, identical order, identical scores — and the next start of the
+application all come back unchanged. A row count would not have caught a restore that lost the vector
+index or the lexical column, so it is not one of the assertions.
+
+Two things a dump does **not** contain, and both matter on the day you need it:
+
+- **`SECRET_KEY`.** It is an environment variable. Without the original key, every stored source
+  credential has to be re-entered. Keep it somewhere the dump is not — the dump plus the key is the
+  whole instance.
+- **`/data`.** Git checkouts are re-clonable and Notion pulls are re-pullable, but **an upload source's
+  `current/` directory is the only copy of its content anywhere**. A `/data` backup can be restricted to
+  those and skip the re-clonable gigabytes.
+
+Take the backup when no project is `indexing`: a re-index writes a second generation beside the live one
+and `pg_dump` cannot filter rows, so a dump taken mid-run is twice the size. Expect a dump of roughly
+2 KB per indexed chunk — vectors dump as text and compress back down — and expect most of a restore's
+time to be the HNSW index being rebuilt over every chunk in the instance.
+
 `POSTGRES_PASSWORD` is applied when the cluster is created. To change it later run
 `ALTER USER contextator PASSWORD '...'` via `psql` and update `.env` before the next start.
 
