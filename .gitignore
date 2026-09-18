@@ -3,6 +3,5 @@ dist/
 .cache/
 .env
 *.log
-drizzle/
 .DS_Store
 .data

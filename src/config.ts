@@ -131,12 +131,3 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   return result.data;
 }
-
-/**
- * Lightweight accessor used by db/schema.ts. The Drizzle schema needs the vector
- * dimension at module-load time (drizzle-kit imports it without the full config).
- */
-export function embeddingDimensionsFromEnv(): number {
-  const n = Number(process.env.EMBEDDING_DIMENSIONS);
-  return Number.isInteger(n) && n > 0 ? n : 384;
-}
