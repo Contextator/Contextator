@@ -498,7 +498,9 @@ cp .env.example .env
 npm install
 npm run dev                              # tsx watch, http://localhost:3444
 npm test                                 # vitest: chunker + path-safety unit tests
-npm run typecheck
+npm run typecheck                        # the build's tsconfig, then the one that covers test/
+npm run lint                             # biome: format + lint over src, test, scripts and public
+npm run lint:fix                         # the same, writing every fix it can make
 npm run smoke -- http://localhost:3444/mcp/demo "kurulum" --sse   # exercise the legacy transport too
 ```
 
@@ -560,6 +562,8 @@ Dockerfile                    one image: postgres:16 + pgvector + Node 22 + the 
 docker/entrypoint.sh          starts PostgreSQL, then the app; stops both in order on SIGTERM
 docker-compose.yml            the `contextator` container and its volumes
 docker-compose.dev.yml        PostgreSQL only, for `npm run dev`
+biome.jsonc                   the one formatter and linter, and why each rule is set as it is
+tsconfig.test.json            typechecks test/ and scripts/, which the build's tsconfig cannot see
 ```
 
 ### How the single container works

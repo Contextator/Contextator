@@ -1,0 +1,171 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+
+  // One tool formats and lints the whole tree — see ADR-0029 in the specification repository.
+  // Biome parses this file as JSONC, so the reasoning lives next to the setting it explains.
+
+  // The import blocks in this repository are hand-grouped: node builtins, then dependencies, then
+  // local modules, with blank lines that mean something. Sorting them would produce a large diff
+  // that says nothing. Off deliberately, not by oversight.
+  "assist": { "actions": { "source": { "organizeImports": "off" } } },
+
+  "files": {
+    // Everything that is hand-written. `dist/`, `node_modules/`, `.data/` and `.cache/` are left out
+    // by being absent rather than by an ignore list.
+    "includes": ["src/**", "test/**", "scripts/**", "public/**", "*.config.ts"]
+  },
+
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    // Measured from the tree, not chosen. Only 66 lines in the whole repository exceed this column,
+    // and the reformat it costs is the smallest of any width tried: 100 rewrites 713 lines, 120
+    // rewrites 352, 150 rewrites 155, and going wider starts rewriting more again. The tree is not
+    // uniformly wrapped at any single width, so some reflow is unavoidable; this is the least of it.
+    "lineWidth": 150,
+    // .gitattributes already normalises to LF; this makes the formatter agree rather than fight it.
+    "lineEnding": "lf"
+  },
+
+  "javascript": {
+    "formatter": { "quoteStyle": "single", "semicolons": "always", "trailingCommas": "all", "arrowParentheses": "always", "bracketSpacing": true }
+  },
+
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+
+      "a11y": {
+        // Every icon this rule flags is decorative and already sits inside a wrapper carrying
+        // `aria-hidden="true"` (public/index.html, public/pages/*.html). The rule does not look at
+        // the ancestor. Giving a deliberately hidden graphic an accessible name would be the bug.
+        "noSvgWithoutTitle": "off",
+
+        // `#dropzone` is a drop target that is focusable on purpose, so the upload flow is reachable
+        // from the keyboard (NFR-11). The rule's fix is to delete the tabindex, which is backwards.
+        "noNoninteractiveTabindex": "off",
+
+        // One occurrence: the "Sign out instead" control in public/pages/change-password.html is a
+        // button dressed as a link (`href="#"`). That is a genuine finding and a real fix, but it is
+        // a change to the dashboard and this configuration is not the commit that makes it.
+        // Re-enable once that anchor becomes a <button>.
+        "useValidAnchor": "off"
+      },
+
+      "complexity": {
+        // One use, in public/style.css, and it is load-bearing: `[hidden] { display: none !important }`
+        // has to beat every `display` rule below it, because the dashboard toggles the hidden
+        // attribute. The stylesheet already carries a comment saying so.
+        "noImportantStyles": "off",
+
+        // The cases this flags in src/services/sources/notion-render.ts sit above `default` and
+        // enumerate the Notion block types that are knowingly unsupported. They are documentation:
+        // "we have seen this type and we render nothing for it". Collapsing them into `default`
+        // deletes that distinction.
+        "noUselessSwitchCase": "off",
+
+        // Would rewrite `!row || !row.isActive` as `!row?.isActive`. The existing form states two
+        // separate facts and reads better for it, and in src/services/fs-scan.ts the operand
+        // (`rootPath: string`) is not nullable at all — optional chaining there would imply it is.
+        "useOptionalChain": "off"
+      },
+
+      "suspicious": {
+        // src/services/archives.ts matches `[<>:"|?*\x00-\x1f]` to reject filenames that cannot be
+        // created on every platform. The rule exists to catch a control character typed by accident;
+        // here matching them is the entire purpose of the expression.
+        "noControlCharactersInRegex": "off",
+
+        // `let entries;` assigned inside a try/catch. TypeScript's evolving-`let` inference types it
+        // from the assignment and `strict` is on, so there is no implicit `any` here to catch — this
+        // is a JavaScript-era check that the compiler already covers in a .ts file.
+        "noImplicitAnyLet": "off"
+      },
+
+      // The style group is opinions about voice, and this codebase has one. Off as a group, with
+      // back on only the rules that catch a real mistake rather than a preference — and only rules
+      // that are already clean across the tree, so turning them on changes no existing line.
+      //
+      // Deliberately left off: noNonNullAssertion (18 uses, all considered — `this.queue.shift()!`
+      // in src/services/indexer.ts is correct, the loop tests `queue.length` first), useTemplate
+      // (10 string concatenations that read fine as they are), and noDescendingSpecificity (10 CSS
+      // ordering complaints that would mean reorganising a stylesheet nobody is changing here).
+      "style": {
+        "preset": "none",
+        "useConst": "error",
+        "useNodejsImportProtocol": "error",
+        "useImportType": "error",
+        "useExportType": "error",
+        "useAsConstAssertion": "error",
+        "useShorthandFunctionType": "error",
+        "noParameterAssign": "error",
+        "useThrowOnlyError": "error",
+        "noSubstr": "error",
+        "useNumberNamespace": "error",
+        "useArrayLiterals": "error",
+        "useDefaultParameterLast": "error"
+      }
+    }
+  },
+
+  "overrides": [
+    {
+      // public/ is ES modules the browser loads directly — no bundler, no build step (ADR-0022).
+      // Nothing else checks these files: no compiler reads them and no test imports most of them,
+      // so the two rules below are the only thing standing between a typo and a broken dashboard.
+      "includes": ["public/**"],
+      "javascript": {
+        "globals": [
+          "window",
+          "document",
+          "location",
+          "history",
+          "navigator",
+          "localStorage",
+          "sessionStorage",
+          "fetch",
+          "Headers",
+          "Request",
+          "Response",
+          "AbortController",
+          "FormData",
+          "File",
+          "FileReader",
+          "Blob",
+          "URL",
+          "URLSearchParams",
+          "CustomEvent",
+          "Event",
+          "EventTarget",
+          "DataTransfer",
+          "HTMLElement",
+          "Node",
+          "MutationObserver",
+          "IntersectionObserver",
+          "ResizeObserver",
+          "requestAnimationFrame",
+          "cancelAnimationFrame",
+          "getComputedStyle",
+          "matchMedia",
+          "alert",
+          "confirm",
+          "prompt"
+        ]
+      },
+      "linter": {
+        "rules": {
+          "correctness": {
+            // A misspelled global in a .ts file is a compile error; here it is a runtime one that
+            // nothing would find until the page is opened. This rule is that missing compiler.
+            "noUndeclaredVariables": "error",
+            // These files run in a browser. An accidental `import ... from 'node:fs'` cannot work
+            // and should not survive to a page load.
+            "noNodejsModules": "error"
+          }
+        }
+      }
+    }
+  ]
+}
