@@ -85,8 +85,23 @@ jobs:
           # Built and thrown away. There are no registry credentials here on purpose: publishing is
           # a later phase, and a workflow that can push is a workflow that has to be trusted to.
           push: false
+          # Loaded into the local daemon so the step below can run something inside it.
+          load: true
+          tags: contextator:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # The recovery tool dropped out of the image once already, silently, and nothing noticed until
+      # somebody needed it (ADR-0032). Checking that the file is present would not have caught the
+      # half of that defect that mattered — it has no loader and its imports point into src/ — so
+      # this runs the thing. With no argument it prints its usage and exits 2, which it can only
+      # reach through tsx, through every import in scripts/reset-password.ts, and back.
+      - name: The recovery tool runs inside the image
+        run: |
+          set -o pipefail
+          output=$(docker run --rm --entrypoint sh contextator:ci -c 'npm run reset-password 2>&1' || true)
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep -qF 'Usage: npm run reset-password -- <username>'
 
 # One more job belongs here and is deliberately absent rather than stubbed: `eval`, scoring retrieval
 # quality against a fixed question set. An empty job that always reports success is a lie told in a
