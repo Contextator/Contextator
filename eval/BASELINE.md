@@ -511,3 +511,72 @@ npm run eval
 
 The corpus, the model, the budget and the prefixes are all unchanged from the section above, so the only
 difference between the two tables is the search.
+
+---
+
+# What result selection did to it
+
+[ADR-0042](../../.ssot/ADR.md#adr-0042), [ROADMAP.md](../../.ssot/ROADMAP.md) Item 7a. Retrieval is
+unchanged here — the same statement finds the same chunks in the same order. What changed is which of
+them are handed over, so two of the four settings can move a number and the other two cannot.
+
+| | `recall@1` | `recall@5` | `MRR` | mean score | `heading@5` |
+|---|--:|--:|--:|--:|--:|
+| **`SEARCH_MAX_PER_DOCUMENT=2`, `SEARCH_SCORE_FLOOR=0.82`** (shipped) | 75.0 % | **87.5 %** | **0.802** | 0.881 | **84.4 %** |
+| cap off (`=20`), floor on | 75.0 % | 85.9 % | 0.799 | 0.881 | 82.8 % |
+| cap on, floor off (`=0`) | 75.0 % | 87.5 % | 0.802 | 0.881 | 84.4 % |
+| both off | 75.0 % | 85.9 % | 0.799 | 0.881 | 82.8 % |
+| cap on, floor on, `SEARCH_NEIGHBOR_CONTEXT=0` | 75.0 % | 87.5 % | 0.802 | 0.881 | 84.4 % |
+
+Four things to read out of that.
+
+**The cap gains a question rather than costing one**, which is the opposite of what it was measured to
+check. A cap can cost recall when the right answer really is the third chunk of one document; on this
+corpus what it displaces is a near-duplicate of an excerpt already on the page, and the slot goes to a
+document that was not represented at all. The identifier questions gain most: `recall@5` 83.3 % → 86.7 %.
+A cap of 1 measures the same `recall@5` with a better `MRR` (0.810) and a cap of 3 measures exactly like
+no cap — 2 is inside that plateau rather than at its edge.
+
+**The floor costs nothing here because nothing reaches it.** Not one of the sixty-four questions has a
+top hit below 0.82, so the two floor rows are identical to the digit. That is the floor's *price*
+measured, and it is zero; its *benefit* is not measurable from this file, for the reason below.
+
+**Neighbour context is invisible to every metric**, which is the claim it makes: a neighbour carries no
+rank and no score, cannot displace a hit and is not counted by the cap. The row is here because "it
+changes nothing" is worth one run to establish rather than to assert.
+
+**`recall@1` does not move at all**, at any setting. Both features act below rank 1 by construction: the
+cap cannot displace the first excerpt of a page, and the floor either refuses everything or nothing.
+
+## The distributions the floor came out of
+
+These are not in the table above and cannot be, because they need questions the corpus **cannot**
+answer, and `golden.jsonl` has none by construction. Twenty-four were written for this — twelve with
+nothing to do with the product, twelve shaped exactly like it whose answers are genuinely absent — and
+they are **not committed**: a question whose right answer is "nothing" has no `expectFile`, and this
+harness is built around one. So the numbers below are reproducible only by writing that set again, and
+the honest version of this measurement is ROADMAP Item 6's query log.
+
+| the top hit of a question | n | min | p10 | median | max |
+|---|--:|--:|--:|--:|--:|
+| golden, all | 64 | **0.833** | 0.847 | 0.876 | 0.919 |
+| golden, correct at rank 1 | 48 | 0.846 | 0.853 | 0.887 | 0.919 |
+| shaped like the product, answer absent | 12 | 0.819 | 0.826 | 0.841 | 0.873 |
+| nothing to do with the product | 12 | 0.778 | 0.779 | 0.789 | **0.829** |
+
+The third band overlaps the first almost entirely. The fourth clears it by four thousandths. That is the
+whole argument for a floor that only claims to catch an off-domain question, and against the 0.85 this
+feature is usually written with — which would refuse eight golden questions, four of them with the
+answer inside the top five.
+
+## Reproducing it
+
+```bash
+npm run eval                                               # the shipped configuration
+SEARCH_MAX_PER_DOCUMENT=20 npm run eval                    # without the cap
+SEARCH_SCORE_FLOOR=0 npm run eval                          # without the floor
+SEARCH_NEIGHBOR_CONTEXT=0 npm run eval                     # without the context
+```
+
+The corpus, the model, the budget, the prefixes and the search are all unchanged from the section above,
+so the only difference between these runs is what is selected out of what the search found.
