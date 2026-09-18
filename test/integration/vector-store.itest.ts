@@ -1,10 +1,9 @@
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { ensureSchema } from '../../src/db/ensure-schema.js';
 import { chunks, documentSources, documents, projects } from '../../src/db/schema.js';
 import { type NewChunk, replaceDocument, searchChunks } from '../../src/services/vector-store.js';
-import { createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
+import { applySchema, createTestDatabase, dropTestDatabase, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 
 /**
  * The two things in `services/vector-store.ts` that a mocked client cannot observe (ADR-0031): a
@@ -41,7 +40,7 @@ function vectorLiteral(values: number[]): string {
 
 async function freshSchema(name: string): Promise<TestDatabase> {
   const database = await createTestDatabase(baseUrl, name);
-  await ensureSchema(database.db, { dimensions: DIMS, resetVectors: false, log: silentLogger });
+  await applySchema(database, DIMS);
   return database;
 }
 

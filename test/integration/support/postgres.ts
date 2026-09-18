@@ -2,6 +2,7 @@ import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testconta
 import { sql } from 'drizzle-orm';
 import type pg from 'pg';
 
+import { bootstrapDatabase } from '../../../src/db/bootstrap.js';
 import type { Logger } from '../../../src/context.js';
 import { createDb, type Db } from '../../../src/db/client.js';
 
@@ -145,7 +146,16 @@ function compareVersions(left: string, right: string): number {
 }
 
 /**
- * `ensureSchema` wants the Fastify logger the server hands its services. The tests have no server, and
+ * The product's own startup path, against a test database: extension, journal adoption, migrations,
+ * the vector dimension and the HNSW index. Every suite that needs tables goes through this rather than
+ * through re-stated DDL, which is what makes the schema these tests run on the schema an operator gets.
+ */
+export function applySchema(database: TestDatabase, dimensions: number = TEST_EMBEDDING_DIMENSIONS): Promise<void> {
+  return bootstrapDatabase(database.db, { pool: database.pool, dimensions, resetVectors: false, log: silentLogger });
+}
+
+/**
+ * The bootstrap wants the Fastify logger the server hands its services. The tests have no server, and
  * a real pino instance would put the startup chatter of every case into the reporter's output.
  */
 export const silentLogger: Logger = {

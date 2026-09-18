@@ -2,12 +2,11 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { resetPassword } from '../../scripts/reset-password.js';
-import { ensureSchema } from '../../src/db/ensure-schema.js';
 import { userSessions, users, type UserRow } from '../../src/db/schema.js';
 import { createSession } from '../../src/services/auth/sessions.js';
 import { createUser } from '../../src/services/auth/users.js';
 import { verifyPassword } from '../../src/services/passwords.js';
-import { createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
+import { applySchema, createTestDatabase, dropTestDatabase, type TestDatabase } from './support/postgres.js';
 
 /**
  * The recovery tool (ADR-0032). It is the one thing in the product that is only ever run on the worst
@@ -21,7 +20,7 @@ let database: TestDatabase;
 
 beforeAll(async () => {
   database = await createTestDatabase(baseUrl, 'reset_password');
-  await ensureSchema(database.db, { dimensions: TEST_EMBEDDING_DIMENSIONS, resetVectors: false, log: silentLogger });
+  await applySchema(database);
 });
 
 afterAll(async () => {

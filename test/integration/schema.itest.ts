@@ -5,8 +5,10 @@ import { fileURLToPath } from 'node:url';
 import { sql } from 'drizzle-orm';
 import { afterAll, describe, expect, inject, it } from 'vitest';
 
-import { ensureSchema } from '../../src/db/ensure-schema.js';
+import { SchemaMismatchError } from '../../src/db/bootstrap.js';
+import { ensureSchema } from './fixtures/ensure-schema-v5.js';
 import {
+  applySchema,
   createTestDatabase,
   dropTestDatabase,
   pgvectorVersion,
@@ -18,8 +20,9 @@ import {
 import { captureSchema, renderSchemaSnapshot } from './support/schema-snapshot.js';
 
 /**
- * `ensure-schema.ts` against a real server (ADR-0031): the empty case, the idempotent case, and the
- * upgrade of a genuine pre-v3 database. None of the three is observable without one.
+ * `src/db/bootstrap.ts` against a real server (ADR-0031): the empty case, the idempotent case, and a
+ * genuine pre-v3 `0.1` database carried forward along the route ADR-0033 documents. None of the three
+ * is observable without one.
  */
 
 const baseUrl = inject('postgresBaseUrl');
@@ -51,11 +54,7 @@ async function freshDatabase(name: string): Promise<TestDatabase> {
   return database;
 }
 
-function applySchema(database: TestDatabase): Promise<void> {
-  return ensureSchema(database.db, { dimensions: TEST_EMBEDDING_DIMENSIONS, resetVectors: false, log: silentLogger });
-}
-
-describe('ensureSchema on an empty database', () => {
+describe('the bootstrap on an empty database', () => {
   it('creates every table, the enum, the settings and an HNSW index with the options NFR-02 claims', async () => {
     const database = await freshDatabase('schema_empty');
     await applySchema(database);
@@ -80,7 +79,9 @@ describe('ensureSchema on an empty database', () => {
       schema_version: '5',
     });
 
-    // The column type carries the dimension, and the dimension is what the settings row guards.
+    // The column type carries the dimension, and the dimension is what the settings row guards. Note
+    // that `information_schema` does not: a user-defined type has no typmod there, so the catalogue
+    // projection this suite compares elsewhere cannot see this number and it is asserted by hand.
     const embedding = await db.execute(sql`
       SELECT format_type(a.atttypid, a.atttypmod) AS type
       FROM pg_attribute a WHERE a.attrelid = 'chunks'::regclass AND a.attname = 'embedding'`);
@@ -97,10 +98,14 @@ describe('ensureSchema on an empty database', () => {
     const row = index.rows[0] as { amname: string; reloptions: string[] | null };
     expect(row.amname).toBe('hnsw');
     expect([...(row.reloptions ?? [])].sort()).toEqual(['ef_construction=64', 'm=16']);
+
+    // One migration applied, in drizzle's own journal — the thing that now decides what a start does.
+    const journal = await db.execute(sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`);
+    expect((journal.rows[0] as { n: number }).n).toBe(1);
   });
 });
 
-describe('ensureSchema twice', () => {
+describe('the bootstrap twice', () => {
   it('is a no-op the second time, down to a byte-identical schema projection', async () => {
     const database = await freshDatabase('schema_twice');
     await applySchema(database);
@@ -109,17 +114,32 @@ describe('ensureSchema twice', () => {
     await expect(applySchema(database)).resolves.toBeUndefined();
 
     const after = await captureSchema(database.db);
-    // The helper, not an inline query: this comparison is the entire review of the change that
-    // replaces this DDL with generated migrations (ADR-0031).
     expect(renderSchemaSnapshot(after)).toBe(renderSchemaSnapshot(before));
     expect(after).toEqual(before);
+
+    // A second start must not re-apply the baseline, and must not add a second journal row either.
+    const journal = await database.db.execute(sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`);
+    expect((journal.rows[0] as { n: number }).n).toBe(1);
   });
 });
 
-describe('ensureSchema over a 0.1 database', () => {
+/**
+ * `fixtures/schema-0.1.sql` is **derived, not extracted**, and the file says so at length: the
+ * earliest revision of `ensure-schema.ts` in this repository's history already carries
+ * `SCHEMA_VERSION = 3`, so no revision of that file ever produced the shape below — it was
+ * reconstructed by reading that revision's three upgrade steps backwards. It is the best evidence
+ * available of what a `0.1` database looked like, and it is evidence rather than a record.
+ *
+ * What the case asserts changed with ADR-0033. The bootstrap does not carry a pre-v5 database forward
+ * any more; it refuses one, and names the two-step route out. That route is what runs here, with the
+ * first step performed by the frozen copy of the DDL ladder in `fixtures/ensure-schema-v5.ts` —
+ * which is not a stand-in for `0.1.0` but literally its code.
+ */
+describe('a 0.1 database, along the route ADR-0033 documents', () => {
   let upgradedDatabase: TestDatabase;
+  let projectId: string;
 
-  it('adds what v3, v4 and v5 added, and migrates the legacy root_path into a local source', async () => {
+  it('is refused by the bootstrap, with the remedy in the message', async () => {
     const database = await freshDatabase('schema_upgrade_0_1');
     upgradedDatabase = database;
     await runSqlScript(database, await readFile(join(here, 'fixtures', 'schema-0.1.sql'), 'utf8'));
@@ -127,13 +147,33 @@ describe('ensureSchema over a 0.1 database', () => {
     const { db } = database;
     const project = await db.execute(sql`
       INSERT INTO projects (name, root_path) VALUES ('handbook-project', '/srv/docs/handbook') RETURNING id`);
-    const projectId = (project.rows[0] as { id: string }).id;
+    projectId = (project.rows[0] as { id: string }).id;
     await db.execute(sql`
       INSERT INTO documents (project_id, relative_path, title, content_hash, size_bytes, chunk_count) VALUES
         (${projectId}, 'index.md', 'Index', 'hash-index', 10, 1),
         (${projectId}, 'guides/install.md', 'Install', 'hash-install', 20, 2)`);
 
+    await expect(applySchema(database)).rejects.toThrow(SchemaMismatchError);
+    await expect(applySchema(database)).rejects.toThrow(/schema_version=2 .*no migration journal/s);
+    await expect(applySchema(database)).rejects.toThrow(/0\.1\.0/);
+
+    // A refusal writes nothing. The database is still exactly the 0.1 shape it was loaded as.
+    const version = await db.execute(sql`SELECT value FROM settings WHERE key = 'schema_version'`);
+    expect((version.rows[0] as { value: string }).value).toBe('2');
+  });
+
+  it('reaches schema 5 under the 0.1.0 ladder, and the bootstrap then adopts it unchanged', async () => {
+    const database = upgradedDatabase;
+    const { db } = database;
+
+    // Step one of the remedy: start 0.1.0 once. This *is* 0.1.0's startup DDL, frozen.
+    await ensureSchema(db, { dimensions: TEST_EMBEDDING_DIMENSIONS, resetVectors: false, log: silentLogger });
+
+    const afterLadder = await captureSchema(db);
+
+    // Step two: the upgrade. It adopts rather than applies, so it changes no DDL at all.
     await applySchema(database);
+    expect(renderSchemaSnapshot(await captureSchema(db))).toBe(renderSchemaSnapshot(afterLadder));
 
     const tables = await db.execute(sql`
       SELECT table_name FROM information_schema.tables
@@ -173,11 +213,14 @@ describe('ensureSchema over a 0.1 database', () => {
     ]);
 
     // v5: an upgraded project stays reachable by whatever was already configured against it.
-    const upgraded = await db.execute(sql`SELECT mcp_auth, root_path FROM projects WHERE id = ${projectId}`);
+    const upgraded = await db.execute(sql`SELECT mcp_auth FROM projects WHERE id = ${projectId}`);
     expect((upgraded.rows[0] as { mcp_auth: string }).mcp_auth).toBe('open');
 
     const version = await db.execute(sql`SELECT value FROM settings WHERE key = 'schema_version'`);
     expect((version.rows[0] as { value: string }).value).toBe('5');
+
+    const journal = await db.execute(sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`);
+    expect((journal.rows[0] as { n: number }).n).toBe(1);
   });
 
   it('is idempotent over the upgraded database: a second start creates no second source', async () => {

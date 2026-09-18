@@ -6,13 +6,12 @@ import { adminRoutes } from '../../src/admin/routes.js';
 import { SESSION_COOKIE } from '../../src/auth/cookies.js';
 import type { AppContext } from '../../src/context.js';
 import { createDb, type Db } from '../../src/db/client.js';
-import { ensureSchema } from '../../src/db/ensure-schema.js';
 import { createSession } from '../../src/services/auth/sessions.js';
 import { SetupGate } from '../../src/services/auth/setup.js';
 import { createUser } from '../../src/services/auth/users.js';
 import { SlidingWindow } from '../../src/services/rate-limit.js';
 import { SessionRegistry } from '../../src/mcp/sessions.js';
-import { createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
+import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 
 /**
  * `/api/health` is the only thing in the deployment that can report the embedded PostgreSQL
@@ -65,7 +64,7 @@ async function buildApi(db: Db): Promise<FastifyInstance> {
 
 beforeAll(async () => {
   database = await createTestDatabase(baseUrl, 'health');
-  await ensureSchema(database.db, { dimensions: TEST_EMBEDDING_DIMENSIONS, resetVectors: false, log: silentLogger });
+  await applySchema(database);
 
   appDb = createDb(database.url, silentLogger);
   app = await buildApi(appDb.db);
