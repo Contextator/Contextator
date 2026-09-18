@@ -1,0 +1,186 @@
+# Contributing to Contextator
+
+Thank you for looking. This file is the short version of how the project is worked on: how to get it
+running, what a change has to pass, and the two rules that are not obvious from the code — that a change
+to observable behaviour is written in the specification first, and that an outside contribution needs a
+licence grant before it can be merged.
+
+Read [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) too. Security problems do not go in an issue — see
+[`SECURITY.md`](SECURITY.md).
+
+---
+
+## Running it
+
+You need Node.js 20 or newer (the image runs 22) and a container runtime for the database.
+
+```bash
+docker compose -f docker-compose.dev.yml up -d   # PostgreSQL 16 + pgvector on localhost:5432, nothing else
+cp .env.example .env
+npm install
+npm run dev                                      # tsx watch, http://localhost:3444
+```
+
+`.env.example` is annotated and every setting has a default that works on a laptop. Three are worth
+knowing before the first start:
+
+- **`SETUP_CODE`** decides the one-time code `/setup` asks for when you create the first account. Pick one
+  and you never have to read it out of a log; leave it empty and the server prints a generated one at
+  every start until that account exists.
+- **`ALLOWED_DOC_ROOTS`** is the containment boundary for local document sources. A project directory
+  outside it is refused. The repository's own `docs/demo` is inside the default.
+- **`SECRET_KEY`** (32+ characters, `openssl rand -hex 32`) is only needed once a source stores a token —
+  a private git repository or Notion.
+
+**The first start downloads the embedding model** — about 470 MB for the default multilingual one, into
+`.cache/models`. It loads in the background, so the dashboard is usable immediately, but the first search
+waits for it. `EMBEDDING_DTYPE=q8` cuts the download to ~120 MB if you only need it to work.
+
+Once it is up: create the first account at `/setup`, then a project pointing at `docs/demo`, then
+
+```bash
+npm run smoke -- http://localhost:3444/mcp/demo "how do I re-index"
+```
+
+which talks to the endpoint as a real MCP client would.
+
+## The checks a change has to pass
+
+These four are the gate. CI runs exactly them (plus `npm run db:check` and a build of the image) on every
+pull request, so running them before you push is most of staying green.
+
+```bash
+npm run lint             # biome: format and lint over src, test, scripts and public
+npm run typecheck        # both tsconfigs — the build's, and the one that covers test/ and scripts/
+npm test                 # the unit suite: no database, no Docker, a few seconds
+npm run test:integration # the same runner against a real PostgreSQL + pgvector
+```
+
+`npm run lint:fix` writes every fix Biome can make. The configuration is [`biome.jsonc`](biome.jsonc) and
+each non-obvious setting has the reason next to it — please read the comment before turning a rule off.
+
+**`npm test` needs no Docker.** That is deliberate and worth keeping: the inner loop stays fast, so it
+stays run.
+
+**`npm run test:integration` does need a container runtime.** It starts `pgvector/pgvector:pg16` itself
+through testcontainers, gives every test file its own database and throws the container away afterwards —
+`docker-compose.dev.yml` is not involved and nothing has to be started by hand. The first run pulls a
+460 MB image and is a minute or two slower than every run after it.
+
+Docker Desktop and a stock Linux install need no configuration. A socket somewhere else does:
+
+```bash
+# Colima
+export DOCKER_HOST="unix://$HOME/.colima/default/docker.sock"
+export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
+
+# Rancher Desktop
+export DOCKER_HOST="unix://$HOME/.rd/docker.sock"
+
+# rootless Podman
+export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/podman/podman.sock"
+export TESTCONTAINERS_RYUK_DISABLED=true
+```
+
+`npm run test:all` runs both suites. And tell `git blame` to step over the one commit that only
+reformatted the tree:
+
+```bash
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
+## Specification first
+
+A change to **observable behaviour** — an endpoint, a response shape, a default, a rule about who may do
+what, anything a user could notice — references the requirement it satisfies (`FR-…`) or the decision it
+implements (`ADR-…`). If neither exists, it is written down before it is built, not explained afterwards
+in a commit message.
+
+That writing happens in a separate specification repository which holds the PRD, the architecture
+decision records, the data model, the API contract, the security model and the roadmap. It is where the
+`FR-…` and `ADR-…` identifiers in this codebase's comments point.
+
+**It is not public.** An outside contributor cannot read it and cannot write to it, and there is no point
+pretending otherwise: a rule you are unable to follow is worse than no rule. So the rule for you is the
+part you can do.
+
+- **Describe the behaviour change in the pull request itself.** What it does, what it replaces, what it
+  makes impossible, and what you considered and rejected. That last part is the one that is expensive to
+  rediscover, and it is what the records in that repository are mostly made of.
+- **A maintainer records it** and replies with the `FR-…` or `ADR-…` your change now carries, before the
+  merge. If your change contradicts something already decided, that is a conversation and not a rejection
+  — several of the decisions in this project supersede an earlier one.
+- **A change with no observable behaviour** — a refactor, a test, a typo, a dependency bump — needs none
+  of this. Say so in the pull request and that is the end of it.
+
+## The pairs that are kept in sync
+
+Three places in this repository hold one statement in two files. Each has a check that fails when the two
+stop agreeing, because none of them is something a compiler or a formatter can see.
+
+**`src/db/schema.ts` ↔ `drizzle/`**, guarded by `npm run db:check` (its own step in CI). The schema file
+is the source the migrations are generated from, and adding a column is four steps and no others:
+
+1. Edit `src/db/schema.ts`.
+2. Run `npm run db:generate`.
+3. **Read the SQL** drizzle-kit wrote into `drizzle/` — this step is the review, not a formality.
+4. Commit both.
+
+Nothing else creates or alters a table. Do not hand-write a migration, and do not edit a generated one
+after the fact; the snapshot in `drizzle/meta/` is what the next generate diffs against. Two things stay
+out of `schema.ts` on purpose — the vector column's dimension is a deployment setting, and the HNSW index
+cannot exist before that dimension is settled — and both are handled by `src/db/bootstrap.ts` at startup.
+
+**`public/index.html` ids ↔ the dashboard modules**, guarded by `test/dashboard-wiring.test.ts`. The
+dashboard has no build step, so nothing links its JavaScript to its markup: a renamed id fails silently
+in the browser, at the moment somebody clicks. That test is the missing link. Rename an id and it tells
+you which module still looks for the old one.
+
+**The policy table ↔ every `/api` route**, guarded by `test/auth-coverage.test.ts`. Authorisation is data
+in `src/auth/policy.ts`, applied by one hook, and a route declares no permission of its own — a read is a
+viewer's and any other method an editor's unless the table says otherwise. The test walks the server's own
+route table and fails if a route is neither listed as public nor covered by a rule. **Adding a route
+therefore means deciding who may call it**, and the suite will not let you forget.
+
+## Commits and pull requests
+
+Subjects are imperative and sentence-shaped, and they say *why* rather than what the diff already shows.
+From the history:
+
+```
+Stay up when PostgreSQL hangs up on a connection the pool was holding
+Make CI run the recovery tool inside the image, not look for it
+```
+
+Not `fix(db): pool error handler` — there is no scope prefix and no conventional-commits grammar here.
+The body is prose, wrapped at about 80 columns, and it is where the reasoning goes: what was wrong, what
+the fix rests on, what it deliberately does not do. Several of the commits in this repository are longer
+than the change they carry, and that is the intended ratio for anything subtle.
+
+**No trailers.** A commit message ends with its last sentence. No `Co-Authored-By`, no
+`Generated with …`, no tool or session attribution, no `Signed-off-by`. The same goes for pull request
+descriptions.
+
+A pull request should say which `FR-…` or `ADR-…` it implements (or that it changes no observable
+behaviour), confirm the four checks pass locally, and name any documented claim it changes — the README,
+`.env.example` and the configuration table go stale silently, and a change that makes one of them false
+is not finished until it has fixed it. The template asks for exactly that.
+
+## The licence grant
+
+Contextator is [AGPL-3.0-or-later](LICENSE), and a commercial licence is offered alongside it by the
+copyright holder. That second half only works while the copyright is held in full: a contribution merged
+without a licence grant permanently removes the ability to grant a commercial licence over that code, and
+reverting the commit afterwards does not undo it.
+
+So **before an outside contribution is merged, its author is asked to grant a licence.** The text is
+[`CLA.md`](CLA.md) — a copyright licence and a patent grant to the copyright holder, in both an individual
+and an entity version.
+
+It is honestly marked: `CLA.md` is a **draft that is not yet in force**, and nothing automated collects a
+signature today. There is no bot, no status check and no signatures repository yet; clearing a
+contribution is a maintainer doing it by hand in the pull request thread. Read `CLA.md` before you invest
+real time in a change, so that the condition is not a surprise at the end.
+
+If that is not something you are willing to grant, say so early. Opening an issue that describes the
+problem and lets a maintainer implement it is a perfectly good contribution and needs none of this.

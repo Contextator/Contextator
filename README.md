@@ -40,7 +40,7 @@ app, started and stopped together by a small entrypoint script. Data lives in Do
 survives container removal (see [Data and persistence](#data-and-persistence)).
 
 ```bash
-git clone <this repo> contextator && cd contextator
+git clone https://github.com/Contextator/Contextator.git contextator && cd contextator
 cp .env.example .env
 # in .env, pick the code that /setup will ask for once:
 #   SETUP_CODE=whatever-you-like
@@ -580,6 +580,11 @@ test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vect
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
 test/integration/fixtures/    a pre-v3 `0.1` schema derived from history, and the frozen DDL ladder the migrations replaced
 drizzle/                      generated migrations (`npm run db:generate`), applied at startup and shipped in the image
+CONTRIBUTING.md               how to run it, the four checks, the pairs kept in sync, and the licence grant
+CLA.md                        the contributor licence grant — a draft, not yet in force
+SECURITY.md                   how to report a vulnerability, and what is documented behaviour rather than one
+CODE_OF_CONDUCT.md            Contributor Covenant 2.1
+LICENSE                       AGPL-3.0-or-later, verbatim; copied into the image and served at /license.txt
 docs/demo/                    sample documentation (English, Turkish, MDX)
 Dockerfile                    one image: postgres:16 + pgvector + Node 22 + the app
 docker/entrypoint.sh          starts PostgreSQL, then the app; stops both in order on SIGTERM
@@ -686,6 +691,20 @@ text, on every pull request, against a real server.
 | A member reads a project in `/mcp/…` they are not a member of | Expected while that project is `open`: dashboard roles do not reach the MCP endpoint. Require a token on it under **MCP access**. |
 | An MCP client suddenly answers `401` | The project now requires a token. Mint one under **MCP access** and add `--header "Authorization: Bearer …"` (or `headers` in `mcp.json`). |
 | I lost an MCP token | It cannot be recovered — only a hash is stored. Revoke it and mint another. |
+
+## Contributing and security
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) is the whole of how this project is worked on: getting it running, the
+four checks a change has to pass, the three places where one statement is kept in two files, and the commit
+register. Read it before the first pull request — it also explains the licence grant an outside
+contribution is asked for ([`CLA.md`](CLA.md), currently a draft), which exists because the commercial
+option below depends on the copyright being held in full.
+
+**Found a security problem? Do not open an issue.** [`SECURITY.md`](SECURITY.md) says where it goes
+instead, and lists the things that look like vulnerabilities and are documented behaviour — a project left
+`open`, and what an MCP token does and does not grant.
+
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) is the Contributor Covenant, and it applies here.
 
 ## License
 
