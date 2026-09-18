@@ -497,7 +497,9 @@ cp .env.example .env
 # SECRET_KEY=$(openssl rand -hex 32)     (only needed for private repositories / Notion)
 npm install
 npm run dev                              # tsx watch, http://localhost:3444
-npm test                                 # vitest: chunker + path-safety unit tests
+npm test                                 # vitest: the unit suite — no database, no Docker
+npm run test:integration                 # the same runner against a real PostgreSQL + pgvector
+npm run test:all                         # both suites
 npm run typecheck                        # the build's tsconfig, then the one that covers test/
 npm run lint                             # biome: format + lint over src, test, scripts and public
 npm run lint:fix                         # the same, writing every fix it can make
@@ -506,9 +508,17 @@ npm run smoke -- http://localhost:3444/mcp/demo "kurulum" --sse   # exercise the
 
 `npm run db:studio` opens Drizzle Studio against `DATABASE_URL`.
 
-The first four of those commands are exactly what CI runs on every pull request, alongside a build of
-the Docker image, so running them before you push is the whole of staying green. Tell `git blame` to
-skip the one commit that reformatted the tree:
+`npm test`, `npm run typecheck` and `npm run lint` are exactly what CI's `check` job runs on every pull
+request, alongside a build of the Docker image, so running them before you push is most of staying green.
+
+`npm run test:integration` is CI's other job and the one command here that needs a container runtime. It
+starts `pgvector/pgvector:pg16` itself through testcontainers, gives every test file its own database and
+throws the container away afterwards — the compose file above is not involved and nothing has to be
+started by hand. Docker Desktop and a stock Linux install need no configuration; a socket somewhere else
+(Colima, Rancher Desktop, rootless Podman) needs `DOCKER_HOST` and a `TESTCONTAINERS_*` setting or two.
+The first run pulls a 460 MB image and is a minute or two slower than every run after it.
+
+Tell `git blame` to skip the one commit that reformatted the tree:
 
 ```bash
 git config blame.ignoreRevsFile .git-blame-ignore-revs
@@ -565,6 +575,10 @@ public/auth-page.js           /login, /setup and /change-password — imports no
 public/pages/                 body of each product/legal page + the shell they share
 scripts/smoke-mcp.ts          end-to-end MCP client check
 scripts/reset-password.ts     last-resort password reset straight against the database
+test/*.test.ts                unit suite — pure functions, no database, no Docker (`npm test`)
+test/integration/*.itest.ts   ensure-schema and vector-store against a real PostgreSQL + pgvector
+test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
+test/integration/fixtures/    a pre-v3 `0.1` schema, derived from history, for the upgrade case
 docs/demo/                    sample documentation (English, Turkish, MDX)
 Dockerfile                    one image: postgres:16 + pgvector + Node 22 + the app
 docker/entrypoint.sh          starts PostgreSQL, then the app; stops both in order on SIGTERM
@@ -593,7 +607,10 @@ DDL on every start under an advisory lock and records the dimension in a `settin
 mismatch fails fast with a clear message. `src/db/schema.ts` is kept in sync by hand and powers Drizzle's
 typed queries and Drizzle Studio. Schema version 4 added `users`, `user_sessions` and `project_members`, and
 version 5 added `mcp_tokens` and `projects.mcp_auth`; an existing database picks them up on the next start with
-nothing to run by hand, and every project keeps the MCP behaviour it already had.
+nothing to run by hand, and every project keeps the MCP behaviour it already had. What used to rest on
+review now has a test: `test/integration/schema.itest.ts` applies that DDL to an empty database, applies it
+again and compares the two schemas byte for byte, and carries a pre-v3 `0.1` database forward — on every
+pull request, against a real server.
 
 ## Security notes
 

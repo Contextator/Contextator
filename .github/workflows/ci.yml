@@ -1,5 +1,6 @@
-# The gate every pull request has to pass: lint, typecheck, the test suite, and proof that the image
-# still builds. See ADR-0029 and NFR-15 in the specification repository.
+# The gate every pull request has to pass: lint, typecheck, the unit suite, the integration suite
+# against a real PostgreSQL, and proof that the image still builds. See ADR-0029, ADR-0031, NFR-15 and
+# NFR-16 in the specification repository.
 name: CI
 
 on:
@@ -43,6 +44,29 @@ jobs:
 
       - run: npm test
 
+  integration:
+    name: Integration tests against PostgreSQL
+    runs-on: ubuntu-latest
+    env:
+      # Same reason as above: nothing in this suite embeds anything, and the vectors it searches with
+      # are written by hand (ADR-0031), so there is no model and no GPU runtime to fetch.
+      ONNXRUNTIME_NODE_INSTALL: skip
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      # No `services:` block on purpose. ubuntu-latest already runs a Docker daemon, and testcontainers
+      # starts pgvector/pgvector:pg16 itself, waits for it and stops it afterwards — which is the same
+      # code path a contributor runs locally. A service container would work only here, and the two
+      # paths would drift until the one that is harder to run stopped being run (ADR-0031).
+      - run: npm run test:integration
+
   image:
     name: Build the image
     runs-on: ubuntu-latest
@@ -64,7 +88,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-# Two more jobs belong here and are deliberately absent rather than stubbed: `integration`, running
-# the suite against a real PostgreSQL + pgvector service, and `eval`, scoring retrieval quality
-# against a fixed question set. An empty job that always reports success is a lie told in a status
-# check; the absence of a check is the more honest signal until the check exists.
+# One more job belongs here and is deliberately absent rather than stubbed: `eval`, scoring retrieval
+# quality against a fixed question set. An empty job that always reports success is a lie told in a
+# status check; the absence of a check is the more honest signal until the check exists. `integration`
+# was the other one, and it is above now.
