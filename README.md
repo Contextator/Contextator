@@ -409,6 +409,33 @@ On the golden set in [`eval/`](eval/), the tokenizer and budget work moved `reca
 **Changing the budget — or the model — re-chunks as well as re-embeds, so an existing project keeps its
 old chunks until it is re-indexed.**
 
+**Search is hybrid: meaning and exact wording, fused.** A 384-dimensional sentence model has no useful
+representation of `HALYARD_DISPATCH_TIMEOUT` — it has a representation of the words around it, which is
+why an operator asking which variable sets the attempt timeout used to be handed prose about the retry
+schedule. So every chunk is also stored as a PostgreSQL `tsvector` of the same text, with a GIN index
+beside the vector one, and a search runs both: fifty candidates by cosine distance, fifty by keyword
+rank, combined with **reciprocal rank fusion** — `Σ 1/(60 + rank)` over whichever lists each chunk
+appeared on — and truncated to your `limit` afterwards. It is one SQL statement and one round trip.
+
+Ranks rather than scores, deliberately. Cosine similarity and `ts_rank` are not comparable quantities,
+so any weighted sum of them would have to be re-learnt every time the embedding model changed; ranks
+survive a model swap untouched. The consequence is that **the score on a result no longer explains its
+position** — a result scoring 0.86 can sit above one scoring 0.88. `GET /api/projects/:id/search` and
+the dashboard therefore also carry the rank the result held on each side, shown as `D3 L1`; a result
+with an `L` and no `D` is an identifier the vector search could not see.
+
+On the golden set — extended first with sixteen identifier-shaped questions written from the corpus
+before anything was measured — the thirty identifier questions go from `recall@5` 76.7 % to 83.3 %, the
+sixteen new ones from 75.0 % to 87.5 %, and the thirty-four natural-language questions do not move at
+all. `recall@1` falls from 78.1 % to 75.0 %, which is the trade rank fusion makes: a chunk found by one
+half alone cannot outrank a chunk found respectably by both. Cross-lingual retrieval, which a hybrid
+search was expected to help, **did not improve** on the questions that measure it.
+
+A source can name the language its documents are written in, which picks the text search configuration
+they are indexed with. Leave it unset unless you have measured it — this version searches in the unset
+configuration, so a source indexed with stemming is matched *less* well. There is no Turkish option
+because PostgreSQL has no Turkish configuration; Turkish is indexed word for word.
+
 ## Configuration
 
 Everything is an environment variable; see [`.env.example`](.env.example) for the full annotated list.

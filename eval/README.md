@@ -131,11 +131,19 @@ here is not `recall@5` anywhere else, and quoting it outside this repository wou
 cannot support. What it supports is "this configuration, against the previous one, on the same
 questions".
 
-Forty-eight questions over twenty-six pages is also a small set, and a small set overfits. A movement of
+Sixty-four questions over twenty-six pages is also a small set, and a small set overfits. Taking the
+best cell of a parameter sweep on a set this size is the mirror again: a one-question difference is a
+1.6-point difference, and `BASELINE.md` has a sweep in it where the same value appears at two
+non-adjacent points and nowhere between them. A movement of
 one or two points is noise. The real fix is not more invented questions — it is feeding the set from
 queries people actually asked, which is what the query log of Phase 2 is for.
 
-Two runs are comparable only if `EMBEDDING_MODEL`, `EMBEDDING_DTYPE`, `CHUNK_MAX_TOKENS` and
-`CHUNK_OVERLAP_TOKENS` were the same. The report prints all four, and the run's `provider.id` with them —
+`EVAL_TEXT_SEARCH_CONFIG=english npm run eval` runs the lexical half of retrieval in another PostgreSQL
+text search configuration — the corpus indexed with it and the questions parsed with it, because running
+the two sides apart measures nothing at all. Default `simple`, which is what the product ships
+([ADR-0041](../../.ssot/ADR.md#adr-0041)).
+
+Two runs are comparable only if `EMBEDDING_MODEL`, `EMBEDDING_DTYPE`, `CHUNK_MAX_TOKENS`,
+`CHUNK_OVERLAP_TOKENS` and the text search configuration were the same. The report prints all four, and the run's `provider.id` with them —
 and since [ADR-0038](../../.ssot/ADR.md#adr-0038) that id also carries the query and passage prefixes, so
 two runs that differ only in `EMBEDDING_QUERY_PREFIX` are visibly two runs and not one repeated.

@@ -352,3 +352,162 @@ EMBEDDING_QUERY_PREFIX=none EMBEDDING_PASSAGE_PREFIX=none npm run eval          
 
 The second is a configuration change and not a code change, which is the point of putting the prefixes
 in the provider and the override in the environment.
+
+---
+
+# What hybrid search did to it
+
+[ADR-0041](../../.ssot/ADR.md#adr-0041), the last change of Item 2 and the largest of Phase 1. A
+`tsvector` beside the vector, a GIN index beside the HNSW one, and reciprocal rank fusion over fifty
+candidates from each side. `npm run eval` with no arguments now measures it.
+
+**The golden set was extended first, and the baseline re-recorded on the extended set.** Sixteen
+identifier-shaped questions — environment variable names, header values, error codes, build flags,
+releases — written from the corpus before any search was run and kept whichever way they fell, by the
+rule at the top of [README.md](README.md). Four of the sixteen miss the top five under dense-only.
+Comparing hybrid on sixty-four questions against dense-only on forty-eight would have been a decision
+wearing a measurement's clothes, so every figure below is against dense-only on the same sixty-four.
+
+The forty-eight that were already here reproduce their published figures exactly — 79.2 % / 85.4 %,
+`MRR` 0.818, `heading@5` 81.3 %, `cross-lingual` 14.3 % — which is the control: the sixteen are an
+addition to the instrument and not a change to it.
+
+| | |
+|---|---|
+| Date | 2026-09-18 |
+| Provider | `local:Xenova/multilingual-e5-small:fp32:"query: "+"passage: "` (unchanged) |
+| `CHUNK_MAX_TOKENS` / overlap | 96 / 24 (unchanged) |
+| Corpus | 26 documents, 577 chunks (unchanged) |
+| Questions | **64** (31 `en`, 33 `tr`; 10 cross-lingual; 30 identifier-shaped) |
+| Text search configuration | `simple`, on both sides |
+
+## The three numbers the change was gated on, separately
+
+| group | dense-only `recall@1` / `@5` | hybrid `recall@1` / `@5` |
+|---|--:|--:|
+| **1 — the 30 `identifier` questions** | 76.7 / 76.7 | **70.0** / **83.3** |
+|   …of which, the 16 written for this change | 75.0 / 75.0 | 75.0 / **87.5** |
+| **2 — the 34 that are not identifier-shaped** | 79.4 / 88.2 | 79.4 / 88.2 |
+| **3 — `cross-lingual`, the original 7** | 14.3 / 14.3 | 14.3 / **14.3** |
+|   …all 10, including the 3 added here | 10.0 / 10.0 | 10.0 / **20.0** |
+| overall (64) | 78.1 / 82.8 | **75.0** / **85.9** |
+| the 48 that predate this change | 79.2 / 85.4 | **75.0** / 85.4 |
+| `MRR` / `heading@5` | 0.803 / 79.7 | 0.799 / **82.8** |
+| search time per question | 4.9 ms | 7.5 ms |
+
+**Gate 1 is met at five and missed at one.** `recall@5` on identifier questions goes up 6.6 points, and
+on the sixteen written blind for this change 12.5 points — three questions that dense-only could not
+find at all. `recall@1` goes *down* 6.7. Both are the same mechanism rather than a gain and a separate
+defect: under RRF a chunk found by one retriever alone scores exactly what the other retriever's first
+place scores, so a dense rank-1 with no keyword support is displaced by anything ranked respectably on
+both lists. It is the trade RRF makes, it is not tunable away without abandoning rank fusion, and it
+matters most to a caller that reads only the first hit.
+
+**Gate 2 is met exactly.** The thirty-four natural-language questions measure 79.4 % / 88.2 % before and
+after — the same questions, at the same ranks, with `MRR` up 0.005. Whatever the keyword half costs, it
+does not cost that.
+
+**Gate 3 did not move, and it is the most useful result in the run.** Item 1's model swap took
+cross-lingual `recall@5` from 42.9 % to 14.3 %, and this change leaves it at 14.3 %: not one of those
+seven questions moved a place. The one cross-lingual question hybrid gains is a *new* one and an
+identifier question — `HALYARD_PAYLOAD_MAX sınırını aşan bir gövde hangi kodla reddedilir?`, a Turkish
+question about an English table, answered because the two share a string. So what the lexical half fixes
+is cross-lingual *identifier* retrieval, and it does nothing at all for `Yedek alırken önce
+veritabanını mı yoksa yük havuzunu mu almalıyım?`, which shares no string with the page that answers it.
+
+Item 2 was the last place Phase 1 had to look for that regression. The remedy is elsewhere: a re-ranker
+that reads both languages, or an encoder that is not same-language-biased.
+
+## The measurement that changed the design
+
+The first working implementation OR-ed the question's lexemes and ranked with `ts_rank_cd`, which is
+what the plan said. It made retrieval **worse than dense-only**:
+
+| | dense-only | OR, no term filter | shipped |
+|---|--:|--:|--:|
+| overall `recall@1` / `@5` | 78.1 / 82.8 | 64.1 / **79.7** | 75.0 / 85.9 |
+| `identifier` | 76.7 / 76.7 | 50.0 / **70.0** | 70.0 / 83.3 |
+| not identifier | 79.4 / 88.2 | 76.5 / 88.2 | 79.4 / 88.2 |
+| `MRR` | 0.803 | 0.705 | 0.799 |
+
+`ts_rank_cd` scores term frequency and proximity and has no notion of inverse document frequency, so
+`What does HLY-4019 mean?` ranks a paragraph containing *what*, *does* and *mean* above the table
+containing `HLY-4019` — three covered terms against two — and fusion then hands that paragraph a rank on
+both lists. Twelve questions dense-only answered at rank 1 were pushed down or off the page.
+
+Dropping query terms that appear in more than a twentieth of the project's chunks is what turns it
+around. The threshold is the middle of a plateau and not a tuned value:
+
+| term document-frequency ceiling | `recall@1` / `@5` | `identifier` | `cross-lingual` | `MRR` | `heading@5` |
+|--:|--:|--:|--:|--:|--:|
+| 0.015 | 78.1 / 85.9 | 70.0 / 83.3 | 20.0 | 0.813 | 79.7 |
+| 0.02 | 78.1 / 85.9 | 70.0 / 83.3 | 20.0 | 0.813 | 79.7 |
+| 0.025 | 78.1 / 85.9 | 70.0 / 83.3 | 20.0 | 0.815 | 82.8 |
+| 0.03 | 76.6 / **87.5** | 70.0 / **86.7** | **30.0** | 0.813 | 84.4 |
+| 0.035 | 75.0 / 85.9 | 70.0 / 83.3 | 20.0 | 0.801 | 81.3 |
+| 0.04 | 76.6 / 85.9 | 73.3 / 83.3 | 20.0 | 0.803 | 84.4 |
+| **0.05** | **75.0 / 85.9** | **70.0 / 83.3** | **20.0** | **0.799** | **82.8** |
+| 0.06 | 75.0 / 85.9 | 70.0 / 83.3 | 20.0 | 0.798 | 82.8 |
+| 0.08 | 75.0 / **87.5** | 70.0 / **86.7** | 20.0 | 0.799 | 84.4 |
+
+87.5 % appears at 0.03 and at 0.08 and nowhere between them. One question, at two points that are not
+adjacent, is noise and not a peak — and taking the best cell of an eight-point sweep on sixty-four
+questions is the mirror this directory's README warns about. Every value in the range beats dense-only,
+which is the result; 0.05 is the middle of it.
+
+The candidate count per side is flat above twenty and 50 is kept for the reason it was chosen — it is
+the pool a cross-encoder would later rerank:
+
+| lexical candidates (at 0.05) | `recall@1` / `@5` |
+|--:|--:|
+| 10 | 73.4 / 85.9 |
+| 20 | 73.4 / 85.9 |
+| 30 | 75.0 / 85.9 |
+| 50 | 75.0 / 85.9 |
+
+## `simple` against stemming
+
+Measured with the configuration applied to both sides at once — the corpus indexed with it and the
+questions parsed with it, because running the two apart measures nothing.
+
+| English questions (31) | `simple` | `english` |
+|---|--:|--:|
+| `recall@1` / `recall@5` | 74.2 / 83.9 | 74.2 / 83.9 |
+| identifier-shaped (14) | 71.4 / 78.6 | **78.6** / 78.6 |
+| natural-language (17) | **76.5** / 88.2 | 70.6 / 88.2 |
+| overall `MRR` (64 questions) | **0.799** | 0.792 |
+
+**The prediction was that `simple` would win on the identifier questions, and it does not.** Stemming
+takes that subset by one question at rank 1 and gives one back on the natural-language half; at
+`recall@5` the two are identical everywhere. `simple` ships on the reasons that need no measurement:
+PostgreSQL has no Turkish configuration, a project here is routinely two languages at once, and an
+unstemmed index returns an identifier as the string it is.
+
+```bash
+npm run eval                                        # the shipped default
+EVAL_TEXT_SEARCH_CONFIG=english npm run eval        # the same run, stemmed on both sides
+```
+
+## Two defects this found that were not about retrieval
+
+**The eval was not reproducible, and nobody had noticed.** `ts_rank_cd` without normalisation returns
+the same score for a great many chunks, and the tie-break was the chunk's uuid — so a fresh database
+minted fresh identifiers and the *same* configuration measured `recall@1` anywhere across a nine-point
+spread. Five runs of one configuration now agree to the digit. Any number in any earlier section of this
+file that was produced by a lexical ranking is suspect; none were, because there was no lexical ranking.
+
+**Two assertions in the integration suite had been failing about one run in three, on this branch and on
+the one before it.** pgvector picks each element's HNSW level pseudo-randomly, so the graph differs
+between runs and whether one query's hundred global candidates happen to contain ten of a project's
+thousand rows differs with it. Seeding PostgreSQL's PRNG is not enough, measured. The two cases now ask
+five directions and assert that approximate search without the iterative scan does not *reliably* answer
+the project — which is what [ADR-0040](../../.ssot/ADR.md#adr-0040) actually claims.
+
+## Reproducing it
+
+```bash
+npm run eval
+```
+
+The corpus, the model, the budget and the prefixes are all unchanged from the section above, so the only
+difference between the two tables is the search.
