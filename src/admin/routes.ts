@@ -56,16 +56,20 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     if (err instanceof UnauthorizedError) return reply.code(401).send({ error: err.code, message: err.message });
     if (err instanceof ForbiddenError) return reply.code(403).send({ error: err.code, message: err.message });
     if (err instanceof RateLimitedError) {
-      return reply.code(429).header('retry-after', String(err.retryAfterSec)).send({ error: 'rate_limited', message: err.message, retryAfterSec: err.retryAfterSec });
+      return reply
+        .code(429)
+        .header('retry-after', String(err.retryAfterSec))
+        .send({ error: 'rate_limited', message: err.message, retryAfterSec: err.retryAfterSec });
     }
     if (err instanceof NotFoundError) return reply.code(404).send({ error: 'not_found', message: err.message });
     if (err instanceof ConflictError) return reply.code(409).send({ error: 'conflict', message: err.message });
     const e = err as { statusCode?: number; message?: string };
     const status = typeof e.statusCode === 'number' ? e.statusCode : 500;
     if (status >= 500) req.log.error({ err }, 'admin api error');
-    return reply
-      .code(status)
-      .send({ error: status >= 500 ? 'internal_error' : 'request_error', message: status >= 500 ? 'Internal error' : (e.message ?? 'Request error') });
+    return reply.code(status).send({
+      error: status >= 500 ? 'internal_error' : 'request_error',
+      message: status >= 500 ? 'Internal error' : (e.message ?? 'Request error'),
+    });
   });
 
   const baseUrl = (req: FastifyRequest): string => (config.PUBLIC_BASE_URL ?? `${req.protocol}://${req.host}`).replace(/\/+$/, '');
@@ -167,7 +171,13 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     const project = await createProject(db, { name: body.name, rootPath: body.rootPath }, config.ALLOWED_DOC_ROOTS);
     if (body.rootPath) {
       // Legacy shape: the directory becomes the project's first (local) source.
-      const name = slugifySourceName(body.rootPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? '') || 'local';
+      const name =
+        slugifySourceName(
+          body.rootPath
+            .replace(/[\\/]+$/, '')
+            .split(/[\\/]/)
+            .pop() ?? '',
+        ) || 'local';
       await createSource(
         db,
         project.id,
@@ -200,7 +210,9 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     await deleteProject(db, id, (projectId) => indexer.isBusy(projectId));
     indexer.forget(id);
     await sessions.closeForProject(id);
-    await removeProjectDir(config.DATA_DIR, id).catch((err: unknown) => req.log.warn({ err, projectId: id }, 'could not remove project data directory'));
+    await removeProjectDir(config.DATA_DIR, id).catch((err: unknown) =>
+      req.log.warn({ err, projectId: id }, 'could not remove project data directory'),
+    );
     return reply.code(204).send();
   });
 

@@ -235,7 +235,11 @@ type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
 /** Mirrors PROJECT_NAME_RE without importing config (schema code stays dependency-free). */
 function legacySourceName(rootPath: string, taken: Set<string>): string {
-  const base = rootPath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? '';
+  const base =
+    rootPath
+      .replace(/[\\/]+$/, '')
+      .split(/[\\/]/)
+      .pop() ?? '';
   let name = base
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, '-')
@@ -266,7 +270,9 @@ async function migrateLegacyRootPaths(tx: Tx, log: Logger): Promise<void> {
     await tx.execute(sql`
       UPDATE documents SET source_id = ${sourceId}, relative_path = ${name} || '/' || relative_path
       WHERE project_id = ${row.id} AND source_id IS NULL`);
-    await tx.execute(sql`UPDATE document_sources SET document_count = (SELECT count(*) FROM documents WHERE source_id = ${sourceId}) WHERE id = ${sourceId}`);
+    await tx.execute(
+      sql`UPDATE document_sources SET document_count = (SELECT count(*) FROM documents WHERE source_id = ${sourceId}) WHERE id = ${sourceId}`,
+    );
     log.info({ projectId: row.id, source: name, rootPath: row.root_path }, 'migrated legacy project root to a local source');
   }
 }

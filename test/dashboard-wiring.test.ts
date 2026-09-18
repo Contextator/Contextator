@@ -41,9 +41,7 @@ describe('the dashboard markup and its modules agree', () => {
 
   it('keeps the auth pages free of dashboard ids, since they load a different script', async () => {
     const authPage = await readFile(new URL('auth-page.js', PUBLIC), 'utf8');
-    const bodies = await Promise.all(
-      ['login', 'setup', 'change-password'].map((slug) => readFile(new URL(`pages/${slug}.html`, PUBLIC), 'utf8')),
-    );
+    const bodies = await Promise.all(['login', 'setup', 'change-password'].map((slug) => readFile(new URL(`pages/${slug}.html`, PUBLIC), 'utf8')));
     const ids = idsIn(bodies.join('\n'));
     for (const id of selectorsIn(authPage)) expect(ids).toContain(id);
   });

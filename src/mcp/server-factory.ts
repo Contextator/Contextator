@@ -14,10 +14,7 @@ function buildInstructions(project: ProjectRow): string {
 
 /** One McpServer per client session, bound to exactly one project. */
 export function createProjectMcpServer(ctx: AppContext, project: ProjectRow): McpServer {
-  const server = new McpServer(
-    { name: `contextator-${project.name}`, version: ctx.version },
-    { instructions: buildInstructions(project) },
-  );
+  const server = new McpServer({ name: `contextator-${project.name}`, version: ctx.version }, { instructions: buildInstructions(project) });
   registerTools(server, ctx, project);
   return server;
 }

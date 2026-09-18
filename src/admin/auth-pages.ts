@@ -79,7 +79,8 @@ export const authPageRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (ap
       const session = await whoIsThis(req);
 
       if (page.slug === 'setup' && !ctx.setup.needsSetup) return reply.redirect('/login', 302);
-      if (page.slug === 'login' && session && !session.mustChangePassword) return reply.redirect(safeNext(String((req.query as { next?: string }).next ?? '/')), 302);
+      if (page.slug === 'login' && session && !session.mustChangePassword)
+        return reply.redirect(safeNext(String((req.query as { next?: string }).next ?? '/')), 302);
       if (page.slug === 'change-password') {
         if (!session) return reply.redirect('/login?next=%2Fchange-password', 302);
         if (!session.mustChangePassword) return reply.redirect('/', 302);

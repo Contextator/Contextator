@@ -23,7 +23,11 @@ export function generateSetupCode(): string {
 const digest = (value: string) => createHash('sha256').update(value, 'utf8').digest();
 
 /** Case- and dash-insensitive, because this is read off a terminal and typed by hand. */
-const canonical = (value: string) => value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+const canonical = (value: string) =>
+  value
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
 
 export function setupCodeMatches(given: string, expected: string): boolean {
   return timingSafeEqual(digest(canonical(given)), digest(canonical(expected)));

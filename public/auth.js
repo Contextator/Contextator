@@ -64,10 +64,7 @@ export function renderUserMenu() {
   if (!menuOpen) return;
   host.append(
     el('div', { class: 'menu', role: 'menu' }, [
-      el('div', { class: 'menu-head' }, [
-        el('span', { class: 'bold', text: label }),
-        el('span', { class: 'sub', text: me.email || me.username }),
-      ]),
+      el('div', { class: 'menu-head' }, [el('span', { class: 'bold', text: label }), el('span', { class: 'sub', text: me.email || me.username })]),
       el('button', {
         type: 'button',
         class: 'menu-item',
@@ -78,9 +75,7 @@ export function renderUserMenu() {
           openPasswordDialog();
         },
       }),
-      canManageUsers()
-        ? el('a', { class: 'menu-item', role: 'menuitem', href: '#/~users', text: 'Users', onclick: closeMenu })
-        : null,
+      canManageUsers() ? el('a', { class: 'menu-item', role: 'menuitem', href: '#/~users', text: 'Users', onclick: closeMenu }) : null,
       el('span', { class: 'menu-sep' }),
       el('button', { type: 'button', class: 'menu-item danger-text', role: 'menuitem', text: 'Sign out', onclick: signOut }),
     ]),

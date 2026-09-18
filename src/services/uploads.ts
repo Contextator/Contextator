@@ -17,7 +17,12 @@ import { NotFoundError, ValidationError } from './projects.js';
  * Staging lives in a dot-directory, so a running scan never sees half-uploaded files.
  */
 export class UploadService {
-  constructor(private readonly config: Pick<Config, 'DATA_DIR' | 'UPLOAD_MAX_FILE_BYTES' | 'UPLOAD_MAX_ARCHIVE_BYTES' | 'ARCHIVE_MAX_ENTRIES' | 'ARCHIVE_MAX_TOTAL_BYTES'>) {}
+  constructor(
+    private readonly config: Pick<
+      Config,
+      'DATA_DIR' | 'UPLOAD_MAX_FILE_BYTES' | 'UPLOAD_MAX_ARCHIVE_BYTES' | 'ARCHIVE_MAX_ENTRIES' | 'ARCHIVE_MAX_TOTAL_BYTES'
+    >,
+  ) {}
 
   private limitsFor(source: DocumentSourceRow): ImportLimits {
     const extensions = (source.config as { extensions?: string[] }).extensions ?? ['md', 'mdx', 'txt'];
@@ -74,7 +79,14 @@ export class UploadService {
         throw new ValidationError(`Archive "${name}" exceeds the limit of ${this.config.UPLOAD_MAX_ARCHIVE_BYTES} bytes`);
       }
       try {
-        await extractArchive(target, filesDir, limits, stats, 0, subdir.filter((s) => !s.startsWith('.')));
+        await extractArchive(
+          target,
+          filesDir,
+          limits,
+          stats,
+          0,
+          subdir.filter((s) => !s.startsWith('.')),
+        );
       } finally {
         await fs.rm(target, { force: true }).catch(() => undefined);
       }

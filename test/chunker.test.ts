@@ -83,7 +83,7 @@ describe('chunkMarkdown', () => {
     expect(chunks[2].content).toContain('docker text');
   });
 
-  it('merges heading-only stubs into the following chunk and keeps that chunk\'s breadcrumb', () => {
+  it("merges heading-only stubs into the following chunk and keeps that chunk's breadcrumb", () => {
     const src = ['# Guide', '', '## Install', '', `${'real install content '.repeat(4)}`].join('\n');
     const { chunks } = chunkMarkdown(src, 'guide.md', opts);
     expect(chunks).toHaveLength(1);
@@ -99,7 +99,12 @@ describe('chunkMarkdown', () => {
 
   it('splits oversized sections on paragraph boundaries with overlap and respects the budget', () => {
     // Each paragraph is three ~10-token lines, so a 15-token overlap can carry whole lines across.
-    const paragraph = (n: number) => [`Paragraph ${n} line one lorem ipsum dolor.`, `Paragraph ${n} line two sit amet consectetur.`, `Paragraph ${n} line three adipiscing elit sed.`].join('\n');
+    const paragraph = (n: number) =>
+      [
+        `Paragraph ${n} line one lorem ipsum dolor.`,
+        `Paragraph ${n} line two sit amet consectetur.`,
+        `Paragraph ${n} line three adipiscing elit sed.`,
+      ].join('\n');
     const src = '# Big\n\n' + Array.from({ length: 8 }, (_, i) => paragraph(i)).join('\n\n');
     const { chunks } = chunkMarkdown(src, 'big.md', opts);
     expect(chunks.length).toBeGreaterThan(1);

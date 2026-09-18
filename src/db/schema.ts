@@ -122,9 +122,7 @@ export const chunks = pgTable(
   (t) => [
     index('chunks_project_idx').on(t.projectId),
     index('chunks_document_idx').on(t.documentId),
-    index('chunks_embedding_hnsw_idx')
-      .using('hnsw', t.embedding.op('vector_cosine_ops'))
-      .with({ m: 16, ef_construction: 64 }),
+    index('chunks_embedding_hnsw_idx').using('hnsw', t.embedding.op('vector_cosine_ops')).with({ m: 16, ef_construction: 64 }),
   ],
 );
 

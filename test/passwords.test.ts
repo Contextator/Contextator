@@ -22,8 +22,8 @@ describe('password hashing', () => {
   });
 
   it('treats the two Unicode spellings of a character as the same password', async () => {
-    const composed = 'parolamé';       // é as one code point
-    const decomposed = 'parolamé';    // e + combining acute
+    const composed = 'parolamé'; // é as one code point
+    const decomposed = 'parolamé'; // e + combining acute
     expect(await verifyPassword(decomposed, await hashPassword(composed))).toBe(true);
   });
 

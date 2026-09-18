@@ -2,13 +2,24 @@ import { describe, expect, it } from 'vitest';
 import { frontmatter, pageFileStem, pageTitle, renderBlocks, renderRichText, type NotionBlock } from '../src/services/sources/notion-render.js';
 
 const rt = (text: string, extra: Record<string, unknown> = {}) => ({ plain_text: text, ...extra });
-const block = (type: string, payload: Record<string, unknown>, children?: NotionBlock[]): NotionBlock => ({ id: type, type, [type]: payload, has_children: Boolean(children), children });
+const block = (type: string, payload: Record<string, unknown>, children?: NotionBlock[]): NotionBlock => ({
+  id: type,
+  type,
+  [type]: payload,
+  has_children: Boolean(children),
+  children,
+});
 
 describe('notion renderer', () => {
   it('renders rich text annotations and links', () => {
-    expect(renderRichText([rt('bold', { annotations: { bold: true } }), rt(' and '), rt('code', { annotations: { code: true } }), rt('link', { href: 'https://x.y' })])).toBe(
-      '**bold** and `code`[link](https://x.y)',
-    );
+    expect(
+      renderRichText([
+        rt('bold', { annotations: { bold: true } }),
+        rt(' and '),
+        rt('code', { annotations: { code: true } }),
+        rt('link', { href: 'https://x.y' }),
+      ]),
+    ).toBe('**bold** and `code`[link](https://x.y)');
   });
 
   it('renders headings, lists (with nesting and numbering), quotes, code and tables', () => {
@@ -22,7 +33,10 @@ describe('notion renderer', () => {
       block('quote', { rich_text: [rt('wise words')] }),
       block('code', { rich_text: [rt('console.log(1)')], language: 'javascript' }),
       block('callout', { rich_text: [rt('note')], icon: { emoji: '💡' } }),
-      block('table', { has_column_header: true }, [block('table_row', { cells: [[rt('a')], [rt('b')]] }), block('table_row', { cells: [[rt('1')], [rt('2')]] })]),
+      block('table', { has_column_header: true }, [
+        block('table_row', { cells: [[rt('a')], [rt('b')]] }),
+        block('table_row', { cells: [[rt('1')], [rt('2')]] }),
+      ]),
       block('divider', {}),
       block('unsupported', {}),
     ]);

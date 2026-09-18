@@ -11,7 +11,12 @@ import { promisify } from 'node:util';
  * old ones up on the owner's next successful sign-in.
  */
 
-const scrypt = promisify(scryptCb) as (password: string | Buffer, salt: Buffer, keylen: number, options: { N: number; r: number; p: number; maxmem: number }) => Promise<Buffer>;
+const scrypt = promisify(scryptCb) as (
+  password: string | Buffer,
+  salt: Buffer,
+  keylen: number,
+  options: { N: number; r: number; p: number; maxmem: number },
+) => Promise<Buffer>;
 
 const VERSION = 'v1';
 const N = 32768; // 2^15 — roughly 32 MB and ~50-100 ms per hash

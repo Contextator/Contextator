@@ -51,7 +51,14 @@ class StubNotion {
       this.guard();
       const p = this.page(args.page_id);
       if (!p) throw new Error('Could not find page');
-      return { object: 'page', id: p.id, url: `https://notion.so/${p.id}`, last_edited_time: p.lastEdited, parent: p.parent, properties: titleProp(p.title) };
+      return {
+        object: 'page',
+        id: p.id,
+        url: `https://notion.so/${p.id}`,
+        last_edited_time: p.lastEdited,
+        parent: p.parent,
+        properties: titleProp(p.title),
+      };
     },
   };
 
@@ -166,17 +173,18 @@ describe('notion source', () => {
 
   it('imports every shared page as Markdown, nested under its parent page', async () => {
     const stub = new StubNotion([HOME, CHILD]);
-    const driver = new NotionDriver(source(sourceId, projectId), { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } }, stub as never);
+    const driver = new NotionDriver(
+      source(sourceId, projectId),
+      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } },
+      stub as never,
+    );
 
     const result = await driver.sync();
     expect(result.note).toContain('2 pages');
     expect(stub.calls.filter((c) => c.startsWith('search:'))).toEqual(['search:first', 'search:cursor-2']);
 
     // The child page sits in a folder named after its parent; both stems carry the id prefix.
-    expect(await listFiles()).toEqual([
-      'product-handbook--aaaaaaaa/kurulum-rehberi--11112222.md',
-      'product-handbook--aaaaaaaa.md',
-    ].sort());
+    expect(await listFiles()).toEqual(['product-handbook--aaaaaaaa/kurulum-rehberi--11112222.md', 'product-handbook--aaaaaaaa.md'].sort());
 
     const home = await fs.readFile(path.join(currentDir(), 'product-handbook--aaaaaaaa.md'), 'utf8');
     expect(home).toContain('title: "Product Handbook"');
@@ -193,21 +201,34 @@ describe('notion source', () => {
   }, 30_000);
 
   it('skips pages whose last_edited_time did not move, and renders the one that did', async () => {
-    const stub = new StubNotion([HOME, { ...CHILD, lastEdited: '2026-09-09T12:00:00.000Z', blocks: [{ id: 'p2', type: 'paragraph', paragraph: { rich_text: [rt('Guncellendi.')] } }] }]);
-    const driver = new NotionDriver(source(sourceId, projectId), { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } }, stub as never);
+    const stub = new StubNotion([
+      HOME,
+      { ...CHILD, lastEdited: '2026-09-09T12:00:00.000Z', blocks: [{ id: 'p2', type: 'paragraph', paragraph: { rich_text: [rt('Guncellendi.')] } }] },
+    ]);
+    const driver = new NotionDriver(
+      source(sourceId, projectId),
+      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } },
+      stub as never,
+    );
 
     const result = await driver.sync();
     expect(result.note).toContain('1 rendered');
     // Only the changed page's blocks were fetched again.
     expect(stub.calls.filter((c) => c.startsWith('blocks:'))).toEqual([`blocks:${CHILD.id}`]);
-    expect(await fs.readFile(path.join(currentDir(), 'product-handbook--aaaaaaaa', 'kurulum-rehberi--11112222.md'), 'utf8')).toContain('Guncellendi.');
+    expect(await fs.readFile(path.join(currentDir(), 'product-handbook--aaaaaaaa', 'kurulum-rehberi--11112222.md'), 'utf8')).toContain(
+      'Guncellendi.',
+    );
   }, 30_000);
 
   it('fails loudly when the token is rejected, instead of reporting an empty workspace', async () => {
     // Swallowing this reported "0 pages" — and the removal pass below then deleted every imported file.
     const stub = new StubNotion([HOME, CHILD]);
     stub.failWith = 'API token is invalid.';
-    const driver = new NotionDriver(source(sourceId, projectId), { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } }, stub as never);
+    const driver = new NotionDriver(
+      source(sourceId, projectId),
+      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } },
+      stub as never,
+    );
 
     await expect(driver.sync()).rejects.toThrow('API token is invalid.');
     expect(await listFiles()).toContain('product-handbook--aaaaaaaa.md'); // nothing was deleted
@@ -216,8 +237,15 @@ describe('notion source', () => {
   it('fails when no configured root can be read', async () => {
     const stub = new StubNotion([HOME]);
     stub.failWith = 'API token is invalid.';
-    const rooted = { ...source(sourceId, projectId), config: { rootIds: ['1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d'], extensions: ['md'] } } as DocumentSourceRow;
-    const driver = new NotionDriver(rooted, { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } }, stub as never);
+    const rooted = {
+      ...source(sourceId, projectId),
+      config: { rootIds: ['1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d'], extensions: ['md'] },
+    } as DocumentSourceRow;
+    const driver = new NotionDriver(
+      rooted,
+      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } },
+      stub as never,
+    );
 
     await expect(driver.sync()).rejects.toThrow('No configured Notion root could be read');
     expect(await listFiles()).toContain('product-handbook--aaaaaaaa.md');
@@ -225,7 +253,11 @@ describe('notion source', () => {
 
   it('removes the file of a page that is no longer shared', async () => {
     const stub = new StubNotion([HOME]);
-    const driver = new NotionDriver(source(sourceId, projectId), { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } }, stub as never);
+    const driver = new NotionDriver(
+      source(sourceId, projectId),
+      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } },
+      stub as never,
+    );
 
     const result = await driver.sync();
     expect(result.note).toContain('1 removed');

@@ -23,11 +23,19 @@ const EnvSchema = z
     ADMIN_TOKEN: z.string().min(1).optional(),
     ALLOWED_ORIGINS: z.string().default('').transform(csv),
     /** MCP transport sessions, not dashboard sign-ins — those are AUTH_SESSION_IDLE_MS. */
-    SESSION_IDLE_TTL_MS: z.coerce.number().int().min(60_000).default(30 * 60_000),
+    SESSION_IDLE_TTL_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .default(30 * 60_000),
 
     // Authentication (dashboard accounts). See src/auth/.
     /** A dashboard session that goes unused for this long has to sign in again. */
-    AUTH_SESSION_IDLE_MS: z.coerce.number().int().min(60_000).default(12 * 60 * 60_000),
+    AUTH_SESSION_IDLE_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .default(12 * 60 * 60_000),
     /** Hard ceiling on a session's life, however actively it is used. */
     AUTH_SESSION_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
     /** `auto` sets Secure when the request arrived over HTTPS; force it behind a proxy. */
@@ -47,16 +55,31 @@ const EnvSchema = z
     ALLOWED_DOC_ROOTS: z.string().default('/docs').transform(csv),
     IGNORE_GLOBS: z.string().default('').transform(csv),
     /** Writable directory for materialised sources (git checkouts, uploads, Notion pulls). */
-    DATA_DIR: z.string().default('.data').transform((p) => path.resolve(p)),
+    DATA_DIR: z
+      .string()
+      .default('.data')
+      .transform((p) => path.resolve(p)),
     /** Encrypts source secrets (git / Notion tokens) at rest. Only needed once such a source exists. */
     SECRET_KEY: z.string().min(32, 'must be at least 32 characters').optional(),
 
     // Uploads and archives
-    UPLOAD_MAX_FILE_BYTES: z.coerce.number().int().min(1024).default(50 * 1024 * 1024),
+    UPLOAD_MAX_FILE_BYTES: z.coerce
+      .number()
+      .int()
+      .min(1024)
+      .default(50 * 1024 * 1024),
     UPLOAD_MAX_FILES_PER_REQUEST: z.coerce.number().int().min(1).max(5000).default(500),
-    UPLOAD_MAX_ARCHIVE_BYTES: z.coerce.number().int().min(1024).default(256 * 1024 * 1024),
+    UPLOAD_MAX_ARCHIVE_BYTES: z.coerce
+      .number()
+      .int()
+      .min(1024)
+      .default(256 * 1024 * 1024),
     ARCHIVE_MAX_ENTRIES: z.coerce.number().int().min(1).default(20_000),
-    ARCHIVE_MAX_TOTAL_BYTES: z.coerce.number().int().min(1024).default(1024 * 1024 * 1024),
+    ARCHIVE_MAX_TOTAL_BYTES: z.coerce
+      .number()
+      .int()
+      .min(1024)
+      .default(1024 * 1024 * 1024),
 
     // Embeddings
     EMBEDDING_PROVIDER: z.enum(['local', 'openai']).default('local'),

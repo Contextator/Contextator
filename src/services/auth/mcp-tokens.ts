@@ -45,7 +45,12 @@ export async function listMcpTokens(db: Db, projectId: string): Promise<McpToken
   return rows.map(toMcpTokenView);
 }
 
-export async function createMcpToken(db: Db, projectId: string, name: string, createdBy: string | null): Promise<{ token: string; view: McpTokenView }> {
+export async function createMcpToken(
+  db: Db,
+  projectId: string,
+  name: string,
+  createdBy: string | null,
+): Promise<{ token: string; view: McpTokenView }> {
   const token = newMcpToken();
   const [row] = await db
     .insert(mcpTokens)

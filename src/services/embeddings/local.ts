@@ -14,10 +14,7 @@ export interface LocalEmbeddingOptions {
 }
 
 /** Minimal view of the feature-extraction pipeline we rely on (keeps us independent of upstream type churn). */
-type Extractor = (
-  texts: string[],
-  options: { pooling: 'mean'; normalize: boolean },
-) => Promise<{ dims: number[]; data: ArrayLike<number> }>;
+type Extractor = (texts: string[], options: { pooling: 'mean'; normalize: boolean }) => Promise<{ dims: number[]; data: ArrayLike<number> }>;
 
 let extractorPromise: Promise<Extractor> | null = null;
 

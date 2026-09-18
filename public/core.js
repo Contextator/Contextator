@@ -5,8 +5,10 @@ const TOKEN_KEY = 'contextator_admin_token';
 
 export const ICON = {
   copy: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15V6a2 2 0 0 1 2-2h9"></path></svg>',
-  refresh: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 3v6h-6"></path></svg>',
-  trash: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"></path></svg>',
+  refresh:
+    '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 3v6h-6"></path></svg>',
+  trash:
+    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"></path></svg>',
   plus: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>',
 };
 
@@ -17,7 +19,8 @@ export const el = (tag, attrs = {}, children = []) => {
   for (const [k, v] of Object.entries(attrs)) {
     if (k === 'class') node.className = v;
     else if (k === 'text') node.textContent = v;
-    else if (k === 'html') node.innerHTML = v; // static icon markup only, never user data
+    else if (k === 'html')
+      node.innerHTML = v; // static icon markup only, never user data
     else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
     else if (v !== undefined && v !== null && v !== false) node.setAttribute(k, v === true ? '' : v);
   }
@@ -167,7 +170,9 @@ export function formatBytes(n) {
 
 /** First line of an error, shortened for the project list. */
 export function shortError(message, max = 40) {
-  const line = String(message || '').split('\n')[0].trim();
+  const line = String(message || '')
+    .split('\n')[0]
+    .trim();
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
@@ -177,7 +182,10 @@ export const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 /** Up to two letters for an avatar; falls back to the first character of whatever we have. */
 export function initials(name) {
-  const parts = String(name || '').trim().split(/[\s._-]+/).filter(Boolean);
+  const parts = String(name || '')
+    .trim()
+    .split(/[\s._-]+/)
+    .filter(Boolean);
   if (parts.length === 0) return '?';
   const letters = parts.length === 1 ? parts[0].slice(0, 2) : parts[0][0] + parts[1][0];
   return letters.toUpperCase();

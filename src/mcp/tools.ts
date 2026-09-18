@@ -100,9 +100,7 @@ export function registerTools(server: McpServer, ctx: AppContext, project: Proje
         const totalChunks = docs.reduce((n, d) => n + d.chunkCount, 0);
         const lines: string[] = [`Project "${project.name}": ${docs.length} documents, ${totalChunks} chunks`];
         if (sources.length > 0) {
-          lines.push(
-            `Sources (the first path segment): ${sources.map((s) => `${s.name} (${s.type}${s.label ? `: ${s.label}` : ''})`).join(', ')}`,
-          );
+          lines.push(`Sources (the first path segment): ${sources.map((s) => `${s.name} (${s.type}${s.label ? `: ${s.label}` : ''})`).join(', ')}`);
         }
         for (const [dir, list] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
           lines.push('', `${dir} — ${list.length} document${list.length === 1 ? '' : 's'}, ${list.reduce((n, d) => n + d.chunkCount, 0)} chunks`);

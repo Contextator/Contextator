@@ -74,7 +74,8 @@ describe('the session cookie', () => {
 
 describe('the first-run setup code', () => {
   it('avoids characters that are misread off a terminal', () => {
-    for (let i = 0; i < 200; i++) expect(generateSetupCode()).toMatch(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}(-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}){2}$/);
+    for (let i = 0; i < 200; i++)
+      expect(generateSetupCode()).toMatch(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}(-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}){2}$/);
   });
 
   it('forgives the dashes and the case, because it is typed by hand', () => {

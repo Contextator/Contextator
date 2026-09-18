@@ -61,9 +61,7 @@ export const usersRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
 
   app.get('/api/users', async () => {
     const views = await listUsers(db);
-    return Promise.all(
-      views.map(async (v) => ({ ...v, activeSessionCount: await countActiveSessions(db, v.id, config.AUTH_SESSION_IDLE_MS) })),
-    );
+    return Promise.all(views.map(async (v) => ({ ...v, activeSessionCount: await countActiveSessions(db, v.id, config.AUTH_SESSION_IDLE_MS) })));
   });
 
   app.post('/api/users', async (req, reply) => {

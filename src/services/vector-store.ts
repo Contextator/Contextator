@@ -132,9 +132,7 @@ export async function replaceDocument(db: Db, doc: DocumentInput, newChunks: New
 
     await tx.delete(chunks).where(eq(chunks.documentId, row.id));
     for (let i = 0; i < newChunks.length; i += INSERT_BATCH) {
-      await tx.insert(chunks).values(
-        newChunks.slice(i, i + INSERT_BATCH).map((c) => ({ projectId: doc.projectId, documentId: row.id, ...c })),
-      );
+      await tx.insert(chunks).values(newChunks.slice(i, i + INSERT_BATCH).map((c) => ({ projectId: doc.projectId, documentId: row.id, ...c })));
     }
     return row.id;
   });

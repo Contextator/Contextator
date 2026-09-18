@@ -29,7 +29,13 @@ export async function listMembers(db: Db, projectId: string): Promise<MemberView
   return rows;
 }
 
-export async function setMemberRole(db: Db, projectId: string, userId: string, role: ProjectMemberRole, createdBy: string | null): Promise<MemberView> {
+export async function setMemberRole(
+  db: Db,
+  projectId: string,
+  userId: string,
+  role: ProjectMemberRole,
+  createdBy: string | null,
+): Promise<MemberView> {
   const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   if (!user) throw new NotFoundError('User not found');
   // root and admin already reach every project; a membership row would say something untrue.
@@ -65,7 +71,10 @@ export async function listProjectsForUser(db: Db, userId: string): Promise<Proje
 
 /** `{ <projectId>: 'viewer' | 'editor' }` for the dashboard, so it can hide what it must. */
 export async function membershipMap(db: Db, userId: string): Promise<Record<string, ProjectMemberRole>> {
-  const rows = await db.select({ projectId: projectMembers.projectId, role: projectMembers.role }).from(projectMembers).where(eq(projectMembers.userId, userId));
+  const rows = await db
+    .select({ projectId: projectMembers.projectId, role: projectMembers.role })
+    .from(projectMembers)
+    .where(eq(projectMembers.userId, userId));
   return Object.fromEntries(rows.map((r) => [r.projectId, r.role]));
 }
 

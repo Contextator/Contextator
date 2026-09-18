@@ -49,7 +49,11 @@ export async function getUserById(db: Db, id: string): Promise<UserRow | undefin
 }
 
 export async function getUserByUsername(db: Db, username: string): Promise<UserRow | undefined> {
-  const [row] = await db.select().from(users).where(eq(users.username, normalizeUsername(username))).limit(1);
+  const [row] = await db
+    .select()
+    .from(users)
+    .where(eq(users.username, normalizeUsername(username)))
+    .limit(1);
   return row;
 }
 
@@ -153,7 +157,13 @@ export async function updateUser(db: Db, id: string, input: UpdateUserInput): Pr
 export async function setPassword(db: Db, id: string, plain: string, mustChange: boolean): Promise<void> {
   const result = await db
     .update(users)
-    .set({ passwordHash: await hashPassword(plain), mustChangePassword: mustChange, passwordChangedAt: new Date(), failedLoginCount: 0, lockedUntil: null })
+    .set({
+      passwordHash: await hashPassword(plain),
+      mustChangePassword: mustChange,
+      passwordChangedAt: new Date(),
+      failedLoginCount: 0,
+      lockedUntil: null,
+    })
     .where(eq(users.id, id))
     .returning({ id: users.id });
   if (result.length === 0) throw new NotFoundError('User not found');

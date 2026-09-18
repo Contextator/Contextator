@@ -35,10 +35,7 @@ export function renderMcpAccess(project) {
   const rows = tokens.map((t) =>
     el('div', { class: 'user-row token-row' }, [
       el('span', { class: 'source-glyph token', 'aria-hidden': 'true', text: 'KEY' }),
-      el('span', { class: 'source-cell' }, [
-        el('code', { text: t.prefix }),
-        el('span', { class: 'sub', text: t.name || 'unnamed' }),
-      ]),
+      el('span', { class: 'source-cell' }, [el('code', { text: t.prefix }), el('span', { class: 'sub', text: t.name || 'unnamed' })]),
       el('span', { class: 'sub', text: `created ${relativeTime(t.createdAt)}` }),
       el('span', { class: 'sub', text: t.lastUsedAt ? `used ${relativeTime(t.lastUsedAt)}` : 'never used' }),
       el(
@@ -52,10 +49,7 @@ export function renderMcpAccess(project) {
   return el('section', { class: 'panel' }, [
     el('div', { class: 'sources-head' }, [
       el('div', {}, [
-        el('h3', {}, [
-          'MCP access ',
-          el('span', { class: `pill small ${locked ? 'idle' : 'error'}`, text: locked ? 'token required' : 'open' }),
-        ]),
+        el('h3', {}, ['MCP access ', el('span', { class: `pill small ${locked ? 'idle' : 'error'}`, text: locked ? 'token required' : 'open' })]),
         el('p', {
           text: locked
             ? 'Only a client presenting one of the tokens below can read this project over MCP. Revoking a token cuts its client off immediately.'

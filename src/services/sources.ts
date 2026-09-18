@@ -152,7 +152,9 @@ async function validateConfig(type: SourceType, config: unknown, opts: SourceSer
   const parsed = parseSourceConfig(type, config) as Record<string, unknown>;
   if (type === 'local') await resolveProjectRoot(String(parsed.path), opts.allowedRoots); // throws PathNotAllowedError
   if (type === 'git') {
-    const subdir = String(parsed.subdir ?? '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    const subdir = String(parsed.subdir ?? '')
+      .replace(/\\/g, '/')
+      .replace(/^\/+|\/+$/g, '');
     if (subdir.split('/').some((s) => s === '..' || s === '.')) throw new ValidationError('subdir must not contain "." or ".." segments');
     parsed.subdir = subdir;
   }
@@ -190,7 +192,13 @@ export interface UpdateSourceInput {
   secret?: string | null;
 }
 
-export async function updateSource(db: Db, projectId: string, sourceId: string, input: UpdateSourceInput, opts: SourceServiceOptions): Promise<DocumentSourceRow> {
+export async function updateSource(
+  db: Db,
+  projectId: string,
+  sourceId: string,
+  input: UpdateSourceInput,
+  opts: SourceServiceOptions,
+): Promise<DocumentSourceRow> {
   const existing = await getSource(db, projectId, sourceId);
   if (!existing) throw new NotFoundError('Source not found');
   const patch: Partial<typeof documentSources.$inferInsert> = {};
@@ -259,4 +267,3 @@ export async function countSourcesByProject(db: Db): Promise<Map<string, number>
     .groupBy(documentSources.projectId);
   return new Map(rows.map((r) => [r.projectId, r.n]));
 }
-

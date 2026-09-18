@@ -19,8 +19,7 @@ export function timingSafeCompare(a: string, b: string): boolean {
 
 const TOKEN_PRINCIPAL: Principal = { kind: 'token', role: 'root', userId: null, username: 'ADMIN_TOKEN', mustChangePassword: false };
 
-const readBearer = (header: string | undefined): string =>
-  header?.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : '';
+const readBearer = (header: string | undefined): string => (header?.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : '');
 
 /**
  * Identity and authorization for everything under /api/*, in two hooks.

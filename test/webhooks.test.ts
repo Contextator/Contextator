@@ -8,7 +8,10 @@ const hmac = createHmac('sha256', secret).update(body).digest('hex');
 
 describe('verifyWebhook', () => {
   it('accepts GitHub, Gitea and Bitbucket HMAC signatures', () => {
-    expect(verifyWebhook({ 'x-hub-signature-256': `sha256=${hmac}`, 'x-github-event': 'push' }, body, secret)).toEqual({ ok: true, provider: 'github' });
+    expect(verifyWebhook({ 'x-hub-signature-256': `sha256=${hmac}`, 'x-github-event': 'push' }, body, secret)).toEqual({
+      ok: true,
+      provider: 'github',
+    });
     expect(verifyWebhook({ 'x-gitea-signature': hmac }, body, secret)).toEqual({ ok: true, provider: 'gitea' });
     expect(verifyWebhook({ 'x-hub-signature': `sha256=${hmac}` }, body, secret)).toEqual({ ok: true, provider: 'bitbucket' });
   });
@@ -26,7 +29,9 @@ describe('pushedBranches', () => {
   it('reads GitHub/GitLab/Gitea refs and Bitbucket change lists', () => {
     expect(pushedBranches({ ref: 'refs/heads/main' })).toEqual(['main']);
     expect(pushedBranches({ ref: 'refs/tags/v1' })).toEqual([]);
-    expect(pushedBranches({ push: { changes: [{ new: { type: 'branch', name: 'dev' } }, { new: null }, { new: { type: 'tag', name: 'v1' } }] } })).toEqual(['dev']);
+    expect(
+      pushedBranches({ push: { changes: [{ new: { type: 'branch', name: 'dev' } }, { new: null }, { new: { type: 'tag', name: 'v1' } }] } }),
+    ).toEqual(['dev']);
     expect(pushedBranches('garbage')).toEqual([]);
   });
 });

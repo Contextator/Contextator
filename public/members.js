@@ -132,7 +132,9 @@ export async function openMemberDialog(project) {
   const taken = new Set(state.members.map((m) => m.userId));
   const candidates = state.users.filter((u) => u.role === 'member' && u.isActive && !taken.has(u.id));
   const select = form.elements.userId;
-  select.replaceChildren(...candidates.map((u) => el('option', { value: u.id, text: u.displayName ? `${u.username} — ${u.displayName}` : u.username })));
+  select.replaceChildren(
+    ...candidates.map((u) => el('option', { value: u.id, text: u.displayName ? `${u.username} — ${u.displayName}` : u.username })),
+  );
 
   $('#member-empty').hidden = candidates.length > 0;
   $('#member-picker').hidden = candidates.length === 0;

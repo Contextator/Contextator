@@ -48,9 +48,18 @@ const SOURCE_TITLE = { local: 'Local directory', git: 'Git repository', upload: 
  */
 const SOURCE_KINDS = {
   local: { type: 'local', title: 'Local directory', subtitle: 'A folder mounted on the server, scanned in place. Nothing is copied.' },
-  git: { type: 'git', title: 'Git repository', subtitle: 'Cloned on the server and fetched at the start of every index run. A push webhook can trigger one.' },
+  git: {
+    type: 'git',
+    title: 'Git repository',
+    subtitle: 'Cloned on the server and fetched at the start of every index run. A push webhook can trigger one.',
+  },
   upload: { type: 'upload', title: 'Upload files', subtitle: 'Files, folders and archives are unpacked on the server and kept for this source.' },
-  obsidian: { type: 'upload', flavor: 'obsidian', title: 'Obsidian vault', subtitle: 'An uploaded vault; [[wikilinks]] are rewritten to Markdown links.' },
+  obsidian: {
+    type: 'upload',
+    flavor: 'obsidian',
+    title: 'Obsidian vault',
+    subtitle: 'An uploaded vault; [[wikilinks]] are rewritten to Markdown links.',
+  },
   notion: { type: 'notion', title: 'Notion', subtitle: 'Pages shared with an internal integration are rendered to Markdown on every sync.' },
 };
 
@@ -222,7 +231,11 @@ function renderHealth() {
   node.append(
     el('span', { class: `pill ${h.db === 'up' ? 'idle' : 'error'}`, text: h.db === 'up' ? 'Database up' : 'Database down' }),
     el('span', { class: `pill ${model.ready ? 'idle' : 'loading'}`, text: model.ready ? 'Model ready' : 'Model loading' }),
-    el('span', { class: 'chip mono', title: 'embedding provider · model · dimensions', text: `${model.provider} · ${model.model} · ${model.dimensions}d` }),
+    el('span', {
+      class: 'chip mono',
+      title: 'embedding provider · model · dimensions',
+      text: `${model.provider} · ${model.model} · ${model.dimensions}d`,
+    }),
     el('span', { class: 'chip', title: 'open MCP sessions', text: `${h.sessions.total} open session${h.sessions.total === 1 ? '' : 's'}` }),
     el('span', { class: 'version', text: `v${h.version}` }),
   );
@@ -313,7 +326,11 @@ function renderList() {
       row.append(
         el('span', { class: 'row-progress' }, [
           el('span', { class: `bar${pct === null ? ' indeterminate' : ''}` }, el('span', { style: pct === null ? '' : `width:${pct}%` })),
-          el('span', { text: job.filesTotal ? `${job.phase} · ${job.filesDone}/${job.filesTotal} files · ${fmt(job.chunksDone)} chunks embedded` : `${job.phase}…` }),
+          el('span', {
+            text: job.filesTotal
+              ? `${job.phase} · ${job.filesDone}/${job.filesTotal} files · ${fmt(job.chunksDone)} chunks embedded`
+              : `${job.phase}…`,
+          }),
         ]),
       );
     }
@@ -344,7 +361,9 @@ function renderDetail() {
               ? 'Point Contextator at a folder of Markdown files. Every project becomes its own MCP endpoint that agents can search.'
               : 'No project has been shared with your account yet. Ask an administrator to add you to one.',
         }),
-        state.projects.length || !mayCreate ? null : el('button', { type: 'button', class: 'primary', onclick: openCreate }, [icon('plus'), 'New project']),
+        state.projects.length || !mayCreate
+          ? null
+          : el('button', { type: 'button', class: 'primary', onclick: openCreate }, [icon('plus'), 'New project']),
       ]),
     );
     return;
@@ -366,7 +385,11 @@ function renderDetail() {
         el('div', { class: 'title-row' }, [el('h1', { text: p.name }), el('span', { class: `pill ${status}`, text: status })]),
         el('div', { class: 'url-row' }, [
           el('code', { class: 'url', text: p.mcpUrl }),
-          el('button', { type: 'button', class: 'icon', 'aria-label': 'Copy MCP URL', title: 'Copy MCP URL', onclick: () => copyText(p.mcpUrl) }, icon('copy')),
+          el(
+            'button',
+            { type: 'button', class: 'icon', 'aria-label': 'Copy MCP URL', title: 'Copy MCP URL', onclick: () => copyText(p.mcpUrl) },
+            icon('copy'),
+          ),
           el('code', { class: 'path', text: sourceSummary(p), title: sourceSummary(p) }),
         ]),
       ]),
@@ -405,7 +428,10 @@ function renderDetail() {
     const pct = job.filesTotal ? Math.round((job.filesDone / job.filesTotal) * 100) : null;
     main.append(
       el('div', { class: 'callout warn' }, [
-        el('span', { class: 'callout-title', text: job.phase === 'queued' ? 'Queued — waiting for the indexer' : `${capitalize(job.phase)}${job.force ? ' (full re-index)' : ''}` }),
+        el('span', {
+          class: 'callout-title',
+          text: job.phase === 'queued' ? 'Queued — waiting for the indexer' : `${capitalize(job.phase)}${job.force ? ' (full re-index)' : ''}`,
+        }),
         el('span', { class: `bar${pct === null ? ' indeterminate' : ''}` }, el('span', { style: pct === null ? '' : `width:${pct}%` })),
         el('span', {
           text: job.filesTotal
@@ -416,13 +442,20 @@ function renderDetail() {
     );
   }
   if (status === 'error' && (p.lastError || job?.error)) {
-    main.append(el('div', { class: 'callout error' }, [el('span', { class: 'callout-title', text: 'Last index run failed' }), el('pre', { text: p.lastError || job.error })]));
+    main.append(
+      el('div', { class: 'callout error' }, [
+        el('span', { class: 'callout-title', text: 'Last index run failed' }),
+        el('pre', { text: p.lastError || job.error }),
+      ]),
+    );
   }
   if (modelMismatch) {
     main.append(
       el('div', { class: 'callout warn' }, [
         el('span', { class: 'callout-title', text: 'Indexed with a different embedding model' }),
-        el('span', { text: `Chunks were embedded with ${p.embeddingModel}; the server now runs ${state.health.embeddings.id}. Re-index before searching.` }),
+        el('span', {
+          text: `Chunks were embedded with ${p.embeddingModel}; the server now runs ${state.health.embeddings.id}. Re-index before searching.`,
+        }),
       ]),
     );
   }
@@ -443,7 +476,12 @@ function renderDetail() {
     el('div', { class: 'stats' }, [
       stat('Documents', fmt(p.documentCount), `across ${fmt(p.sourceCount)} source${p.sourceCount === 1 ? '' : 's'}`),
       stat('Chunks', fmt(p.chunkCount), 'embedded, HNSW cosine index'),
-      stat('Last indexed', relativeTime(p.lastIndexedAt), lastRun || (p.lastIndexedAt ? new Date(p.lastIndexedAt).toLocaleString() : 'never indexed'), p.lastIndexedAt),
+      stat(
+        'Last indexed',
+        relativeTime(p.lastIndexedAt),
+        lastRun || (p.lastIndexedAt ? new Date(p.lastIndexedAt).toLocaleString() : 'never indexed'),
+        p.lastIndexedAt,
+      ),
       stat('Embedding model', model, modelSub, null, true, modelMismatch),
     ]),
   );
@@ -483,7 +521,10 @@ function renderDetail() {
           current.hint ? el('p', { class: 'hint', text: current.hint }) : null,
           el('div', { class: 'snippet' }, [
             el('pre', { text: current.code }),
-            el('button', { type: 'button', class: 'copy', 'aria-label': `Copy ${current.tab} snippet`, onclick: () => copyText(current.code) }, [icon('copy'), 'Copy']),
+            el('button', { type: 'button', class: 'copy', 'aria-label': `Copy ${current.tab} snippet`, onclick: () => copyText(current.code) }, [
+              icon('copy'),
+              'Copy',
+            ]),
           ]),
           el('p', { class: 'hint' }, [
             'Then ask the agent to search this project. It receives the MCP instructions describing ',
@@ -513,11 +554,19 @@ function renderDetail() {
   // Index runs (persisted history, newest first)
   main.append(
     el('section', { class: 'panel' }, [
-      el('div', { class: 'panel-head' }, [el('h3', { text: 'Index runs' }), el('p', { text: 'Incremental: unchanged files are skipped by sha256.' })]),
+      el('div', { class: 'panel-head' }, [
+        el('h3', { text: 'Index runs' }),
+        el('p', { text: 'Incremental: unchanged files are skipped by sha256.' }),
+      ]),
       el('div', { class: 'panel-body' }, [
         runs.length === 0
           ? el('p', { class: 'runs-empty', text: busy ? 'The first run is in progress.' : 'No runs yet. Press Re-index to build the index.' })
-          : el('div', { class: 'run-grid head' }, [el('span', { text: 'When' }), el('span', { text: 'Mode' }), el('span', { text: 'Result' }), el('span', { class: 'right', text: 'Duration' })]),
+          : el('div', { class: 'run-grid head' }, [
+              el('span', { text: 'When' }),
+              el('span', { text: 'Mode' }),
+              el('span', { text: 'Result' }),
+              el('span', { class: 'right', text: 'Duration' }),
+            ]),
         ...runs.map((r) =>
           el('div', { class: 'run-grid' }, [
             el('span', { title: new Date(r.finishedAt).toLocaleString(), text: relativeTime(r.finishedAt) }),
@@ -547,12 +596,30 @@ function renderSources(project, busy) {
     const failed = s.status === 'error';
     const actions = [
       mayEdit && (s.type === 'git' || s.type === 'notion')
-        ? el('button', { type: 'button', class: 'ghost small', title: 'Check the connection without indexing', text: 'Test', onclick: () => testSource(project, s) })
+        ? el('button', {
+            type: 'button',
+            class: 'ghost small',
+            title: 'Check the connection without indexing',
+            text: 'Test',
+            onclick: () => testSource(project, s),
+          })
         : null,
       mayEdit
-        ? el('button', { type: 'button', class: 'ghost small', disabled: busy, title: 'Sync this source and re-index the project', text: 'Sync', onclick: () => syncSource(project, s) })
+        ? el('button', {
+            type: 'button',
+            class: 'ghost small',
+            disabled: busy,
+            title: 'Sync this source and re-index the project',
+            text: 'Sync',
+            onclick: () => syncSource(project, s),
+          })
         : null,
-      el('button', { type: 'button', class: 'ghost small', text: mayEdit ? (s.type === 'upload' ? 'Files' : 'Edit') : 'View', onclick: () => openSourceDialog(project, s) }),
+      el('button', {
+        type: 'button',
+        class: 'ghost small',
+        text: mayEdit ? (s.type === 'upload' ? 'Files' : 'Edit') : 'View',
+        onclick: () => openSourceDialog(project, s),
+      }),
       mayEdit
         ? el('button', {
             type: 'button',
@@ -565,14 +632,25 @@ function renderSources(project, busy) {
     ];
     return el('div', { class: 'source-row' }, [
       el('span', { class: `source-glyph ${failed ? 'error' : s.type}`, text: SOURCE_GLYPH[s.type] ?? '?' }),
-      el('span', { class: 'source-cell' }, [el('code', { text: s.name }), el('span', { class: 'sub', text: s.label || SOURCE_TITLE[s.type] || s.type })]),
+      el('span', { class: 'source-cell' }, [
+        el('code', { text: s.name }),
+        el('span', { class: 'sub', text: s.label || SOURCE_TITLE[s.type] || s.type }),
+      ]),
       el('span', { class: 'source-cell' }, [
         el('code', { text: sourceOrigin(s), title: sourceOrigin(s) }),
-        el('span', { class: `sub${failed ? ' err' : ''}`, text: failed ? shortError(s.lastError, 80) : sourceDetail(s), title: failed ? s.lastError || '' : '' }),
+        el('span', {
+          class: `sub${failed ? ' err' : ''}`,
+          text: failed ? shortError(s.lastError, 80) : sourceDetail(s),
+          title: failed ? s.lastError || '' : '',
+        }),
       ]),
       el('span', { class: 'sub', text: s.flavor === 'plain' ? '—' : s.flavor, title: 'Content type' }),
       el('span', { class: 'sub', text: `${fmt(s.documentCount)} docs` }),
-      el('span', { class: 'sub', text: relativeTime(s.lastSyncedAt), title: s.lastSyncedAt ? new Date(s.lastSyncedAt).toLocaleString() : 'never synced' }),
+      el('span', {
+        class: 'sub',
+        text: relativeTime(s.lastSyncedAt),
+        title: s.lastSyncedAt ? new Date(s.lastSyncedAt).toLocaleString() : 'never synced',
+      }),
       el('span', { class: 'source-actions' }, actions),
     ]);
   });
@@ -581,9 +659,13 @@ function renderSources(project, busy) {
     el('div', { class: 'sources-head' }, [
       el('div', {}, [
         el('h3', { text: 'Document sources' }),
-        el('p', { text: 'Every source is mounted under its own name; a document\u2019s path is <source>/<path inside it>. All of them are synced at the start of an index run.' }),
+        el('p', {
+          text: 'Every source is mounted under its own name; a document\u2019s path is <source>/<path inside it>. All of them are synced at the start of an index run.',
+        }),
       ]),
-      mayEdit ? el('button', { type: 'button', class: 'primary small', onclick: () => openSourceDialog(project, null) }, [icon('plus'), 'Add source']) : null,
+      mayEdit
+        ? el('button', { type: 'button', class: 'primary small', onclick: () => openSourceDialog(project, null) }, [icon('plus'), 'Add source'])
+        : null,
     ]),
     rows.length
       ? el('div', {}, rows)
@@ -999,7 +1081,9 @@ function configForKind(kind) {
   const extensions = extensionsFromForm();
   if (extensions.length === 0) throw new Error('Pick at least one file type');
   if (type === 'local') {
-    const rest = $('#src-path').value.trim().replace(/^[\\/]+/, '');
+    const rest = $('#src-path')
+      .value.trim()
+      .replace(/^[\\/]+/, '');
     const root = srcSelectedRoot();
     const path = root ? `${root}/${rest}` : rest;
     if (!path) throw new Error('A directory is required');
@@ -1089,8 +1173,15 @@ function renderQueue(note) {
   $('#upload-detail').textContent = note ?? (skipped ? `${skipped} skipped — unsupported file type` : '');
   $('#upload-bar').style.width = `${srcUi.queue.length ? Math.round((settled / srcUi.queue.length) * 100) : 0}%`;
   $('#upload-list').replaceChildren(
-    ...srcUi.queue.map((i) => el('div', {}, [el('span', { text: i.path, title: i.path }), el('span', { class: i.status === 'queued' ? '' : i.status, text: QUEUE_LABEL[i.status] })])),
-    ...srcUi.existingFiles.map((f) => el('div', {}, [el('span', { text: f.path, title: f.path }), el('span', { class: 'ok', text: formatBytes(f.sizeBytes) })])),
+    ...srcUi.queue.map((i) =>
+      el('div', {}, [
+        el('span', { text: i.path, title: i.path }),
+        el('span', { class: i.status === 'queued' ? '' : i.status, text: QUEUE_LABEL[i.status] }),
+      ]),
+    ),
+    ...srcUi.existingFiles.map((f) =>
+      el('div', {}, [el('span', { text: f.path, title: f.path }), el('span', { class: 'ok', text: formatBytes(f.sizeBytes) })]),
+    ),
   );
 
   // Committing an upload always queues an index run, so the checkbox cannot say otherwise.
@@ -1296,7 +1387,16 @@ $('#filter').addEventListener('input', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'n' && !event.metaKey && !event.ctrlKey && !event.altKey && !dialog.open && !srcDialog.open && state.view === 'projects' && canCreateProject()) {
+  if (
+    event.key === 'n' &&
+    !event.metaKey &&
+    !event.ctrlKey &&
+    !event.altKey &&
+    !dialog.open &&
+    !srcDialog.open &&
+    state.view === 'projects' &&
+    canCreateProject()
+  ) {
     const tag = document.activeElement?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') return;
     event.preventDefault();

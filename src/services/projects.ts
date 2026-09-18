@@ -52,9 +52,7 @@ function isUniqueViolation(err: unknown): boolean {
 export async function createProject(db: Db, input: { name: string; rootPath?: string }, allowedRoots: string[]): Promise<ProjectRow> {
   const name = input.name.trim();
   if (!PROJECT_NAME_RE.test(name)) {
-    throw new ValidationError(
-      'Project name must be 1-63 characters of lowercase letters, digits, "-" or "_", and start with a letter or digit',
-    );
+    throw new ValidationError('Project name must be 1-63 characters of lowercase letters, digits, "-" or "_", and start with a letter or digit');
   }
   const rootPath = input.rootPath?.trim() || null;
   if (rootPath) await resolveProjectRoot(rootPath, allowedRoots); // throws PathNotAllowedError

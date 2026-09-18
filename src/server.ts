@@ -53,7 +53,20 @@ async function main(): Promise<void> {
   const uploads = new UploadService(config);
   const setup = new SetupGate();
   const loginLimiter = new SlidingWindow(config.AUTH_LOGIN_MAX_ATTEMPTS, config.AUTH_LOGIN_WINDOW_MIN * 60_000);
-  const ctx: AppContext = { config, db, log, embeddings, indexer, locks, uploads, sessions, setup, loginLimiter, version: APP_VERSION, startedAt: Date.now() };
+  const ctx: AppContext = {
+    config,
+    db,
+    log,
+    embeddings,
+    indexer,
+    locks,
+    uploads,
+    sessions,
+    setup,
+    loginLimiter,
+    version: APP_VERSION,
+    startedAt: Date.now(),
+  };
 
   // No `credentials: true`: ALLOWED_ORIGINS exists for browser MCP clients, and granting them
   // credentialed reads of /api/* would hand them the dashboard of whoever is signed in.

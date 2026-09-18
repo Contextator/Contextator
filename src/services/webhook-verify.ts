@@ -23,7 +23,13 @@ function safeEqual(a: string, b: string): boolean {
 
 function hmacMatches(rawBody: Buffer, secret: string, provided: string): boolean {
   const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
-  return safeEqual(expected, provided.replace(/^sha256=/i, '').trim().toLowerCase());
+  return safeEqual(
+    expected,
+    provided
+      .replace(/^sha256=/i, '')
+      .trim()
+      .toLowerCase(),
+  );
 }
 
 export function verifyWebhook(headers: WebhookHeaders, rawBody: Buffer, secret: string): { ok: boolean; provider: string } {

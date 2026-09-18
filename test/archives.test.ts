@@ -3,10 +3,24 @@ import os from 'node:os';
 import path from 'node:path';
 import * as tar from 'tar';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ArchiveLimitError, cleanEntryPath, extractArchive, importTree, isArchiveName, isPortableSegment, type ImportLimits } from '../src/services/archives.js';
+import {
+  ArchiveLimitError,
+  cleanEntryPath,
+  extractArchive,
+  importTree,
+  isArchiveName,
+  isPortableSegment,
+  type ImportLimits,
+} from '../src/services/archives.js';
 
 const FIXTURES = path.join(__dirname, 'fixtures');
-const limits: ImportLimits = { maxEntries: 100, maxTotalBytes: 1024 * 1024, maxFileBytes: 64 * 1024, extensions: ['md', 'mdx', 'txt'], flavor: 'plain' };
+const limits: ImportLimits = {
+  maxEntries: 100,
+  maxTotalBytes: 1024 * 1024,
+  maxFileBytes: 64 * 1024,
+  extensions: ['md', 'mdx', 'txt'],
+  flavor: 'plain',
+};
 
 let tmp: string;
 beforeAll(async () => {

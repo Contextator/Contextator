@@ -12,14 +12,7 @@ import type { KeyedMutex } from './locks.js';
 import { getProjectById } from './projects.js';
 import { driverFor } from './sources/driver.js';
 import { listSources, recountSources, setSourceStatus } from './sources.js';
-import {
-  deleteAllDocuments,
-  deleteDocuments,
-  getExistingDocuments,
-  recountProject,
-  replaceDocument,
-  type NewChunk,
-} from './vector-store.js';
+import { deleteAllDocuments, deleteDocuments, getExistingDocuments, recountProject, replaceDocument, type NewChunk } from './vector-store.js';
 
 export type JobPhase = 'queued' | 'syncing' | 'scanning' | 'embedding' | 'finalizing' | 'done' | 'error';
 

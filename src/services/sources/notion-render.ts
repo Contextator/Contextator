@@ -38,7 +38,21 @@ export function renderRichText(parts: RichText[] | undefined): string {
     .join('');
 }
 
-type Payload = { rich_text?: RichText[]; caption?: RichText[]; language?: string; checked?: boolean; icon?: { emoji?: string }; url?: string; external?: { url?: string }; file?: { url?: string }; expression?: string; title?: string; cells?: RichText[][]; has_column_header?: boolean; name?: string };
+type Payload = {
+  rich_text?: RichText[];
+  caption?: RichText[];
+  language?: string;
+  checked?: boolean;
+  icon?: { emoji?: string };
+  url?: string;
+  external?: { url?: string };
+  file?: { url?: string };
+  expression?: string;
+  title?: string;
+  cells?: RichText[][];
+  has_column_header?: boolean;
+  name?: string;
+};
 
 function payload(block: NotionBlock): Payload {
   return (block[block.type] as Payload | undefined) ?? {};
@@ -140,7 +154,9 @@ export function renderBlock(block: NotionBlock, nextNumber: () => number): strin
     case 'child_database':
       return `→ Database: ${p.title ?? 'Untitled'}`;
     case 'table': {
-      const rows = (block.children ?? []).filter((r) => r.type === 'table_row').map((r) => (payload(r).cells ?? []).map((c) => renderRichText(c).replace(/\|/g, '\\|')));
+      const rows = (block.children ?? [])
+        .filter((r) => r.type === 'table_row')
+        .map((r) => (payload(r).cells ?? []).map((c) => renderRichText(c).replace(/\|/g, '\\|')));
       if (rows.length === 0) return null;
       const width = Math.max(...rows.map((r) => r.length));
       const pad = (r: string[]) => [...r, ...Array(width - r.length).fill('')];
@@ -165,7 +181,11 @@ export function renderBlock(block: NotionBlock, nextNumber: () => number): strin
 export function pageTitle(page: { properties?: Record<string, { type?: string; title?: RichText[] }> }): string {
   const props = page.properties ?? {};
   for (const prop of Object.values(props)) {
-    if (prop?.type === 'title') return (prop.title ?? []).map((t) => t.plain_text ?? '').join('').trim();
+    if (prop?.type === 'title')
+      return (prop.title ?? [])
+        .map((t) => t.plain_text ?? '')
+        .join('')
+        .trim();
   }
   return '';
 }

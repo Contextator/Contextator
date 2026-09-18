@@ -39,7 +39,15 @@ export function renderUsersView() {
   }
 
   const activeRoots = users.filter((u) => u.role === 'root' && u.isActive).length;
-  wrap.append(el('section', { class: 'panel' }, [el('div', { class: 'panel-body' }, users.map((u) => userRow(u, activeRoots)))]));
+  wrap.append(
+    el('section', { class: 'panel' }, [
+      el(
+        'div',
+        { class: 'panel-body' },
+        users.map((u) => userRow(u, activeRoots)),
+      ),
+    ]),
+  );
   return wrap;
 }
 
@@ -68,7 +76,10 @@ function userRow(u, activeRoots) {
       el('span', { class: `pill small ${u.role}`, text: u.role, title: ROLE_HINT[u.role] }),
       isSelf ? el('span', { class: 'pill small you', text: 'you' }) : null,
     ]),
-    el('span', { class: `sub${u.isActive ? '' : ' err'}`, text: !u.isActive ? 'disabled' : u.mustChangePassword ? 'password change pending' : 'active' }),
+    el('span', {
+      class: `sub${u.isActive ? '' : ' err'}`,
+      text: !u.isActive ? 'disabled' : u.mustChangePassword ? 'password change pending' : 'active',
+    }),
     el('span', { class: 'sub', text: u.role === 'member' ? `${fmt(u.projectCount)} project${u.projectCount === 1 ? '' : 's'}` : 'all projects' }),
     el('span', {
       class: 'sub',
@@ -76,7 +87,14 @@ function userRow(u, activeRoots) {
       title: u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString() : 'never signed in',
     }),
     el('span', { class: 'source-actions' }, [
-      el('button', { type: 'button', class: 'ghost small', disabled: untouchable || undefined, title: untouchable ? lockWhy : undefined, text: 'Edit', onclick: () => openUserDialog(u) }),
+      el('button', {
+        type: 'button',
+        class: 'ghost small',
+        disabled: untouchable || undefined,
+        title: untouchable ? lockWhy : undefined,
+        text: 'Edit',
+        onclick: () => openUserDialog(u),
+      }),
       el('button', {
         type: 'button',
         class: 'ghost small',

@@ -67,7 +67,13 @@ async function withScratch<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 }
 
 /** Copies acceptable files from `from` into `dest` (both absolute), returning what was imported. */
-export async function importTree(from: string, dest: string, limits: ImportLimits, stats: ImportStats = { files: 0, skipped: 0, bytes: 0 }, depth = 0): Promise<ImportStats> {
+export async function importTree(
+  from: string,
+  dest: string,
+  limits: ImportLimits,
+  stats: ImportStats = { files: 0, skipped: 0, bytes: 0 },
+  depth = 0,
+): Promise<ImportStats> {
   const matchesExt = extensionMatcher(limits.extensions);
   const destReal = path.resolve(dest);
 

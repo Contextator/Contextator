@@ -131,7 +131,14 @@ export async function listSessionsOfUser(db: Db, userId: string, currentSessionI
       ),
     );
   return rows
-    .map((r) => ({ id: r.id, createdAt: r.createdAt, lastSeenAt: r.lastSeenAt, userAgent: r.userAgent, ip: r.ip, current: r.id === currentSessionId }))
+    .map((r) => ({
+      id: r.id,
+      createdAt: r.createdAt,
+      lastSeenAt: r.lastSeenAt,
+      userAgent: r.userAgent,
+      ip: r.ip,
+      current: r.id === currentSessionId,
+    }))
     .sort((a, b) => b.lastSeenAt.getTime() - a.lastSeenAt.getTime());
 }
 

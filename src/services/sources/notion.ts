@@ -127,7 +127,8 @@ export class NotionDriver implements SourceDriver {
         /* not a page id — it may name a database */
       }
       try {
-        for (const page of await this.databasePages(client, clean, true)) if (add(page)) queue.push({ id: page.id as string, kind: 'page', depth: 1 });
+        for (const page of await this.databasePages(client, clean, true))
+          if (add(page)) queue.push({ id: page.id as string, kind: 'page', depth: 1 });
       } catch (err) {
         rootFailures.push(`${clean.slice(0, 8)}… (${err instanceof Error ? err.message : String(err)})`);
       }
@@ -142,7 +143,8 @@ export class NotionDriver implements SourceDriver {
       const item = queue.shift()!;
       if (item.depth > MAX_DEPTH) continue;
       if (item.kind === 'database') {
-        for (const page of await this.databasePages(client, item.id)) if (add(page)) queue.push({ id: page.id as string, kind: 'page', depth: item.depth + 1 });
+        for (const page of await this.databasePages(client, item.id))
+          if (add(page)) queue.push({ id: page.id as string, kind: 'page', depth: item.depth + 1 });
         continue;
       }
       for (const child of await this.childBlocks(client, item.id, true)) {
@@ -186,7 +188,10 @@ export class NotionDriver implements SourceDriver {
     for (const dsId of dataSourceIds.length ? dataSourceIds : [databaseId]) {
       let cursor: string | undefined;
       do {
-        const res = (await query({ data_source_id: dsId, page_size: 100, start_cursor: cursor })) as { results: AnyRecord[]; next_cursor: string | null };
+        const res = (await query({ data_source_id: dsId, page_size: 100, start_cursor: cursor })) as {
+          results: AnyRecord[];
+          next_cursor: string | null;
+        };
         out.push(...res.results.filter((r) => r.object === 'page'));
         cursor = res.next_cursor ?? undefined;
       } while (cursor && out.length < MAX_PAGES);
@@ -208,7 +213,8 @@ export class NotionDriver implements SourceDriver {
     } while (cursor);
     if (!shallow && depth < MAX_DEPTH) {
       for (const b of blocks) {
-        if (b.has_children && b.type !== 'child_page' && b.type !== 'child_database') b.children = await this.childBlocks(client, b.id, false, depth + 1);
+        if (b.has_children && b.type !== 'child_page' && b.type !== 'child_database')
+          b.children = await this.childBlocks(client, b.id, false, depth + 1);
       }
     }
     return blocks;
@@ -256,7 +262,8 @@ export class NotionDriver implements SourceDriver {
 
       const blocks = await this.childBlocks(client, page.id);
       const body = renderBlocks(blocks);
-      const md = frontmatter({ title: page.title, notion_id: page.id, url: page.url, last_edited_time: page.lastEdited }) + `\n# ${page.title}\n\n${body}\n`;
+      const md =
+        frontmatter({ title: page.title, notion_id: page.id, url: page.url, last_edited_time: page.lastEdited }) + `\n# ${page.title}\n\n${body}\n`;
       await fs.mkdir(path.dirname(abs), { recursive: true });
       await fs.writeFile(abs, md, 'utf8');
       written++;
