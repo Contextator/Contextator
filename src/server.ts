@@ -15,7 +15,7 @@ import './services/sources/notion.js';
 import { loadConfig } from './config.js';
 import type { AppContext } from './context.js';
 import { createDb, waitForDb } from './db/client.js';
-import { ensureSchema, SchemaMismatchError } from './db/ensure-schema.js';
+import { bootstrapDatabase, SchemaMismatchError } from './db/bootstrap.js';
 import { mcpRoutes } from './mcp/router.js';
 import { SessionRegistry } from './mcp/sessions.js';
 import { sweepOrphanDirs } from './services/data-dir.js';
@@ -100,7 +100,7 @@ async function main(): Promise<void> {
     log.warn({ attempt, error: err instanceof Error ? err.message : String(err) }, 'waiting for database'),
   );
   try {
-    await ensureSchema(db, { dimensions: config.EMBEDDING_DIMENSIONS, resetVectors: config.RESET_VECTORS, log });
+    await bootstrapDatabase(db, { pool, dimensions: config.EMBEDDING_DIMENSIONS, resetVectors: config.RESET_VECTORS, log });
   } catch (err) {
     if (err instanceof SchemaMismatchError) {
       log.fatal(err.message);
