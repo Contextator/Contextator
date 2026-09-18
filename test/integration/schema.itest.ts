@@ -177,13 +177,16 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
 
     // Step two: the upgrade. It adopts the baseline rather than applying it — had it applied it, the
     // first `CREATE TABLE` would have failed — and then applies the migrations cut since, which today
-    // is `0001_index_generations` ([ADR-0039](../../../.ssot/ADR.md#adr-0039)). So the claim is no
-    // longer "nothing changed": it is that nothing changed *except* what that migration says it
-    // changes, and the lines that moved are checked by name rather than counted.
+    // is `0001_index_generations` ([ADR-0039](../../../.ssot/ADR.md#adr-0039)) and
+    // `0002_hybrid_search` ([ADR-0041](../../../.ssot/ADR.md#adr-0041)). So the claim is no
+    // longer "nothing changed": it is that nothing changed *except* what those migrations say they
+    // change, and the lines that moved are checked by name rather than counted.
     await applySchema(database);
     const changed = snapshotDifference(afterLadder, await captureSchema(db));
     expect(changed).not.toHaveLength(0);
-    expect(changed.filter((line) => !/index_generation|live_generation|\| generation \||documents_project_path_uq/.test(line))).toEqual([]);
+    expect(changed.filter((line) => !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv/.test(line))).toEqual(
+      [],
+    );
 
     // And the carried-forward rows kept the generation every pre-ADR-0039 document is already in.
     const generations = await db.execute(sql`SELECT DISTINCT index_generation FROM documents`);

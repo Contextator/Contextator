@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import {
   boolean,
   check,
+  customType,
   foreignKey,
   index,
   integer,
@@ -44,6 +45,22 @@ import {
  * looks at its length; the dimension is enforced by the column type in the database, as it always was.
  */
 const MIGRATION_VECTOR_DIMENSIONS = 384;
+
+/**
+ * PostgreSQL's `tsvector`, which drizzle-kit has no column helper for
+ * ([ADR-0041](../../.ssot/ADR.md#adr-0041)). It is declared rather than generated on purpose: a
+ * `GENERATED ALWAYS AS (to_tsvector('simple', …)) STORED` column would bake one text search
+ * configuration into the table for every row of every project at once, and the configuration is the
+ * one thing that has to be able to vary per source.
+ *
+ * `driverData: string` because nothing in this codebase ever reads the column back: it is written by
+ * `replaceDocument` as a `to_tsvector(…)` expression and read only by `@@` inside the search
+ * statement. A mapper that pretended to parse a `tsvector` into something would be a mapper nobody
+ * calls and nobody maintains.
+ */
+const tsvector = customType<{ data: string; driverData: string }>({
+  dataType: () => 'tsvector',
+});
 
 export const projectStatus = pgEnum('project_status', ['idle', 'indexing', 'error']);
 
@@ -188,6 +205,19 @@ export const chunks = pgTable(
     tokenCount: integer('token_count').notNull(),
     embedding: vector('embedding', { dimensions: MIGRATION_VECTOR_DIMENSIONS }).notNull(),
     /**
+     * The lexical half of retrieval ([ADR-0041](../../.ssot/ADR.md#adr-0041)):
+     * `to_tsvector(<config>, heading_path || ' ' || content)`, written by `replaceDocument` in the
+     * same statement as the row itself. The breadcrumb is in it because an identifier lives in a
+     * heading (`### AUTH_COOKIE_SECURE`) as often as in prose, and the dense side already prepends it.
+     *
+     * **Nullable, and that is the upgrade path.** A database that has been through the migration holds
+     * this column empty for every chunk written before it; `src/db/bootstrap.ts` fills it in batches at
+     * the next start, and until it has, `content_tsv @@ query` is NULL for those rows, which is not
+     * true, which keeps them out of the lexical candidate list and leaves them exactly where dense-only
+     * retrieval had them. There is no state in which a half-filled column returns a wrong row.
+     */
+    contentTsv: tsvector('content_tsv'),
+    /**
      * Denormalised from the owning document, deliberately ([ADR-0039](../../.ssot/ADR.md#adr-0039)).
      * `searchChunks` has to apply the generation as a plain column predicate on this table with no
      * join, because that predicate is what pgvector's iterative scan will be given to work against.
@@ -204,6 +234,10 @@ export const chunks = pgTable(
     index('chunks_project_idx').on(t.projectId),
     index('chunks_document_idx').on(t.documentId),
     index('chunks_project_generation_idx').on(t.projectId, t.indexGeneration),
+    // Unlike `chunks_embedding_hnsw_idx` above, this one *is* declared here and *is* generated. A GIN
+    // index over a `tsvector` needs no fixed dimension and blocks no `ALTER COLUMN … TYPE`, so none of
+    // the reasons that keep the HNSW index in the bootstrap apply to it.
+    index('chunks_content_tsv_idx').using('gin', t.contentTsv),
   ],
 );
 

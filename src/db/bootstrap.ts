@@ -55,7 +55,7 @@ export const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../drizzle', import.m
 
 /**
  * Brings a database up to the schema this build expects, on every start, with nothing for the operator
- * to run (P2). Four phases, in this order and for these reasons:
+ * to run (P2). Five phases, in this order and for these reasons:
  *
  * 1. `CREATE EXTENSION vector` — the baseline migration declares a `vector` column and cannot install
  *    the type that column needs.
@@ -65,6 +65,9 @@ export const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../drizzle', import.m
  * 4. The dimension, the HNSW index and the legacy backfill — the three things that cannot be
  *    generated SQL, because the first is a deploy-time setting, the second depends on the first, and
  *    the third is a loop over rows.
+ * 5. `content_tsv` for the chunks that predate it — a loop over rows for the same reason, and one
+ *    that must not be inside phase 4's single transaction, because it rewrites every chunk of an
+ *    existing installation ([ADR-0041](../../.ssot/ADR.md#adr-0041)).
  *
  * The whole of it runs under a **session-scoped** advisory lock. The transaction-scoped lock this
  * replaces could not span the phases, because `migrate()` opens transactions of its own.
@@ -82,6 +85,7 @@ export async function bootstrapDatabase(db: Db, opts: BootstrapOptions): Promise
       await adoptBaselineIfNeeded(db, opts.log);
       await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
       await settleDimensionAndIndex(db, dims, opts);
+      await backfillContentTsv(db, opts.log);
     } finally {
       // Released explicitly rather than left to the connection: this client goes back to the pool and
       // would carry the lock with it, and the next start would wait on a lock nobody is using.
@@ -153,6 +157,46 @@ async function settleDimensionAndIndex(db: Db, dims: number, opts: BootstrapOpti
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
       WHERE settings.key = 'schema_version'`);
   });
+}
+
+/** How many chunks one backfill statement rewrites before coming up for air. */
+const TSV_BACKFILL_BATCH = 2_000;
+
+/** Safety valve, as in `sweepGenerations`: a loop against a live table must not be able to spin forever. */
+const TSV_BACKFILL_MAX_BATCHES = 50_000;
+
+/**
+ * Fills `chunks.content_tsv` for every chunk written before it existed
+ * ([ADR-0041](../../.ssot/ADR.md#adr-0041)).
+ *
+ * **Why this is not "the next index run will fix it".** It would not. An incremental run skips every
+ * file whose sha256 is unchanged, which after an upgrade is all of them, so an installation would
+ * carry an empty lexical half until somebody forced a rebuild — and a rebuild re-embeds the entire
+ * corpus to produce a column that is a pure function of text already in the database. The vector is
+ * the expensive half; this one is `to_tsvector` over rows that are already here.
+ *
+ * `simple`, and not the per-source language, because the query side is `simple` in this version and
+ * the two have to agree. A source that names a language gets its own configuration on its next run.
+ *
+ * Batched and outside the migration's transaction: one `UPDATE` over a large `chunks` would hold row
+ * locks for its whole duration and write a write-ahead log the size of the table. Idempotent by the
+ * `IS NULL` guard, so the steady-state cost of running it at every start is one query that matches
+ * nothing.
+ */
+async function backfillContentTsv(db: Db, log: Logger): Promise<void> {
+  let filled = 0;
+  for (let batch = 0; batch < TSV_BACKFILL_MAX_BATCHES; batch++) {
+    const updated = await db.execute(sql`
+      UPDATE chunks SET content_tsv = to_tsvector('simple', heading_path || ' ' || content)
+      WHERE id IN (SELECT id FROM chunks WHERE content_tsv IS NULL LIMIT ${TSV_BACKFILL_BATCH})`);
+    // `rowCount` is `number | null` on the driver's result type. Nothing here produces the null, but
+    // a loop whose exit condition is `=== 0` and whose value can be null is a loop that runs fifty
+    // thousand times to find that out.
+    const rows = updated.rowCount ?? 0;
+    if (rows === 0) break;
+    filled += rows;
+  }
+  if (filled > 0) log.info({ chunks: filled }, 'filled the lexical index of chunks written before hybrid search');
 }
 
 /** The dimension `chunks.embedding` currently carries, read out of the catalogue. */

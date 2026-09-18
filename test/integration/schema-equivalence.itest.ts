@@ -36,7 +36,14 @@ const baseUrl = inject('postgresBaseUrl');
 const opened: TestDatabase[] = [];
 
 /** Every generation column this migration added, and the constraint it replaced. */
-const GENERATION_MARKERS = /index_generation|live_generation|\| generation \||documents_project_path_uq/;
+/**
+ * Everything the migrations cut *after* the baseline are allowed to have changed, by name. It grows by
+ * a term per migration, on purpose: a regex that said "anything" would let the next one through
+ * unread, which is the whole thing this assertion is for. `0001_index_generations`
+ * ([ADR-0039](../../.ssot/ADR.md#adr-0039)) is the first four; `0002_hybrid_search`
+ * ([ADR-0041](../../.ssot/ADR.md#adr-0041)) is the fifth.
+ */
+const POST_BASELINE_MARKERS = /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv/;
 
 afterAll(async () => {
   for (const database of opened) await dropTestDatabase(baseUrl, database);
@@ -88,10 +95,11 @@ describe('adopting a database that already has the schema', () => {
     // the first `CREATE TABLE` would have failed and there would be no projection to compare. What
     // *is* allowed to differ is what the migrations after the baseline did, and that is checked by
     // name rather than waved through: every line that appeared or disappeared names a generation
-    // column or the unique constraint ADR-0039 replaced, and nothing else moved.
+    // column, the unique constraint ADR-0039 replaced, or the lexical column ADR-0041 added — and
+    // nothing else moved.
     const changed = snapshotDifference(before, await captureSchema(database.db));
     expect(changed).not.toHaveLength(0);
-    expect(changed.filter((line) => !GENERATION_MARKERS.test(line))).toEqual([]);
+    expect(changed.filter((line) => !POST_BASELINE_MARKERS.test(line))).toEqual([]);
 
     // The first row is drizzle's own hash of the baseline file — not a hand-rolled digest that
     // merely looks like one. A row whose hash disagreed would describe a migration nobody applied.
