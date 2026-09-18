@@ -33,11 +33,18 @@ export function setupCodeMatches(given: string, expected: string): boolean {
 export class SetupGate {
   private code: string | null = null;
   private usersExist = false;
+  /** True when the operator chose the code in .env rather than letting the server generate one. */
+  private pinned = false;
 
   /** Called once at start-up with the account count. */
   arm(userCount: number, pinnedCode?: string): void {
     this.usersExist = userCount > 0;
+    this.pinned = Boolean(pinnedCode) && !this.usersExist;
     this.code = this.usersExist ? null : (pinnedCode ?? generateSetupCode());
+  }
+
+  get codeIsPinned(): boolean {
+    return this.pinned;
   }
 
   get needsSetup(): boolean {
@@ -56,20 +63,34 @@ export class SetupGate {
   complete(): void {
     this.usersExist = true;
     this.code = null;
+    this.pinned = false;
   }
 
-  /** The banner the operator reads out of `docker compose logs`. */
+  /**
+   * The one thing an operator has to *read* out of the log, so it is drawn as a box and written
+   * straight to stdout rather than through the JSON logger.
+   *
+   * A pinned code is never echoed: the operator already has it in their own `.env`, and repeating
+   * their secret into the log — where it outlives the setup window — would be a poor trade for
+   * telling them something they know.
+   */
   banner(baseUrl: string): string {
-    return [
+    const title = ' Contextator first-run setup ';
+    const body = [
+      'No user accounts exist yet; the dashboard is waiting for its first one.',
       '',
-      '  ┌─ Contextator first-run setup ' + '─'.repeat(28),
-      '  │ No user accounts exist yet. Open ' + `${baseUrl}/setup`,
-      '  │',
-      `  │   Setup code:  ${this.code ?? ''}`,
-      '  │',
-      '  │ Valid until the first account is created. Lost it? Restart and a new one is printed.',
-      '  └' + '─'.repeat(58),
+      `  Open   ${baseUrl}/setup`,
+      this.pinned ? '  Code   the SETUP_CODE you set in .env' : `  Code   ${this.code ?? ''}`,
       '',
-    ].join('\n');
+      this.pinned
+        ? 'Clear SETUP_CODE to have a fresh code generated and printed here instead.'
+        : 'A new code is printed on every start until that first account exists.',
+    ];
+
+    const width = Math.max(title.length, ...body.map((line) => line.length)) + 2;
+    const top = `┌─${title}${'─'.repeat(width - title.length - 1)}┐`;
+    const middle = body.map((line) => `│ ${line.padEnd(width - 1)}│`);
+    const bottom = `└${'─'.repeat(width)}┘`;
+    return ['', top, ...middle, bottom, ''].join('\n');
   }
 }

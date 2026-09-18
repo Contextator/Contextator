@@ -101,7 +101,12 @@ async function main(): Promise<void> {
   const userCount = await countUsers(db);
   setup.arm(userCount, config.SETUP_CODE);
   if (setup.needsSetup) {
-    log.warn(setup.banner(config.PUBLIC_BASE_URL?.replace(/\/+$/, '') ?? `http://localhost:${config.PORT}`));
+    const baseUrl = config.PUBLIC_BASE_URL?.replace(/\/+$/, '') ?? `http://localhost:${config.PORT}`;
+    // Straight to stdout rather than through pino: this is the one line an operator has to read,
+    // and a JSON-escaped box is not something anyone reads. The structured line below is what a
+    // log collector sees — it never carries the code.
+    process.stdout.write(setup.banner(baseUrl) + '\n');
+    log.warn({ setupUrl: `${baseUrl}/setup`, codeFromEnv: setup.codeIsPinned }, 'no user accounts yet; setup is pending');
     if (!config.ADMIN_TOKEN) {
       log.warn('Until that account exists, every /api/* endpoint answers 401 setup_required.');
     }

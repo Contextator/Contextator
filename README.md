@@ -40,22 +40,30 @@ survives container removal (see [Data and persistence](#data-and-persistence)).
 ```bash
 git clone <this repo> contextator && cd contextator
 cp .env.example .env
+# in .env, pick the code that /setup will ask for once:
+#   SETUP_CODE=whatever-you-like
 # optional: DOCS_HOST_PATH=/path/to/your/docs  (defaults to ./docs, which contains a demo)
 docker compose up -d
 docker compose logs -f            # wait for "embedding model ready"
 ```
 
-1. **Create the first account.** With no account yet, the log prints a one-time setup code:
+1. **Create the first account.** Open **http://localhost:3444/setup**, enter the `SETUP_CODE` you chose, and create
+   the `root` account. The code exists so that nobody who reaches the server before you can claim it; it stops working
+   the moment that account is created.
+
+   Left `SETUP_CODE` empty? The server generates one and prints it at every start until an account exists — it is in
+   the log you are already tailing:
 
    ```
-   ┌─ Contextator first-run setup ────────────────────────────
-   │ No user accounts exist yet. Open http://localhost:3444/setup
-   │
-   │   Setup code:  K7QM-92QX-VBHT
+   ┌─ Contextator first-run setup ───────────────────────────────────────────┐
+   │ No user accounts exist yet; the dashboard is waiting for its first one. │
+   │                                                                         │
+   │   Open   http://localhost:3444/setup                                    │
+   │   Code   K7QM-92QX-VBHT                                                 │
+   │                                                                         │
+   │ A new code is printed on every start until that first account exists.   │
+   └─────────────────────────────────────────────────────────────────────────┘
    ```
-
-   Open **http://localhost:3444/setup**, paste the code and create the `root` account. Lost the code? Restart the
-   container — a fresh one is printed on every start until an account exists.
 2. Sign in at **http://localhost:3444/**.
 3. Press **New project** (or `n`): name `demo`, directory `/docs/demo` (the host folder from `DOCS_HOST_PATH` is mounted at `/docs`).
    Leaving the directory empty creates an empty project; add its sources afterwards with **Add source**.
@@ -195,8 +203,10 @@ secret. The endpoint authenticates with this per-source secret, not with `ADMIN_
 
 ## Accounts and permissions
 
-The dashboard and the admin API are behind a personal account. The first one is created at `/setup` with the one-time
-code the server prints while no account exists; after that, accounts are managed from **Users** in the top-right menu.
+The dashboard and the admin API are behind a personal account. The first one is created at `/setup` with a one-time
+code — either the `SETUP_CODE` you set in `.env`, or one the server generates and prints while no account exists. Its
+only job is to make sure the operator, and not whoever reaches the server first, claims that account; it stops working
+once one exists. After that, accounts are managed from **Users** in the top-right menu.
 
 There are three instance roles, and on top of them a per-project role for members:
 
@@ -353,7 +363,7 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `AUTH_LOGIN_MAX_ATTEMPTS` | `10` | Failed sign-ins per account and per IP before a lockout / `429` |
 | `AUTH_LOGIN_WINDOW_MIN` | `15` | The IP window, and the first lockout step (it doubles, capped at an hour) |
 | `PASSWORD_MIN_LENGTH` | `12` | Applies to every password, temporary ones included. No composition rules |
-| `SETUP_CODE` | – | Pins the first-run setup code instead of generating a random one, for automated provisioning. Ignored once an account exists |
+| `SETUP_CODE` | – | The code `/setup` asks for once. Set it and you never have to read it out of the log; leave it empty and the server generates one and prints it at every start until the first account exists. Ignored from then on. Case, dashes and punctuation are ignored when it is checked, so give it enough letters and digits |
 | `ALLOWED_ORIGINS` | – | Extra browser origins allowed on `/mcp/*` (non-browser clients are always allowed) |
 | `PUBLIC_BASE_URL` | – | e.g. `https://docs.example.com` for the URLs shown in the dashboard |
 | `SESSION_IDLE_TTL_MS` | `1800000` | Idle Streamable HTTP sessions are closed after 30 min |
@@ -560,7 +570,7 @@ an existing database picks them up on the next start with nothing to run by hand
 | A push webhook returns `401 invalid_signature` | The secret in the repository settings is not the one shown while editing the source — copy it again, or **Regenerate** and paste the new one. |
 | `search_docs` says the project was indexed with another model | Re-index the project (it happens automatically on the next index run). |
 | `Could not load the sharp module` in the container | Regenerate `package-lock.json` on Linux or run `npm install --os=linux --cpu=x64 sharp` before building. |
-| I missed the first-run setup code | Restart the server. While no account exists a fresh code is printed on every start: `docker compose restart contextator && docker compose logs -f`. |
+| I missed the first-run setup code | Set `SETUP_CODE` in `.env` to something you choose and restart — it is read on every start until the first account exists. Or just restart and read the fresh code the server prints: `docker compose restart contextator && docker compose logs -f`. |
 | I forgot my password | Any root or admin can reset it from **Users → Reset password**, which hands them a temporary one for you. |
 | Nobody can sign in any more | On the server: `npm run reset-password -- <username>` (inside the container: `docker compose exec contextator node --import tsx scripts/reset-password.ts <username>`). It prints a new temporary password and ends that account's sessions. With `ADMIN_TOKEN` set, `curl -XPOST -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:3444/api/users/<id>/password` does the same. |
 | I cannot delete the last root account | By design — the server answers `409` and the dashboard disables the button. Promote somebody else to `root` first. |

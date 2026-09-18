@@ -85,6 +85,12 @@ describe('the first-run setup code', () => {
     expect(setupCodeMatches('', 'ABCD-EFGH-JKLM')).toBe(false); // a length mismatch must not throw
   });
 
+  it('ignores punctuation in an operator-chosen code, which .env.example warns about', () => {
+    expect(setupCodeMatches('EKIP KURULUM 2026', 'ekip-kurulum-2026')).toBe(true);
+    expect(setupCodeMatches('ekip_kurulum_2026', 'ekip-kurulum-2026')).toBe(true);
+    expect(setupCodeMatches('ekipkurulum2027', 'ekip-kurulum-2026')).toBe(false);
+  });
+
   it('is armed only while no account exists, and never comes back', () => {
     const gate = new SetupGate();
     gate.arm(0);
@@ -105,11 +111,27 @@ describe('the first-run setup code', () => {
     expect(gate.pendingCode).toBeNull();
   });
 
-  it('can be pinned for automated provisioning', () => {
+  it('can be pinned in .env, and then is never echoed back into the log', () => {
     const gate = new SetupGate();
     gate.arm(0, 'PINNED-CODE-1234');
     expect(gate.pendingCode).toBe('PINNED-CODE-1234');
-    expect(gate.banner('http://localhost:3444')).toContain('PINNED-CODE-1234');
+    expect(gate.verify('pinned-code-1234')).toBe(true);
+    expect(gate.codeIsPinned).toBe(true);
+    // The operator already has it; repeating their secret into the log would outlive the setup window.
+    const banner = gate.banner('http://localhost:3444');
+    expect(banner).not.toContain('PINNED-CODE-1234');
+    expect(banner).toContain('SETUP_CODE');
+  });
+
+  it('draws a box whose borders line up, because it is meant to be read', () => {
+    const gate = new SetupGate();
+    gate.arm(0);
+    const lines = gate.banner('http://localhost:3444').split('\n').filter(Boolean);
+    const widths = new Set(lines.map((l) => [...l].length));
+    expect(widths.size).toBe(1);
+    expect(lines[0].startsWith('┌')).toBe(true);
+    expect(lines.at(-1)!.startsWith('└')).toBe(true);
+    expect(lines.some((l) => l.includes(gate.pendingCode!))).toBe(true);
   });
 });
 
