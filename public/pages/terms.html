@@ -1,0 +1,91 @@
+<h1>Terms of Use</h1>
+<p class="page-meta">Last updated: 18 September 2026</p>
+<p class="page-lead">
+  These terms cover the Contextator software and the product website at
+  <a href="https://contextator.com" target="_blank" rel="noopener">contextator.com</a>. The software itself is
+  free and open source: your rights to use, copy, modify and distribute it come from the GNU Affero General Public
+  License v3, and nothing here takes them away.
+</p>
+
+<h2>1. The license comes first</h2>
+<p>
+  Contextator is distributed under the <a href="/license">GNU Affero General Public License, version 3 or later</a>.
+  Where these terms and that license disagree about what you may do with the code, the license wins. The sections below
+  add what a license text does not cover: how the website is offered, and what running an instance means for you.
+</p>
+<p>
+  One consequence is worth spelling out because it is easy to miss. The AGPL's section 13 applies to servers: if you
+  modify Contextator and let anyone interact with your modified version over a network, you must offer those users the
+  complete source of what you are running, under the same license. Running the unmodified software — for yourself, your
+  team or your company — triggers nothing. If those terms do not fit your case, a separate commercial license is
+  available from Tunedness; see the <a href="/license">License</a> page.
+</p>
+
+<h2>2. No warranty</h2>
+<p>
+  The software and the website are provided <strong>“as is”, without warranty of any kind</strong>, express or implied,
+  including but not limited to the warranties of merchantability, fitness for a particular purpose and
+  non-infringement. There is no promise that indexing is complete, that a search returns the right passage, that a sync
+  with a third-party service succeeds, or that the software is free of defects.
+</p>
+
+<h2>3. Limitation of liability</h2>
+<p>
+  To the fullest extent permitted by applicable law, the author and Tunedness are not liable for any claim, damages or
+  other liability — including lost data, lost profits, downtime or any indirect or consequential loss — arising from
+  the software, its use, or the inability to use it. Consumer rights that cannot be waived under mandatory law are not
+  affected.
+</p>
+
+<h2>4. Running an instance is your responsibility</h2>
+<p>If you deploy Contextator, you are the operator, and that carries duties this software cannot perform for you:</p>
+<ul>
+  <li><strong>Access control.</strong> The MCP endpoints under <code>/mcp/*</code> are unauthenticated by design. Anyone who can reach one can read that project's indexed documents. Keep the server on a private network or behind an authenticating proxy, and set <code>ADMIN_TOKEN</code> whenever the dashboard is reachable by anyone but you.</li>
+  <li><strong>Secrets.</strong> Set a strong <code>SECRET_KEY</code> before storing repository or Notion tokens, and keep it out of version control. Tokens are encrypted with it; lose it and they cannot be decrypted.</li>
+  <li><strong>The content you index.</strong> You must hold the rights to index the documents you add, and you must be allowed to expose them to the AI clients you connect. Do not index material you may not copy, and do not use the software to process content unlawfully.</li>
+  <li><strong>Third-party terms.</strong> Git hosting providers, Notion and any hosted embedding API you enable have their own terms and rate limits. Your use of them through Contextator is between you and them, under your own credentials.</li>
+  <li><strong>Data protection.</strong> If the documents you index contain personal data, the obligations of a controller are yours. See the <a href="/privacy">Privacy Policy</a>.</li>
+  <li><strong>Source, if you modified it.</strong> A modified version reachable over a network owes its users the source, under the AGPL. Keep a link to your fork where those users can find it.</li>
+</ul>
+
+<h2>5. No service, no support obligation</h2>
+<p>
+  Contextator is software you run yourself, not a hosted service. There is no uptime commitment, no support window and
+  no guarantee that a future version keeps any particular behaviour, configuration variable or API shape. The product
+  website may change or be taken offline at any time. Bug reports and feature requests are welcome and answered when
+  time allows, which is not the same as a support contract.
+</p>
+
+<h2>6. Acceptable use of the website</h2>
+<p>
+  Do not attempt to break into, overload or disrupt <a href="https://contextator.com" target="_blank" rel="noopener">contextator.com</a>,
+  and do not use it to distribute malware or unlawful content. Access may be blocked if you do.
+</p>
+
+<h2>7. Names and marks</h2>
+<p>
+  The AGPL covers the code. It does not grant rights to the names <strong>“Contextator”</strong> and
+  <strong>“Tunedness”</strong>, their logos or their visual identity. You may of course say that your work is built on
+  or derived from Contextator; do not present a modified version as the official product or imply an endorsement that
+  does not exist.
+</p>
+
+<h2>8. Changes</h2>
+<p>
+  These terms may be revised; the date at the top says when they last were. Continuing to use the website or a new
+  version of the software after a revision means the revised terms apply. The version you agreed to for an older
+  release stays with that release.
+</p>
+
+<h2>9. Governing law</h2>
+<p>
+  These terms are governed by the laws of the Republic of Türkiye, and the courts of Türkiye have jurisdiction over any
+  dispute arising from them, without prejudice to mandatory consumer protections in your own country of residence.
+</p>
+
+<h2>10. Contact</h2>
+<p>
+  Questions about these terms:
+  <a href="https://contextator.com" target="_blank" rel="noopener">contextator.com</a> ·
+  <a href="https://tunedness.com" target="_blank" rel="noopener">tunedness.com</a>.
+</p>

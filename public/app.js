@@ -276,7 +276,7 @@ function renderHealth() {
     el('span', { class: 'version', text: `v${h.version}` }),
   );
   $('#allowed-roots').textContent = (h.allowedDocRoots || []).join(', ');
-  $('#version').textContent = `Contextator v${h.version}`;
+  $('#version').textContent = `v${h.version}`;
   renderRootPrefix(h.allowedDocRoots || []);
 }
 
@@ -1353,5 +1353,8 @@ document.addEventListener('keydown', (event) => {
     openCreate();
   }
 });
+
+// The footer's version arrives with the first health poll; the year does not have to wait for it.
+$('#footer-year').textContent = String(new Date().getFullYear());
 
 refresh();

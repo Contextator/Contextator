@@ -1,0 +1,57 @@
+<h1>About Contextator</h1>
+<p class="page-lead">
+  Contextator turns documentation into a searchable endpoint that AI agents can talk to. Point a project at a
+  folder, a git repository, an upload or a Notion workspace, and it becomes its own
+  <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">Model Context Protocol</a> server that
+  Cursor, Claude Code, Claude Desktop and other MCP clients can search semantically.
+</p>
+
+<h2>What it does</h2>
+<ul>
+  <li><strong>One URL per project, fully isolated.</strong> Every project keeps its own documents and vector embeddings; a client connected to <code>/mcp/billing</code> never sees <code>/mcp/mobile</code>.</li>
+  <li><strong>Many sources per project.</strong> A mounted directory, a git repository (or one subdirectory of it), uploaded files and archives, an Obsidian vault or a Notion workspace — combined into one searchable endpoint, each source mounted under its own name.</li>
+  <li><strong>Semantic search, not grep.</strong> Documents are chunked with their heading breadcrumbs intact and embedded into PostgreSQL with pgvector, so an agent finds the passage that answers the question rather than the page that repeats the keyword.</li>
+  <li><strong>Incremental indexing.</strong> Files are hashed; only what changed is re-embedded, and deleted files disappear from the index. A push webhook can trigger a run on every commit.</li>
+  <li><strong>Three tools for the agent.</strong> <code>search_docs</code> for ranked excerpts, <code>list_topics</code> for the document tree, <code>read_document</code> for the full Markdown of one indexed file.</li>
+</ul>
+
+<h2>How it works</h2>
+<p>
+  An index run syncs each source first — fetching a git branch, pulling Notion pages, reading a mounted folder — then
+  walks the result, chunks every Markdown, MDX or text file along its headings, embeds the chunks and stores them next
+  to their document. When an agent asks a question, the question is embedded the same way and answered with a cosine
+  search over that project's chunks alone.
+</p>
+<p>
+  Embeddings are generated locally on the CPU by default, with a multilingual model that covers 50+ languages. Nothing
+  about your documents is sent anywhere unless you deliberately switch the embedding provider to a hosted API.
+</p>
+
+<h2>Principles</h2>
+<ul>
+  <li><strong>Self-hosted first.</strong> One Docker container holds the database and the app. Your documents stay on your infrastructure.</li>
+  <li><strong>Local by default.</strong> The default setup makes no outbound call once the embedding model has been downloaded.</li>
+  <li><strong>Boring on purpose.</strong> The dashboard is vanilla HTML, CSS and ES modules with no build step; the server is TypeScript on Node.js.</li>
+  <li><strong>Honest about limits.</strong> The MCP endpoints are unauthenticated by design — the operator is expected to put them on a private network or behind a proxy. See the <a href="/terms">Terms of Use</a>.</li>
+</ul>
+
+<h2>Built with</h2>
+<p>
+  TypeScript · Node.js 20+ · Fastify 5 · PostgreSQL 16 with pgvector · Drizzle ORM ·
+  <code>@modelcontextprotocol/sdk</code> · transformers.js. The full list of third-party components and their licenses
+  is on the <a href="/license">License</a> page.
+</p>
+
+<h2>Who builds it</h2>
+<p>
+  Contextator is designed and developed by <strong>Muhammet Şafak</strong> and published as a
+  <a href="https://tunedness.com" target="_blank" rel="noopener">Tunedness</a> production. The product lives at
+  <a href="https://contextator.com" target="_blank" rel="noopener">contextator.com</a>, where you will also find
+  release notes, documentation and the way to report a bug or ask for a feature.
+</p>
+<p>
+  The software is free and open source under the <a href="/license">GNU Affero General Public License v3</a>: anyone may
+  use it, study it, change it and run it, and any modified version that people reach over a network has to offer its
+  source in turn — Contextator cannot be closed. A separate commercial license is available for cases where those terms
+  do not fit. The version this instance runs is shown in the footer of every page.
+</p>

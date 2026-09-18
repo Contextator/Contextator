@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import Fastify, { LogController } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
+import { pageRoutes } from './admin/pages.js';
 import { adminRoutes } from './admin/routes.js';
 import { webhookRoutes } from './admin/webhooks.js';
 // Source drivers register themselves on import.
@@ -56,6 +57,8 @@ async function main(): Promise<void> {
     prefix: '/',
     index: ['index.html'],
   });
+  // Explicit page routes win over the static wildcard, so /about and the legal pages keep clean URLs.
+  await app.register(pageRoutes, { version: APP_VERSION });
   await app.register(adminRoutes, { ctx });
   await app.register(webhookRoutes, { ctx });
   await app.register(mcpRoutes, { ctx });

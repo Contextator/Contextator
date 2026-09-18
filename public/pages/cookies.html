@@ -1,0 +1,63 @@
+<h1>Cookie Policy</h1>
+<p class="page-meta">Last updated: 18 September 2026</p>
+<p class="page-lead">
+  Contextator sets no cookies. Not for sessions, not for preferences, not for analytics. There is nothing to consent
+  to, which is why you are not being asked.
+</p>
+
+<h2>1. What is used instead</h2>
+<p>
+  The dashboard keeps one value in your browser's <code>localStorage</code>, and only when the server is protected by
+  an admin token:
+</p>
+<div class="page-table-wrap">
+  <table class="page-table">
+    <thead>
+      <tr><th>Key</th><th>Purpose</th><th>Lifetime</th><th>Category</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>contextator_admin_token</code></td>
+        <td>Holds the admin token you typed so the dashboard can send it as an <code>Authorization</code> header on every request instead of asking again on each page load.</td>
+        <td>Until you clear the site data or the dashboard removes it after the token is rejected.</td>
+        <td>Strictly necessary</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+<p>
+  <code>localStorage</code> is not a cookie: it is never attached to requests automatically, it is readable only by
+  pages from this same origin, and it is not sent to any third party. The token is transmitted only to this server, on
+  requests you trigger.
+</p>
+
+<h2>2. How to remove it</h2>
+<p>
+  Clear site data for this origin in your browser settings, or use a private window. The dashboard will ask for the
+  token again the next time it needs one. Nothing else about your visit is remembered.
+</p>
+
+<h2>3. No tracking</h2>
+<p>
+  There are no analytics scripts, no tracking pixels, no advertising identifiers, no session recording and no
+  third-party cookies set by us — in the dashboard, on these pages, or on
+  <a href="https://contextator.com" target="_blank" rel="noopener">contextator.com</a>.
+</p>
+
+<h2>4. Third-party requests</h2>
+<p>
+  The dashboard and these pages load typefaces from Google Fonts (<code>fonts.googleapis.com</code> and
+  <code>fonts.gstatic.com</code>). Those requests are made by your browser to Google, which receives your IP address
+  and user agent; the Fonts API is not used to set cookies, but the request itself does leave your machine. An operator
+  who wants a fully self-contained installation can download the two font families and serve them from
+  <code>public/</code> instead.
+</p>
+<p>
+  Beyond that, the pages load nothing from anywhere else: no CDN scripts, no embedded players, no social widgets.
+</p>
+
+<h2>5. Changes</h2>
+<p>
+  If cookies are ever introduced — they are not planned — this page will say so before they are set, and the date at
+  the top will change. See the <a href="/privacy">Privacy Policy</a> for what the software stores on the server side.
+</p>

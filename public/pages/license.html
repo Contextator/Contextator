@@ -1,0 +1,95 @@
+<h1>License</h1>
+<p class="page-lead">
+  Contextator is free software under the <strong>GNU Affero General Public License, version 3 or later</strong>. Use it,
+  read it, change it, run it for anyone — on one condition: what you build on it stays free too. A modified version that
+  people reach over a network owes them its source. Contextator cannot be quietly closed.
+</p>
+
+<h2>In short</h2>
+<ul>
+  <li><strong>You may</strong> run the software for any purpose, study and modify it, and redistribute it or your modified version.</li>
+  <li><strong>If you distribute it</strong> — as source, as a binary, as a container image — the recipients get the complete corresponding source under this same license, with your changes included.</li>
+  <li><strong>If you modify it and let others use it over a network</strong> — section 13, the reason this is the Affero license and not the plain GPL — those users must be offered the complete source of the version you are running.</li>
+  <li><strong>Running it unmodified</strong> for yourself, your team or your company triggers none of that. Internal use is simply use.</li>
+  <li><strong>The documents you index are yours.</strong> The license covers Contextator's own code, not your content, and an AI client talking to <code>/mcp/…</code> does not become a derivative work of it.</li>
+  <li><strong>No warranty, no liability.</strong> See the <a href="/terms">Terms of Use</a>.</li>
+</ul>
+<p class="page-note">
+  This summary is a convenience, not a substitute: only the full text is the license.
+  <a href="/license.txt">Read the complete GNU AGPL v3</a> — it ships with every copy of the software as the
+  <code>LICENSE</code> file.
+</p>
+
+<h2>Copyright and notice</h2>
+<pre class="page-license">Contextator — self-hosted MCP documentation server
+Copyright (C) 2026 Muhammet Şafak — Tunedness
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see &lt;https://www.gnu.org/licenses/&gt;.</pre>
+<p>
+  The source of this program is published at
+  <a href="https://contextator.com" target="_blank" rel="noopener">contextator.com</a>. If you are using a modified
+  version of Contextator, ask whoever runs it for their source — the license entitles you to it.
+</p>
+
+<h2>Commercial license</h2>
+<p>
+  The AGPL does not fit every situation: some companies forbid it by policy, and some products cannot publish the source
+  of what they ship. Because <strong>Muhammet Şafak</strong> holds the copyright of Contextator in full, a separate
+  commercial license can be granted for those cases, on terms agreed in writing and without the source-disclosure
+  obligations of sections 5, 6 and 13.
+</p>
+<p>
+  This is an offer of an alternative, never a restriction of the AGPL: the free license above stands on its own and
+  nothing is being held back from it. Ask at
+  <a href="https://tunedness.com" target="_blank" rel="noopener">tunedness.com</a>.
+</p>
+
+<h2>Third-party components</h2>
+<p>
+  Contextator stands on other people's work. Each component keeps its own license, and those licenses apply to those
+  components — not to Contextator itself. All of them are permissive and compatible with the AGPL:
+</p>
+<div class="page-table-wrap">
+  <table class="page-table">
+    <thead>
+      <tr><th>Component</th><th>Used for</th><th>License</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Fastify</td><td>HTTP server</td><td>MIT</td></tr>
+      <tr><td><code>@modelcontextprotocol/sdk</code></td><td>MCP transports and server</td><td>MIT</td></tr>
+      <tr><td>PostgreSQL · pgvector</td><td>storage and vector search</td><td>PostgreSQL License</td></tr>
+      <tr><td><code>pg</code></td><td>PostgreSQL client</td><td>MIT</td></tr>
+      <tr><td>Drizzle ORM</td><td>schema and queries</td><td>Apache-2.0</td></tr>
+      <tr><td>transformers.js (<code>@huggingface/transformers</code>)</td><td>local embeddings</td><td>Apache-2.0</td></tr>
+      <tr><td>OpenAI Node SDK</td><td>optional hosted embeddings</td><td>Apache-2.0</td></tr>
+      <tr><td><code>@notionhq/client</code></td><td>Notion sync</td><td>MIT</td></tr>
+      <tr><td>isomorphic-git</td><td>git clone and fetch</td><td>MIT</td></tr>
+      <tr><td><code>node-stream-zip</code> · <code>node-unrar-js</code></td><td>archive extraction</td><td>MIT</td></tr>
+      <tr><td><code>tar</code></td><td>tar and tar.gz extraction</td><td>BlueOak-1.0.0</td></tr>
+      <tr><td>Zod</td><td>request and config validation</td><td>MIT</td></tr>
+      <tr><td><code>picomatch</code></td><td>glob matching</td><td>MIT</td></tr>
+      <tr><td><code>dotenv</code></td><td>environment loading</td><td>BSD-2-Clause</td></tr>
+      <tr><td>IBM Plex Sans · IBM Plex Mono · Instrument Serif</td><td>typefaces</td><td>SIL Open Font License 1.1</td></tr>
+    </tbody>
+  </table>
+</div>
+<p>
+  The default embedding model is downloaded from Hugging Face at first start and is covered by the license stated on
+  its model card, not by this one. The authoritative license of any dependency is the one shipped in its own package;
+  the table above is a map, not a warranty.
+</p>
+<p class="page-note">
+  A machine-readable list of every transitive dependency and its license is available from a checkout with
+  <code>npm ls --all</code> or any SBOM tool of your choice.
+</p>

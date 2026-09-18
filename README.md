@@ -377,7 +377,9 @@ src/admin/routes.ts           REST API for the dashboard
 src/admin/sources-routes.ts   source CRUD, sync, test, webhook secret
 src/admin/upload-routes.ts    multipart upload sessions (the only multipart-parsing plugin)
 src/admin/webhooks.ts         push webhooks, verified with the per-source secret
+src/admin/pages.ts            /about, /privacy, /cookies, /terms, /license rendered into one shell
 public/                       vanilla HTML/JS dashboard (no build step)
+public/pages/                 body of each product/legal page + the shell they share
 scripts/smoke-mcp.ts          end-to-end MCP client check
 docs/demo/                    sample documentation (English, Turkish, MDX)
 Dockerfile                    one image: postgres:16 + pgvector + Node 22 + the app
