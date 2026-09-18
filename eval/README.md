@@ -5,6 +5,9 @@ This directory is an instrument. `npm run eval` indexes `corpus/`, asks every qu
 mean similarity of the correct hit — overall, by language and by tag — plus the worst misses and what
 came back instead.
 
+It then asks the questions in `negative.jsonl`, whose right answer is **nothing**, and prints three
+refusal rates beside the retrieval numbers ([ADR-0045](../../.ssot/ADR.md#adr-0045)).
+
 It exists because Phase 1 of the roadmap rewrites retrieval — the chunk budget, the embedding model,
 query and passage prefixes, hybrid search, filters — and every one of those changes would otherwise be
 judged by reading five search results and squinting. The decision and the alternatives are
@@ -97,6 +100,70 @@ The file is line-oriented so that changing three questions of forty-eight produc
 It is validated with zod on load: a malformed line, a duplicate id or an `expectFile` that is not in the
 corpus **fails the run**. A question set that silently shrinks is a number that silently improves.
 
+## The other rule: a question whose right answer is nothing
+
+`negative.jsonl` holds questions the corpus **cannot** answer. They are as load-bearing as the golden
+ones and they are written under a rule of their own, because the failure they have is a different
+failure: a golden question that stops being answerable fails the run loudly, and a negative question
+that stops being *un*answerable fails nothing at all.
+
+**Write it from the corpus outward, before running any search, and say what the corpus would have to
+contain.** Read a page, find the thing it plausibly ought to cover and does not, and ask about that. Do
+not run the search first, and do not delete a question because the floor lets it through — a question
+the floor answers today is the only kind that can show the floor got better tomorrow. That is the
+golden set's rule again, and it is abandoned in the same pleasant way.
+
+There are two kinds, and the difference between them is the whole substance of the set:
+
+| `kind` | What it is | Example |
+|---|---|---|
+| `absent-feature` | Shaped **exactly** like this product, answer genuinely not in the corpus. The page it belongs on exists and scores well, which is what makes these the hard negatives — and the ones an operator actually cares about. | SAML beside the OIDC page; a Kafka sink; a Python SDK; GraphQL |
+| `off-domain` | Not about this documentation at all. | sourdough, the offside rule, a React hook |
+
+```json
+{"id":"af-en-03","lang":"en","query":"Can I sign in to the browser console with SAML single sign-on?","kind":"absent-feature","note":"Authentication covers API keys, static keys and OIDC. SAML is the obvious fourth and is not there."}
+{"id":"od-en-01","lang":"en","query":"How do I keep a sourdough starter alive if I only bake once a week?","kind":"off-domain"}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `id` | yes | As in `golden.jsonl`, and unique within this file. |
+| `lang` | yes | The language of the question. |
+| `query` | yes | What somebody types. |
+| `kind` | yes | `absent-feature` or `off-domain`. Nothing else parses. |
+| `note` | on `absent-feature` | **What the corpus would have to contain for this to stop being a negative.** Required there and optional on `off-domain`, because only the first makes a claim about the corpus — and a claim nobody wrote down is a claim nobody can re-check when a page is added. |
+
+**This is a second file and a second schema on purpose.** The obvious alternative is an optional
+`expectFile` on the golden row, and it is the wrong one: it would let a real question lose its answer to
+a typo and be scored as a question that never had one — a hard failure turned into a shrug, which is
+exactly what the rule above exists to prevent. Two files cannot make that mistake, because neither
+schema can express the other's row.
+
+## What the refusal rates say, and what they do not
+
+Every run reports three figures at the shipped `SEARCH_SCORE_FLOOR`, and the search that produced them
+ran with the floor **off**: it is computed afterwards from the scores by `belowRelevanceFloor`, the
+product's own function and its escape hatch, so one indexing pass yields both the floor's cost and its
+benefit in numbers that are comparable to each other and to the gated run.
+
+- **false refusal** — how many *golden* questions the floor would refuse, and how many of those had the
+  answer inside the top five. That is the floor's price.
+- **absent-feature** — how often it fires over the hard negatives.
+- **off-domain** — how often it fires over questions about something else entirely.
+
+That is [ADR-0042](../../.ssot/ADR.md#adr-0042)'s three-band table, reproduced from the repository on
+every run instead of quoted from a paragraph; today's figures are in [BASELINE.md](BASELINE.md).
+
+**They are reported and they are not gated.** There is no evidence yet for what a defensible floor on a
+refusal rate would be, and this repository's own lesson is that a gate without a measured floor under
+it is theatre. Nor do the negative questions enter any retrieval denominator: `recall@5` and
+`heading@5` are over `golden.jsonl` and nothing else, or ADR-0044's two floors would silently become
+floors over a question set nobody argued them from. A unit test asserts exactly that.
+
+**What this still cannot do.** It measures the floor against *this* corpus's negatives — two dozen
+questions somebody sat down and invented. An operator's real unanswerable questions are about their own
+corpus, and those come from the query log of [ROADMAP.md](../../.ssot/ROADMAP.md) Item 6, not from here.
+
 ## The corpus
 
 `corpus/en/**` and `corpus/tr/**` — documentation for a fictional event-relay product called Halyard,
@@ -143,6 +210,10 @@ Changing a page can invalidate a question that depends on it, and nothing will t
   intended outcome.
 - Add a page → add at least one question for it. A page nothing asks about is corpus that only makes
   every other question harder.
+- Add a page → also re-read `negative.jsonl`. A page about SAML turns `af-en-03` into a golden question
+  filed as a negative one, and **nothing will go red**: the run will simply report a lower refusal rate.
+  Each `absent-feature` row's `note` says what would have to appear for that to happen, which is what
+  makes this check possible at all.
 - Never edit a page to make a failing question pass. That is the mirror again, wearing a different hat.
 
 ## What the numbers mean, and what they do not

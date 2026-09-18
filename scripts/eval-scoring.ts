@@ -33,10 +33,66 @@ export const GoldenRowSchema = z.strictObject({
 
 export type GoldenRow = z.infer<typeof GoldenRowSchema>;
 
+/**
+ * The two kinds of question whose right answer is "nothing"
+ * ([ADR-0045](../../.ssot/ADR.md#adr-0045)). The distinction is the substance of the negative set, so
+ * it is stated here as well as in `eval/README.md`, where somebody adding a row will read it:
+ *
+ * - **`absent-feature`** — shaped exactly like this product, and the answer is genuinely not in the
+ *   corpus: SAML beside the OIDC page, a Kafka sink, a Python SDK, GraphQL. These are the hard
+ *   negatives and the ones an operator actually cares about, because the page the answer *would* be on
+ *   exists and scores well.
+ * - **`off-domain`** — not about this documentation at all: sourdough, the offside rule, a React hook.
+ */
+export const NEGATIVE_KINDS = ['absent-feature', 'off-domain'] as const;
+
+export type NegativeKind = (typeof NEGATIVE_KINDS)[number];
+
+/** The three fields both kinds carry. Spread into each arm so the discriminator can stay a literal. */
+const negativeFields = {
+  /** Stable and unique within `negative.jsonl`, under the same rule as a golden id. */
+  id: z.string().regex(ID_RE, 'must be lowercase letters, digits and hyphens'),
+  /** The language of the *question*, as in the golden set — it is what the per-language split groups by. */
+  lang: z.enum(['en', 'tr']),
+  query: z.string().min(1),
+};
+
+/**
+ * Two arms rather than an optional `note`, because the note is load-bearing on exactly one of them.
+ *
+ * An `absent-feature` question is a claim about the corpus — *this is not written down here* — and a
+ * claim nobody wrote down is a claim nobody can re-check. A page added to `eval/corpus/` can quietly
+ * turn such a question into an answerable one, and the only thing that would catch it is the note
+ * saying what the corpus would have to contain. An `off-domain` question makes no claim about the
+ * corpus at all, so its note is optional.
+ */
+export const NegativeRowSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    ...negativeFields,
+    kind: z.literal('absent-feature'),
+    /** Required: what the corpus would have to say for this question to stop being a negative. */
+    note: z.string().min(1),
+  }),
+  z.strictObject({
+    ...negativeFields,
+    kind: z.literal('off-domain'),
+    note: z.string().min(1).optional(),
+  }),
+]);
+
+export type NegativeRow = z.infer<typeof NegativeRowSchema>;
+
 export class GoldenSetError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'GoldenSetError';
+  }
+}
+
+export class NegativeSetError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NegativeSetError';
   }
 }
 
@@ -77,6 +133,48 @@ export function parseGoldenSet(text: string, corpusFiles: ReadonlySet<string>): 
   }
 
   if (rows.length === 0) throw new GoldenSetError('golden.jsonl holds no questions');
+  return rows;
+}
+
+/**
+ * Parses `negative.jsonl` — a second file and a second schema, deliberately, rather than making
+ * `expectFile` optional on the golden row ([ADR-0045](../../.ssot/ADR.md#adr-0045)).
+ *
+ * An optional `expectFile` would let a real question lose its answer to a typo and be scored as a
+ * question that never had one: a hard failure turned into a shrug, which is the single thing
+ * `eval/README.md`'s one rule exists to prevent. Two files cannot make that mistake, because neither
+ * schema can express the other's row.
+ *
+ * It takes no corpus, because there is nothing to check a negative question against — that is what
+ * makes it a negative question. Everything else is `parseGoldenSet`'s discipline: a malformed line, an
+ * unknown field or a duplicate id fails the run rather than shrinking the set quietly.
+ */
+export function parseNegativeSet(text: string): NegativeRow[] {
+  const rows: NegativeRow[] = [];
+  const seen = new Set<string>();
+
+  for (const [index, raw] of text.split('\n').entries()) {
+    const line = raw.trim();
+    if (line === '') continue;
+    const where = `negative.jsonl:${index + 1}`;
+
+    let json: unknown;
+    try {
+      json = JSON.parse(line);
+    } catch (err) {
+      throw new NegativeSetError(`${where}: not valid JSON (${err instanceof Error ? err.message : String(err)})`);
+    }
+
+    const parsed = NegativeRowSchema.safeParse(json);
+    if (!parsed.success) throw new NegativeSetError(`${where}: ${z.prettifyError(parsed.error).replace(/\n\s*/g, ' ')}`);
+
+    const row = parsed.data;
+    if (seen.has(row.id)) throw new NegativeSetError(`${where}: duplicate id ${JSON.stringify(row.id)}`);
+    seen.add(row.id);
+    rows.push(row);
+  }
+
+  if (rows.length === 0) throw new NegativeSetError('negative.jsonl holds no questions');
   return rows;
 }
 
@@ -178,6 +276,88 @@ export function aggregate(results: readonly RowResult[]): Metrics {
   };
 }
 
+/**
+ * What one negative question measured. Deliberately **not** a `RowResult`, and deliberately without a
+ * rank, a `recall` or a score of a correct hit — there is no correct hit, and a type that could carry
+ * one is a type that could be handed to `aggregate` ([ADR-0045](../../.ssot/ADR.md#adr-0045)).
+ *
+ * That is the trap this separation exists to make unreachable: a negative question inside the golden
+ * denominators moves `recall@5` and `heading@5` without moving retrieval, and both floors of ADR-0044
+ * would then be floors over a different set of questions than the ones they were argued from.
+ */
+export interface NegativeResult {
+  row: NegativeRow;
+  /** Whether the relevance floor would answer "no good match" — the one thing being measured here. */
+  refused: boolean;
+  /** The similarity of the top hit, which is the number the floor actually sees. `null` if nothing came back. */
+  topScore: number | null;
+  hits: ScoredHit[];
+}
+
+export function scoreNegativeRow(row: NegativeRow, hits: readonly ScoredHit[], refused: boolean): NegativeResult {
+  return { row, refused, topScore: hits[0]?.score ?? null, hits: [...hits] };
+}
+
+/** One row of the three-band table: how often the floor fires over one class of question. */
+export interface RefusalBand {
+  questions: number;
+  refused: number;
+  /** `refused / questions`, and `0` over an empty band — which the report prints as `—` rather than as 0 %. */
+  rate: number;
+}
+
+/**
+ * The floor's cost, stated as a band so it sits in the same table as its benefit. `withAnswer` is the
+ * part that matters: refusing a question that was going to miss anyway costs nothing, and refusing one
+ * whose answer was on the page costs everything.
+ */
+export interface FalseRefusalBand extends RefusalBand {
+  withAnswer: number;
+}
+
+/**
+ * ADR-0042's three-band table, recomputed from the repository on every run instead of living in a
+ * paragraph of that entry ([ADR-0045](../../.ssot/ADR.md#adr-0045)).
+ *
+ * `falseRefusal` restates `Metrics.gated` and `Metrics.gatedWithAnswer` on purpose: the cost and the
+ * benefit of a floor are one argument, and an argument split across two places in a report is one
+ * nobody reads as a whole.
+ *
+ * **This reports and does not gate.** There is no evidence yet for what a defensible floor on a
+ * refusal rate would be — the bands overlap, and Phase 1's lesson is that a gate without a measured
+ * floor under it is theatre.
+ */
+export interface RefusalReport {
+  /** The `SEARCH_SCORE_FLOOR` the three bands were computed at. A band is meaningless without it. */
+  floor: number;
+  falseRefusal: FalseRefusalBand;
+  absentFeature: RefusalBand;
+  offDomain: RefusalBand;
+  results: NegativeResult[];
+}
+
+const band = (rows: readonly NegativeResult[]): RefusalBand => {
+  const refused = rows.filter((r) => r.refused).length;
+  return { questions: rows.length, refused, rate: rows.length === 0 ? 0 : refused / rows.length };
+};
+
+export function buildRefusalReport(golden: readonly RowResult[], negatives: readonly NegativeResult[], floor: number): RefusalReport {
+  const of = (kind: NegativeKind): NegativeResult[] => negatives.filter((r) => r.row.kind === kind);
+  const gated = golden.filter((r) => r.belowFloor);
+  return {
+    floor,
+    falseRefusal: {
+      questions: golden.length,
+      refused: gated.length,
+      rate: golden.length === 0 ? 0 : gated.length / golden.length,
+      withAnswer: gated.filter((r) => r.rank !== null && r.rank < 5).length,
+    },
+    absentFeature: band(of('absent-feature')),
+    offDomain: band(of('off-domain')),
+    results: [...negatives],
+  };
+}
+
 /** Groups results by every key a row produces — one key for `lang`, one per entry in `tags`. */
 export function groupBy(results: readonly RowResult[], keys: (result: RowResult) => readonly string[]): Map<string, RowResult[]> {
   const groups = new Map<string, RowResult[]>();
@@ -275,10 +455,23 @@ export interface Report {
   byTag: Record<string, Metrics>;
   /** What the run was gated on, carried into the JSON so an artifact says what it had to clear. */
   floors: Floors;
+  /**
+   * The three refusal bands, or `null` for a caller that asked no negative questions — every test in
+   * `test/eval-scoring.test.ts` that is about retrieval, and nothing else.
+   *
+   * It rides beside `overall` rather than inside it because it is not a retrieval metric and must
+   * never be averaged with one (ADR-0045).
+   */
+  refusals: RefusalReport | null;
   results: RowResult[];
 }
 
-export function buildReport(results: readonly RowResult[], context: RunContext, floors: Floors): Report {
+/**
+ * `results` is the golden set and nothing else. `refusals` carries the negative questions, and the
+ * only way into this function they have is that parameter — which is the mechanical reason the golden
+ * denominators cannot move when the negative set grows (ADR-0045).
+ */
+export function buildReport(results: readonly RowResult[], context: RunContext, floors: Floors, refusals: RefusalReport | null = null): Report {
   const toRecord = (groups: Map<string, RowResult[]>): Record<string, Metrics> =>
     Object.fromEntries([...groups.entries()].map(([key, rows]) => [key, aggregate(rows)]));
   return {
@@ -287,6 +480,7 @@ export function buildReport(results: readonly RowResult[], context: RunContext, 
     byLang: toRecord(groupBy(results, (r) => [r.row.lang])),
     byTag: toRecord(groupBy(results, (r) => r.row.tags)),
     floors,
+    refusals,
     results: [...results],
   };
 }
@@ -350,6 +544,43 @@ function configurationSummary(c: RunContext, tick = ''): string {
   );
 }
 
+/**
+ * The three-band table, in the text report. It is printed as rates and counts rather than as a column
+ * of the metrics table above, because it is not a retrieval metric: two of its three bands are
+ * measured over questions that are not in any denominator on that table (ADR-0045).
+ *
+ * The questions the floor let through are listed under it for the reason the gated golden questions
+ * are listed above it — a rate alone cannot be argued with, and the argument is what somebody moving
+ * the floor needs.
+ */
+function refusalLines(report: Report): string[] {
+  const r = report.refusals;
+  if (r === null) return [];
+
+  const rate = (b: RefusalBand): string => (b.questions === 0 ? '    —' : pct(b.rate));
+  const count = (b: RefusalBand): string => `(${String(b.refused).padStart(2)} of ${String(b.questions).padStart(2)})`;
+  const out: string[] = [];
+
+  out.push(`  refusal rates       SEARCH_SCORE_FLOOR=${r.floor}, computed from the scores — reported, never gated (ADR-0045)`);
+  out.push(
+    `    false refusal   ${rate(r.falseRefusal)}  ${count(r.falseRefusal)}  golden questions the floor would refuse` +
+      ` — ${r.falseRefusal.withAnswer} with the answer inside the top five`,
+  );
+  out.push(`    absent-feature  ${rate(r.absentFeature)}  ${count(r.absentFeature)}  shaped like the product; the answer is not in the corpus`);
+  out.push(`    off-domain      ${rate(r.offDomain)}  ${count(r.offDomain)}  not about this documentation at all`);
+
+  const letThrough = [...r.results].filter((n) => !n.refused).sort((a, b) => (b.topScore ?? 0) - (a.topScore ?? 0));
+  if (letThrough.length > 0) {
+    out.push(`    the floor answered ${letThrough.length} of these ${r.results.length} questions instead of refusing them:`);
+    for (const n of letThrough.slice(0, 10)) {
+      out.push(`      ${n.row.id} [${n.row.lang}] ${(n.topScore ?? 0).toFixed(3)} ${n.row.kind} — ${n.row.query}`);
+    }
+    if (letThrough.length > 10) out.push(`      … and ${letThrough.length - 10} more`);
+  }
+  out.push('');
+  return out;
+}
+
 function metricRow(label: string, m: Metrics, width: number): string {
   const heading = m.headingQuestions === 0 ? '   —  ' : pct(m.headingRecall5);
   return `  ${label.padEnd(width)} ${String(m.questions).padStart(3)}  ${pct(m.recall1)}  ${pct(m.recall5)}  ${m.mrr.toFixed(3)}  ${sim(m.meanCorrectScore)}  ${heading}`;
@@ -405,6 +636,8 @@ export function formatText(report: Report): string {
     out.push('  relevance floor     no question in the set falls under it.');
     out.push('');
   }
+
+  for (const line of refusalLines(report)) out.push(line);
 
   const misses = worstMisses(report.results, 5);
   if (misses.length === 0) {
@@ -468,6 +701,26 @@ export function formatMarkdown(report: Report): string {
       `**The relevance floor would refuse ${report.overall.gated} of ${report.overall.questions} questions**, ` +
         `${report.overall.gatedWithAnswer} of which had the answer inside the top five.`,
     );
+    out.push('');
+  }
+
+  const refusals = report.refusals;
+  if (refusals !== null) {
+    const mdBand = (label: string, b: RefusalBand, why: string): string =>
+      `| ${label} | ${b.questions} | ${b.refused} | ${b.questions === 0 ? '—' : `${(b.rate * 100).toFixed(1)}%`} | ${why} |`;
+    out.push(`**Refusal rates at \`SEARCH_SCORE_FLOOR=${refusals.floor}\`** — reported, never gated ([ADR-0045](../.ssot/ADR.md#adr-0045)).`);
+    out.push('');
+    out.push('| band | n | refused | rate | what it is |');
+    out.push('|---|--:|--:|--:|---|');
+    out.push(
+      mdBand(
+        'false refusal',
+        refusals.falseRefusal,
+        `golden questions the floor would refuse — ${refusals.falseRefusal.withAnswer} with the answer inside the top five`,
+      ),
+    );
+    out.push(mdBand('`absent-feature`', refusals.absentFeature, 'shaped like the product; the answer is not in the corpus'));
+    out.push(mdBand('`off-domain`', refusals.offDomain, 'not about this documentation at all'));
     out.push('');
   }
 

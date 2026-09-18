@@ -553,9 +553,12 @@ cap cannot displace the first excerpt of a page, and the floor either refuses ev
 These are not in the table above and cannot be, because they need questions the corpus **cannot**
 answer, and `golden.jsonl` has none by construction. Twenty-four were written for this — twelve with
 nothing to do with the product, twelve shaped exactly like it whose answers are genuinely absent — and
-they are **not committed**: a question whose right answer is "nothing" has no `expectFile`, and this
-harness is built around one. So the numbers below are reproducible only by writing that set again, and
-the honest version of this measurement is ROADMAP Item 6's query log.
+at the time they were **not committed**: a question whose right answer is "nothing" had no `expectFile`,
+and this harness was built around one.
+
+The numbers below are that original set's, kept as recorded. They are no longer the last word: the
+harness asks a committed negative set now ([ADR-0045](../../.ssot/ADR.md#adr-0045)), and the last
+section of this file re-measures every figure below against it — including one that did not survive.
 
 | the top hit of a question | n | min | p10 | median | max |
 |---|--:|--:|--:|--:|--:|
@@ -704,3 +707,111 @@ CHUNK_MAX_TOKENS=496 CHUNK_OVERLAP_TOKENS=124 \
 A change that means to move a floor moves the two numbers in this table and the two in
 `.github/workflows/ci.yml` in the same commit, and says why the new figure is the right one. That is the
 only mechanism there is; nothing enforces it, which is why it is written here rather than assumed.
+
+---
+
+# The questions whose right answer is nothing
+
+[ADR-0045](../../.ssot/ADR.md#adr-0045). Retrieval is unchanged here and so is the gate: the same
+sixty-four questions measure 75.0 / 87.5 / 0.802 / 84.4 at every floor in this section, because a
+negative question is in no denominator of any of them. What is new is that the table ADR-0042 argued
+`SEARCH_SCORE_FLOOR=0.82` from is now produced by `npm run eval` rather than quoted from a paragraph.
+
+| | |
+|---|---|
+| Measured at | `2490bf1`, with `eval/negative.jsonl` added |
+| Date | 2026-09-18 |
+| Negative questions | 24 — 12 `absent-feature`, 12 `off-domain`; 6 of each in each language |
+| Everything else | exactly the run above: 26 documents, 577 chunks, `local:Xenova/multilingual-e5-small:fp32`, `CHUNK_MAX_TOKENS=96`, `max_per_document=2, neighbor_context=1` |
+
+The search runs with the floor **off** and the floor is computed from the scores by
+`belowRelevanceFloor`, so a sweep is seven runs of one measurement rather than seven measurements.
+
+## The three bands, re-measured
+
+At the shipped floor, and beside what ADR-0042 recorded from the set that was never committed:
+
+| band at `SEARCH_SCORE_FLOOR=0.82` | measured here | ADR-0042 recorded |
+|---|--:|--:|
+| false refusal — golden questions refused | **0 / 64** | 0 / 64 |
+| …of which the answer was inside the top five | **0** | 0 |
+| `absent-feature` refused | **1 / 12** | 1 / 12 |
+| `off-domain` refused | **10 / 12** | 10 / 12 |
+
+Three figures, reconstructed from questions written independently, landing on the same three counts.
+That is a better outcome than this reconstruction deserved, and the distributions underneath say why it
+should not be read as a reproduction.
+
+## The distributions, and the sentence that did not survive
+
+| the top hit of a question | n | min | p10 | median | max |
+|---|--:|--:|--:|--:|--:|
+| golden, all | 64 | **0.833** | 0.846 | 0.876 | 0.919 |
+| golden, correct at rank 1 | 48 | 0.846 | 0.853 | 0.887 | 0.919 |
+| golden, wrong at rank 1 | 16 | 0.833 | — | 0.860 | 0.876 |
+| `absent-feature` | 12 | 0.802 | 0.825 | 0.845 | 0.873 |
+| `off-domain` | 12 | 0.794 | 0.802 | 0.808 | **0.839** |
+
+The golden rows are the same rows as ADR-0042's, to the thousandth, which is the control this section
+needs: the halves that should agree do agree, and the quantiles differ by a thousandth only because
+these are nearest-rank and that entry's were interpolated.
+
+**The `absent-feature` band still sits inside the golden one** — median 0.845 against a golden band that
+starts at 0.833 — which is ADR-0042's central claim and the reason the floor promises only to catch an
+off-domain question. That claim survives a second, independent set of questions.
+
+**The sentence that did not survive is the other one.** ADR-0042 reads its off-domain ceiling of 0.829
+against the golden floor of 0.833 as a separation "by four thousandths". This set's off-domain ceiling
+is **0.839**, which is *above* the golden minimum: `od-en-01`, a question about feeding a sourdough
+starter, scores higher against this corpus than six golden questions do. There is no threshold that
+separates these two classes either. Four thousandths was a property of twelve particular questions, and
+a margin that a differently-worded dozen erases was never a margin. The floor's value does not move —
+0.82 is below both bands' overlap and refuses ten of twelve off-domain questions anyway — but the
+argument for it is now "it catches most off-domain questions and costs nothing", not "it separates
+them".
+
+## The sweep
+
+| floor | golden refused | …of which the answer was in the top five | `absent-feature` | `off-domain` |
+|---|--:|--:|--:|--:|
+| 0.80 | 0 / 64 | 0 | 0 / 12 | 1 / 12 |
+| **0.82** (shipped) | **0 / 64** | **0** | **1 / 12** | **10 / 12** |
+| 0.83 | 0 / 64 | 0 | 2 / 12 | 10 / 12 |
+| 0.84 | 2 / 64 | 0 | 3 / 12 | 11 / 12 |
+| 0.845 | 4 / 64 | 1 | 3 / 12 | 11 / 12 |
+| 0.85 | 6 / 64 | 3 | 5 / 12 | 11 / 12 |
+| 0.855 | 11 / 64 | 8 | 5 / 12 | 11 / 12 |
+
+**The off-domain column is the reconstruction's weakest agreement.** ADR-0042 records 8 of 12 refused
+at 0.80 and 12 of 12 from 0.83 upward; this set refuses 1 at 0.80 and never reaches 12. These questions
+simply score higher — median 0.808 against 0.789 — and there is no way to tell from here whether the
+original dozen were further out or whether a dozen is too few for either number to mean much. The
+second explanation is the likelier one and it is also the one that generalises: this column is an
+estimate with an error bar of several questions, and nothing should be gated on it.
+
+**The golden column differs from ADR-0042's for a reason worth keeping.** That entry's sweep is a bare
+threshold sweep over the top hit: 0, 0, 0, 2, 5, 8, 14 refused — and this run reproduces those counts
+exactly when the escape hatch is ignored. The column above is smaller (0, 0, 0, 2, 4, 6, 11) because it
+is the floor **as the product ships it**, and an identifier-shaped question whose lexical half matched
+something skips the gate ([ADR-0042](../../.ssot/ADR.md#adr-0042), FR-271). At 0.855 the escape hatch
+is worth three golden questions.
+
+**And it protects the hard negatives just as effectively**, which is new and is not good news. Under
+the same sweep, the questions whose top hit falls below the floor and are spared by the hatch anyway
+are, for `absent-feature`: 1 of 3 at 0.83, 3 of 6 at 0.84, 6 of 11 at 0.85. A question shaped exactly
+like the product is identifier-shaped and does match the lexical half — that is what makes it a hard
+negative — so the hatch fires hardest on precisely the class the floor is already worst at. At the
+shipped 0.82 this costs nothing at all: no golden and no negative question is spared by it there. It is
+a reason not to raise the floor, and it belongs beside the reasons ADR-0042 already gives.
+
+## Reproducing it
+
+```bash
+npm run eval                              # the three bands, at the shipped floor
+SEARCH_SCORE_FLOOR=0.85 npm run eval      # one row of the sweep; the golden numbers do not move
+```
+
+The negative questions are in `negative.jsonl` and the rule for writing one is in
+[README.md](README.md). They gate nothing, and a run that added one to `golden.jsonl` instead would
+move `recall@5`, `heading@5` and both floors in `.github/workflows/ci.yml` — which is why they are two
+files and why a unit test asserts the denominators do not move.

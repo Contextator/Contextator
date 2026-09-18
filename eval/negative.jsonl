@@ -1,0 +1,24 @@
+{"id":"af-en-01","lang":"en","query":"Is there an official Python client library for publishing events?","kind":"absent-feature","note":"The corpus documents the HTTP API with curl and halyardctl only. It would have to name a client library and where it is published for this to be answerable."}
+{"id":"af-en-02","lang":"en","query":"How do I deliver events to a Kafka topic instead of an HTTP endpoint?","kind":"absent-feature","note":"An endpoint is a URL everywhere in the corpus. A non-HTTP sink of any kind would have to exist in the endpoint reference and in the architecture page."}
+{"id":"af-en-03","lang":"en","query":"Can I sign in to the browser console with SAML single sign-on?","kind":"absent-feature","note":"Authentication covers API keys, static keys in the environment and OIDC. SAML is the obvious fourth and is not there — the hardest kind of negative, because the page it belongs on exists."}
+{"id":"af-en-04","lang":"en","query":"Is there a GraphQL API for querying deliveries, or only REST?","kind":"absent-feature","note":"The HTTP API reference is REST throughout. A GraphQL surface would need its own schema and endpoint section."}
+{"id":"af-en-05","lang":"en","query":"Which Terraform provider do I use to manage endpoints as code?","kind":"absent-feature","note":"Endpoints are created through the API, the CLI and Helm values. Infrastructure-as-code for them is not written down anywhere."}
+{"id":"af-en-06","lang":"en","query":"How do I present a client certificate to a receiver that requires mutual TLS?","kind":"absent-feature","note":"TLS appears in the corpus only as the receiver's server certificate (HLY-4002). Client certificates on the dispatch side are absent."}
+{"id":"af-tr-01","lang":"tr","query":"Olay gövdelerini yerel disk yerine S3'te saklayabilir miyim?","kind":"absent-feature","note":"Yük havuzu her yerde yerel bir dizin olarak anlatılıyor. Nesne depolama seçeneği olsaydı yedekleme ve saklama sayfalarında adı geçmesi gerekirdi."}
+{"id":"af-tr-02","lang":"tr","query":"PostgreSQL yerine MySQL ile çalıştırabilir miyim?","kind":"absent-feature","note":"Veritabanı korpusun tamamında PostgreSQL. Başka bir veritabanı desteklenseydi kurulum ve göç sayfalarında yazardı."}
+{"id":"af-tr-03","lang":"tr","query":"Tüm denemeleri tükenen gönderimler için ölü mektup kuyruğunu nasıl boşaltırım?","kind":"absent-feature","note":"Korpus tükenen bir gönderimin 'terk edildiğini' söylüyor ama terk edilenlerin gittiği bir kuyruk, o kuyruğu okuma ya da boşaltma diye bir şey yok. Kasten zor bir negatif: cevabın bulunması gereken sayfa var."}
+{"id":"af-tr-04","lang":"tr","query":"Halyard ile birlikte gelen hazır Grafana panoları var mı?","kind":"absent-feature","note":"Gözlemlenebilirlik sayfası Prometheus serilerini sayıyor, hiçbir pano ya da pano tanımı vermiyor."}
+{"id":"af-tr-05","lang":"tr","query":"İki ayrı bölgede aktif-aktif kurulum nasıl yapılandırılır?","kind":"absent-feature","note":"Kopyalar tek bir veritabanını paylaşan süreçler olarak anlatılıyor. Bölgeler arası çoğaltma ya da aktif-aktif topoloji korpusta hiç geçmiyor."}
+{"id":"af-tr-06","lang":"tr","query":"Yönetici girişini şirketin LDAP dizinine bağlayabilir miyim?","kind":"absent-feature","note":"af-en-03'ün Türkçe eşi: kimlik doğrulama sayfası var, LDAP orada yok."}
+{"id":"od-en-01","lang":"en","query":"How do I keep a sourdough starter alive if I only bake once a week?","kind":"off-domain"}
+{"id":"od-en-02","lang":"en","query":"When exactly is a player offside in football?","kind":"off-domain"}
+{"id":"od-en-03","lang":"en","query":"Why does useEffect run twice in React development mode?","kind":"off-domain"}
+{"id":"od-en-04","lang":"en","query":"What grind size should I use for espresso and how do I adjust it?","kind":"off-domain"}
+{"id":"od-en-05","lang":"en","query":"How much notice does a landlord have to give before raising the rent?","kind":"off-domain"}
+{"id":"od-en-06","lang":"en","query":"How long should I acclimatise before climbing above four thousand metres?","kind":"off-domain"}
+{"id":"od-tr-01","lang":"tr","query":"Ekşi mayayı buzdolabında en fazla ne kadar bekletebilirim?","kind":"off-domain"}
+{"id":"od-tr-02","lang":"tr","query":"Bisiklet zincirini ne sıklıkla yağlamak gerekir?","kind":"off-domain"}
+{"id":"od-tr-03","lang":"tr","query":"Satrançta İspanyol açılışı nasıl oynanır?","kind":"off-domain"}
+{"id":"od-tr-04","lang":"tr","query":"Kedilerde karma aşı kaç ayda bir tekrarlanmalı?","kind":"off-domain"}
+{"id":"od-tr-05","lang":"tr","query":"Salon bitkilerini kışın ne sıklıkla sulamak gerekir?","kind":"off-domain"}
+{"id":"od-tr-06","lang":"tr","query":"Ehliyet için kaç saat direksiyon dersi zorunlu?","kind":"off-domain"}

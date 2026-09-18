@@ -12,6 +12,7 @@ import { chunkReserveTokens } from '../src/services/chunk-budget.js';
 import { chunkMarkdown, embeddingText } from '../src/services/chunker.js';
 import { createEmbeddingProvider, type EmbeddingProvider } from '../src/services/embeddings/index.js';
 import { readAndHash } from '../src/services/fs-scan.js';
+import { belowRelevanceFloor } from '../src/services/relevance.js';
 import { searchProject } from '../src/services/search.js';
 import { isTextSearchConfig, QUERY_TEXT_SEARCH_CONFIG, TEXT_SEARCH_CONFIGS, type TextSearchConfig } from '../src/services/text-search.js';
 import {
@@ -31,17 +32,22 @@ import {
   type TestDatabase,
 } from '../test/integration/support/postgres.js';
 import {
+  buildRefusalReport,
   buildReport,
   formatMarkdown,
   formatText,
   gateVerdict,
   NO_FLOORS,
   parseGoldenSet,
+  parseNegativeSet,
+  scoreNegativeRow,
   scoreRow,
   type Floors,
   type GateVerdict,
+  type NegativeResult,
   type RowResult,
   type RunContext,
+  type ScoredHit,
 } from './eval-scoring.js';
 
 /**
@@ -73,12 +79,28 @@ import {
  * With neither, it is the report it has always been and exits `0` whatever it finds — which is what an
  * operator sweeping a setting on a laptop wants, and the reason the floor is an argument and not a
  * constant in this file.
+ *
+ * **It also asks questions the corpus cannot answer.** `eval/negative.jsonl` holds two dozen of them
+ * ([ADR-0045](../.ssot/ADR.md#adr-0045)), and the run reports three refusal rates: how many *real*
+ * questions `SEARCH_SCORE_FLOOR` would refuse, and how often it fires over each of the two negative
+ * classes. That is ADR-0042's three-band table, reproduced from the repository rather than quoted from
+ * a paragraph. Two properties of it are load-bearing:
+ *
+ * - **The search runs with the floor off and the floor is computed from what came back.** One indexing
+ *   pass then yields the floor's cost and its benefit in numbers that are comparable to each other and
+ *   to the golden run, and `belowRelevanceFloor` — the product's own function, escape hatch and all —
+ *   is what decides, so the harness cannot drift into measuring a floor nobody ships.
+ * - **A negative question never enters a golden denominator.** It is loaded by a different parser into
+ *   a different type and reaches the report through a different parameter. If one ever did, `recall@5`
+ *   and `heading@5` would both move without retrieval moving, and ADR-0044's two floors would silently
+ *   become floors over a different question set.
  */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..');
 const CORPUS_DIR = path.join(REPO_ROOT, 'eval', 'corpus');
 const GOLDEN_PATH = path.join(REPO_ROOT, 'eval', 'golden.jsonl');
+const NEGATIVE_PATH = path.join(REPO_ROOT, 'eval', 'negative.jsonl');
 
 /**
  * Ten rather than the product's default five. `recall@5` is the headline and needs only five, but a
@@ -138,6 +160,11 @@ const USAGE = `Usage: npm run eval [-- <options>]
   SEARCH_MAX_PER_DOCUMENT, SEARCH_NEIGHBOR_CONTEXT and SEARCH_SCORE_FLOOR are read from the
   environment like every other setting, so measuring what the cap or the floor costs is running this
   twice with one of them changed rather than a flag this file has to grow.
+
+  Every run also asks eval/negative.jsonl — questions whose right answer is "nothing" — and reports
+  three refusal rates at SEARCH_SCORE_FLOOR: over the golden set, over absent-feature questions and
+  over off-domain ones. Those three are reported and never gated, and the negative questions are in
+  no recall@5 or heading@5 denominator.
 `;
 
 /** A floor is a fraction, because every metric in the report is one. `--min-recall5=85` is a mistake. */
@@ -344,7 +371,10 @@ async function run(options: Options): Promise<GateVerdict> {
 
   const files = await corpusFiles();
   const golden = parseGoldenSet(await fs.readFile(GOLDEN_PATH, 'utf8'), new Set(files));
-  step(`eval: ${files.length} corpus files, ${golden.length} questions`);
+  // Two files, two parsers, two types. The negative set is never merged into `golden` anywhere below
+  // — that is what keeps it out of every denominator in the report (ADR-0045).
+  const negative = parseNegativeSet(await fs.readFile(NEGATIVE_PATH, 'utf8'));
+  step(`eval: ${files.length} corpus files, ${golden.length} questions, ${negative.length} negative questions`);
 
   const embeddings = createEmbeddingProvider(config, evalLogger);
   step(`eval: loading ${embeddings.id} (a first run downloads it, which takes minutes)`);
@@ -399,31 +429,50 @@ async function run(options: Options): Promise<GateVerdict> {
     // the same risk: SEARCH_MAX_PER_DOCUMENT changes `recall@5` by a question, so a harness that
     // hard-coded either would measure a product nobody runs (ADR-0042).
     const selection = selectionFrom(config);
+    /**
+     * One question through the product's own search path, with the relevance floor **off**.
+     *
+     * The floor changes no hit and no score — `searchProject` returns the same list either way and
+     * only sets a flag — so asking with it off and deciding here costs nothing and buys two things.
+     * The golden run and the negative run are then one measurement rather than two, and the decision
+     * is made by `belowRelevanceFloor` itself, escape hatch included, so the figures describe the
+     * floor the product ships rather than a re-implementation of it (ADR-0045).
+     *
+     * The scan settings are the server's own, not the defaults (ADR-0040). The eval corpus is one
+     * project in an otherwise empty database, so iterative scan has nothing to do here — but a harness
+     * that measured a different `ef_search` from the one an agent searches under would be measuring
+     * something nobody runs, which is the mistake this whole file exists to avoid.
+     */
+    const ask = async (id: string, query: string): Promise<{ hits: ScoredHit[]; refused: boolean }> => {
+      const outcome = await searchProject(
+        { db, embeddings, scan, textSearchConfig, selection, scoreFloor: 0 },
+        { projectId: project.id, query, limit: SEARCH_LIMIT },
+      );
+      if (outcome.status !== 'ok') {
+        throw new Error(`Question ${id} could not be scored: searchProject answered ${outcome.status}`);
+      }
+      return {
+        hits: outcome.hits.map((hit) => ({ file: hit.file, headingPath: hit.headingPath, score: hit.score })),
+        refused: belowRelevanceFloor(query, outcome.hits, config.SEARCH_SCORE_FLOOR),
+      };
+    };
+
     step(`eval: asking ${golden.length} questions`);
     const searchStart = Date.now();
     const results: RowResult[] = [];
     for (const row of golden) {
-      // The server's own scan settings, not the defaults (ADR-0040). The eval corpus is one project in
-      // an otherwise empty database, so iterative scan has nothing to do here — but a harness that
-      // measured a different `ef_search` from the one an agent searches under would be measuring
-      // something nobody runs, which is the mistake this whole file exists to avoid.
-      const outcome = await searchProject(
-        { db, embeddings, scan, textSearchConfig, selection, scoreFloor: config.SEARCH_SCORE_FLOOR },
-        { projectId: project.id, query: row.query, limit: SEARCH_LIMIT },
-      );
-      if (outcome.status !== 'ok') {
-        throw new Error(`Question ${row.id} could not be scored: searchProject answered ${outcome.status}`);
-      }
-      results.push(
-        scoreRow(
-          row,
-          outcome.hits.map((hit) => ({ file: hit.file, headingPath: hit.headingPath, score: hit.score })),
-          // What the agent would have been told, recorded beside the rank rather than instead of it.
-          // The hits are scored either way: the floor's cost is "the answer was here and we refused
-          // it", and folding a refusal into `recall@5` would hide exactly that (ADR-0042).
-          outcome.belowFloor,
-        ),
-      );
+      const { hits, refused } = await ask(row.id, row.query);
+      // What the agent would have been told, recorded beside the rank rather than instead of it.
+      // The hits are scored either way: the floor's cost is "the answer was here and we refused it",
+      // and folding a refusal into `recall@5` would hide exactly that (ADR-0042).
+      results.push(scoreRow(row, hits, refused));
+    }
+
+    step(`eval: asking ${negative.length} questions the corpus cannot answer`);
+    const negativeResults: NegativeResult[] = [];
+    for (const row of negative) {
+      const { hits, refused } = await ask(row.id, row.query);
+      negativeResults.push(scoreNegativeRow(row, hits, refused));
     }
     const searchMs = Date.now() - searchStart;
 
@@ -449,7 +498,10 @@ async function run(options: Options): Promise<GateVerdict> {
       searchMs,
     };
 
-    const report = buildReport(results, context, options.floors);
+    // The negative results reach the report here and only here — as their own argument, never merged
+    // into `results` (ADR-0045). `test/eval-scoring.test.ts` asserts what that buys: the golden
+    // denominators are the same number with the negative set loaded and without it.
+    const report = buildReport(results, context, options.floors, buildRefusalReport(results, negativeResults, config.SEARCH_SCORE_FLOOR));
     // The verdict is computed before anything is written, so a floor that cannot be judged — a
     // `--min-heading5` over a question set carrying no headings — fails the run rather than being
     // rendered into a summary as a pass.
