@@ -27,6 +27,7 @@
   <li><strong>Password hashes</strong> — passwords themselves are never stored. Only a salted <code>scrypt</code> hash is kept, and it cannot be turned back into the password. Passwords never appear in the logs, and the API never returns one.</li>
   <li><strong>Sessions</strong> — one row per signed-in browser: a hash of the session token (not the token), the browser's user-agent string, the IP address the session was opened from, when it started and when it was last used.</li>
   <li><strong>Project memberships</strong> — which account may read, and which may change, which project.</li>
+  <li><strong>MCP tokens</strong> — for each project, a hash of every token that was issued for its MCP endpoint (never the token), the label it was given, who created it, and when it was created, last used and revoked. The token itself is shown once, when it is created, and is not recoverable afterwards.</li>
 </ul>
 <p>
   Deleting a project or a source deletes its documents, chunks, embeddings and materialised files. Deleting a user
@@ -66,7 +67,7 @@
 </ul>
 <p>There is no usage tracking, no crash reporting and no update check.</p>
 
-<h2>6. Who can see what</h2>
+<h2 id="who-can-see-what">6. Who can see what</h2>
 <p>
   An account is one of three roles. <strong>root</strong> and <strong>admin</strong> reach every project and manage
   accounts; a <strong>member</strong> reaches only the projects it has been added to, as a <em>viewer</em> that reads or
@@ -74,18 +75,21 @@
   server, not in the browser.
 </p>
 <p>
-  <strong>Accounts do not protect the MCP endpoints.</strong> <code>/mcp/&lt;project&gt;</code> is unauthenticated by
-  design, so anyone who can reach that URL can read that project's indexed documents whatever their role here — or
-  without an account at all. Membership governs the dashboard and the admin API. Keep the server on a private network,
-  or put it behind a reverse proxy that authenticates.
+  <strong>Accounts do not reach the MCP endpoints; those have their own door.</strong> A project's
+  <code>/mcp/&lt;project&gt;</code> endpoint is <em>open</em> unless the operator closes it, and while it is open anyone
+  who can reach that URL can read that project's indexed documents — whatever their role here, or without an account at
+  all. An operator can require a bearer token on any project, after which only a client holding one of that project's
+  tokens is answered. A token carries no identity: whoever holds it reads everything indexed in that project. Either
+  way, keeping the server on a private network or behind an authenticating proxy remains the operator's decision.
 </p>
 
 <h2>7. MCP clients</h2>
 <p>
   An AI agent connected to <code>/mcp/&lt;project&gt;</code> receives the excerpts and documents it searches for, and
-  whatever the agent does with them is governed by that client's own privacy policy. The MCP endpoints are
-  unauthenticated by design, so anyone who can reach the URL can read that project's indexed documents. Keep the server
-  on a private network, or put it behind a reverse proxy that authenticates.
+  whatever the agent does with them is governed by that client's own privacy policy. Whether the agent needs a token to
+  connect at all is the operator's choice, per project; see <a href="#who-can-see-what">Who can see what</a> above. What
+  the server records about a connected agent is the token it presented — as a hash, with the time it was last used —
+  and nothing about the agent itself.
 </p>
 
 <h2>8. Personal data</h2>

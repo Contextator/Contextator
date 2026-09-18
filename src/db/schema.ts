@@ -19,8 +19,37 @@ export const projects = pgTable('projects', {
   lastIndexedAt: timestamp('last_indexed_at', { withTimezone: true }),
   lastError: text('last_error'),
   embeddingModel: text('embedding_model'),
+  /**
+   * Who may talk to this project's MCP endpoint. `open` is the historical behaviour — anyone who can
+   * reach the URL — and stays the default so an upgrade breaks no configured client.
+   */
+  mcpAuth: text('mcp_auth').notNull().default('open').$type<McpAuthMode>(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * Bearer tokens for one project's MCP endpoint. Like sessions, only the hash is stored; the token
+ * itself is shown once, when it is minted.
+ */
+export const mcpTokens = pgTable(
+  'mcp_tokens',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    /** What it is for, in the operator's words: "Cursor on my laptop", "CI". */
+    name: text('name').notNull().default(''),
+    tokenHash: text('token_hash').notNull().unique(),
+    /** First few characters, so two tokens can be told apart in a list without storing either. */
+    prefix: text('prefix').notNull(),
+    createdBy: uuid('created_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  },
+  (t) => [index('mcp_tokens_project_idx').on(t.projectId)],
+);
 
 /**
  * A place a project's documents come from. Every document path is prefixed with the source `name`
@@ -191,12 +220,14 @@ export const settings = pgTable('settings', {
 });
 
 export type UserRole = 'root' | 'admin' | 'member';
+export type McpAuthMode = 'open' | 'token';
 export type ProjectMemberRole = 'viewer' | 'editor';
 
 export type UserRow = typeof users.$inferSelect;
 export type UserSessionRow = typeof userSessions.$inferSelect;
 export type ProjectMemberRow = typeof projectMembers.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
+export type McpTokenRow = typeof mcpTokens.$inferSelect;
 export type DocumentSourceRow = typeof documentSources.$inferSelect;
 export type DocumentRow = typeof documents.$inferSelect;
 export type ChunkInsert = typeof chunks.$inferInsert;

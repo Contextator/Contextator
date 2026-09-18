@@ -23,6 +23,8 @@ http://localhost:3444/mcp/<project-name>
 - **Accounts and roles.** People sign in with their own account. `root` and `admin` manage everything and everyone; a
   `member` sees only the projects it is assigned to, as a read-only `viewer` or an `editor` that adds sources, uploads
   files and re-indexes. `ADMIN_TOKEN` stays for scripts and CI. See [Accounts and permissions](#accounts-and-permissions).
+- **A door on each MCP endpoint.** A project's endpoint is open by default, as it has always been; require a bearer
+  token on it per project when you want it closed. See [MCP access](#mcp-access).
 - **Incremental indexing.** Files are hashed; only changed files are re-embedded, removed files are deleted.
 
 Stack: TypeScript · Node.js 20+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/sdk` · `@huggingface/transformers`.
@@ -240,10 +242,50 @@ password_change_required`.
 `ADMIN_TOKEN` is unchanged and still works: `Authorization: Bearer <token>` acts with **root** permissions, so scripts
 and CI that predate accounts keep running. Treat it like a root password and keep it out of browsers.
 
-> **Accounts do not protect `/mcp/*`.** The MCP endpoints are unauthenticated by design, so anyone who can reach
-> `http://host:3444/mcp/<project>` can read that project's indexed documents whatever their role here — or without an
-> account at all. Roles govern the dashboard and the admin API. Keep the server on a private network or behind an
-> authenticating proxy.
+Accounts govern the dashboard and the admin API. The MCP endpoints have their own door — see
+[MCP access](#mcp-access) below.
+
+## MCP access
+
+A project's MCP endpoint is **open** by default: anyone who can reach `http://host:3444/mcp/<project>` reads every
+document indexed there, with no account and no token. That is how Contextator has always behaved, and an upgrade does
+not change it for a single existing project.
+
+Per project, you can close it. **MCP access** on the project page switches it to **token required**, and from then on
+only a client presenting one of that project's tokens gets an answer:
+
+```bash
+claude mcp add --transport http demo-docs http://localhost:3444/mcp/demo   --header "Authorization: Bearer ctxm_9f3a…"
+```
+
+```json
+{ "mcpServers": { "demo-docs": { "url": "http://localhost:3444/mcp/demo",
+  "headers": { "Authorization": "Bearer ctxm_9f3a…" } } } }
+```
+
+Tokens are per project, named so you can tell them apart, and shown exactly once — the server keeps only a hash, the
+same as it does for passwords and sessions. Revoking one closes that project's open MCP sessions immediately rather
+than waiting for the client's next request. Turning the requirement on does the same, so a session opened while the
+endpoint was public does not outlive the moment it stopped being.
+
+| | root | admin | editor | viewer |
+|---|:--:|:--:|:--:|:--:|
+| See a project's tokens (names, prefixes, last use) | ✓ | ✓ | ✓ | ✓ |
+| Mint and revoke a token | ✓ | ✓ | ✓ | – |
+| Require a token, or make the endpoint open again | ✓ | ✓ | – | – |
+
+Deciding whether a project's documents are readable by anything that can reach the URL is the same class of decision
+as creating the project in the first place, which is why it sits with `admin` rather than `editor`.
+
+**What this does not do.** The token is a bearer credential for the endpoint, not an account: it carries no identity,
+no per-document rules and no audit trail beyond "this token was last used at". A holder reads everything indexed in
+that project. And a token-protected project answers `401` where an unknown project answers `404`, so the existence of
+a project name is still discoverable by anyone who can reach the server — hiding that would mean answering `404` to a
+client with a wrong token, which is worse to debug than it is worth.
+
+Clients that cannot set an `Authorization` header — a browser `EventSource` on the legacy SSE transport, for one —
+cannot reach a token-protected project at all. Leave those projects open, or put the whole instance behind an
+authenticating proxy.
 
 ## Data and persistence
 
@@ -306,6 +348,10 @@ claude mcp add --transport http demo-docs http://localhost:3444/mcp/demo
 **Legacy SSE clients** connect with `GET http://localhost:3444/mcp/demo`; the server answers with an
 `endpoint` event pointing at `/mcp/demo/messages?sessionId=…`. Modern clients POST an `initialize`
 request to the same URL and get Streamable HTTP. No client configuration is needed to pick one.
+
+If the project requires a token, every one of these needs `Authorization: Bearer <token>` — on the SSE
+stream and on the messages channel both. The dashboard's **Connect** panel prints the snippets with the
+header already in place. See [MCP access](#mcp-access).
 
 ### Tools exposed to the agent
 
@@ -412,6 +458,10 @@ no ambient credential.
 | `GET /api/projects/:id/sources/:sid/files` | Files currently materialised for an upload source |
 | `DELETE /api/projects/:id/sources/:sid/files?path=…` | Delete one of them and re-index |
 | `POST /api/webhooks/git/:sourceId` | Push webhook. Authenticated by the per-source secret, **not** `ADMIN_TOKEN` |
+| `GET /api/projects/:id/mcp-tokens` | This project's live MCP tokens: name, prefix, when they were created and last used. Never the token itself |
+| `POST /api/projects/:id/mcp-tokens` `{ name? }` | Mint one → `201 { token, secret }`; `secret` is returned **once** |
+| `DELETE /api/projects/:id/mcp-tokens/:tokenId` | Revoke it and close the project's open MCP sessions |
+| `PATCH /api/projects/:id/mcp-auth` `{ mode }` | `open` or `token` (root/admin) |
 
 ### Accounts
 
@@ -491,6 +541,8 @@ src/admin/webhooks.ts         push webhooks, verified with the per-source secret
 src/admin/auth-routes.ts      /api/auth/* and /api/setup/*
 src/admin/users-routes.ts     /api/users/*
 src/admin/members-routes.ts   /api/projects/:id/members/*
+src/admin/mcp-routes.ts       /api/projects/:id/mcp-tokens/* and the open/token switch
+src/mcp/access.ts             the MCP endpoint's access rule, as a pure function
 src/admin/pages.ts            /about, /privacy, /cookies, /terms, /license rendered into one shell
 src/admin/auth-pages.ts       /login, /setup, /change-password and the guard on `/`
 public/                       vanilla HTML/JS dashboard (no build step)
@@ -498,6 +550,7 @@ public/core.js                shared helpers: el(), api(), state, the event bus
 public/auth.js                the signed-in account, the top-bar menu, permission helpers
 public/users.js               the account list at #/~users
 public/members.js             a project's Members panel
+public/mcp.js                 a project's MCP access panel and its tokens
 public/auth-page.js           /login, /setup and /change-password — imports nothing from the dashboard
 public/pages/                 body of each product/legal page + the shell they share
 scripts/smoke-mcp.ts          end-to-end MCP client check
@@ -524,8 +577,9 @@ The vector column's dimension is a deployment setting (`vector(384)` vs `vector(
 generated migrations would hard-code. Instead `ensure-schema.ts` runs idempotent `CREATE … IF NOT EXISTS`
 DDL on every start under an advisory lock and records the dimension in a `settings` table so a
 mismatch fails fast with a clear message. `src/db/schema.ts` is kept in sync by hand and powers Drizzle's
-typed queries and Drizzle Studio. Schema version 4 added `users`, `user_sessions` and `project_members`;
-an existing database picks them up on the next start with nothing to run by hand.
+typed queries and Drizzle Studio. Schema version 4 added `users`, `user_sessions` and `project_members`, and
+version 5 added `mcp_tokens` and `projects.mcp_auth`; an existing database picks them up on the next start with
+nothing to run by hand, and every project keeps the MCP behaviour it already had.
 
 ## Security notes
 
@@ -551,8 +605,12 @@ an existing database picks them up on the next start with nothing to run by hand
   deliberately left without `credentials`, so `ALLOWED_ORIGINS` cannot be used to read the API as a signed-in user.
 - The last active root account cannot be deleted, demoted or disabled, and an admin cannot touch a root account.
 - `ADMIN_TOKEN` bypasses the account system with root permissions. It is meant for scripts; do not paste it into a browser.
-- **Accounts do not protect `/mcp/*`.** The MCP endpoints stay unauthenticated by design; a project a `viewer` can only
-  read in the dashboard is still readable in full by anyone who can reach its MCP URL.
+- An MCP endpoint is **open** by default — the historical behaviour — and can be closed per project with a bearer
+  token. Tokens are stored as hashes, shown once, scoped to one project, and revoking one closes that project's live
+  MCP sessions rather than waiting for the next request.
+- A token is a credential for the endpoint, not an account: it has no identity and no per-document rules, so a holder
+  reads everything indexed in that project. A project left `open` is readable by anyone who can reach its URL,
+  whatever the dashboard roles say.
 - Browser `Origin` headers on `/mcp/*` are validated (DNS-rebinding protection); CLI clients send none.
 - The embedded PostgreSQL is reachable only from inside the container (`listen_addresses=127.0.0.1`, no published port).
 
@@ -578,7 +636,9 @@ an existing database picks them up on the next start with nothing to run by hand
 | The dashboard bounces between `/` and `/login` | The cookie is not coming back. Usually `AUTH_COOKIE_SECURE=1` on a plain-HTTP origin, or a reverse proxy dropping `Set-Cookie`. Set `AUTH_COOKIE_SECURE=0` for an HTTP-only LAN install. |
 | `403 csrf_blocked` from my own script | The script is sending the session cookie from another origin. Use `Authorization: Bearer $ADMIN_TOKEN` instead; bearer requests are exempt. |
 | After upgrading, `/api/*` answers `401 setup_required` | This instance had no `ADMIN_TOKEN` and was therefore open. It is now closed: open `/setup` with the code from the log and create the first account. Projects, sources and indexes are untouched. |
-| A member reads a project in `/mcp/…` they are not a member of | Expected. MCP endpoints are unauthenticated; roles govern the dashboard and the admin API only. |
+| A member reads a project in `/mcp/…` they are not a member of | Expected while that project is `open`: dashboard roles do not reach the MCP endpoint. Require a token on it under **MCP access**. |
+| An MCP client suddenly answers `401` | The project now requires a token. Mint one under **MCP access** and add `--header "Authorization: Bearer …"` (or `headers` in `mcp.json`). |
+| I lost an MCP token | It cannot be recovered — only a hash is stored. Revoke it and mint another. |
 
 ## License
 

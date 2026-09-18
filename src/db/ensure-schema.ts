@@ -17,7 +17,7 @@ export interface EnsureSchemaOptions {
   log: Logger;
 }
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const ADVISORY_LOCK_KEY = 7213001;
 
 /**
@@ -175,6 +175,25 @@ export async function ensureSchema(db: Db, opts: EnsureSchemaOptions): Promise<v
     await run(`ALTER TABLE project_members DROP CONSTRAINT IF EXISTS project_members_role_check`);
     await run(`ALTER TABLE project_members ADD CONSTRAINT project_members_role_check CHECK (role IN ('viewer', 'editor'))`);
     await run(`CREATE INDEX IF NOT EXISTS project_members_project_idx ON project_members (project_id)`);
+
+    // v5: per-project MCP tokens. Existing projects default to `open`, which is what they already
+    // were, so an upgrade does not cut off a single configured client.
+    await run(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS mcp_auth text NOT NULL DEFAULT 'open'`);
+    await run(`ALTER TABLE projects DROP CONSTRAINT IF EXISTS projects_mcp_auth_check`);
+    await run(`ALTER TABLE projects ADD CONSTRAINT projects_mcp_auth_check CHECK (mcp_auth IN ('open', 'token'))`);
+
+    await run(`CREATE TABLE IF NOT EXISTS mcp_tokens (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      name text NOT NULL DEFAULT '',
+      token_hash text NOT NULL UNIQUE,
+      prefix text NOT NULL,
+      created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      last_used_at timestamptz,
+      revoked_at timestamptz
+    )`);
+    await run(`CREATE INDEX IF NOT EXISTS mcp_tokens_project_idx ON mcp_tokens (project_id)`);
 
     // Dimension guard: the column type is fixed once created.
     const stored = await tx.execute(sql`SELECT value FROM settings WHERE key = 'embedding_dimensions'`);

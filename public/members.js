@@ -64,12 +64,20 @@ export function renderMembers(project) {
     rows.length
       ? el('div', {}, rows)
       : el('p', { class: 'sources-empty', text: 'No members yet. Only root and admin accounts can see this project.' }),
-    el('p', { class: 'members-note' }, [
-      el('strong', { text: 'Membership governs the dashboard, not the MCP endpoint. ' }),
-      'Anyone who can reach ',
-      el('code', { text: project.mcpUrl }),
-      ' can read this project’s indexed documents, whatever their role here.',
-    ]),
+    // The honest caveat, and it changes the moment the endpoint stops being public.
+    project.mcpAuth === 'token'
+      ? el('p', { class: 'members-note ok' }, [
+          el('strong', { text: 'The MCP endpoint is behind a token. ' }),
+          'Membership governs the dashboard; ',
+          el('code', { text: project.mcpUrl }),
+          ' answers only to a client holding one of this project’s tokens — see MCP access below.',
+        ])
+      : el('p', { class: 'members-note' }, [
+          el('strong', { text: 'Membership governs the dashboard, not the MCP endpoint. ' }),
+          'Anyone who can reach ',
+          el('code', { text: project.mcpUrl }),
+          ' can read this project’s indexed documents, whatever their role here. Require a token under MCP access to change that.',
+        ]),
   ]);
 }
 
