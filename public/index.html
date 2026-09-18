@@ -228,6 +228,28 @@
             </div>
           </div>
 
+          <label class="field">
+            <span class="field-label">Language <span class="muted">— optional</span></span>
+            <select name="language">
+              <option value="">Not set — index words as written (recommended)</option>
+              <option value="english">English</option>
+              <option value="german">German</option>
+              <option value="french">French</option>
+              <option value="spanish">Spanish</option>
+              <option value="portuguese">Portuguese</option>
+              <option value="italian">Italian</option>
+              <option value="dutch">Dutch</option>
+              <option value="danish">Danish</option>
+              <option value="swedish">Swedish</option>
+              <option value="norwegian">Norwegian</option>
+              <option value="finnish">Finnish</option>
+              <option value="hungarian">Hungarian</option>
+              <option value="romanian">Romanian</option>
+              <option value="russian">Russian</option>
+            </select>
+            <span class="field-hint">Which PostgreSQL text search configuration the keyword half of search indexes this source with. <strong>There is no Turkish option, because PostgreSQL has no Turkish configuration</strong> — Turkish documentation is indexed word for word, which is the honest default and costs nothing on identifiers. Leave this unset unless you have measured it: search currently asks in the unset configuration, so a source indexed with stemming is matched <em>less</em> well, not better. Changing it re-indexes this source.</span>
+          </label>
+
           <div class="kind-only" data-kind="upload obsidian">
             <div id="dropzone" class="dropzone" tabindex="0">
               <span class="dropzone-icon" aria-hidden="true">

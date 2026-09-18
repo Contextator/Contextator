@@ -7,16 +7,37 @@ import { encryptSecret, randomSecret } from './crypto.js';
 import { FLAVORS, type Flavor } from './flavors.js';
 import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './fs-scan.js';
 import { ConflictError, NotFoundError, ValidationError } from './projects.js';
+import { TEXT_SEARCH_CONFIGS } from './text-search.js';
 
 export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion'] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
 
 const Extensions = z.array(z.enum(SUPPORTED_EXTENSIONS)).min(1);
 
+/**
+ * The PostgreSQL text search configuration this source's documents are indexed with
+ * ([ADR-0041](../../.ssot/ADR.md#adr-0041)). Unset — the default, and what every source created
+ * before that entry holds — means `simple`.
+ *
+ * The empty string is accepted and normalised away so that the dashboard's "—" option can *clear* the
+ * setting: `updateSource` merges a patch over the stored config, so a key the form simply omitted
+ * would keep whatever was there, and there would be no way back to unset.
+ *
+ * **Turkish is not an option, because PostgreSQL has no Turkish configuration**, and `simple` is what
+ * a Turkish source gets. The four schemas below each carry the key rather than sharing a base object,
+ * because each one is also the documentation of its type in `DATA-MODEL.md` §1.
+ */
+const Language = z
+  .enum(TEXT_SEARCH_CONFIGS)
+  .or(z.literal(''))
+  .optional()
+  .transform((value) => (value === '' ? undefined : value));
+
 /** Non-secret, type-specific settings stored in `document_sources.config`. */
 export const LocalConfig = z.object({
   path: z.string().min(1).max(4096),
   extensions: Extensions.default([...DEFAULT_EXTENSIONS]),
+  language: Language,
 });
 export const GitConfig = z.object({
   url: z.url().max(2048),
@@ -27,14 +48,17 @@ export const GitConfig = z.object({
   /** Last commit checked out; set by the driver. */
   lastCommit: z.string().max(64).optional(),
   extensions: Extensions.default([...DEFAULT_EXTENSIONS]),
+  language: Language,
 });
 export const UploadConfig = z.object({
   extensions: Extensions.default(['md', 'mdx', 'txt']),
+  language: Language,
 });
 export const NotionConfig = z.object({
   /** Page or database ids to start from; empty = everything shared with the integration. */
   rootIds: z.array(z.string().min(1).max(64)).max(50).default([]),
   extensions: Extensions.default(['md']),
+  language: Language,
 });
 
 export const SourceConfigByType = { local: LocalConfig, git: GitConfig, upload: UploadConfig, notion: NotionConfig } as const;
@@ -246,6 +270,10 @@ export async function setSourceStatus(
  * Drops the stored hashes of a source's documents so the next run re-chunks all of them. The indexer
  * decides what to skip from the hash of the file as it sits on disk, while the content type is applied
  * afterwards, on the way into the chunker — so without this a changed content type would reach no file.
+ *
+ * The same applies to `language` since [ADR-0041](../../.ssot/ADR.md#adr-0041): the text search
+ * configuration is spent inside `replaceDocument`, on a document the run would otherwise have skipped
+ * as unchanged.
  */
 export async function invalidateSourceDocuments(db: Db, sourceId: string): Promise<void> {
   await db.update(documents).set({ contentHash: '' }).where(eq(documents.sourceId, sourceId));

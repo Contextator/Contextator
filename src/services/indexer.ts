@@ -13,6 +13,7 @@ import type { KeyedMutex } from './locks.js';
 import { getProjectById } from './projects.js';
 import { driverFor } from './sources/driver.js';
 import { listSources, recountSources, setSourceStatus } from './sources.js';
+import { textSearchConfigFor, type TextSearchConfig } from './text-search.js';
 import { deleteDocuments, getExistingDocuments, recountProject, replaceDocument, sweepGenerations, type NewChunk } from './vector-store.js';
 
 export type JobPhase = 'queued' | 'syncing' | 'scanning' | 'embedding' | 'finalizing' | 'done' | 'error';
@@ -74,6 +75,13 @@ interface SourceFile {
   absolutePath: string;
   sourceId: string;
   flavor: Flavor;
+  /**
+   * The PostgreSQL text search configuration this file's chunks are indexed with — its source's
+   * optional `language`, `simple` when unset ([ADR-0041](../../.ssot/ADR.md#adr-0041)). It is carried
+   * on the file rather than looked up at write time because a run holds files from several sources and
+   * `replaceDocument` is given one document at a time.
+   */
+  textSearchConfig: TextSearchConfig;
 }
 
 /**
@@ -196,6 +204,7 @@ export class Indexer {
     const { db, config } = this.deps;
     const flavor = source.flavor as Flavor;
     const extensions = (source.config as { extensions?: string[] }).extensions;
+    const textSearchConfig = textSearchConfigFor((source.config as { language?: unknown }).language);
     const driver = driverFor(source, { db, log, config });
 
     let syncError: string | undefined;
@@ -221,6 +230,7 @@ export class Indexer {
           absolutePath: f.absolutePath,
           sourceId: source.id,
           flavor,
+          textSearchConfig,
         });
       }
       scanned = true;
@@ -382,6 +392,7 @@ export class Indexer {
               indexGeneration: generation,
             },
             rows,
+            file.textSearchConfig,
           );
           job.filesDone++;
           job.chunksDone += rows.length;
