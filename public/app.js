@@ -37,7 +37,10 @@ const POLL_TYPING_MS = 30000;
 const ACTIVE_PHASES = new Set(['queued', 'scanning', 'embedding', 'finalizing']);
 
 const TOOLS = [
-  { name: 'search_docs', text: 'Hybrid search — meaning and exact wording, fused. Returns ranked excerpts with path, heading breadcrumb and score.' },
+  {
+    name: 'search_docs',
+    text: 'Hybrid search — meaning and exact wording, fused. Ranked excerpts with path, breadcrumb, score and the passage around them; optional source and path_prefix filters, and an honest "no good match".',
+  },
   { name: 'list_topics', text: 'Every indexed document grouped by directory, with title and chunk count.' },
   { name: 'read_document', text: 'Full Markdown of one indexed file, capped at 512 KB.' },
 ];

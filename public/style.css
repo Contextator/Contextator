@@ -1250,6 +1250,36 @@ button:focus-visible {
   height: 38px;
 }
 
+/* The two filters, on their own row under the question. Below and not beside it: they are the part
+   of the request an operator sets once and then forgets, and the question is the part they retype. */
+.search-filters {
+  flex: 1 1 100%;
+  display: flex;
+  gap: 8px;
+}
+
+.search-filter {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  outline: none;
+}
+
+.search-filter:focus {
+  border-color: var(--accent);
+}
+
+.search-filter:disabled {
+  opacity: 0.55;
+}
+
 .hit-list {
   display: flex;
   flex-direction: column;
@@ -1318,9 +1348,15 @@ button:focus-visible {
   color: var(--accent);
 }
 
+/* The chunks either side of the excerpt. Dimmed rather than separated, because they are the same
+   page continuing and they carry neither a rank nor a score of their own (ADR-0042). */
+.hit-context {
+  color: var(--muted);
+}
+
 .hit-body {
   margin: 0;
-  max-height: 180px;
+  max-height: 260px;
   overflow: auto;
   font-size: 12.5px;
   line-height: 1.6;

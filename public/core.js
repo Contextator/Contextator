@@ -65,12 +65,18 @@ export const state = {
     projectId: null,
     query: '',
     limit: 5,
+    /** The two filters search_docs takes, so the panel asks what an agent can ask (ADR-0042). */
+    source: '',
+    pathPrefix: '',
     caret: 0,
     focused: false,
     status: 'idle', // 'idle' | 'searching' | 'done' | 'error'
     error: '',
     ranQuery: '', // the query the hits below actually answer
     hits: [],
+    /** Whether the agent would have been told "no good match" instead of the hits below. */
+    belowFloor: false,
+    scoreFloor: 0,
   },
   confirmDelete: null,
   confirmTimer: null,

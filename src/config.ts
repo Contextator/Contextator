@@ -237,6 +237,54 @@ export const EnvSchema = z
      * project holding 1 % of the chunks has to be scanned past to be found.
      */
     HNSW_MAX_SCAN_TUPLES: z.coerce.number().int().min(1).default(20_000),
+
+    // Search: how the fused list is turned into an answer (ADR-0042). None of the four changes what
+    // retrieval finds; they change which of it an agent is handed, and every default is the value the
+    // golden set was measured at.
+    /**
+     * How many excerpts of one document may appear in one answer. Two, because five results that are
+     * five consecutive chunks of the same page answer one question five times — and because a cap is a
+     * rule an operator can state in a sentence, where MMR is a λ nobody has a budget to tune.
+     *
+     * Applied after fusion and refilled from the candidates below it, so a capped answer is still the
+     * requested number of excerpts. Measured on the golden set: `recall@5` 85.9 % → 87.5 % and
+     * `heading@5` 82.8 % → 84.4 %, because the excerpt a cap displaces is a near-duplicate of one
+     * already on the page. Set it to `SEARCH_LIMIT`'s ceiling to turn the cap off.
+     */
+    SEARCH_MAX_PER_DOCUMENT: z.coerce.number().int().min(1).max(MAX_SEARCH_LIMIT).default(2),
+    /**
+     * Chunks either side of a hit, rendered as context around it rather than as extra results. One is
+     * enough to carry the sentence a chunk boundary cut in half; `0` turns it off.
+     *
+     * It is not free. A chunk is `CHUNK_MAX_TOKENS` — 96 by default since ADR-0037, where it used to be
+     * 512 — so a hit plus two neighbours is roughly three times the context it used to be, which is
+     * what `SEARCH_MAX_RESULT_CHARS` below is for.
+     */
+    SEARCH_NEIGHBOR_CONTEXT: z.coerce.number().int().min(0).max(3).default(1),
+    /**
+     * The ceiling on one rendered `search_docs` answer, in characters, after which it is cut with an
+     * explicit `[…truncated]`. Measured: a default answer — five excerpts, one neighbour a side —
+     * renders at around 3 300 characters on the evaluation corpus, so this is the budget of an agent
+     * that asked for twenty and not of one that asked for five.
+     */
+    SEARCH_MAX_RESULT_CHARS: z.coerce.number().int().min(500).default(12_000),
+    /**
+     * The cosine similarity below which `search_docs` answers "no good match" instead of handing over
+     * its best hit ([ADR-0042](../.ssot/ADR.md#adr-0042)). `0` turns the gate off.
+     *
+     * **It is a number about one embedding model, and the default is measured against the default
+     * model.** Under `multilingual-e5-small` every question the golden set answers has a top hit at
+     * 0.833 or above, and a question about something the corpus has never heard of tops out at 0.829;
+     * 0.82 sits below the first with margin and still catches ten of twelve such questions. Under
+     * another model the same number means something else entirely — `text-embedding-3-small` scores the
+     * same pair of texts far lower — so changing `EMBEDDING_MODEL` and leaving this alone is a way to
+     * refuse every search. The server says so at startup rather than leaving it to be discovered.
+     *
+     * What it does **not** separate is a question shaped like this product whose answer is simply not
+     * written down: those score inside the band of questions the corpus does answer, and no threshold
+     * splits them. That is ROADMAP.md Item 6's query log, not this.
+     */
+    SEARCH_SCORE_FLOOR: z.coerce.number().min(0).max(1).default(0.82),
   })
   .superRefine((c, ctx) => {
     if (c.EMBEDDING_PROVIDER === 'openai' && !c.OPENAI_API_KEY) {

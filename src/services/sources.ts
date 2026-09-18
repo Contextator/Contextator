@@ -146,6 +146,20 @@ export async function getSource(db: Db, projectId: string, sourceId: string): Pr
   return row;
 }
 
+/**
+ * The source an agent named in `search_docs`' `source` filter ([ADR-0042](../../.ssot/ADR.md#adr-0042)).
+ * By name, because the name is what every document path is prefixed with and therefore the only handle
+ * a client has ever been shown; unique per project, by `document_sources_project_name_uq`.
+ */
+export async function getSourceByName(db: Db, projectId: string, name: string): Promise<DocumentSourceRow | undefined> {
+  const [row] = await db
+    .select()
+    .from(documentSources)
+    .where(and(eq(documentSources.projectId, projectId), eq(documentSources.name, name)))
+    .limit(1);
+  return row;
+}
+
 export async function getSourceById(db: Db, sourceId: string): Promise<DocumentSourceRow | undefined> {
   const [row] = await db.select().from(documentSources).where(eq(documentSources.id, sourceId)).limit(1);
   return row;

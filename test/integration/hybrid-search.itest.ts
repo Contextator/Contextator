@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { DENSE_CANDIDATES } from '../../src/config.js';
+import { DENSE_CANDIDATES, MAX_SEARCH_LIMIT } from '../../src/config.js';
 import { documentSources, projects } from '../../src/db/schema.js';
 import { fuseRankLists } from '../../src/services/rrf.js';
 import { type NewChunk, replaceDocument, searchChunks, type SearchHit } from '../../src/services/vector-store.js';
@@ -73,8 +73,16 @@ let projectId: string;
 
 const identify = (hit: SearchHit): string => `${hit.file}#${hit.chunkIndex}`;
 
+/**
+ * Retrieval, not selection. Every assertion in this file is about which rows come back and in what
+ * order, over a fixture that is one document — so ADR-0042's per-document cap, which is on by
+ * default, would hold every page here to two rows and the file would be measuring the cap instead.
+ * Stated explicitly rather than left to the default, for the same reason the scan settings are.
+ */
+const WHOLE_PAGE = { maxPerDocument: MAX_SEARCH_LIMIT, neighborContext: 0 };
+
 const search = (queryText: string, limit = 5): Promise<SearchHit[]> =>
-  searchChunks(database.db, { projectId, generation: LIVE, queryEmbedding: stubVector(queryText), queryText, limit });
+  searchChunks(database.db, { projectId, generation: LIVE, queryEmbedding: stubVector(queryText), queryText, limit, selection: WHOLE_PAGE });
 
 /**
  * The dense half alone, asked of the database directly — the ordering this change has to beat, and the

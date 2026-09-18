@@ -52,6 +52,38 @@ export function scanFrom(config: Pick<Config, 'HNSW_EF_SEARCH' | 'HNSW_ITERATIVE
   };
 }
 
+/**
+ * How the fused list is turned into an answer ([ADR-0042](../../.ssot/ADR.md#adr-0042)) — the two
+ * settings that change which candidates a caller is handed rather than which ones exist. A plain
+ * structure and not a `Config`, for `HnswScan`'s reason.
+ */
+export interface ResultSelection {
+  /** Excerpts one document may contribute to one answer, applied after fusion and refilled from below. */
+  maxPerDocument: number;
+  /** Chunks either side of a hit, fetched as context *around* it rather than as further results. */
+  neighborContext: number;
+}
+
+/** The schema's own defaults, restated for a caller that holds no environment; the tests assert they agree. */
+export const DEFAULT_RESULT_SELECTION: ResultSelection = { maxPerDocument: 2, neighborContext: 1 };
+
+/** The configured selection, for the callers that hold a `Config`. */
+export function selectionFrom(config: Pick<Config, 'SEARCH_MAX_PER_DOCUMENT' | 'SEARCH_NEIGHBOR_CONTEXT'>): ResultSelection {
+  return { maxPerDocument: config.SEARCH_MAX_PER_DOCUMENT, neighborContext: config.SEARCH_NEIGHBOR_CONTEXT };
+}
+
+/**
+ * Escapes the two characters `LIKE` reads as wildcards, for a pattern built from a string somebody
+ * typed. Every caller pairs it with `ESCAPE '\'`, because the escape character is not the default.
+ *
+ * One function and not one per query: `path_prefix` searches for `_` in exactly the paths an operator
+ * would write it in, and a second copy of this is a second place for one of the two characters to be
+ * forgotten.
+ */
+export function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
 export interface SearchHit {
   /**
    * Cosine similarity in [-1, 1], higher better — **for display, and no longer for ordering**
@@ -77,6 +109,15 @@ export interface SearchHit {
   headingPath: string;
   content: string;
   chunkIndex: number;
+  /**
+   * The `neighborContext` chunks before this one in the same document, joined, or `null` when there
+   * are none or the setting is `0` ([ADR-0042](../../.ssot/ADR.md#adr-0042)). It is context and not a
+   * result: it carries no rank and no score, because it was not retrieved — it was fetched because
+   * the chunk beside it was.
+   */
+  contextBefore: string | null;
+  /** The same, after. */
+  contextAfter: string | null;
 }
 
 /** What one search is: a project, a generation, both encodings of the question, and how far to look. */
@@ -95,7 +136,22 @@ export interface SearchRequest {
   queryText: string;
   /** Excerpts to return after fusion. 1–`MAX_SEARCH_LIMIT`. */
   limit: number;
+  /**
+   * Only documents of this source ([ADR-0042](../../.ssot/ADR.md#adr-0042)). The **id**, resolved by
+   * the caller from the name an agent wrote — `documents.source_id` is the real key, and resolving it
+   * first is what lets a caller answer "unknown source; the ones this project has are …" instead of
+   * returning an empty page that looks like an honest miss.
+   */
+  sourceId?: string;
+  /**
+   * Only documents whose `relative_path` starts with this. Already normalised by the caller
+   * (`normalizeRelativePath`), and escaped here, because the `_` in `docs/getting_started` is a `LIKE`
+   * wildcard and an operator who typed it meant the character.
+   */
+  pathPrefix?: string;
   scan?: HnswScan;
+  /** The per-document cap and the neighbour context. Unset is `DEFAULT_RESULT_SELECTION`. */
+  selection?: ResultSelection;
   /**
    * The text search configuration the query is parsed with. `simple` in this version, everywhere; it
    * is a parameter so that the evaluation harness can measure stemming against it without the product
@@ -115,6 +171,8 @@ interface HybridRow extends Record<string, unknown> {
   heading_path: string;
   content: string;
   chunk_index: number;
+  context_before: string | null;
+  context_after: string | null;
 }
 
 /**
@@ -153,14 +211,57 @@ interface HybridRow extends Record<string, unknown> {
  * makes a project mid-upgrade — migrated, not yet backfilled, not yet re-indexed — behave as
  * dense-only rather than as broken.
  *
+ * **Since [ADR-0042](../../.ssot/ADR.md#adr-0042) the statement also decides which of what it found a
+ * caller is handed**, and all three parts of that are in the SQL for one reason: the pool is here.
+ * `source` and `path_prefix` are resolved to a document-id CTE and pushed into *both* candidate lists;
+ * the per-document cap is a `row_number()` over the fused ordering, so refilling from the candidates
+ * below a capped excerpt costs nothing; and the neighbours of the page are fetched after `limit` has
+ * been applied, as context rather than as results. The alternative — fusing fifty and fifty, shipping
+ * them to Node and selecting there — is the trade ADR-0041 already refused.
+ *
  * The three `hnsw.*` settings are still transaction-local `set_config(…, is_local => true)`, for
  * ADR-0040's reason: `createDb` pools connections and a session-level `SET` would follow one into an
  * index run's writes. `SET LOCAL` outside a transaction is a silent no-op.
  */
 export async function searchChunks(db: Db, request: SearchRequest): Promise<SearchHit[]> {
-  const { projectId, generation, queryEmbedding, queryText, limit } = request;
+  const { projectId, generation, queryEmbedding, queryText, limit, sourceId, pathPrefix } = request;
   const scan = request.scan ?? DEFAULT_HNSW_SCAN;
+  const selection = request.selection ?? DEFAULT_RESULT_SELECTION;
   const textSearchConfig = request.textSearchConfig ?? QUERY_TEXT_SEARCH_CONFIG;
+
+  // A filtered search is a different statement, not the same statement with a predicate that is
+  // sometimes true: an unfiltered search must keep exactly the plan ADR-0040 and ADR-0041 measured,
+  // and `and c.document_id in (select …)` over an unrestricted sub-select would not be free to the
+  // planner even though it excludes nothing.
+  const filtered = sourceId !== undefined || pathPrefix !== undefined;
+  const documentScope = filtered
+    ? sql`
+      filtered_documents as materialized (
+        -- The filters, resolved to document ids **once**, so each candidate CTE below carries one
+        -- hash semi-join rather than its own copy of two predicates. Served by
+        -- documents_project_generation_idx.
+        select id from documents
+        where project_id = ${projectId} and index_generation = ${generation}
+          ${sourceId === undefined ? sql`` : sql`and source_id = ${sourceId}`}
+          ${pathPrefix === undefined ? sql`` : sql`and relative_path like ${`${escapeLikePattern(pathPrefix)}%`} escape '\\'`}
+      ),`
+    : sql``;
+  // The third and fourth predicates ADR-0040 said were coming. Both halves get them, because a filter
+  // that applied to one of them would silently mean "this source, or anything the other retriever
+  // liked".
+  const withinScope = filtered ? sql`and c.document_id in (select id from filtered_documents)` : sql``;
+
+  // Neighbour expansion, and it is deliberately outside the fused statement's own candidate CTEs: a
+  // neighbour is not a candidate and must never be able to rank, displace one, or be counted by the
+  // per-document cap. It is a point range on chunks_document_chunk_index_uq, for the page only.
+  const neighbors = (offset: -1 | 1): ReturnType<typeof sql> =>
+    selection.neighborContext === 0
+      ? sql`null::text`
+      : sql`(select string_agg(n.content, ${'\n\n'} order by n.chunk_index)
+             from chunks n
+             where n.document_id = p.document_id and n.index_generation = ${generation}
+               and n.chunk_index between ${offset === -1 ? sql`p.chunk_index - ${selection.neighborContext}` : sql`p.chunk_index + 1`}
+                                     and ${offset === -1 ? sql`p.chunk_index - 1` : sql`p.chunk_index + ${selection.neighborContext}`})`;
 
   // pgvector's own text form, bound as a parameter and cast, rather than interpolated: this is 384
   // floats and it appears twice, once to select the dense candidates and once to score every fused
@@ -177,9 +278,16 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
       set_config('hnsw.max_scan_tuples', ${String(scan.maxScanTuples)}, true)`);
 
     return tx.execute<HybridRow>(sql`
-      with corpus as (
+      with ${documentScope}
+      corpus as (
         -- How many chunks the question is being asked of, and therefore what "this word is everywhere"
         -- means for this project. Served by chunks_project_generation_idx.
+        --
+        -- **Deliberately the whole project, filters or not** (ADR-0042). How much a term says about
+        -- which chunk is a property of the corpus, not of the slice somebody asked about; counting it
+        -- over a filtered subset would make the same question mean different things under different
+        -- filters, and a filter narrow enough to matter would fall under the floor below and drop
+        -- nothing at all.
         select greatest(
                  ceil(count(*) * ${LEXICAL_TERM_MAX_DOCUMENT_FREQUENCY}::float8),
                  ${LEXICAL_TERM_MIN_DOCUMENT_FLOOR}::float8
@@ -208,7 +316,7 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
       dense_candidates as materialized (
         select c.id, (c.embedding <=> ${vector}) as distance
         from chunks c
-        where c.project_id = ${projectId} and c.index_generation = ${generation}
+        where c.project_id = ${projectId} and c.index_generation = ${generation} ${withinScope}
         -- One sort key, and no tie-break. A second ORDER BY column here is not free: the HNSW index
         -- can only satisfy an ordering it produces itself, so adding c.id makes the whole clause
         -- unsatisfiable by the index and PostgreSQL falls back to reading the project's rows and
@@ -234,7 +342,7 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
           length(c.content) as content_length,
           c.chunk_index
         from chunks c, question
-        where c.project_id = ${projectId} and c.index_generation = ${generation}
+        where c.project_id = ${projectId} and c.index_generation = ${generation} ${withinScope}
           and c.content_tsv @@ question.q
         -- What is left of the ties is broken by properties of the corpus rather than of the database:
         -- the shorter chunk first, then the earlier one in its document. c.id stays as a backstop so
@@ -255,22 +363,48 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
           l.rank as lexical_rank,
           coalesce(1.0 / (${RRF_K} + d.rank), 0) + coalesce(1.0 / (${RRF_K} + l.rank), 0) as fused_score
         from dense d full outer join lexical l on l.id = d.id
+      ),
+      capped as (
+        -- The per-document cap (ADR-0042), as a window over the fused ordering rather than as a pass
+        -- in Node: refilling from the candidates below a capped excerpt is what row_number() <= n
+        -- does for free, over a pool that is already here. The partition's ORDER BY is the fused
+        -- ordering itself, so the excerpts a document keeps are its best ones and not an arbitrary two.
+        select
+          f.id,
+          f.dense_rank,
+          f.lexical_rank,
+          f.fused_score,
+          c.document_id,
+          c.chunk_index,
+          row_number() over (partition by c.document_id order by f.fused_score desc, f.dense_rank asc nulls last, f.id asc) as per_document
+        from fused f
+        join chunks c on c.id = f.id
+      ),
+      page as materialized (
+        -- Materialised so that the limit happens *before* the two neighbour lookups in the select
+        -- list below. Inlined, PostgreSQL would project them over every fused candidate and then
+        -- discard all but a page of the work.
+        select * from capped
+        where per_document <= ${selection.maxPerDocument}
+        order by fused_score desc, dense_rank asc nulls last, id asc
+        limit ${limit}
       )
       select
         (1 - (c.embedding <=> ${vector}))::float8 as score,
-        f.fused_score::float8 as fused_score,
-        f.dense_rank::int as dense_rank,
-        f.lexical_rank::int as lexical_rank,
+        p.fused_score::float8 as fused_score,
+        p.dense_rank::int as dense_rank,
+        p.lexical_rank::int as lexical_rank,
         doc.relative_path as file,
         doc.title as title,
         c.heading_path as heading_path,
         c.content as content,
-        c.chunk_index as chunk_index
-      from fused f
-      join chunks c on c.id = f.id
+        c.chunk_index as chunk_index,
+        ${neighbors(-1)} as context_before,
+        ${neighbors(1)} as context_after
+      from page p
+      join chunks c on c.id = p.id
       join documents doc on doc.id = c.document_id
-      order by f.fused_score desc, f.dense_rank asc nulls last, f.id asc
-      limit ${limit}`);
+      order by p.fused_score desc, p.dense_rank asc nulls last, p.id asc`);
   });
 
   return result.rows.map((row) => ({
@@ -283,6 +417,8 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
     headingPath: row.heading_path,
     content: row.content,
     chunkIndex: row.chunk_index,
+    contextBefore: row.context_before,
+    contextAfter: row.context_after,
   }));
 }
 
@@ -365,7 +501,7 @@ export interface DocumentInput {
  * in flight cannot turn one match into two and make the fallback stop resolving.
  */
 export async function getDocumentBySuffix(db: Db, projectId: string, generation: number, suffix: string): Promise<DocumentRow | undefined> {
-  const pattern = `%/${suffix.replace(/[\\%_]/g, (c) => `\\${c}`)}`;
+  const pattern = `%/${escapeLikePattern(suffix)}`;
   const rows = await db
     .select()
     .from(documents)

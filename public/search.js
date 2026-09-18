@@ -10,6 +10,11 @@
 // because an excerpt with no `D` and an `L1` is the identifier query hybrid search exists for, and an
 // operator should be able to see that rather than infer it from a reordering.
 //
+// ADR-0042 adds the two things that change what comes back rather than how it is ordered: the source
+// and path-prefix filters an agent can pass, and the relevance floor. The floor is shown as a notice
+// *above* the hits rather than instead of them — an agent would have been refused, and the operator
+// asking why needs to see what was withheld.
+//
 // The awkward part is that app.js rebuilds #detail from scratch on every poll, so nothing typed here
 // may live in the DOM. The query, the caret and whether the box has focus are all in state.search,
 // and the input's `input` event writes there without re-rendering.
@@ -60,6 +65,24 @@ export function renderSearch(project) {
 
   const submit = el('button', { type: 'submit', class: 'primary small', text: 'Search', disabled: empty || undefined });
 
+  // Plain inputs and not a select of the project's sources: the panel is meant to be the agent's
+  // request, and an agent types a name it read out of list_topics rather than picking from a list.
+  // A name that does not exist is answered by the API with the names that do.
+  const filter = (key, placeholder, label, maxlength) =>
+    el('input', {
+      type: 'text',
+      class: 'search-filter',
+      placeholder,
+      'aria-label': label,
+      maxlength,
+      autocomplete: 'off',
+      disabled: empty || undefined,
+      value: s[key],
+      oninput: (event) => {
+        s[key] = event.target.value;
+      },
+    });
+
   const form = el(
     'form',
     {
@@ -84,6 +107,10 @@ export function renderSearch(project) {
         LIMITS.map((n) => el('option', { value: String(n), selected: s.limit === n || undefined, text: `${n} hits` })),
       ),
       submit,
+      el('div', { class: 'search-filters' }, [
+        filter('source', 'source (optional)', 'Restrict to one source', '64'),
+        filter('pathPrefix', 'path prefix (optional)', 'Restrict to a path prefix', '512'),
+      ]),
     ],
   );
 
@@ -95,7 +122,7 @@ export function renderSearch(project) {
       el('p', {
         text: empty
           ? 'Index this project and its documents become searchable here, exactly as an agent would find them.'
-          : 'The same query your agent would send to search_docs, against the same chunks. D and L say which half found each excerpt — vector and keyword — and the score is the raw cosine similarity, which is shown rather than ranked on.',
+          : 'The same query your agent would send to search_docs, against the same chunks and the same filters. D and L say which half found each excerpt — vector and keyword — and the score is the raw cosine similarity, which is shown rather than ranked on.',
       }),
     ]),
     el('div', { class: 'panel-body' }, [form, results(s)]),
@@ -117,7 +144,20 @@ export function captureSearchFocus() {
 
 /** Everything but the chosen `limit`, which is a preference and survives a change of project. */
 function resetSearch(projectId) {
-  Object.assign(state.search, { projectId, query: '', caret: 0, focused: false, status: 'idle', error: '', ranQuery: '', hits: [] });
+  Object.assign(state.search, {
+    projectId,
+    query: '',
+    source: '',
+    pathPrefix: '',
+    caret: 0,
+    focused: false,
+    status: 'idle',
+    error: '',
+    ranQuery: '',
+    hits: [],
+    belowFloor: false,
+    scoreFloor: 0,
+  });
 }
 
 // ---------- the results half ----------
@@ -141,6 +181,18 @@ function results(s) {
   }
 
   return el('div', { class: 'hit-list' }, [
+    // What the agent was told instead of this list. Above it and not in place of it: the hits are the
+    // evidence for whether the floor was right, and hiding them here would hide exactly that.
+    s.belowFloor
+      ? el('div', { class: 'callout warn' }, [
+          el('span', { class: 'callout-title', text: 'Below the relevance floor' }),
+          el('p', {
+            text:
+              `search_docs would answer “no good match” here: the best excerpt scored ${(s.hits[0]?.score ?? 0).toFixed(3)}, ` +
+              `under SEARCH_SCORE_FLOOR=${s.scoreFloor}. The excerpts are shown anyway, so you can judge whether the floor was right.`,
+          }),
+        ])
+      : null,
     el('p', { class: 'hint', text: `${s.hits.length} excerpt${s.hits.length === 1 ? '' : 's'} for “${s.ranQuery}”, best first.` }),
     ...s.hits.map((hit, i) =>
       el('article', { class: 'hit' }, [
@@ -161,7 +213,13 @@ function results(s) {
             title: `Cosine similarity — shown, not used to rank · chunk #${hit.chunkIndex} of ${hit.title}`,
           }),
         ]),
-        el('pre', { class: 'hit-body', text: hit.content.trim() }),
+        // The neighbours are rendered inside the same block and dimmed, because that is what they
+        // are: the passage around the excerpt, carrying no rank and no score of their own.
+        el('pre', { class: 'hit-body' }, [
+          hit.contextBefore ? el('span', { class: 'hit-context', text: `${hit.contextBefore.trim()}\n\n` }) : null,
+          el('span', { text: hit.content.trim() }),
+          hit.contextAfter ? el('span', { class: 'hit-context', text: `\n\n${hit.contextAfter.trim()}` }) : null,
+        ]),
       ]),
     ),
   ]);
@@ -181,13 +239,18 @@ async function run(project) {
 
   try {
     const params = new URLSearchParams({ q: query, limit: String(s.limit) });
+    if (s.source.trim()) params.set('source', s.source.trim());
+    if (s.pathPrefix.trim()) params.set('path_prefix', s.pathPrefix.trim());
     const result = await api(`/api/projects/${project.id}/search?${params}`);
     if (state.selectedId !== project.id) return; // selection moved on meanwhile
     s.hits = result.hits;
+    s.belowFloor = result.belowFloor === true;
+    s.scoreFloor = result.scoreFloor ?? 0;
     s.status = 'done';
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) return; // core.js is already going to /login
     s.hits = [];
+    s.belowFloor = false;
     s.status = 'error';
     // 409 not_indexed / model_mismatch arrive here too, and their message is the remedy.
     s.error = err.message;
@@ -201,6 +264,7 @@ function clear() {
   s.caret = 0;
   s.status = 'idle';
   s.hits = [];
+  s.belowFloor = false;
   s.ranQuery = '';
   emit('render');
 }

@@ -2,6 +2,7 @@ import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { chunks, documentSources, documents, projects } from '../../src/db/schema.js';
+import { MAX_SEARCH_LIMIT } from '../../src/config.js';
 import { type NewChunk, replaceDocument, searchChunks } from '../../src/services/vector-store.js';
 import { applySchema, createTestDatabase, dropTestDatabase, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 
@@ -12,6 +13,15 @@ import { applySchema, createTestDatabase, dropTestDatabase, TEST_EMBEDDING_DIMEN
  */
 
 const baseUrl = inject('postgresBaseUrl');
+
+/**
+ * Retrieval, not selection. Every assertion in this file is about which rows come back and in what
+ * order, over a fixture that is one document — so ADR-0042's per-document cap, which is on by
+ * default, would hold every page here to two rows and the file would be measuring the cap instead.
+ * Stated explicitly rather than left to the default, for the same reason the scan settings are.
+ */
+const WHOLE_PAGE = { maxPerDocument: MAX_SEARCH_LIMIT, neighborContext: 0 };
+
 const DIMS = TEST_EMBEDDING_DIMENSIONS;
 
 /**
@@ -200,7 +210,14 @@ describe('searchChunks across two projects', () => {
   });
 
   it('returns only the queried project, ordered by ascending distance', async () => {
-    const hits = await searchChunks(database.db, { projectId: alpha, generation: LIVE, queryEmbedding: QUERY, queryText: QUERY_TEXT, limit: 10 });
+    const hits = await searchChunks(database.db, {
+      projectId: alpha,
+      generation: LIVE,
+      queryEmbedding: QUERY,
+      queryText: QUERY_TEXT,
+      limit: 10,
+      selection: WHOLE_PAGE,
+    });
 
     expect(hits).toHaveLength(ANGLES.length);
     expect(hits.map((h) => h.chunkIndex)).toEqual(EXPECTED_ORDER);
@@ -217,7 +234,14 @@ describe('searchChunks across two projects', () => {
   });
 
   it('reports a score that is exactly 1 - the cosine distance PostgreSQL computed', async () => {
-    const hits = await searchChunks(database.db, { projectId: alpha, generation: LIVE, queryEmbedding: QUERY, queryText: QUERY_TEXT, limit: 10 });
+    const hits = await searchChunks(database.db, {
+      projectId: alpha,
+      generation: LIVE,
+      queryEmbedding: QUERY,
+      queryText: QUERY_TEXT,
+      limit: 10,
+      selection: WHOLE_PAGE,
+    });
 
     const raw = await database.db.execute(sql`
       SELECT chunk_index, (embedding <=> ${vectorLiteral(QUERY)}::vector)::float8 AS distance
@@ -232,12 +256,26 @@ describe('searchChunks across two projects', () => {
   });
 
   it('honours the limit', async () => {
-    const hits = await searchChunks(database.db, { projectId: alpha, generation: LIVE, queryEmbedding: QUERY, queryText: QUERY_TEXT, limit: 3 });
+    const hits = await searchChunks(database.db, {
+      projectId: alpha,
+      generation: LIVE,
+      queryEmbedding: QUERY,
+      queryText: QUERY_TEXT,
+      limit: 3,
+      selection: WHOLE_PAGE,
+    });
     expect(hits.map((h) => h.chunkIndex)).toEqual(EXPECTED_ORDER.slice(0, 3));
   });
 
   it('gives the other project its own rows, which are the ones that would have been noticed', async () => {
-    const hits = await searchChunks(database.db, { projectId: beta, generation: LIVE, queryEmbedding: QUERY, queryText: QUERY_TEXT, limit: 10 });
+    const hits = await searchChunks(database.db, {
+      projectId: beta,
+      generation: LIVE,
+      queryEmbedding: QUERY,
+      queryText: QUERY_TEXT,
+      limit: 10,
+      selection: WHOLE_PAGE,
+    });
     expect(hits).toHaveLength(ANGLES.length);
     for (const hit of hits) expect(hit.score).toBeCloseTo(1, 6);
   });

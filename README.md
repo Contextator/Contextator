@@ -357,11 +357,27 @@ header already in place. See [MCP access](#mcp-access).
 
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
-| `search_docs` | `query: string`, `limit?: 1-20` (default 5) | Hybrid search over the project's chunks — meaning and exact wording at once, so `HALYARD_DISPATCH_TIMEOUT` finds its page as readily as a question does. Returns ranked excerpts with file path, heading breadcrumb (`Guide > Install > Docker`) and score. |
+| `search_docs` | `query: string`, `limit?: 1-20` (default 5), `source?: string`, `path_prefix?: string` | Hybrid search over the project's chunks — meaning and exact wording at once, so `HALYARD_DISPATCH_TIMEOUT` finds its page as readily as a question does. Returns ranked excerpts with file path, heading breadcrumb (`Guide > Install > Docker`), score and the passage either side of each excerpt. `source` and `path_prefix` narrow it to one source or one directory; both are optional and omitting them searches everything, as it always did. When nothing clears the relevance floor it says *no good match* and points at `list_topics` instead of returning its least bad hit. |
 | `list_topics` | – | Every indexed document grouped by directory, with title and chunk count. The first path segment is the source it came from. |
 | `read_document` | `path: string` | Full Markdown of one indexed file (path as shown by the other tools, e.g. `handbook/install.md`). Only indexed paths are served; capped at 512 KB. |
 
 The server also sends MCP `instructions` describing the project so agents know when to use which tool.
+
+**What an answer looks like, and what it costs.** Each excerpt is rendered with the chunk before and
+after it, marked with a leading and trailing `…`, so an agent usually does not have to spend a
+`read_document` call to see the sentence a chunk boundary cut in half. At most two excerpts come from
+any one document, because five results that are five consecutive chunks of one page answer the question
+once and crowd out four other pages. The whole answer is capped at `SEARCH_MAX_RESULT_CHARS` and says
+so when it cuts. All three are settings; see the configuration table.
+
+**The relevance floor is the one setting to know about before you change the embedding model.** Below
+`SEARCH_SCORE_FLOOR` — a cosine similarity, defaulting to `0.82` — `search_docs` answers *no good
+match* instead of handing over a hit an agent would cite. That number was measured against the default
+model and means nothing on another one, so changing `EMBEDDING_MODEL` and leaving it alone can refuse
+every search; the server warns about that at startup. What it catches is a question that is not about
+your documentation at all. What it does **not** catch is a question shaped like your product whose
+answer is not written down — those score exactly where real questions score, and no threshold
+separates them.
 
 ## How indexing works
 
@@ -471,6 +487,10 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `HNSW_EF_SEARCH` | `100` | How many candidates the vector index produces **before** the project filter is applied — pgvector's own default is 40. One index serves every project and pgvector post-filters, so too low a value answers a project that does not dominate the index with too few hits, or none. Costs latency on every search |
 | `HNSW_ITERATIVE_SCAN` | `relaxed_order` | `relaxed_order`, `strict_order` or `off`. Keeps scanning when the filter leaves fewer hits than asked for, instead of answering short (pgvector 0.8+; on an older one all three settings are ignored and search behaves as it did). `relaxed_order` returns the rows unordered and the server sorts them itself |
 | `HNSW_MAX_SCAN_TUPLES` | `20000` | The ceiling that actually **ends** an iterative scan, counted in index tuples across the **whole instance** rather than the project. Raise it with the instance — a project holding one per cent of the rows has to be scanned past to be found |
+| `SEARCH_MAX_PER_DOCUMENT` | `2` | Excerpts one document may contribute to one answer, applied after ranking and refilled from the excerpts below it, so an agent that asked for five still gets five. Measured on the golden set it *gains* a question — what it drops is a near-duplicate of something already on the page. `20` turns it off |
+| `SEARCH_NEIGHBOR_CONTEXT` | `1` | Chunks either side of each hit, shown as context around it rather than as further results. `0` turns it off. A chunk is `CHUNK_MAX_TOKENS`, so one either side is about three times the context a hit used to be |
+| `SEARCH_MAX_RESULT_CHARS` | `12000` | Ceiling on one rendered `search_docs` answer; past it whole excerpts are dropped and the result says how many. A default answer is around 3 300 characters |
+| `SEARCH_SCORE_FLOOR` | `0.82` | Similarity below which `search_docs` answers *no good match* rather than its best hit. `0` turns it off. **Measured against the default embedding model and meaningless on another one** — the server warns at startup if they disagree. A question naming an identifier that the keyword half actually matched skips the gate, because an exact string match is correct at any similarity |
 | `ADMIN_TOKEN` | – | **Machine access** to `/api/*` via `Authorization: Bearer …`, acting with root permissions. Browsers sign in with an account instead; treat this token like a root password |
 | `AUTH_SESSION_IDLE_MS` | `43200000` (12 h) | A dashboard session unused for this long has to sign in again. Refreshed while the dashboard is in use |
 | `AUTH_SESSION_TTL_DAYS` | `30` | Hard ceiling on a session's life, however actively it is used |
@@ -526,7 +546,7 @@ no ambient credential.
 | `POST /api/projects/:id/reindex?force=true` | Queue (incremental or full) re-index → `202 { job }` |
 | `GET /api/projects/:id/status` | Project row + live job |
 | `GET /api/projects/:id/runs` | The project's last 20 index runs (mode, counts, duration, error), newest first |
-| `GET /api/projects/:id/search?q=…&limit=…` | The same search the project's `search_docs` tool runs, as JSON: `{ query, limit, hits: [{ score, fusedScore, denseRank, lexicalRank, path, title, headingPath, chunkIndex, content }] }`. `score` is the cosine similarity and is shown rather than ranked on; `fusedScore` is what ordered the list, and the two ranks say which half of search found the excerpt (`null` for the half that did not). `limit` is 1–20 (default 5). `409 not_indexed` when the project has no chunks, `409 model_mismatch` when they were embedded with another model |
+| `GET /api/projects/:id/search?q=…&limit=…&source=…&path_prefix=…` | The same search the project's `search_docs` tool runs, as JSON: `{ query, limit, source, pathPrefix, belowFloor, scoreFloor, hits: [{ score, fusedScore, denseRank, lexicalRank, path, title, headingPath, chunkIndex, content, contextBefore, contextAfter }] }`. `score` is the cosine similarity and is shown rather than ranked on; `fusedScore` is what ordered the list, and the two ranks say which half of search found the excerpt (`null` for the half that did not). `belowFloor` is whether an agent would have been told *no good match* — the hits come back either way, so the dashboard can show what was withheld. `limit` is 1–20 (default 5); `source` and `path_prefix` are optional. `400 invalid_request` for a source this project does not have (the message names the ones it does), `409 not_indexed` when the project has no chunks, `409 model_mismatch` when they were embedded with another model |
 | `DELETE /api/projects/:id` | Delete project, its chunks and open MCP sessions (`409` while indexing) |
 | `GET /api/projects/:id/sources` | The project's sources (type, name, config, status, document count). Secrets are never returned — only `hasSecret` |
 | `POST /api/projects/:id/sources` `{ type, name, label?, flavor?, config?, secret?, index? }` | Add a source. `type` is `local`, `git`, `upload` or `notion`; `config` is type-specific (`path` / `url`+`branch`+`subdir` / `rootIds`) |
@@ -777,6 +797,9 @@ text, on every pull request, against a real server.
 | `Subdirectory "…" does not exist in the repository` | The path is relative to the repository root and is checked against the branch that was checked out. |
 | A push webhook returns `401 invalid_signature` | The secret in the repository settings is not the one shown while editing the source — copy it again, or **Regenerate** and paste the new one. |
 | `search_docs` says the project was indexed with another model | Re-index the project (it happens automatically on the next index run). |
+| Every search answers *no good match* | `SEARCH_SCORE_FLOOR` is a cosine similarity measured against the default embedding model. If you changed `EMBEDDING_MODEL`, the startup log says so — re-measure the floor with `npm run eval` against your corpus, or set `SEARCH_SCORE_FLOOR=0`. |
+| An agent is told *no good match* for something that **is** documented | The floor refused a question it should not have. The server logs every gated query at `info` with the score it saw; compare that against `SEARCH_SCORE_FLOOR` and lower it, or set it to `0`. |
+| Answers got longer after upgrading | Each excerpt now carries the chunk either side of it. `SEARCH_NEIGHBOR_CONTEXT=0` restores the old shape, and `SEARCH_MAX_RESULT_CHARS` caps the whole answer. |
 | `Could not load the sharp module` in the container | Regenerate `package-lock.json` on Linux or run `npm install --os=linux --cpu=x64 sharp` before building. |
 | I missed the first-run setup code | Set `SETUP_CODE` in `.env` to something you choose and restart — it is read on every start until the first account exists. Or just restart and read the fresh code the server prints: `docker compose restart contextator && docker compose logs -f`. |
 | I forgot my password | Any root or admin can reset it from **Users → Reset password**, which hands them a temporary one for you. |

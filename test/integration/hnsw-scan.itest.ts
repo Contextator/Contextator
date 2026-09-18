@@ -3,7 +3,7 @@ import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { documentSources, documents, projects } from '../../src/db/schema.js';
-import { DENSE_CANDIDATES } from '../../src/config.js';
+import { DENSE_CANDIDATES, MAX_SEARCH_LIMIT } from '../../src/config.js';
 import { DEFAULT_HNSW_SCAN, type HnswScan, searchChunks } from '../../src/services/vector-store.js';
 import {
   applySchema,
@@ -47,6 +47,14 @@ const LIVE = 0;
 
 /** What a caller asks for. Every assertion below is about whether it gets that many, and which. */
 const K = 10;
+
+/**
+ * Retrieval, not selection. Every assertion in this file is about which rows come back and in what
+ * order, over a fixture that is one document per project — so ADR-0042's per-document cap, which is
+ * on by default, would hold every page here to two rows and the file would be measuring the cap.
+ * Stated explicitly rather than left to the default, which is the same reason the scan settings are.
+ */
+const WHOLE_PAGE = { maxPerDocument: MAX_SEARCH_LIMIT, neighborContext: 0 };
 
 /** Rows per `INSERT`. Large enough that round trips are not the cost, small enough to stay in memory. */
 const INSERT_BATCH = 1_000;
@@ -197,19 +205,29 @@ async function seedProject(spec: Spec, index: number): Promise<void> {
     .insert(documentSources)
     .values({ projectId: project.id, type: 'local', name: 'handbook' })
     .returning({ id: documentSources.id });
-  const [document] = await database.db
+  // **Two documents and not one**, split down the middle of the chunk indexes
+  // ([ADR-0042](../../../.ssot/ADR.md#adr-0042)). Nothing above this line changes — the same rows, the
+  // same vectors, in the same order, so every ADR-0040 assertion in this file is about the corpus it
+  // was written against. What it buys is a *third* predicate that genuinely rejects something: a
+  // `path_prefix` naming the second half of the crowded project excludes five hundred of its own rows
+  // and 97.6 % of the instance, which is the case ADR-0040 said this file would have to answer for
+  // when the filters landed.
+  const half = Math.ceil(spec.chunks / 2);
+  const [first, second] = await database.db
     .insert(documents)
-    .values({
-      projectId: project.id,
-      sourceId: source.id,
-      relativePath: `handbook/${spec.name}.md`,
-      title: `${spec.name} handbook`,
-      contentHash: `hash-${spec.name}`,
-      sizeBytes: 4096,
-      chunkCount: spec.chunks,
-      indexGeneration: LIVE,
-      indexedAt: new Date(),
-    })
+    .values(
+      ['a', 'b'].map((part) => ({
+        projectId: project.id,
+        sourceId: source.id,
+        relativePath: `handbook/${spec.name}-${part}.md`,
+        title: `${spec.name} handbook, part ${part}`,
+        contentHash: `hash-${spec.name}-${part}`,
+        sizeBytes: 4096,
+        chunkCount: part === 'a' ? half : spec.chunks - half,
+        indexGeneration: LIVE,
+        indexedAt: new Date(),
+      })),
+    )
     .returning({ id: documents.id });
   ids[spec.name] = project.id;
 
@@ -232,22 +250,31 @@ async function seedProject(spec: Spec, index: number): Promise<void> {
         indexes.push(i);
         vectors.push(vectorLiteral(chunkVector(centroid, low + (high - low) * next(), next)));
       }
+      // `chunk_index` stays unique across the project rather than restarting at the second document,
+      // because every assertion in this file identifies a row by it — and it is what
+      // `chunks_document_chunk_index_uq` is about.
       await client.query(
         `INSERT INTO chunks (project_id, document_id, index_generation, chunk_index, heading_path, content, token_count, embedding)
-         SELECT $1::uuid, $2::uuid, ${LIVE}, t.i, 'Handbook > Section ' || t.i, '${spec.name} chunk ' || t.i, 12, t.v::vector
+         SELECT $1::uuid, CASE WHEN t.i < $5::int THEN $2::uuid ELSE $6::uuid END, ${LIVE}, t.i,
+                'Handbook > Section ' || t.i, '${spec.name} chunk ' || t.i, 12, t.v::vector
          FROM unnest($3::int[], $4::text[]) AS t(i, v)`,
-        [project.id, document.id, indexes, vectors],
+        [project.id, first.id, indexes, vectors, half, second.id],
       );
     }
   } finally {
     client.release();
   }
 
-  await database.db.execute(sql`UPDATE projects SET chunk_count = ${spec.chunks}, document_count = 1 WHERE id = ${project.id}`);
+  await database.db.execute(sql`UPDATE projects SET chunk_count = ${spec.chunks}, document_count = 2 WHERE id = ${project.id}`);
 }
 
 /** The answer the index has to agree with: the same rows, reached without any index at all. */
-async function bruteForce(projectId: string, limit: number, query: number[] = QUERY): Promise<Array<{ chunkIndex: number; score: number }>> {
+async function bruteForce(
+  projectId: string,
+  limit: number,
+  query: number[] = QUERY,
+  pathPrefix: string | null = null,
+): Promise<Array<{ chunkIndex: number; score: number }>> {
   const client = await database.pool.connect();
   try {
     await client.query('BEGIN');
@@ -256,10 +283,12 @@ async function bruteForce(projectId: string, limit: number, query: number[] = QU
     await client.query('SET LOCAL enable_indexscan = off');
     await client.query('SET LOCAL enable_bitmapscan = off');
     const result = await client.query<{ chunk_index: number; score: number }>(
-      `SELECT chunk_index, (1 - (embedding <=> $2::vector))::float8 AS score
-       FROM chunks WHERE project_id = $1::uuid AND index_generation = ${LIVE}
-       ORDER BY embedding <=> $2::vector LIMIT $3`,
-      [projectId, vectorLiteral(query), limit],
+      `SELECT c.chunk_index, (1 - (c.embedding <=> $2::vector))::float8 AS score
+       FROM chunks c JOIN documents d ON d.id = c.document_id
+       WHERE c.project_id = $1::uuid AND c.index_generation = ${LIVE}
+         AND ($4::text IS NULL OR d.relative_path LIKE $4 || '%')
+       ORDER BY c.embedding <=> $2::vector LIMIT $3`,
+      [projectId, vectorLiteral(query), limit, pathPrefix],
     );
     await client.query('COMMIT');
     return result.rows.map((r) => ({ chunkIndex: r.chunk_index, score: r.score }));
@@ -361,13 +390,14 @@ describe('a project crowded out of the global top-k of a shared index', () => {
       queryText: QUERY_TEXT,
       limit: K,
       scan: scan(),
+      selection: WHOLE_PAGE,
     });
 
     expect(hits).toHaveLength(K);
     // Not asserted through the score: every chunk is named after the project that owns it, so a leak
     // is visible as a string rather than inferred from a number.
     for (const hit of hits) {
-      expect(hit.file).toBe('handbook/small.md');
+      expect(hit.file).toMatch(/^handbook\/small-[ab]\.md$/);
       expect(hit.content).toMatch(/^small chunk \d+$/);
     }
   });
@@ -407,6 +437,7 @@ describe('a project crowded out of the global top-k of a shared index', () => {
       queryText: QUERY_TEXT,
       limit: K,
       scan: scan(),
+      selection: WHOLE_PAGE,
     });
     const exact = await bruteForce(ids.small, K);
 
@@ -427,6 +458,7 @@ describe('a project crowded out of the global top-k of a shared index', () => {
       queryText: QUERY_TEXT,
       limit: K,
       scan: scan(),
+      selection: WHOLE_PAGE,
     });
     for (const [rank, hit] of hits.entries()) if (rank > 0) expect(hit.score).toBeLessThanOrEqual(hits[rank - 1].score);
   });
@@ -454,8 +486,62 @@ describe('a project crowded out of the global top-k of a shared index', () => {
       queryText: QUERY_TEXT,
       limit: K,
       scan: scan(),
+      selection: WHOLE_PAGE,
     });
     expect(hits.map((h) => h.chunkIndex)).toEqual((await bruteForce(ids.beta, K)).map((e) => e.chunkIndex));
+  });
+});
+
+describe('a third predicate, which is what ADR-0040 said this file would have to answer for', () => {
+  // ADR-0040 accepted that `index_generation` had made post-filtering strictly worse and named the
+  // filters of Item 7 as the next two predicates. This is the measurement rather than the assumption:
+  // the same crowded project, the same shipped scan settings, and a `path_prefix` that rejects half of
+  // the project's own rows on top of the 95 % of the instance that belongs to somebody else.
+  const HALF_OF_SMALL = 'handbook/small-b';
+
+  it('answers the crowded project exactly, at the shipped ef_search and max_scan_tuples', async () => {
+    const hits = await searchChunks(database.db, {
+      projectId: ids.small,
+      generation: LIVE,
+      queryEmbedding: QUERY,
+      queryText: QUERY_TEXT,
+      limit: K,
+      pathPrefix: HALF_OF_SMALL,
+      scan: scan(),
+      selection: WHOLE_PAGE,
+    });
+    const exact = await bruteForce(ids.small, K, QUERY, HALF_OF_SMALL);
+
+    // A full page, every row inside the filter, and the same rows an exact scan of that half returns.
+    // Short of this the settings would need raising, and the number to raise is `max_scan_tuples`.
+    expect(hits).toHaveLength(K);
+    expect(hits.map((h) => h.chunkIndex)).toEqual(exact.map((e) => e.chunkIndex));
+    expect(hits.every((h) => h.file === `${HALF_OF_SMALL}.md`)).toBe(true);
+  });
+
+  it('answers the project that dominates the index exactly too, which is the one that goes through it', async () => {
+    // `small` is read by `chunks_project_idx` at fifty candidates (the case above ADR-0041 found), so
+    // the filtered claim would be vacuous without this: `beta` is the project the planner still
+    // reaches through the HNSW index, and therefore the one a third predicate post-filters.
+    const prefix = 'handbook/beta-b';
+    const hits = await searchChunks(database.db, {
+      projectId: ids.beta,
+      generation: LIVE,
+      queryEmbedding: QUERY,
+      queryText: QUERY_TEXT,
+      limit: K,
+      pathPrefix: prefix,
+      scan: scan(),
+      selection: WHOLE_PAGE,
+    });
+    const exact = await bruteForce(ids.beta, K, QUERY, prefix);
+
+    // Not vacuous: this is the project the planner reaches through `chunks_embedding_hnsw_idx`, so
+    // the filter here really is a post-filter over index candidates rather than a predicate on rows
+    // PostgreSQL was going to read anyway.
+    expect(await usesVectorIndex(ids.beta, DENSE_CANDIDATES)).toBe(true);
+    expect(hits).toHaveLength(K);
+    expect(hits.map((h) => h.chunkIndex)).toEqual(exact.map((e) => e.chunkIndex));
   });
 });
 
@@ -473,6 +559,7 @@ describe('a project too small for the planner to use the vector index at all', (
         queryText: QUERY_TEXT,
         limit: K,
         scan: scan({ iterativeScan: mode }),
+        selection: WHOLE_PAGE,
       });
       expect(hits.map((h) => h.chunkIndex)).toEqual(exact.map((e) => e.chunkIndex));
     }
@@ -554,6 +641,7 @@ describe('the settings themselves', () => {
         queryText: QUERY_TEXT,
         limit: K,
         scan: scan({ efSearch: 137 }),
+        selection: WHOLE_PAGE,
       });
       expect(hits).toHaveLength(K);
 

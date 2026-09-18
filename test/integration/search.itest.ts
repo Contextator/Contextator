@@ -128,6 +128,15 @@ async function buildApi(db: Db): Promise<FastifyInstance> {
       HNSW_EF_SEARCH: 100,
       HNSW_ITERATIVE_SCAN: 'relaxed_order',
       HNSW_MAX_SCAN_TUPLES: 20_000,
+      // And the four ADR-0042 added, at the schema's own values, for exactly the reason above: the
+      // route reads them on every search, and a fixture that left them out would fail as a 500 that
+      // reads like a route defect. At these values the fixture's three one-chunk documents behave as
+      // they always did — the cap cannot bite on a document with one chunk — which is what keeps the
+      // assertions below about the route.
+      SEARCH_MAX_PER_DOCUMENT: 2,
+      SEARCH_NEIGHBOR_CONTEXT: 1,
+      SEARCH_MAX_RESULT_CHARS: 12_000,
+      SEARCH_SCORE_FLOOR: 0.82,
       SECRET_KEY: undefined,
       UPLOAD_MAX_FILE_BYTES: 1024,
       UPLOAD_MAX_FILES_PER_REQUEST: 1,
@@ -250,9 +259,10 @@ describe('a viewer searching a project they are a member of', () => {
     const expected = await searchChunks(database.db, { projectId: indexedId, generation: LIVE, queryEmbedding: vector, queryText: QUERY, limit: 2 });
 
     expect(res.json().limit).toBe(2);
-    // Field for field, including the three ADR-0041 added: the route is a projection of `SearchHit`
-    // and nothing else, so a field that appeared in one and not the other would be a field the
-    // dashboard cannot show or an excerpt the agent and the operator disagree about.
+    // Field for field, including the three ADR-0041 added and the two of ADR-0042: the route is a
+    // projection of `SearchHit` and nothing else, so a field that appeared in one and not the other
+    // would be a field the dashboard cannot show or an excerpt the agent and the operator disagree
+    // about.
     expect(res.json().hits).toEqual(
       expected.map((hit) => ({
         score: hit.score,
@@ -264,6 +274,8 @@ describe('a viewer searching a project they are a member of', () => {
         headingPath: hit.headingPath,
         chunkIndex: hit.chunkIndex,
         content: hit.content,
+        contextBefore: hit.contextBefore,
+        contextAfter: hit.contextAfter,
       })),
     );
   });

@@ -24,6 +24,7 @@ import { createEmbeddingProvider } from './services/embeddings/index.js';
 import { Indexer } from './services/indexer.js';
 import { KeyedMutex } from './services/locks.js';
 import { listProjects } from './services/projects.js';
+import { floorModelWarning } from './services/relevance.js';
 import { countUsers } from './services/auth/users.js';
 import { startSessionReaper } from './services/auth/sessions.js';
 import { SetupGate } from './services/auth/setup.js';
@@ -174,6 +175,11 @@ async function main(): Promise<void> {
       // The only place a loaded tokenizer and the configuration are both in hand (ADR-0035). Loud,
       // never fatal: exiting from a background promise would make a tuning mistake a crash loop.
       verifyChunkBudget(ctx);
+      // And the same shape of mistake one setting along (ADR-0042): SEARCH_SCORE_FLOOR is a cosine
+      // similarity, cosine similarities are not comparable between encoders, and its default was
+      // measured against one. Here rather than in `config.ts` because the model is a runtime fact.
+      const floorWarning = floorModelWarning(config.SEARCH_SCORE_FLOOR, embeddings.model);
+      if (floorWarning) log.warn({ floor: config.SEARCH_SCORE_FLOOR, model: embeddings.model }, floorWarning);
     })
     .catch((err: unknown) => log.error({ err }, 'embedding model failed to load; indexing and search will fail until it is available'));
 

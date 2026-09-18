@@ -16,7 +16,7 @@ import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { listProjectsForUser, membershipMap } from '../services/auth/memberships.js';
 import { ConflictError, NotFoundError, ValidationError, createProject, deleteProject, getProjectById, listProjects } from '../services/projects.js';
 import { countSourcesByProject, createSource, slugifySourceName } from '../services/sources.js';
-import { scanFrom } from '../services/vector-store.js';
+import { scanFrom, selectionFrom } from '../services/vector-store.js';
 import { authRoutes } from './auth-routes.js';
 import { mcpRoutes } from './mcp-routes.js';
 import { memberRoutes } from './members-routes.js';
@@ -36,6 +36,19 @@ const ReindexQuery = z.object({ force: z.enum(['true', 'false', '1', '0']).optio
 const SearchQuery = z.object({
   q: z.string().min(1).max(2000),
   limit: z.coerce.number().int().min(1).max(MAX_SEARCH_LIMIT).optional(),
+  // The same two filters `search_docs` takes, spelled the way a query string is (ADR-0042). Both
+  // optional, and an empty one is dropped rather than refused: a form that submits every field it
+  // has would otherwise send `source=` and be told it named a source called nothing.
+  source: z
+    .string()
+    .max(64)
+    .optional()
+    .transform((value) => (value === '' ? undefined : value)),
+  path_prefix: z
+    .string()
+    .max(512)
+    .optional()
+    .transform((value) => (value === '' ? undefined : value)),
 });
 
 /**
@@ -205,11 +218,24 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
    */
   app.get('/api/projects/:id/search', async (req) => {
     const { id } = IdParams.parse(req.params);
-    const { q, limit } = SearchQuery.parse(req.query);
-    const outcome = await searchProject({ db, embeddings, scan: scanFrom(config) }, { projectId: id, query: q, limit });
+    const { q, limit, source, path_prefix } = SearchQuery.parse(req.query);
+    const outcome = await searchProject(
+      // The floor is passed here as well as to the tool, because this panel is the operator's view of
+      // what the agent sees and a search that would be refused has to look refused (ADR-0042). The
+      // hits come back either way; the dashboard shows them under the notice.
+      { db, embeddings, scan: scanFrom(config), selection: selectionFrom(config), scoreFloor: config.SEARCH_SCORE_FLOOR },
+      { projectId: id, query: q, limit, source, pathPrefix: path_prefix },
+    );
     // Deleted between the policy hook resolving access and this read — the same 404 a caller who
     // may not see it would have got.
     if (outcome.status === 'project_gone') throw new NotFoundError('Project not found');
+    if (outcome.status === 'unknown_source') {
+      const known = outcome.available.length > 0 ? outcome.available.join(', ') : 'none';
+      throw new ValidationError(`This project has no source named "${outcome.requested}". Its sources are: ${known}.`);
+    }
+    if (outcome.status === 'invalid_path_prefix') {
+      throw new ValidationError(`"${outcome.requested}" is not a usable path prefix; use a relative path as shown by the documents list.`);
+    }
     if (outcome.status === 'not_indexed') {
       throw new SearchUnavailableError('not_indexed', 'This project has no indexed content yet. Index it and try again.');
     }
@@ -222,6 +248,12 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     return {
       query: q,
       limit: limit ?? DEFAULT_SEARCH_LIMIT,
+      source: source ?? null,
+      pathPrefix: path_prefix ?? null,
+      // What the agent would have been told instead of these hits, and the number that decided it
+      // (ADR-0042). Additive, like the three fusion fields: a script parsing the old shape is unaffected.
+      belowFloor: outcome.belowFloor,
+      scoreFloor: config.SEARCH_SCORE_FLOOR,
       // The raw score and the path, deliberately: a score an operator cannot see is a score they
       // cannot reason about, and the path is what read_document takes next.
       //
@@ -240,6 +272,10 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         headingPath: hit.headingPath,
         chunkIndex: hit.chunkIndex,
         content: hit.content,
+        // The passages either side, so the panel can show the excerpt in the place it came from
+        // rather than as a paragraph with no edges. `null` when there is none or the setting is 0.
+        contextBefore: hit.contextBefore,
+        contextAfter: hit.contextAfter,
       })),
     };
   });
