@@ -140,14 +140,28 @@ function body(marker: string, name: string): string {
 
 const QUERY = 'rotate the alpha secret';
 
-/** The job object the indexer mutates in place; this waits for it to leave the active phases. */
-async function settle(job: JobState): Promise<JobState> {
+/**
+ * The job object the indexer mutates in place; this waits for it to leave the active phases, and then
+ * for the project row to stop saying `indexing`.
+ *
+ * **The second wait is not belt and braces.** On the failure path the indexer marks the job `error`
+ * first and writes `projects.status` afterwards — deliberately, so that a run whose *status write*
+ * fails still leaves a settled job rather than one parked in an active phase forever. A test that reads
+ * the row the instant the job settles is therefore reading it one statement early, and on a database
+ * that a dozen test files are sharing that statement is long enough to lose.
+ */
+async function settle(db: Db, job: JobState): Promise<JobState> {
   const deadline = Date.now() + 60_000;
   while (job.phase !== 'done' && job.phase !== 'error') {
     if (Date.now() > deadline) throw new Error(`index job never settled (phase ${job.phase})`);
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
-  return job;
+  for (;;) {
+    const project = await getProjectById(db, job.projectId);
+    if (project?.status !== 'indexing') return job;
+    if (Date.now() > deadline) throw new Error(`project row still says "indexing" after the job settled as ${job.phase}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 async function generationsOf(db: Db, projectId: string): Promise<number[]> {
@@ -201,7 +215,7 @@ describe('a forced re-index while a client is searching', () => {
   beforeAll(async () => {
     fx = await buildFixture('generations_rebuild', 'original');
 
-    const first = await settle(fx.indexer.enqueue(fx.projectId));
+    const first = await settle(fx.database.db, fx.indexer.enqueue(fx.projectId));
     expect(first.phase).toBe('done');
     fx.indexer.forget(fx.projectId);
 
@@ -262,7 +276,7 @@ describe('a forced re-index while a client is searching', () => {
 
     // Fail it where it stands, and the previous generation must still be the live one.
     gate.breakRun('embedding provider exploded mid-rebuild');
-    await settle(job);
+    await settle(fx.database.db, job);
     expect(job.phase).toBe('error');
 
     const after = await getProjectById(fx.database.db, fx.projectId);
@@ -334,7 +348,7 @@ describe('a forced re-index while a client is searching', () => {
 
   it('publishes the next attempt, and reclaims the generation it replaced', async () => {
     gate.disarm(); // nothing parked: the run goes straight through
-    const job = await settle(fx.indexer.enqueue(fx.projectId, { force: true }));
+    const job = await settle(fx.database.db, fx.indexer.enqueue(fx.projectId, { force: true }));
     expect(job.phase).toBe('done');
 
     const project = await getProjectById(fx.database.db, fx.projectId);
@@ -369,7 +383,7 @@ describe('a rebuild whose source cannot be read at all', () => {
 
   beforeAll(async () => {
     fx = await buildFixture('generations_unreadable', 'original');
-    const first = await settle(fx.indexer.enqueue(fx.projectId));
+    const first = await settle(fx.database.db, fx.indexer.enqueue(fx.projectId));
     expect(first.phase).toBe('done');
     fx.indexer.forget(fx.projectId);
     baseline = await searchChunks(fx.database.db, {
@@ -393,7 +407,7 @@ describe('a rebuild whose source cannot be read at all', () => {
     // one condition ADR-0010 calls "protected" and ADR-0039 makes fatal to a rebuild.
     await rename(fx.root, `${fx.root}-moved`);
 
-    const job = await settle(fx.indexer.enqueue(fx.projectId, { force: true }));
+    const job = await settle(fx.database.db, fx.indexer.enqueue(fx.projectId, { force: true }));
     expect(job.phase).toBe('error');
     expect(job.error).toMatch(/Full re-index abandoned/);
     expect(job.error).toMatch(/previous index is still being served/);
@@ -417,7 +431,7 @@ describe('a rebuild whose source cannot be read at all', () => {
   });
 
   it('still protects the same documents on an incremental run, exactly as ADR-0010 says', async () => {
-    const job = await settle(fx.indexer.enqueue(fx.projectId));
+    const job = await settle(fx.database.db, fx.indexer.enqueue(fx.projectId));
     expect(job.phase).toBe('error'); // the source failed; the project says so
     expect(job.filesRemoved).toBe(0); // and not one document was deleted for it
 
