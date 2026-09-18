@@ -39,20 +39,56 @@ export const CHUNK_TOKENIZER_RESERVE_TOKENS = 2;
 export const CHUNK_MAX_TOKENS_MIN = 50;
 
 /**
- * The most rows one search may ask the index for — the ceiling on `limit` in both callers, and the
- * number `HNSW_EF_SEARCH` is checked against below.
+ * The most excerpts one search may be asked for — the ceiling on `limit` in both callers.
  *
- * It lives here rather than beside `DEFAULT_SEARCH_LIMIT` in `services/search.ts` only because the
- * `superRefine` at the bottom of this file needs it and `services/search.ts` reaches `config.ts`
- * through `services/projects.ts`. Importing it back the other way would be a cycle.
- *
- * It is a *candidate* count, not a result count, and that distinction is about to matter: the hybrid
- * retrieval of ROADMAP Item 2 — the next change to this path — asks the dense side and the lexical
- * side for their own candidates before fusing them with RRF, and raises this to 50 per side.
- * `HNSW_EF_SEARCH` has to stay above whatever this number becomes, so the rule below is written
- * against the constant rather than against 20.
+ * It used to be called `MAX_SEARCH_CANDIDATES` and it used to be both things at once. Since
+ * [ADR-0041](../../.ssot/ADR.md#adr-0041) a search collects `DENSE_CANDIDATES` from one side and
+ * `LEXICAL_CANDIDATES` from the other, fuses them and *then* takes `limit`, so the count the index is
+ * asked for and the count a caller receives are different numbers and no longer share a name.
  */
-export const MAX_SEARCH_CANDIDATES = 20;
+export const MAX_SEARCH_LIMIT = 20;
+
+/**
+ * How many chunks each half of retrieval contributes before the two are fused
+ * ([ADR-0041](../../.ssot/ADR.md#adr-0041)). Fifty, the same on both sides, and one number rather
+ * than two: the cross-encoder rerank of ROADMAP Item 2's last bullet would rerank *the fused top
+ * fifty*, and a pool that is fifty from one side and thirty from the other is a pool nobody can
+ * describe in a sentence.
+ *
+ * They live here rather than beside `searchChunks` only because the `superRefine` at the bottom of
+ * this file has to check `HNSW_EF_SEARCH` against `DENSE_CANDIDATES`, and `services/vector-store.ts`
+ * reaches `config.ts` for its `Config` type. Importing a value back the other way would be a cycle.
+ */
+export const DENSE_CANDIDATES = 50;
+export const LEXICAL_CANDIDATES = 50;
+
+/**
+ * When a query term stops being worth matching on
+ * ([ADR-0041](../../.ssot/ADR.md#adr-0041)): a lexeme present in more than a tenth of a project's
+ * chunks is dropped from the lexical query.
+ *
+ * **This is the whole difference between a lexical half that helps and one that hurts, and it was
+ * measured rather than reasoned about.** PostgreSQL's `ts_rank_cd` scores term frequency and
+ * proximity and has no notion of inverse document frequency, so `What does HLY-4019 mean?` asked as a
+ * plain OR of its lexemes ranks a paragraph that happens to contain *what*, *does* and *mean* above
+ * the reference table that contains `HLY-4019` — three covered terms against two. Fused, that
+ * paragraph then arrives with a rank on both lists and displaces the answer. Measured on the golden
+ * set, unfiltered: `recall@5` 79.7 % against dense-only's 82.8 %, and twelve questions dense-only
+ * answered at rank 1 pushed down or off the page. The filter is what turns that around.
+ *
+ * **A twentieth is the middle of a plateau and not a tuned number.** Swept at eight values from 0.015
+ * to 0.08, `recall@5` measures 85.9 % everywhere except 0.03 and 0.08, where it measures 87.5 % — one
+ * question, at two points that are not adjacent, which is noise and not a peak. Every value in that
+ * range beats dense-only. What matters is that *what*, *does* and *mean* are out and `HLY-4019` is in,
+ * not where exactly the line is drawn.
+ */
+export const LEXICAL_TERM_MAX_DOCUMENT_FREQUENCY = 0.05;
+
+/**
+ * The floor under that fraction, so a project of forty chunks does not drop every term it has. A term
+ * in ten of forty chunks is still a term worth matching when there is nothing rarer to match on.
+ */
+export const LEXICAL_TERM_MIN_DOCUMENT_FLOOR = 10;
 
 /** Exported for the tests: the cross-field rules are the only part of this file that has behaviour. */
 export const EnvSchema = z
@@ -223,17 +259,18 @@ export const EnvSchema = z
       });
     }
     // An HNSW scan cannot return more rows than it collected candidates, so an `ef_search` below the
-    // largest `limit` a caller may ask for is short by construction — before the project and
-    // generation predicates have discarded anything at all (ADR-0040). This is the floor, not the
-    // setting: at `ef_search = MAX_SEARCH_CANDIDATES` a search of a shared instance still starves, and
-    // the default is 100 for that reason.
-    if (c.HNSW_EF_SEARCH < MAX_SEARCH_CANDIDATES) {
+    // number of dense candidates one search asks for is short by construction — before the project and
+    // generation predicates have discarded anything at all (ADR-0040). ADR-0041 raised that number from
+    // 20 to 50, and this rule was already written against the constant so that it would move with it.
+    // It is the floor, not the setting: at `ef_search = DENSE_CANDIDATES` a search of a shared instance
+    // still starves, and the default is 100 for that reason.
+    if (c.HNSW_EF_SEARCH < DENSE_CANDIDATES) {
       ctx.addIssue({
         code: 'custom',
         path: ['HNSW_EF_SEARCH'],
         message:
-          `must be at least ${MAX_SEARCH_CANDIDATES}, the most candidates one search may ask for; ` +
-          'below it the index cannot yield a full page even before the project predicate filters one row',
+          `must be at least ${DENSE_CANDIDATES}, the number of dense candidates one search asks for before fusion; ` +
+          'below it the index cannot yield a full candidate list even before the project predicate filters one row',
       });
     }
     if (c.ALLOWED_DOC_ROOTS.length === 0) {

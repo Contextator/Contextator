@@ -210,7 +210,13 @@ describe('a forced re-index while a client is searching', () => {
     expect(project?.chunkCount).toBeGreaterThan(0);
     baselineCounts = { chunkCount: project?.chunkCount ?? 0, documentCount: project?.documentCount ?? 0 };
 
-    baseline = await searchChunks(fx.database.db, fx.projectId, 0, await embeddings.embedQuery(QUERY), 5);
+    baseline = await searchChunks(fx.database.db, {
+      projectId: fx.projectId,
+      generation: 0,
+      queryEmbedding: await embeddings.embedQuery(QUERY),
+      queryText: QUERY,
+      limit: 5,
+    });
     expect(baseline.length).toBeGreaterThan(0);
     expect(baseline.every((hit) => hit.content.includes('original'))).toBe(true);
   });
@@ -264,7 +270,13 @@ describe('a forced re-index while a client is searching', () => {
     expect(after?.chunkCount).toBe(baselineCounts.chunkCount);
     expect(after?.lastError).toMatch(/exploded mid-rebuild/);
 
-    const stillThere = await searchChunks(fx.database.db, fx.projectId, 0, await embeddings.embedQuery(QUERY), 5);
+    const stillThere = await searchChunks(fx.database.db, {
+      projectId: fx.projectId,
+      generation: 0,
+      queryEmbedding: await embeddings.embedQuery(QUERY),
+      queryText: QUERY,
+      limit: 5,
+    });
     expect(stillThere.map((hit) => hit.content)).toEqual(baseline.map((hit) => hit.content));
 
     // The failed run dropped what it had built, on its way out.
@@ -302,7 +314,13 @@ describe('a forced re-index while a client is searching', () => {
 
     // It is an exact match for the query and it still does not appear: the generation predicate is
     // doing the work, not the distance.
-    const hits = await searchChunks(fx.database.db, fx.projectId, 0, await embeddings.embedQuery(QUERY), 5);
+    const hits = await searchChunks(fx.database.db, {
+      projectId: fx.projectId,
+      generation: 0,
+      queryEmbedding: await embeddings.embedQuery(QUERY),
+      queryText: QUERY,
+      limit: 5,
+    });
     expect(hits.some((hit) => hit.content.includes('abandoned'))).toBe(false);
     expect(await recountProject(fx.database.db, fx.projectId, 0)).toEqual(baselineCounts);
 
@@ -324,7 +342,13 @@ describe('a forced re-index while a client is searching', () => {
     expect(project?.documentCount).toBe(FILES.length);
 
     // The new text is what is served now, and the old generation is gone rather than merely unread.
-    const hits = await searchChunks(fx.database.db, fx.projectId, 1, await embeddings.embedQuery(QUERY), 5);
+    const hits = await searchChunks(fx.database.db, {
+      projectId: fx.projectId,
+      generation: 1,
+      queryEmbedding: await embeddings.embedQuery(QUERY),
+      queryText: QUERY,
+      limit: 5,
+    });
     expect(hits.length).toBeGreaterThan(0);
     expect(hits.every((hit) => hit.content.includes('replacement'))).toBe(true);
     expect(await generationsOf(fx.database.db, fx.projectId)).toEqual([1]);
@@ -347,7 +371,13 @@ describe('a rebuild whose source cannot be read at all', () => {
     const first = await settle(fx.indexer.enqueue(fx.projectId));
     expect(first.phase).toBe('done');
     fx.indexer.forget(fx.projectId);
-    baseline = await searchChunks(fx.database.db, fx.projectId, 0, await embeddings.embedQuery(QUERY), 5);
+    baseline = await searchChunks(fx.database.db, {
+      projectId: fx.projectId,
+      generation: 0,
+      queryEmbedding: await embeddings.embedQuery(QUERY),
+      queryText: QUERY,
+      limit: 5,
+    });
     expect(baseline.length).toBeGreaterThan(0);
   });
 
@@ -374,7 +404,13 @@ describe('a rebuild whose source cannot be read at all', () => {
 
     // Nothing was written into a new generation, and nothing was taken out of the live one.
     expect(await generationsOf(fx.database.db, fx.projectId)).toEqual([0]);
-    const hits = await searchChunks(fx.database.db, fx.projectId, 0, await embeddings.embedQuery(QUERY), 5);
+    const hits = await searchChunks(fx.database.db, {
+      projectId: fx.projectId,
+      generation: 0,
+      queryEmbedding: await embeddings.embedQuery(QUERY),
+      queryText: QUERY,
+      limit: 5,
+    });
     expect(hits.map((hit) => hit.content)).toEqual(baseline.map((hit) => hit.content));
     fx.indexer.forget(fx.projectId);
   });

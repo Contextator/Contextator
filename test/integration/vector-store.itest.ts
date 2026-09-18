@@ -150,6 +150,13 @@ describe('searchChunks across two projects', () => {
   /** Ascending distance is ascending angle: 0.2, 0.4, 0.6, 0.8, 1.0. */
   const EXPECTED_ORDER = [2, 4, 0, 3, 1];
   const QUERY = unitVector(0);
+  /**
+   * The lexical half of the question, and it shares no lexeme with any chunk below — every one of them
+   * is `Guide > Install` and `section <n>` ([ADR-0041](../../.ssot/ADR.md#adr-0041)). So the lexical
+   * candidate list is empty, fusion degrades to the dense ordering, and every assertion in this block
+   * goes on measuring the distance query it was written for.
+   */
+  const QUERY_TEXT = 'nothing here shares a word with this';
 
   let database: TestDatabase;
   let alpha: string;
@@ -193,7 +200,7 @@ describe('searchChunks across two projects', () => {
   });
 
   it('returns only the queried project, ordered by ascending distance', async () => {
-    const hits = await searchChunks(database.db, alpha, LIVE, QUERY, 10);
+    const hits = await searchChunks(database.db, { projectId: alpha, generation: LIVE, queryEmbedding: QUERY, queryText: QUERY_TEXT, limit: 10 });
 
     expect(hits).toHaveLength(ANGLES.length);
     expect(hits.map((h) => h.chunkIndex)).toEqual(EXPECTED_ORDER);
@@ -210,7 +217,7 @@ describe('searchChunks across two projects', () => {
   });
 
   it('reports a score that is exactly 1 - the cosine distance PostgreSQL computed', async () => {
-    const hits = await searchChunks(database.db, alpha, LIVE, QUERY, 10);
+    const hits = await searchChunks(database.db, { projectId: alpha, generation: LIVE, queryEmbedding: QUERY, queryText: QUERY_TEXT, limit: 10 });
 
     const raw = await database.db.execute(sql`
       SELECT chunk_index, (embedding <=> ${vectorLiteral(QUERY)}::vector)::float8 AS distance
@@ -225,12 +232,12 @@ describe('searchChunks across two projects', () => {
   });
 
   it('honours the limit', async () => {
-    const hits = await searchChunks(database.db, alpha, LIVE, QUERY, 3);
+    const hits = await searchChunks(database.db, { projectId: alpha, generation: LIVE, queryEmbedding: QUERY, queryText: QUERY_TEXT, limit: 3 });
     expect(hits.map((h) => h.chunkIndex)).toEqual(EXPECTED_ORDER.slice(0, 3));
   });
 
   it('gives the other project its own rows, which are the ones that would have been noticed', async () => {
-    const hits = await searchChunks(database.db, beta, LIVE, QUERY, 10);
+    const hits = await searchChunks(database.db, { projectId: beta, generation: LIVE, queryEmbedding: QUERY, queryText: QUERY_TEXT, limit: 10 });
     expect(hits).toHaveLength(ANGLES.length);
     for (const hit of hits) expect(hit.score).toBeCloseTo(1, 6);
   });

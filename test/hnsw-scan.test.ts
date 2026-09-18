@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { EnvSchema, MAX_SEARCH_CANDIDATES } from '../src/config.js';
+import { DENSE_CANDIDATES, EnvSchema } from '../src/config.js';
 import { DEFAULT_HNSW_SCAN, scanFrom } from '../src/services/vector-store.js';
 
 /**
@@ -51,16 +51,24 @@ describe('the scan settings an unconfigured installation runs at', () => {
 });
 
 describe('what the schema refuses', () => {
-  it('refuses an ef_search below the most candidates one search may ask for', () => {
+  it('refuses an ef_search below the dense candidates one search asks for', () => {
     // Below this the scan is short before a single row has been filtered: an HNSW scan cannot return
-    // more rows than the candidates it collected.
-    const result = parse({ HNSW_EF_SEARCH: String(MAX_SEARCH_CANDIDATES - 1) });
+    // more rows than the candidates it collected. ADR-0041 moved this number from 20 to 50, which is
+    // what the rule being written against the constant rather than against a literal was for.
+    const result = parse({ HNSW_EF_SEARCH: String(DENSE_CANDIDATES - 1) });
     expect(result.success).toBe(false);
-    expect(issuesFor(result, 'HNSW_EF_SEARCH')).toEqual([expect.stringContaining(`at least ${MAX_SEARCH_CANDIDATES}`)]);
+    expect(issuesFor(result, 'HNSW_EF_SEARCH')).toEqual([expect.stringContaining(`at least ${DENSE_CANDIDATES}`)]);
   });
 
   it('accepts exactly the candidate count, which is the floor and not the recommendation', () => {
-    expect(parse({ HNSW_EF_SEARCH: String(MAX_SEARCH_CANDIDATES) }).success).toBe(true);
+    expect(parse({ HNSW_EF_SEARCH: String(DENSE_CANDIDATES) }).success).toBe(true);
+  });
+
+  it('refuses the ef_search that was legal before the lexical half doubled the candidate pool', () => {
+    // 20 passed until ADR-0041 and does not now. Written down because an operator who pinned
+    // `HNSW_EF_SEARCH=20` is an operator whose server stops starting, and a refusal at startup with a
+    // number in it is the only place that is cheap to discover.
+    expect(parse({ HNSW_EF_SEARCH: '20' }).success).toBe(false);
   });
 
   it('refuses a scan mode pgvector does not have, rather than passing the string through to it', () => {

@@ -2,10 +2,13 @@ import type { Db } from '../db/client.js';
 import type { ProjectRow } from '../db/schema.js';
 import type { EmbeddingProvider } from './embeddings/provider.js';
 import { getProjectById } from './projects.js';
-import { DEFAULT_HNSW_SCAN, type HnswScan, searchChunks, type SearchHit } from './vector-store.js';
+import type { TextSearchConfig } from './text-search.js';
+import { type HnswScan, searchChunks, type SearchHit } from './vector-store.js';
 
 /**
- * The one search path in the product (ROADMAP Item 3). It used to live inside the `search_docs`
+ * The one search path in the product (ROADMAP Item 3) — hybrid since
+ * [ADR-0041](../../.ssot/ADR.md#adr-0041), which changed what `searchChunks` does and nothing about
+ * who calls it. It used to live inside the `search_docs`
  * handler; three callers now enter here — the MCP tool, `GET /api/projects/:id/search`, and the
  * evaluation harness — because a `recall@k` measured through a second implementation would be a
  * measurement of the second implementation and not of what an agent receives.
@@ -27,6 +30,14 @@ export interface SearchDeps {
    * operator who changes `HNSW_EF_SEARCH` changes what they measure and what an agent receives.
    */
   scan?: HnswScan;
+  /**
+   * The text search configuration the lexical half parses the question with
+   * ([ADR-0041](../../.ssot/ADR.md#adr-0041)). Optional for the same structural reason `scan` is, and
+   * unset it is `simple` — which is what the server passes, by not passing anything. The evaluation
+   * harness is the one caller that varies it, so that `simple` against stemming is a measurement
+   * rather than an opinion.
+   */
+  textSearchConfig?: TextSearchConfig;
 }
 
 export interface SearchInput {
@@ -56,7 +67,7 @@ export type SearchOutcome =
   /** Those chunks and this query are not in the same space; the next run re-embeds the project. */
   | { status: 'model_mismatch'; project: ProjectRow; indexedWith: string; serverUses: string };
 
-export async function searchProject({ db, embeddings, scan }: SearchDeps, input: SearchInput): Promise<SearchOutcome> {
+export async function searchProject({ db, embeddings, scan, textSearchConfig }: SearchDeps, input: SearchInput): Promise<SearchOutcome> {
   // Re-read rather than trust the row the caller is holding: an MCP session can outlive a
   // re-index, a delete, or a change of embedding model, and each of the three guards below is
   // about a project that is no longer what it was when the caller picked it up.
@@ -73,6 +84,18 @@ export async function searchProject({ db, embeddings, scan }: SearchDeps, input:
   // The live generation off the row that was just re-read, passed as a value (ADR-0039). A rebuild
   // may be filling `liveGeneration + 1` at this very moment; this query cannot see it, and the moment
   // the swap commits the next call reads the new number here instead. There is no gap between the two.
-  const hits = await searchChunks(db, project.id, project.liveGeneration, vector, input.limit ?? DEFAULT_SEARCH_LIMIT, scan ?? DEFAULT_HNSW_SCAN);
+  //
+  // `input.query` goes to the lexical half **unprefixed**, beside the vector the provider prefixed for
+  // the dense one (ADR-0038, ADR-0041): they are two encodings of one question, and the prefix belongs
+  // to exactly one of them.
+  const hits = await searchChunks(db, {
+    projectId: project.id,
+    generation: project.liveGeneration,
+    queryEmbedding: vector,
+    queryText: input.query,
+    limit: input.limit ?? DEFAULT_SEARCH_LIMIT,
+    scan,
+    textSearchConfig,
+  });
   return { status: 'ok', project, hits };
 }
