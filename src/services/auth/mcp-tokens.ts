@@ -76,17 +76,23 @@ export async function revokeMcpToken(db: Db, projectId: string, tokenId: string)
 }
 
 /**
- * True when `raw` is a live token for this project. The comparison is a lookup on the hash's unique
- * index rather than a scan, so it stays one indexed read per MCP request.
+ * The id of the live token `raw` names for this project, or `null`. The comparison is a lookup on the
+ * hash's unique index rather than a scan, so it stays one indexed read per MCP request.
+ *
+ * **It returns the id rather than a boolean** since [ADR-0047](../../../.ssot/ADR.md#adr-0047): the
+ * query log records which token a search came through, and the verification is the one place in the
+ * request that already knows. `mcpAccessDecision` still takes a boolean — whether a request is allowed
+ * is a different question from which credential allowed it, and only one of the two is a security
+ * rule.
  */
-export async function verifyMcpToken(db: Db, projectId: string, raw: string): Promise<boolean> {
-  if (!raw.startsWith(TOKEN_PREFIX)) return false;
+export async function verifyMcpToken(db: Db, projectId: string, raw: string): Promise<string | null> {
+  if (!raw.startsWith(TOKEN_PREFIX)) return null;
   const rows = await db
     .select({ id: mcpTokens.id })
     .from(mcpTokens)
     .where(and(eq(mcpTokens.tokenHash, hashMcpToken(raw)), eq(mcpTokens.projectId, projectId), isNull(mcpTokens.revokedAt)))
     .limit(1);
-  if (rows.length === 0) return false;
+  if (rows.length === 0) return null;
 
   // An agent polls; a write per request would be a write per poll. A minute of granularity is
   // plenty for "when was this token last used", and it stays off the response path.
@@ -95,7 +101,7 @@ export async function verifyMcpToken(db: Db, projectId: string, raw: string): Pr
     .set({ lastUsedAt: new Date() })
     .where(and(eq(mcpTokens.id, rows[0].id), sql`(${mcpTokens.lastUsedAt} is null or ${mcpTokens.lastUsedAt} < now() - interval '60 seconds')`))
     .catch(() => undefined);
-  return true;
+  return rows[0].id;
 }
 
 export async function countMcpTokens(db: Db, projectId: string): Promise<number> {

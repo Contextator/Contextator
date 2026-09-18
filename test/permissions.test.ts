@@ -60,6 +60,16 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'PATCH', url: '/api/projects/:id/mcp-auth', actor: as('member'), membership: 'editor', allowed: false },
   { method: 'PATCH', url: '/api/projects/:id/mcp-auth', actor: as('admin'), membership: null, allowed: true },
 
+  // The query log (ADR-0047). Reading what agents asked is the same access as running the search
+  // panel that asks; deciding whether the project records it at all, and throwing away what it has
+  // recorded, are a manager's — the `mcp-auth` class of decision rather than the editorial one.
+  { method: 'GET', url: '/api/projects/:id/query-log', actor: as('member'), membership: 'viewer', allowed: true },
+  { method: 'GET', url: '/api/projects/:id/query-log', actor: as('member'), membership: null, allowed: false },
+  { method: 'PATCH', url: '/api/projects/:id/query-log', actor: as('member'), membership: 'editor', allowed: false },
+  { method: 'PATCH', url: '/api/projects/:id/query-log', actor: as('admin'), membership: null, allowed: true },
+  { method: 'DELETE', url: '/api/projects/:id/query-log', actor: as('member'), membership: 'editor', allowed: false },
+  { method: 'DELETE', url: '/api/projects/:id/query-log', actor: as('admin'), membership: null, allowed: true },
+
   // Membership: anyone on the project sees who else is; only root/admin change it.
   { method: 'GET', url: '/api/projects/:id/members', actor: as('member'), membership: 'viewer', allowed: true },
   { method: 'PUT', url: '/api/projects/:id/members/:userId', actor: as('member'), membership: 'editor', allowed: false },
@@ -92,6 +102,26 @@ describe('the permission matrix', () => {
     expect(accessFromMembership(as('member'), 'viewer')).toBe('viewer');
     expect(accessFromMembership(as('member'), 'editor')).toBe('editor');
     expect(accessFromMembership(as('member'), null)).toBe('none');
+  });
+});
+
+/**
+ * The query log's rules were written with its columns, before either route exists
+ * ([ADR-0047](../.ssot/ADR.md#adr-0047)) — this PR is the write side and nothing reads it yet. The
+ * matrix above is the decision; these two assertions are what make it one, because a rule that only
+ * applies to a route nobody has registered is a rule that could have said anything.
+ */
+describe('the query log, before it has a route', () => {
+  it('asks for a viewer to read and a manager to switch or purge', () => {
+    expect(requiredProjectAccess('GET', '/api/projects/:id/query-log')).toBe('viewer');
+    expect(requiredProjectAccess('PATCH', '/api/projects/:id/query-log')).toBe('manager');
+    expect(requiredProjectAccess('DELETE', '/api/projects/:id/query-log')).toBe('manager');
+  });
+
+  it('puts the switch in the same class as deciding whether the MCP endpoint is public at all', () => {
+    expect(requiredProjectAccess('PATCH', '/api/projects/:id/query-log')).toBe(requiredProjectAccess('PATCH', '/api/projects/:id/mcp-auth'));
+    // And not in the class the default would have put it in, which is the whole reason for the row.
+    expect(requiredProjectAccess('PATCH', '/api/projects/:id/anything-else')).toBe('editor');
   });
 });
 

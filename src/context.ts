@@ -8,6 +8,7 @@ import type { KeyedMutex } from './services/locks.js';
 import type { UploadService } from './services/uploads.js';
 import type { SessionRegistry } from './mcp/sessions.js';
 import type { SetupGate } from './services/auth/setup.js';
+import type { QueryLog } from './services/query-log.js';
 import type { SlidingWindow } from './services/rate-limit.js';
 
 /** pino-compatible logger (Fastify's). Services receive it instead of importing a global. */
@@ -30,6 +31,12 @@ export interface AppContext {
   setup: SetupGate;
   /** Per-IP budget for sign-in and setup attempts. */
   loginLimiter: SlidingWindow;
+  /**
+   * Where searches are written down ([ADR-0047](../../.ssot/ADR.md#adr-0047)), or **undefined**, which
+   * is what `SEARCH_QUERY_LOG=0` produces: there is then no sink for a caller to pass, so nothing in
+   * the search path has anything to write to. Optional for that reason and not for convenience.
+   */
+  queryLog?: QueryLog;
   version: string;
   startedAt: number;
 }

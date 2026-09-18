@@ -3,6 +3,7 @@ import type { ProjectRow } from '../db/schema.js';
 import type { EmbeddingProvider } from './embeddings/provider.js';
 import { normalizeRelativePath } from './fs-scan.js';
 import { getProjectById } from './projects.js';
+import type { QueryLogSink } from './query-log.js';
 import { belowRelevanceFloor } from './relevance.js';
 import { getSourceByName, listSources } from './sources.js';
 import type { TextSearchConfig } from './text-search.js';
@@ -53,6 +54,17 @@ export interface SearchDeps {
    * retrieval result rather than a refusal it did not ask for.
    */
   scoreFloor?: number;
+  /**
+   * Where this search is written down ([ADR-0047](../../.ssot/ADR.md#adr-0047)). Optional, and **unset
+   * it is off** — the convention the three fields above already document, and the reason
+   * `npm run eval` records nothing: the harness passes no sink, so there is nothing for it to remember
+   * not to do.
+   *
+   * The sink is bound to its actor by the caller, because this function cannot know who is asking.
+   * `record()` returns nothing and is never awaited here: **a search must never fail or wait because
+   * of the log.**
+   */
+  queryLog?: QueryLogSink;
 }
 
 export interface SearchInput {
@@ -98,9 +110,10 @@ export type SearchOutcome =
   | { status: 'model_mismatch'; project: ProjectRow; indexedWith: string; serverUses: string };
 
 export async function searchProject(
-  { db, embeddings, scan, textSearchConfig, selection, scoreFloor }: SearchDeps,
+  { db, embeddings, scan, textSearchConfig, selection, scoreFloor, queryLog }: SearchDeps,
   input: SearchInput,
 ): Promise<SearchOutcome> {
+  const startedAt = Date.now();
   // Re-read rather than trust the row the caller is holding: an MCP session can outlive a
   // re-index, a delete, or a change of embedding model, and each of the three guards below is
   // about a project that is no longer what it was when the caller picked it up.
@@ -158,5 +171,43 @@ export async function searchProject(
     selection,
     textSearchConfig,
   });
-  return { status: 'ok', project, hits, belowFloor: belowRelevanceFloor(input.query, hits, scoreFloor ?? 0) };
+  const belowFloor = belowRelevanceFloor(input.query, hits, scoreFloor ?? 0);
+
+  // **One seam, three callers** ([ADR-0047](../../.ssot/ADR.md#adr-0047)). The MCP tool and the
+  // dashboard route pass a sink; the evaluation harness does not, and that is the whole of why it
+  // records nothing. A call at each call site would have been three places to forget.
+  //
+  // Only the `ok` path is a row. The five outcomes above never reached the index — an unknown source,
+  // a project with nothing in it, a model the server no longer runs — so they are configuration states
+  // rather than questions this corpus failed to answer, and folding them in would put rows with no
+  // score into the average that the whole table exists to compute.
+  //
+  // `project.queryLogEnabled` is free here: the row was re-read at the top of this function anyway, so
+  // the per-project switch costs no query. `record()` is not awaited — see `QueryLogSink`.
+  if (queryLog && project.queryLogEnabled) {
+    queryLog.record({
+      projectId: project.id,
+      query: input.query,
+      limit: input.limit ?? DEFAULT_SEARCH_LIMIT,
+      source: input.source,
+      // The normalised prefix rather than what was typed, so that two spellings of one filter are one
+      // filter in the log, as they are in the query.
+      pathPrefix,
+      hits: hits.map((hit) => ({
+        relativePath: hit.file,
+        headingPath: hit.headingPath,
+        chunkIndex: hit.chunkIndex,
+        score: hit.score,
+      })),
+      belowFloor,
+      durationMs: Date.now() - startedAt,
+      // The encoder that answered *this* question and the generation it answered from, taken from the
+      // provider and the row in hand rather than from configuration: a log recorded across a model
+      // change otherwise averages two different systems (ROADMAP.md Item 6).
+      embeddingModel: embeddings.id,
+      liveGeneration: project.liveGeneration,
+    });
+  }
+
+  return { status: 'ok', project, hits, belowFloor };
 }

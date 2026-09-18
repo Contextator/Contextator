@@ -37,6 +37,21 @@ const PROJECT_ROUTE_OVERRIDES: ReadonlyArray<{ method: string; url: string; need
   { method: 'GET', url: '/api/projects/:id/members', need: 'viewer' },
   { method: 'PUT', url: '/api/projects/:id/members/:userId', need: 'manager' },
   { method: 'DELETE', url: '/api/projects/:id/members/:userId', need: 'manager' },
+  // The query log ([ADR-0047](../../.ssot/ADR.md#adr-0047)). **Reading it is a `viewer`'s** and needs
+  // no row here: the default below already says so, and it is the same access the search panel needs,
+  // which is the panel these rows are of.
+  //
+  // Deciding whether this project records what agents ask, and throwing away what it has recorded, are
+  // both `manager` — the same class of decision as `mcp-auth` directly above, and for the same reason:
+  // one says whether the project's content is readable by anything that can reach a URL, the other
+  // whether the project's *users* are recorded at all. Neither is a day-to-day editorial change.
+  //
+  // **These two routes do not exist yet**, and the rows are here anyway. The table is the decision and
+  // the route is its application; a rule written when the column was added is a rule argued on its
+  // merits, where one written the day somebody needs the endpoint is a rule chosen to unblock them.
+  // `requiredProjectAccess` is a lookup — a row matching no route costs nothing and refuses nothing.
+  { method: 'PATCH', url: '/api/projects/:id/query-log', need: 'manager' },
+  { method: 'DELETE', url: '/api/projects/:id/query-log', need: 'manager' },
 ];
 
 /**

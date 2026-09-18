@@ -324,6 +324,34 @@ export const EnvSchema = z
      * splits them. That is ROADMAP.md Item 6's query log, not this.
      */
     SEARCH_SCORE_FLOOR: z.coerce.number().min(0).max(1).default(0.82),
+
+    // The query log (ADR-0047): what agents asked, and what they got. Two switches, and the per-project
+    // one is deliberately not here — it is `projects.query_log_enabled`, so that it travels with a
+    // `pg_dump` and with a project export instead of reverting to the new host's environment.
+    /**
+     * The instance-wide kill switch. `0` and nothing is recorded anywhere, whatever any project's own
+     * column says — the server simply does not build a sink, so `SearchDeps.queryLog` is unset and the
+     * search path has nothing to write to.
+     *
+     * On by default, for the reason the per-project column is: the log answers "agents asked about X 41
+     * times this week and the best match scored 0.31", and that answer needs weeks of rows behind it.
+     * A switch an operator has to find and turn on collects nothing during exactly the period the first
+     * report would be drawn from. What makes that defensible rather than presumptuous is the retention
+     * below, the per-project column, and a privacy page that says so in §2, §4 and §7.
+     */
+    SEARCH_QUERY_LOG: z.string().default('1').transform(flag),
+    /**
+     * How long a recorded query is kept. Swept on the interval the session reaper already runs on, so
+     * there is no third timer in the process.
+     *
+     * Thirty days is a month of traffic — enough for "this week against last week", which is the
+     * comparison the report is made of — and it is short enough that the log is not a permanent record
+     * of everything anybody ever asked. **It is a policy decision an operator has to make**, not a
+     * tuning knob: the rows are user content, they are in every `pg_dump`
+     * ([ADR-0046](../.ssot/ADR.md#adr-0046)), and this number is what the instance's own privacy page
+     * is promising on their behalf.
+     */
+    SEARCH_QUERY_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
   })
   .superRefine((c, ctx) => {
     if (c.EMBEDDING_PROVIDER === 'openai' && !c.OPENAI_API_KEY) {

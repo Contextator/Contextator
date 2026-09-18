@@ -1,5 +1,5 @@
 <h1>Privacy Policy</h1>
-<p class="page-meta">Last updated: 18 September 2026</p>
+<p class="page-meta">Last updated: 19 September 2026</p>
 <p class="page-lead">
   Contextator is self-hosted software. It has no analytics and no telemetry: it never reports anything back to its
   authors, and the people who wrote it have no access to any data in your installation. It does manage user accounts —
@@ -21,6 +21,16 @@
   <li><strong>Indexed documents and their embeddings</strong> — the text of every file that was indexed, split into chunks, plus the vector of each chunk.</li>
   <li><strong>Materialised sources</strong> — uploaded files and archives, git checkouts and Notion pulls, kept in the data directory so that runs can be incremental.</li>
   <li><strong>Index run history</strong> — start and finish times, file and chunk counts, and the error message of a failed run.</li>
+  <li>
+    <strong>Search queries</strong> — for each search of a project, whether it came from a connected agent or from the
+    dashboard: <em>the text of the question as it was typed</em>, the time, how many excerpts were asked for and returned,
+    the file path, heading and score of each excerpt that came back, how long it took, which embedding model answered, and
+    the MCP token the agent presented if it presented one. The question is stored in the clear and not as a hash, because
+    the whole purpose is to be able to read back <em>what people are asking</em>, and a hash cannot be read. It is what lets
+    an operator see that forty agents asked about something their documentation does not cover. <strong>This is user
+    content</strong> — see <a href="#query-log">Search queries</a> in section 4 for who can read it, how long it is kept and
+    how to turn it off.
+  </li>
   <li><strong>Access tokens</strong> for private git repositories and Notion integrations — encrypted at rest with AES-256-GCM using the deployment's <code>SECRET_KEY</code>, never returned by the API and never displayed again after they are saved. Credentials pasted into a repository URL are stripped before the URL is stored.</li>
   <li><strong>Webhook secrets</strong>, one per git source, used to verify that a push notification really came from the provider.</li>
   <li><strong>User accounts</strong> — a username, an optional display name and e-mail address, the role (<code>root</code>, <code>admin</code> or <code>member</code>), whether the account is active, when it was created and when it last signed in.</li>
@@ -45,7 +55,7 @@
   clears any leftover automatically. Details are on the <a href="/cookies">Cookie Policy</a> page.
 </p>
 
-<h2>4. Logs</h2>
+<h2>4. Logs and the search query log</h2>
 <p>
   The server writes operational logs to standard output: startup information, index run progress and errors. Per-request
   HTTP logging is off unless the log level is set to <code>debug</code> or <code>trace</code>. Where those logs go and
@@ -54,7 +64,47 @@
 <p>
   Failed sign-in attempts are logged with the username that was tried and the address it came from, so an operator can
   see an attack in progress; account creation, password resets and deletions are logged with the administrator who did
-  them. Passwords, password hashes and session tokens never reach the log.
+  them. Passwords, password hashes and session tokens never reach the log. A search that the server declines to answer,
+  because nothing scored well enough, is written to this log with the question that was asked.
+</p>
+
+<h3 id="query-log">Search queries</h3>
+<p>
+  <strong>Every search of a project is also recorded in the database</strong>, with the question as it was typed and the
+  excerpts that came back. It is not an operational log line that rotates away: it is a table, it is queryable, and it is
+  meant to be read — that is the point of it. Without it this software cannot tell an operator that their documentation
+  fails to answer something, because a single search cannot: a question about a feature that does not exist scores about
+  as well as one the documentation answers, and only the same question arriving forty times in a week says anything.
+</p>
+<ul>
+  <li>
+    <strong>Who can read it.</strong> Anyone who can read the project: <code>root</code>, <code>admin</code>, and any
+    <code>member</code> added to it, as a viewer or an editor. Agents cannot read it — there is no MCP tool that returns it,
+    and one agent can never see another's questions.
+  </li>
+  <li>
+    <strong>How long it is kept.</strong> <code>SEARCH_QUERY_LOG_RETENTION_DAYS</code>, 30 days by default. Older rows are
+    deleted automatically, a few times an hour. Deleting a project deletes its queries with it.
+  </li>
+  <li>
+    <strong>How to turn it off.</strong> Per project, with a setting that stays with the project; or for the whole instance
+    with <code>SEARCH_QUERY_LOG=0</code>, which records nothing whatever any project says. Both are the operator's
+    decision, and turning it off does not delete what is already there.
+  </li>
+  <li>
+    <strong>It is in the backups.</strong> A database dump carries this table like any other, so a backup of this instance
+    contains the questions that were asked of it. Keep backups accordingly.
+  </li>
+  <li>
+    <strong>What it does not record.</strong> No IP address, no browser, no account name, and nothing that identifies an
+    agent beyond which of the project's MCP tokens it presented. A dashboard search is marked as one and carries nothing
+    about who ran it.
+  </li>
+</ul>
+<p>
+  Whoever types a question into an agent decides what that question contains. If the people using this instance would put
+  something confidential into a search box, that is a reason to shorten the retention or to switch the log off — and a
+  reason to say so to them, which is the operator's job and not this page's.
 </p>
 
 <h2>5. When data leaves the machine</h2>
@@ -87,9 +137,20 @@
 <p>
   An AI agent connected to <code>/mcp/&lt;project&gt;</code> receives the excerpts and documents it searches for, and
   whatever the agent does with them is governed by that client's own privacy policy. Whether the agent needs a token to
-  connect at all is the operator's choice, per project; see <a href="#who-can-see-what">Who can see what</a> above. What
-  the server records about a connected agent is the token it presented — as a hash, with the time it was last used —
-  and nothing about the agent itself.
+  connect at all is the operator's choice, per project; see <a href="#who-can-see-what">Who can see what</a> above.
+</p>
+<p>
+  <strong>What the server records about a connected agent is what it asked.</strong> Every <code>search_docs</code> call is
+  written to the search query log described in <a href="#query-log">section 4</a> — the question in the clear, the excerpts
+  returned, and which of the project's MCP tokens the agent presented, if any. It records nothing else about the agent: no
+  address, no client name, no identity, because a token carries none. An <em>open</em> project verifies no token, so its
+  queries are recorded with no attribution at all.
+</p>
+<p>
+  The token itself is still stored only as a hash, with the time it was last used, and is still not recoverable. What
+  changed is that the questions asked through it are now kept beside it, for as long as
+  <code>SEARCH_QUERY_LOG_RETENTION_DAYS</code> says, and can be switched off per project or instance-wide with
+  <code>SEARCH_QUERY_LOG=0</code>.
 </p>
 
 <h2>8. Personal data</h2>

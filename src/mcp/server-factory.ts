@@ -13,9 +13,14 @@ function buildInstructions(project: ProjectRow): string {
   ].join(' ');
 }
 
-/** One McpServer per client session, bound to exactly one project. */
-export function createProjectMcpServer(ctx: AppContext, project: ProjectRow): McpServer {
+/**
+ * One McpServer per client session, bound to exactly one project — and, since
+ * [ADR-0047](../../.ssot/ADR.md#adr-0047), to the MCP token the session presented when it opened, so
+ * that what this client searches for can be attributed to a credential rather than to nobody.
+ * `null` for an `open` project, which verifies nothing and so has nothing to attribute.
+ */
+export function createProjectMcpServer(ctx: AppContext, project: ProjectRow, mcpTokenId: string | null = null): McpServer {
   const server = new McpServer({ name: `contextator-${project.name}`, version: ctx.version }, { instructions: buildInstructions(project) });
-  registerTools(server, ctx, project);
+  registerTools(server, ctx, project, mcpTokenId);
   return server;
 }

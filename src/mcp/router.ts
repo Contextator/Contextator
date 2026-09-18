@@ -34,6 +34,12 @@ declare module 'fastify' {
   interface FastifyRequest {
     /** Resolved once in the onRequest hook, so the four handlers do not each look it up again. */
     mcpProject: ProjectRow | null;
+    /**
+     * Which of the project's MCP tokens this request presented, when it presented a live one. NULL for
+     * an `open` project answered without one. Bound into the session's tool set at initialize
+     * ([ADR-0047](../../.ssot/ADR.md#adr-0047)).
+     */
+    mcpTokenId: string | null;
   }
 }
 
@@ -44,7 +50,9 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
   const { config, sessions, log } = ctx;
   const legacySsePingMs = 25_000;
 
-  app.decorateRequest('mcpProject', null); // primitive default: object defaults are shared between requests
+  // Primitive defaults: an object default would be shared between requests.
+  app.decorateRequest('mcpProject', null);
+  app.decorateRequest('mcpTokenId', null);
 
   /**
    * Origin validation (DNS-rebinding protection), then the project and its MCP access rule.
@@ -65,7 +73,12 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     req.mcpProject = project;
 
     const bearer = readMcpBearer(req.headers.authorization);
-    const verdict = mcpAccessDecision(project.mcpAuth, bearer, bearer ? await verifyMcpToken(ctx.db, project.id, bearer) : false);
+    // The id and not only the verdict, so that a search made through this session can say which token
+    // it came through ([ADR-0047](../../.ssot/ADR.md#adr-0047)). An `open` project verifies nothing and
+    // therefore records nothing, which is exactly what it means for a project to be open.
+    const tokenId = bearer ? await verifyMcpToken(ctx.db, project.id, bearer) : null;
+    req.mcpTokenId = tokenId;
+    const verdict = mcpAccessDecision(project.mcpAuth, bearer, tokenId !== null);
     if (verdict === 'ok') return;
 
     if (verdict === 'token_invalid') log.warn({ project: project.name }, 'mcp request with an unknown or revoked token');
@@ -109,7 +122,9 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
       sessions.touch(sessionId);
       transport = session.transport;
     } else if (isInitializeRequest(req.body)) {
-      const server = createProjectMcpServer(ctx, project);
+      // The token of the request that *opened* the session, not of each later one: an MCP session is a
+      // credential's connection, and the SDK builds the tool set once per session.
+      const server = createProjectMcpServer(ctx, project, req.mcpTokenId);
       const fresh = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => {
@@ -157,7 +172,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     }
 
     // Legacy HTTP+SSE transport. hijack() must precede connect(): SSEServerTransport.start() writes the response head.
-    const server = createProjectMcpServer(ctx, project);
+    const server = createProjectMcpServer(ctx, project, req.mcpTokenId);
     reply.hijack();
     const transport = new SSEServerTransport(`/mcp/${project.name}/messages`, reply.raw);
     const ping = setInterval(() => {

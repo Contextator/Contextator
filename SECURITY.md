@@ -54,6 +54,15 @@ vulnerabilities, and a report about one of them will be closed with a link back 
 - **A token-protected project answers `401` where an unknown project answers `404`**, so project *names*
   remain discoverable by anyone who can reach the server. Hiding that would mean answering `404` to a
   client holding a wrong token, which is worse to debug than the disclosure is worth.
+- **Every search of a project is recorded, in the clear, and every viewer of that project can read it.**
+  The query log stores the question as it was typed — not a hash, because the feature is being able to read
+  back what people asked — with the excerpts it returned and the MCP token the agent presented, if any. It is
+  an ordinary table, so it is in every `pg_dump` as well. That is the feature and not a leak: without it this
+  product cannot tell an operator which questions their documentation fails to answer. What it is *not* is a
+  place for secrets, and an instance whose users type confidential things into a search box should shorten
+  `SEARCH_QUERY_LOG_RETENTION_DAYS`, switch the log off per project, or set `SEARCH_QUERY_LOG=0`. The
+  [Privacy Policy](public/pages/privacy.html) §4 states all of it. A query log readable by somebody with *no*
+  access to the project would be a vulnerability; one readable by that project's viewers is the design.
 - **`/mcp/*` is not rate-limited**, and `ADMIN_TOKEN` has no lockout. Both rely on the entropy of the
   credential and on the network boundary. Sign-in to the dashboard *is* limited, per account and per IP.
 - **`ADMIN_TOKEN` acts with root permissions and bypasses every membership.** That is what it is for —

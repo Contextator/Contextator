@@ -24,6 +24,7 @@ import { createEmbeddingProvider } from './services/embeddings/index.js';
 import { Indexer } from './services/indexer.js';
 import { KeyedMutex } from './services/locks.js';
 import { listProjects } from './services/projects.js';
+import { QueryLog, sweepQueryLog } from './services/query-log.js';
 import { floorModelWarning } from './services/relevance.js';
 import { countUsers } from './services/auth/users.js';
 import { startSessionReaper } from './services/auth/sessions.js';
@@ -56,6 +57,10 @@ async function main(): Promise<void> {
   const uploads = new UploadService(config);
   const setup = new SetupGate();
   const loginLimiter = new SlidingWindow(config.AUTH_LOGIN_MAX_ATTEMPTS, config.AUTH_LOGIN_WINDOW_MIN * 60_000);
+  // Built only when the instance-wide switch allows it (ADR-0047). Left undefined there is no sink for
+  // the MCP tool or the search route to hand `searchProject`, so `SEARCH_QUERY_LOG=0` is not a flag the
+  // search path has to remember to check — it is the absence of the thing that would have written.
+  const queryLog = config.SEARCH_QUERY_LOG ? new QueryLog(db, log) : undefined;
   const ctx: AppContext = {
     config,
     db,
@@ -68,6 +73,7 @@ async function main(): Promise<void> {
     sessions,
     setup,
     loginLimiter,
+    queryLog,
     version: APP_VERSION,
     startedAt: Date.now(),
   };
@@ -97,6 +103,9 @@ async function main(): Promise<void> {
     sessions.stopReaper();
     stopSessionReaper?.();
     await sessions.closeAll();
+    // Before the pool, and awaited: what is buffered is a handful of rows and a shutdown that drops
+    // them would lose exactly the queries of the minute somebody restarted the container.
+    await queryLog?.close().catch((err: unknown) => log.warn({ err }, 'query log did not flush on shutdown'));
     await pool.end();
   });
 
@@ -128,7 +137,19 @@ async function main(): Promise<void> {
       log.warn('Until that account exists, every /api/* endpoint answers 401 setup_required.');
     }
   }
-  stopSessionReaper = startSessionReaper(db, log, config.AUTH_SESSION_IDLE_MS, 15 * 60_000, () => loginLimiter.sweep());
+  // One timer for everything that has to be forgotten on a schedule. The query log's retention rides
+  // the session reaper's interval rather than starting a third one (ADR-0047): the sweep is a single
+  // `DELETE … WHERE created_at < now() - …` and a quarter of an hour of latency on a thirty-day window
+  // is not a number anybody can observe.
+  stopSessionReaper = startSessionReaper(db, log, config.AUTH_SESSION_IDLE_MS, 15 * 60_000, () => {
+    loginLimiter.sweep();
+    if (!config.SEARCH_QUERY_LOG) return;
+    void sweepQueryLog(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)
+      .then((deleted) => {
+        if (deleted > 0) log.info({ deleted, retentionDays: config.SEARCH_QUERY_LOG_RETENTION_DAYS }, 'swept expired query log rows');
+      })
+      .catch((err: unknown) => log.warn({ err }, 'query log sweep failed'));
+  });
 
   // Data directory for materialised sources; drop directories whose project/source rows are gone.
   await fs.mkdir(config.DATA_DIR, { recursive: true });

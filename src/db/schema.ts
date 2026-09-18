@@ -3,6 +3,7 @@ import {
   boolean,
   check,
   customType,
+  doublePrecision,
   foreignKey,
   index,
   integer,
@@ -95,6 +96,23 @@ export const projects = pgTable(
      * is the default and nothing has to be rewritten.
      */
     liveGeneration: integer('live_generation').notNull().default(0),
+    /**
+     * Whether searches of this project are recorded in `search_queries`
+     * ([ADR-0047](../../.ssot/ADR.md#adr-0047)).
+     *
+     * **A column rather than a setting, because the decision belongs to the project and not to the
+     * process.** A `pg_dump` carries it, a project export will carry it, and an instance restored onto
+     * another machine keeps whatever each project's operator decided — where an environment variable
+     * would silently revert to the new host's default. `SEARCH_QUERY_LOG=0` is the instance-wide kill
+     * switch and overrules this in the only direction that is safe: off.
+     *
+     * `true` is the default, and it is the default because a log of what agents asked is worth nothing
+     * until there are weeks of rows behind it — a switch somebody has to find and turn on collects
+     * nothing during exactly the period the first report would be drawn from. What makes that
+     * defensible is the other half of the design: `SEARCH_QUERY_LOG_RETENTION_DAYS` forgets on its own
+     * after thirty days, and the privacy page says so.
+     */
+    queryLogEnabled: boolean('query_log_enabled').notNull().default(true),
   },
   (t) => [check('projects_mcp_auth_check', sql`${t.mcpAuth} in ('open', 'token')`)],
 );
@@ -302,6 +320,123 @@ export const indexRuns = pgTable(
   ],
 );
 
+/**
+ * What agents asked, and what they got back ([ADR-0047](../../.ssot/ADR.md#adr-0047)).
+ *
+ * One row per search that actually ran — through the MCP tool or through the dashboard's search panel.
+ * The five outcomes that never reached the index (an unknown source, a project with nothing in it, a
+ * model mismatch) are configuration states rather than questions, and they are not rows here.
+ *
+ * **It is written off the response path.** `services/query-log.ts` buffers rows in memory and drops
+ * them rather than letting them back up: a search that failed because the log was busy would be a
+ * worse product than one that lost a log row.
+ *
+ * **User content lives here.** `query` is whatever somebody typed, in the clear, because the entire
+ * purpose is reading "what are people asking" back out of it — a hash cannot be read. It is therefore
+ * in every `pg_dump` ([ADR-0046](../../.ssot/ADR.md#adr-0046)), readable by every viewer of the
+ * project, and swept by `SEARCH_QUERY_LOG_RETENTION_DAYS`.
+ */
+export const searchQueries = pgTable(
+  'search_queries',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** `mcp` — an agent through `search_docs` — or `dashboard`, an operator through the search panel. */
+    actor: text('actor').notNull().$type<QueryActor>(),
+    /**
+     * Which of the project's MCP tokens the session presented, when it presented one; NULL for an
+     * `open` project and for every dashboard search.
+     *
+     * **`ON DELETE SET NULL`, not cascade.** A token is revoked rather than deleted today, but a
+     * project that rotates tokens for years will eventually delete one, and a foreign key that took
+     * the log with it would erase the history of exactly the agent somebody is investigating.
+     */
+    mcpTokenId: uuid('mcp_token_id'),
+    /** What was typed, verbatim and bounded by the tool's own 2 000-character limit. */
+    query: text('query').notNull(),
+    /**
+     * The same question, folded so two spellings of it group together: NFKC, lowercased, whitespace
+     * collapsed. It is a *grouping* key and not an identity — "how many agents asked this" is the
+     * question the whole table exists for, and `GROUP BY query` over raw text answers it wrongly.
+     */
+    queryNorm: text('query_norm').notNull(),
+    /** How many excerpts were asked for. `limit` is a reserved word, hence the column name. */
+    resultLimit: integer('result_limit').notNull(),
+    /** The `source` filter, as it was given; NULL when the search was over the whole project. */
+    filterSource: text('filter_source'),
+    /** The `path_prefix` filter, normalised as the search normalised it; NULL when there was none. */
+    filterPathPrefix: text('filter_path_prefix'),
+    /** How many excerpts came back — 0 is a real and interesting answer. */
+    hitCount: integer('hit_count').notNull().default(0),
+    /** The best cosine similarity of the answer, or NULL when nothing came back at all. */
+    topScore: doublePrecision('top_score'),
+    /** Whether the agent was told "no good match" instead of being handed these hits (ADR-0042). */
+    belowFloor: boolean('below_floor').notNull().default(false),
+    /** Wall clock of the whole search, embedding included. */
+    durationMs: integer('duration_ms').notNull().default(0),
+    /**
+     * The provider-qualified id of the encoder that answered this question, and the generation it
+     * answered from — **the part of this table that is easy to leave out and expensive to add later.**
+     *
+     * [ROADMAP.md](../../.ssot/ROADMAP.md) Item 6's own observation is that "a log recorded across a
+     * retrieval rewrite compares two different systems". These two columns turn that from a caveat into
+     * a predicate: analysis can be scoped to one retrieval configuration instead of averaging across a
+     * model change. This repository changed its model mid-phase ([ADR-0037](../../.ssot/ADR.md#adr-0037)),
+     * so that is not hypothetical.
+     */
+    embeddingModel: text('embedding_model').notNull(),
+    liveGeneration: integer('live_generation').notNull().default(0),
+  },
+  (t) => [
+    foreignKey({ name: 'search_queries_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    foreignKey({ name: 'search_queries_mcp_token_id_fkey', columns: [t.mcpTokenId], foreignColumns: [mcpTokens.id] }).onDelete('set null'),
+    check('search_queries_actor_check', sql`${t.actor} in ('mcp', 'dashboard')`),
+    // "The most recent queries of this project", and the per-project row cap's own cut-off lookup.
+    // `nullsFirst()` for `index_runs`' reason: it is PostgreSQL's default for a DESC column, and
+    // leaving it unsaid makes drizzle-kit write `DESC NULLS LAST` instead.
+    index('search_queries_project_created_idx').on(t.projectId, t.createdAt.desc().nullsFirst()),
+    // The retention sweep is instance-wide — one `created_at` predicate over every project — so it
+    // cannot use the composite above.
+    index('search_queries_created_idx').on(t.createdAt),
+    // The question the table exists to answer: "asked 41 times this week, best match 0.31".
+    index('search_queries_project_norm_idx').on(t.projectId, t.queryNorm),
+  ],
+);
+
+/**
+ * What one logged search returned, one row per excerpt, in the order the agent saw them
+ * ([ADR-0047](../../.ssot/ADR.md#adr-0047)).
+ *
+ * **It stores the path, not a `document_id`**, and that is the load-bearing decision. Documents are
+ * generation-scoped and [ADR-0039](../../.ssot/ADR.md#adr-0039)'s sweeper deletes the ones a rebuild
+ * superseded, so a foreign key to `documents` would erase the log every time somebody re-indexed —
+ * taking with it the only record of what the previous index answered, which is precisely what a
+ * before-and-after comparison needs.
+ */
+export const searchQueryHits = pgTable(
+  'search_query_hits',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    queryId: uuid('query_id').notNull(),
+    /** 1-based position in the answer the caller received. */
+    rank: integer('rank').notNull(),
+    /** `<source>/<path inside the source>`, as `search_docs` printed it and `read_document` takes it. */
+    relativePath: text('relative_path').notNull(),
+    headingPath: text('heading_path').notNull().default(''),
+    chunkIndex: integer('chunk_index').notNull(),
+    /** The cosine similarity shown beside the excerpt. */
+    score: doublePrecision('score').notNull(),
+  },
+  (t) => [
+    foreignKey({ name: 'search_query_hits_query_id_fkey', columns: [t.queryId], foreignColumns: [searchQueries.id] }).onDelete('cascade'),
+    // Also the index for "the hits of this query": a unique constraint is an index, and `query_id`
+    // leads it, so a separate one would be the same b-tree twice.
+    unique('search_query_hits_query_rank_uq').on(t.queryId, t.rank),
+    index('search_query_hits_path_idx').on(t.relativePath),
+  ],
+);
+
 /** Dashboard accounts. `root` and `admin` reach every project; a `member` only its memberships. */
 export const users = pgTable(
   'users',
@@ -385,6 +520,8 @@ export const settings = pgTable('settings', {
 });
 
 export type UserRole = 'root' | 'admin' | 'member';
+/** Who asked a logged question ([ADR-0047](../../.ssot/ADR.md#adr-0047)). */
+export type QueryActor = 'mcp' | 'dashboard';
 export type McpAuthMode = 'open' | 'token';
 export type ProjectMemberRole = 'viewer' | 'editor';
 
@@ -398,3 +535,7 @@ export type DocumentRow = typeof documents.$inferSelect;
 export type ChunkInsert = typeof chunks.$inferInsert;
 export type IndexRunRow = typeof indexRuns.$inferSelect;
 export type IndexRunInsert = typeof indexRuns.$inferInsert;
+export type SearchQueryRow = typeof searchQueries.$inferSelect;
+export type SearchQueryInsert = typeof searchQueries.$inferInsert;
+export type SearchQueryHitRow = typeof searchQueryHits.$inferSelect;
+export type SearchQueryHitInsert = typeof searchQueryHits.$inferInsert;

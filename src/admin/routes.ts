@@ -223,7 +223,17 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       // The floor is passed here as well as to the tool, because this panel is the operator's view of
       // what the agent sees and a search that would be refused has to look refused (ADR-0042). The
       // hits come back either way; the dashboard shows them under the notice.
-      { db, embeddings, scan: scanFrom(config), selection: selectionFrom(config), scoreFloor: config.SEARCH_SCORE_FLOOR },
+      // Recorded as `dashboard` rather than `mcp` ([ADR-0047](../../.ssot/ADR.md#adr-0047)), because
+      // the operator testing their own corpus is not an agent asking a question and an analysis that
+      // averaged the two would be reading its author's own typing back to them.
+      {
+        db,
+        embeddings,
+        scan: scanFrom(config),
+        selection: selectionFrom(config),
+        scoreFloor: config.SEARCH_SCORE_FLOOR,
+        queryLog: ctx.queryLog?.for('dashboard'),
+      },
       { projectId: id, query: q, limit, source, pathPrefix: path_prefix },
     );
     // Deleted between the policy hook resolving access and this read — the same 404 a caller who

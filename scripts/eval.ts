@@ -2,12 +2,12 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { eq } from 'drizzle-orm';
+import { count, eq } from 'drizzle-orm';
 
 import { loadConfig, type Config } from '../src/config.js';
 import type { Logger } from '../src/context.js';
 import type { Db } from '../src/db/client.js';
-import { projects } from '../src/db/schema.js';
+import { projects, searchQueries } from '../src/db/schema.js';
 import { chunkReserveTokens } from '../src/services/chunk-budget.js';
 import { chunkMarkdown, embeddingText } from '../src/services/chunker.js';
 import { createEmbeddingProvider, type EmbeddingProvider } from '../src/services/embeddings/index.js';
@@ -475,6 +475,25 @@ async function run(options: Options): Promise<GateVerdict> {
       negativeResults.push(scoreNegativeRow(row, hits, refused));
     }
     const searchMs = Date.now() - searchStart;
+
+    /**
+     * **The harness records nothing, and that is asserted rather than assumed**
+     * ([ADR-0047](../.ssot/ADR.md#adr-0047)).
+     *
+     * `SearchDeps.queryLog` is optional and unset is off, so `ask` above writes no row by construction
+     * — the same convention that makes `scan` and `scoreFloor` safe to omit. This is the check that the
+     * construction is still the construction. An `ask` that acquired a sink by accident — by being
+     * handed a whole `AppContext` one day, say — would quietly turn every run of this file into
+     * eighty-eight rows of invented traffic inside a table whose entire value is that its traffic is
+     * real, and no retrieval number would move to say so.
+     */
+    const [recorded] = await db.select({ rows: count() }).from(searchQueries);
+    if (recorded.rows !== 0) {
+      throw new Error(
+        `The harness passes no query log sink, so search_queries must be empty — it holds ${recorded.rows} rows. ` +
+          'Something on the search path is recording without being asked to (ADR-0047).',
+      );
+    }
 
     const context: RunContext = {
       commit: commitDescription(),

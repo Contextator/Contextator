@@ -102,11 +102,21 @@ function decodeCursor(cursor: string): string | null {
  * server hands them the composition root; a test hands them four fields and a stub provider, which is
  * the difference between a tool contract that can be exercised and one that can only be deployed.
  */
-export type ToolContext = Pick<AppContext, 'db' | 'embeddings' | 'config' | 'log'>;
+export type ToolContext = Pick<AppContext, 'db' | 'embeddings' | 'config' | 'log' | 'queryLog'>;
 
-/** Registers the per-project tool set on a fresh McpServer instance. Handlers never throw; failures come back as `isError`. */
-export function registerTools(server: McpServer, ctx: ToolContext, project: ProjectRow): void {
+/**
+ * Registers the per-project tool set on a fresh McpServer instance. Handlers never throw; failures come
+ * back as `isError`.
+ *
+ * `mcpTokenId` is the credential the session opened with, recorded beside whatever it searches for
+ * ([ADR-0047](../../.ssot/ADR.md#adr-0047)). It is `null` for an `open` project, which verifies nothing.
+ */
+export function registerTools(server: McpServer, ctx: ToolContext, project: ProjectRow, mcpTokenId: string | null = null): void {
   const { db, embeddings, config, log } = ctx;
+  // Bound once per session rather than per call: the actor and the token do not change inside one
+  // connection, and `ctx.queryLog` being undefined — `SEARCH_QUERY_LOG=0` — makes this undefined too,
+  // which is how the instance-wide switch reaches the search path (`SearchDeps.queryLog`, unset = off).
+  const queryLog = ctx.queryLog?.for('mcp', mcpTokenId);
   const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 
   server.registerTool(
@@ -149,7 +159,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
         // The guards, the query embedding and the top-k query are services/search.ts; what is left
         // here is the wording, which is prompt-visible and belongs to the tool.
         const outcome = await searchProject(
-          { db, embeddings, scan: scanFrom(config), selection: selectionFrom(config), scoreFloor: config.SEARCH_SCORE_FLOOR },
+          { db, embeddings, scan: scanFrom(config), selection: selectionFrom(config), scoreFloor: config.SEARCH_SCORE_FLOOR, queryLog },
           { projectId: project.id, query, limit, source, pathPrefix: path_prefix },
         );
         if (outcome.status === 'project_gone') return fail(`Project "${project.name}" no longer exists.`);
@@ -177,10 +187,10 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
           return ok(`No matching documentation for "${query}"${scoped}. Try different wording or call list_topics to browse.`);
         }
         if (outcome.belowFloor) {
-          // The first customer of ROADMAP.md Item 6's query log, and deliberately only a log line:
-          // "the agent was refused and here is what it asked" is the one event this product has never
-          // recorded, and writing it now means the table Item 6 adds starts with a format that has
-          // already been read by somebody.
+          // The log line predates the table and stays beside it ([ADR-0047](../../.ssot/ADR.md#adr-0047)):
+          // `search_queries.below_floor` is the queryable record, and this is the line an operator
+          // watching `docker logs` sees at the moment it happens. One is for analysis over weeks, the
+          // other for the afternoon somebody is debugging a refusal.
           log.info(
             { tool: 'search_docs', project: project.name, query, topScore: outcome.hits[0].score, floor: config.SEARCH_SCORE_FLOOR },
             'search below the relevance floor',

@@ -29,7 +29,7 @@ import { captureSchema, renderSchemaSnapshot, snapshotDifference } from './suppo
 const baseUrl = inject('postgresBaseUrl');
 const here = dirname(fileURLToPath(import.meta.url));
 
-/** The ten tables the current schema version owns, in the order PostgreSQL lists them. */
+/** The twelve tables the current schema version owns, in the order PostgreSQL lists them. */
 const EXPECTED_TABLES = [
   'chunks',
   'document_sources',
@@ -38,6 +38,9 @@ const EXPECTED_TABLES = [
   'mcp_tokens',
   'project_members',
   'projects',
+  // The query log ([ADR-0047](../../../.ssot/ADR.md#adr-0047)): what agents asked, and what came back.
+  'search_queries',
+  'search_query_hits',
   'settings',
   'user_sessions',
   'users',
@@ -196,7 +199,8 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     // is `0001_index_generations` ([ADR-0039](../../../.ssot/ADR.md#adr-0039)) and
     // `0002_hybrid_search` ([ADR-0041](../../../.ssot/ADR.md#adr-0041)) and `0003_chunk_neighbours`
     // ([ADR-0042](../../../.ssot/ADR.md#adr-0042)) and `0004_document_content`
-    // ([ADR-0043](../../../.ssot/ADR.md#adr-0043)). So the claim is no
+    // ([ADR-0043](../../../.ssot/ADR.md#adr-0043)) and `0005_query_log`
+    // ([ADR-0047](../../../.ssot/ADR.md#adr-0047)). So the claim is no
     // longer "nothing changed": it is that nothing changed *except* what those migrations say they
     // change, and the lines that moved are checked by name rather than counted.
     await applySchema(database);
@@ -205,7 +209,7 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     expect(
       changed.filter(
         (line) =>
-          !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated/.test(
+          !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer/.test(
             line,
           ),
       ),

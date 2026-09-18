@@ -218,6 +218,30 @@ describe('the shipped prose tells the truth about accounts and MCP', () => {
     expect(terms).toContain('bearer token');
   });
 
+  /**
+   * FR-135 promises the legal pages state what the software stores "accurately enough that the
+   * statement can be checked against the code", and [ADR-0047](../.ssot/ADR.md#adr-0047) is the first
+   * change to make one of those statements *false* rather than merely incomplete: §7 said the server
+   * records the token an agent presented "and nothing about the agent itself", and it now records
+   * every question the agent asks.
+   *
+   * So the retired sentence is pinned as an absence, exactly as "unauthenticated by design" is above,
+   * and the claims that replaced it are pinned as text. Bringing the behaviour back without the prose —
+   * or deleting the prose without the behaviour — fails here.
+   */
+  it('no longer claims the server records nothing about a connected agent', async () => {
+    const privacy = await readFile(new URL('../public/pages/privacy.html', import.meta.url), 'utf8');
+    // The sentence this change made untrue. It must not come back while the table exists.
+    expect(privacy).not.toContain('and nothing about the agent itself');
+    // What replaced it: the table, what is in it, who can read it, and how long it lives.
+    expect(privacy).toContain('Search queries');
+    expect(privacy).toContain('SEARCH_QUERY_LOG_RETENTION_DAYS');
+    // The two switches an operator has, named as the software names them.
+    expect(privacy).toContain('SEARCH_QUERY_LOG');
+    // The consequence that is easy to leave out of a privacy page: it is content, in the backups too.
+    expect(privacy).toContain('backup');
+  });
+
   it('says the same thing in the README and in the dashboard, where operators actually read it', async () => {
     const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
     const dashboard = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
