@@ -370,10 +370,16 @@ The server also sends MCP `instructions` describing the project so agents know w
 3. Chunking is Markdown-aware: frontmatter is parsed (`title` wins), MDX `import`/`export` lines and component tags are stripped, the document is split at headings (`#`–`####`) with a breadcrumb kept per chunk, and oversized sections are packed from paragraphs and fenced code blocks (code is never split mid-block when avoidable) with a small overlap.
 4. Each chunk is embedded as `heading breadcrumb + content` and stored in `chunks` with an HNSW cosine index.
 
-**Chunk size caveat.** `CHUNK_MAX_TOKENS` defaults to 400 (tokens ≈ characters / 4). MiniLM-class models
-only look at the first ~128–256 word pieces of each input, so with the local models a smaller value
-(`250`) gives slightly better retrieval; 400+ is ideal for OpenAI (8k window). Putting the breadcrumb
-first guarantees the most informative part is always inside the model window.
+**Chunk size caveat, and the warning you will see.** `CHUNK_MAX_TOKENS` defaults to 400 (tokens ≈
+characters / 4), which is larger than the default local model reads. Two different limits are involved
+and it is worth keeping them apart: `Xenova/paraphrase-multilingual-MiniLM-L12-v2` was trained at **128**
+word pieces, while its tokenizer truncates at **512**. So a 400-token chunk is not cut — it is embedded
+in full, by weights that were never trained to represent that much, and the vector that comes out looks
+exactly as confident as any other. The server works both numbers out from the model once it has loaded
+and logs an `error` line naming them and a budget that fits; `/api/health` and the project page carry
+the same thing so it is still visible tomorrow. `250` or lower suits the local models; 400+ is fine for
+OpenAI (8191-token window). Putting the breadcrumb first guarantees the most informative part is always
+inside the window, whatever the budget is.
 
 ## Configuration
 
@@ -401,6 +407,7 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `EMBEDDING_DIMENSIONS` | `384` | Must match the model. `1536` for `text-embedding-3-small` |
 | `EMBEDDING_DTYPE` | `fp32` | `q8` downloads a ~4× smaller quantized model |
 | `OPENAI_API_KEY`, `OPENAI_EMBEDDING_MODEL` | – / `text-embedding-3-small` | Used when the provider is `openai` |
+| `EMBEDDING_MAX_INPUT_TOKENS` | – | What the model reads **usefully** — the window it was trained at, not where its tokenizer truncates. Left empty the server discovers it from the loaded model and warns after startup if `CHUNK_MAX_TOKENS` does not fit; set, it overrules that and a contradicting `CHUNK_MAX_TOKENS` refuses to start |
 | `CHUNK_MAX_TOKENS` / `CHUNK_OVERLAP_TOKENS` | `400` / `50` | |
 | `ADMIN_TOKEN` | – | **Machine access** to `/api/*` via `Authorization: Bearer …`, acting with root permissions. Browsers sign in with an account instead; treat this token like a root password |
 | `AUTH_SESSION_IDLE_MS` | `43200000` (12 h) | A dashboard session unused for this long has to sign in again. Refreshed while the dashboard is in use |
@@ -437,7 +444,7 @@ no ambient credential.
 
 | Method & path | Description |
 |---------------|-------------|
-| `GET /api/health` | DB status, embedding provider/model/dtype/readiness, open MCP sessions, version. `503` with the same body while the database is unreachable, `200` otherwise |
+| `GET /api/health` | DB status, embedding provider/model/dtype/readiness and its input window, whether `CHUNK_MAX_TOKENS` fits that window, open MCP sessions, version. `503` with the same body while the database is unreachable, `200` otherwise |
 | `GET /api/projects` | Projects with counts, `mcpUrl` and the live indexing `job` (phase, files done/total/skipped/removed, chunks; for queued jobs `queue.aheadProjectName`) |
 | `POST /api/projects` `{ name, rootPath, index?: true }` | Create a project; `400` invalid name/path, `409` duplicate |
 | `POST /api/projects/:id/reindex?force=true` | Queue (incremental or full) re-index → `202 { job }` |
@@ -542,6 +549,7 @@ src/services/uploads.ts       staged upload sessions and their commit into a sou
 src/services/data-dir.ts      layout of DATA_DIR, atomic directory swaps, orphan sweep
 src/services/crypto.ts        AES-256-GCM encryption of source tokens (SECRET_KEY)
 src/services/embeddings/      provider interface, local (transformers.js) and OpenAI implementations
+src/services/chunk-budget.ts  the after-warmup half of the chunk budget check: what the model reads, against what the chunker produces
 src/services/indexer.ts       incremental background indexing queue
 src/services/vector-store.ts  pgvector cosine search and chunk persistence
 src/services/search.ts        the one search path: the guards, the query embedding and the top-k query, shared by the MCP tool and the search API
@@ -682,6 +690,7 @@ text, on every pull request, against a real server.
 | Symptom | Fix |
 |---------|-----|
 | `The database was created with EMBEDDING_DIMENSIONS=… but the current config says …` | Match the value, or start once with `RESET_VECTORS=1` and re-index everything. |
+| `CHUNK_MAX_TOKENS=400 exceeds what … reads` | The shipped default, and it is the product telling the truth about itself. Set `CHUNK_MAX_TOKENS` to the value the line suggests and re-index. If you run a model this build does not know, state its window in `EMBEDDING_MAX_INPUT_TOKENS`. |
 | Dashboard shows `model loading` for a long time | First run downloads ~470 MB; check `docker compose logs -f`. Air-gapped hosts: pre-populate the `contextator-models` volume and set `EMBEDDING_OFFLINE=1`. |
 | Container keeps restarting, logs say `PostgreSQL exited during startup` | The PostgreSQL output above that line tells why: usually a data directory from another PostgreSQL major version, or a bind-mounted `CONTEXTATOR_PGDATA_PATH` with wrong permissions. |
 | `Directory is outside the allowed document roots` | Use a path under `ALLOWED_DOC_ROOTS` (`/docs/...` inside Docker). |

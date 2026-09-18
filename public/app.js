@@ -474,6 +474,26 @@ function renderDetail() {
       ]),
     );
   }
+  // The chunk budget against what the model actually reads. Sticky for the life of the server process,
+  // and shown here because a line in the startup log is not where anyone looks (ADR-0035).
+  const budget = state.health?.chunkBudget;
+  if (budget?.checked && !budget.ok) {
+    const w = state.health.embeddings;
+    const truncation =
+      typeof w?.truncatesAtTokens === 'number' && w.truncatesAtTokens > w.maxInputTokens
+        ? ` The tokenizer only truncates at ${w.truncatesAtTokens}, so the rest is read — by weights that were never trained to represent it.`
+        : '';
+    main.append(
+      el('div', { class: 'callout warn' }, [
+        el('span', { class: 'callout-title', text: 'Chunks are larger than the model reads' }),
+        el('span', {
+          text:
+            `CHUNK_MAX_TOKENS is ${budget.chunkMaxTokens}, but ${w?.model ?? 'the model'} represents only the first ` +
+            `${w?.maxInputTokens} tokens.${truncation} Set CHUNK_MAX_TOKENS=${budget.suggestedChunkMaxTokens} and re-index.`,
+        }),
+      ]),
+    );
+  }
 
   // Stat tiles
   const runs = state.runsFor === p.id ? state.runs : [];

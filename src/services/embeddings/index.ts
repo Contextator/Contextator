@@ -5,7 +5,7 @@ import { LocalEmbeddingProvider } from './local.js';
 import { OpenAIEmbeddingProvider } from './openai.js';
 import type { EmbeddingProvider } from './provider.js';
 
-export type { EmbeddingProvider } from './provider.js';
+export type { EmbeddingProvider, EmbeddingWindowSource } from './provider.js';
 export { EmbeddingDimensionError } from './provider.js';
 
 export function createEmbeddingProvider(config: Config, log: Logger): EmbeddingProvider {
@@ -14,6 +14,7 @@ export function createEmbeddingProvider(config: Config, log: Logger): EmbeddingP
       apiKey: config.OPENAI_API_KEY ?? '',
       model: config.OPENAI_EMBEDDING_MODEL,
       dimensions: config.EMBEDDING_DIMENSIONS,
+      maxInputTokens: config.EMBEDDING_MAX_INPUT_TOKENS,
       log,
     });
   }
@@ -23,6 +24,7 @@ export function createEmbeddingProvider(config: Config, log: Logger): EmbeddingP
     cacheDir: path.resolve(config.MODEL_CACHE_DIR),
     dtype: config.EMBEDDING_DTYPE,
     offline: config.EMBEDDING_OFFLINE,
+    maxInputTokens: config.EMBEDDING_MAX_INPUT_TOKENS,
     log,
   });
 }

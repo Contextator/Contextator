@@ -18,6 +18,7 @@ import { createDb, waitForDb } from './db/client.js';
 import { bootstrapDatabase, SchemaMismatchError } from './db/bootstrap.js';
 import { mcpRoutes } from './mcp/router.js';
 import { SessionRegistry } from './mcp/sessions.js';
+import { newChunkBudgetState, verifyChunkBudget } from './services/chunk-budget.js';
 import { sweepOrphanDirs } from './services/data-dir.js';
 import { createEmbeddingProvider } from './services/embeddings/index.js';
 import { Indexer } from './services/indexer.js';
@@ -58,6 +59,7 @@ async function main(): Promise<void> {
     db,
     log,
     embeddings,
+    chunkBudget: newChunkBudgetState(),
     indexer,
     locks,
     uploads,
@@ -142,7 +144,22 @@ async function main(): Promise<void> {
   // Model download/load can take a while on first start; don't block the dashboard on it.
   void embeddings
     .warmup()
-    .then(() => log.info({ provider: embeddings.provider, model: embeddings.model, dimensions: embeddings.dimensions }, 'embedding model ready'))
+    .then(() => {
+      log.info(
+        {
+          provider: embeddings.provider,
+          model: embeddings.model,
+          dimensions: embeddings.dimensions,
+          maxInputTokens: embeddings.maxInputTokens,
+          truncatesAtTokens: embeddings.truncatesAtTokens,
+          windowSource: embeddings.windowSource,
+        },
+        'embedding model ready',
+      );
+      // The only place a loaded tokenizer and the configuration are both in hand (ADR-0035). Loud,
+      // never fatal: exiting from a background promise would make a tuning mistake a crash loop.
+      verifyChunkBudget(ctx);
+    })
     .catch((err: unknown) => log.error({ err }, 'embedding model failed to load; indexing and search will fail until it is available'));
 
   sessions.startReaper(config.SESSION_IDLE_TTL_MS);

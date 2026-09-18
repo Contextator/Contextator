@@ -57,6 +57,10 @@ const embeddings: EmbeddingProvider = {
   model: 'stub-bag-of-words',
   dimensions: DIMS,
   ready: true,
+  // No model here, so no window to discover; nothing in the search path reads these three.
+  maxInputTokens: 512,
+  truncatesAtTokens: 512,
+  windowSource: 'default',
   warmup: async () => {},
   embed: async (texts) => texts.map(stubVector),
 };

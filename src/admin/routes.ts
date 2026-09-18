@@ -144,6 +144,17 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         dimensions: embeddings.dimensions,
         dtype: embeddings.provider === 'local' ? config.EMBEDDING_DTYPE : null,
         ready: embeddings.ready,
+        /** What the model reads usefully; `truncatesAtTokens` is where the runtime cuts (ADR-0035). */
+        maxInputTokens: embeddings.maxInputTokens,
+        truncatesAtTokens: embeddings.truncatesAtTokens,
+        windowSource: embeddings.windowSource,
+      },
+      /** Sticky, and `checked: false` until the model has loaded — before that there is no window. */
+      chunkBudget: {
+        checked: ctx.chunkBudget.checked,
+        ok: ctx.chunkBudget.warning === null,
+        chunkMaxTokens: config.CHUNK_MAX_TOKENS,
+        suggestedChunkMaxTokens: ctx.chunkBudget.warning?.suggestedChunkMaxTokens ?? null,
       },
       sessions: sessions.stats(),
       uploads: {

@@ -12,7 +12,21 @@ const csv = (value: string): string[] =>
 
 const flag = (value: string): boolean => value === '1' || value.toLowerCase() === 'true';
 
-const EnvSchema = z
+/**
+ * Held back from `CHUNK_MAX_TOKENS` when it is checked against the model's window (ADR-0035). It covers
+ * the two things the budget does not count: `embeddingText` prepends the heading breadcrumb to the
+ * content the budget was measured against, and the tokenizer adds its own `<s>`/`</s>`.
+ *
+ * It does **not** pretend to cover `estimateTokens`' characters ÷ 4, which under-counts and is biased by
+ * language. Replacing that approximation with the model's real tokenizer is a separate change.
+ */
+export const CHUNK_BUDGET_RESERVE_TOKENS = 32;
+
+/** `CHUNK_MAX_TOKENS`' own floor, so a suggested budget is never a value the schema would refuse. */
+export const CHUNK_MAX_TOKENS_MIN = 50;
+
+/** Exported for the tests: the cross-field rules are the only part of this file that has behaviour. */
+export const EnvSchema = z
   .object({
     // Server
     PORT: z.coerce.number().int().positive().default(3444),
@@ -92,9 +106,17 @@ const EnvSchema = z
     EMBEDDING_OFFLINE: z.string().default('0').transform(flag),
     OPENAI_API_KEY: z.string().optional(),
     OPENAI_EMBEDDING_MODEL: z.string().default('text-embedding-3-small'),
+    /**
+     * What the model reads usefully — the window it was trained at, not where the tokenizer cuts.
+     * Deliberately optional and deliberately without a default: the window is a runtime fact the local
+     * provider discovers from the loaded tokenizer, and a number guessed here from `process.env` would
+     * be wrong for exactly the operator running a model this product has never heard of (ADR-0035).
+     * Setting it both overrules what the provider discovers and makes the check below fire at startup.
+     */
+    EMBEDDING_MAX_INPUT_TOKENS: z.coerce.number().int().min(64).max(32_000).optional(),
 
     // Chunking (tokens are approximated as chars / 4)
-    CHUNK_MAX_TOKENS: z.coerce.number().int().min(50).max(4000).default(400),
+    CHUNK_MAX_TOKENS: z.coerce.number().int().min(CHUNK_MAX_TOKENS_MIN).max(4000).default(400),
     CHUNK_OVERLAP_TOKENS: z.coerce.number().int().min(0).default(50),
   })
   .superRefine((c, ctx) => {
@@ -103,6 +125,19 @@ const EnvSchema = z
     }
     if (c.CHUNK_OVERLAP_TOKENS >= c.CHUNK_MAX_TOKENS) {
       ctx.addIssue({ code: 'custom', path: ['CHUNK_OVERLAP_TOKENS'], message: 'must be smaller than CHUNK_MAX_TOKENS' });
+    }
+    // Only when the operator has stated the window. Unset, this rule says nothing at all — the runtime
+    // half in src/services/chunk-budget.ts is what checks a window that had to be discovered, and it
+    // warns rather than exiting. Stated and contradicted is the one case that is a refusal (ADR-0035).
+    if (c.EMBEDDING_MAX_INPUT_TOKENS !== undefined && c.CHUNK_MAX_TOKENS + CHUNK_BUDGET_RESERVE_TOKENS > c.EMBEDDING_MAX_INPUT_TOKENS) {
+      const suggested = Math.max(CHUNK_MAX_TOKENS_MIN, c.EMBEDDING_MAX_INPUT_TOKENS - CHUNK_BUDGET_RESERVE_TOKENS);
+      ctx.addIssue({
+        code: 'custom',
+        path: ['CHUNK_MAX_TOKENS'],
+        message:
+          `plus ${CHUNK_BUDGET_RESERVE_TOKENS} reserved tokens does not fit in EMBEDDING_MAX_INPUT_TOKENS=${c.EMBEDDING_MAX_INPUT_TOKENS}; ` +
+          `set it to ${suggested} or lower, or raise the window if the model really reads that much`,
+      });
     }
     if (c.ALLOWED_DOC_ROOTS.length === 0) {
       ctx.addIssue({ code: 'custom', path: ['ALLOWED_DOC_ROOTS'], message: 'at least one directory is required' });

@@ -36,6 +36,7 @@ async function buildApi(db: Db): Promise<FastifyInstance> {
     config: {
       ALLOWED_ORIGINS: [],
       ALLOWED_DOC_ROOTS: ['/docs'],
+      CHUNK_MAX_TOKENS: 400,
       AUTH_SESSION_IDLE_MS: 60_000,
       AUTH_COOKIE_SECURE: '0',
       DATA_DIR: '/tmp/contextator-health-itest',
@@ -47,7 +48,19 @@ async function buildApi(db: Db): Promise<FastifyInstance> {
     },
     db,
     log: silentLogger,
-    embeddings: { id: 'local:stub:fp32', provider: 'local', model: 'stub', dimensions: TEST_EMBEDDING_DIMENSIONS, ready: true },
+    embeddings: {
+      id: 'local:stub:fp32',
+      provider: 'local',
+      model: 'stub',
+      dimensions: TEST_EMBEDDING_DIMENSIONS,
+      ready: true,
+      maxInputTokens: 128,
+      truncatesAtTokens: 512,
+      windowSource: 'known-model',
+    },
+    // What `verifyChunkBudget` would have left behind after warmup found 400 against a 128-token
+    // window — the shipped defect, which this route has to be able to carry (ADR-0035).
+    chunkBudget: { checked: true, warning: { suggestedChunkMaxTokens: 96 } },
     indexer: {},
     locks: {},
     uploads: {},
@@ -91,6 +104,20 @@ describe('while the database answers', () => {
     const body = res.json();
     expect(body).toMatchObject({ ok: true, db: 'up', authRequired: true, allowedDocRoots: ['/docs'] });
     expect(body.embeddings.id).toBe('local:stub:fp32');
+  });
+
+  it('carries both window numbers and the chunk-budget flag to a signed-in caller', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/health', cookies: { [SESSION_COOKIE]: sessionToken } });
+    const body = res.json();
+    // Both, always: 128 alone reads as false to anyone who watches a 400-token chunk be accepted.
+    expect(body.embeddings).toMatchObject({ maxInputTokens: 128, truncatesAtTokens: 512, windowSource: 'known-model' });
+    expect(body.chunkBudget).toEqual({ checked: true, ok: false, chunkMaxTokens: 400, suggestedChunkMaxTokens: 96 });
+  });
+
+  it('keeps the flag out of the anonymous shape, which is what an external monitor watches', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/health' });
+    expect(res.json()).not.toHaveProperty('chunkBudget');
+    expect(res.json()).not.toHaveProperty('embeddings');
   });
 });
 
