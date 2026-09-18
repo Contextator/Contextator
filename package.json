@@ -15,7 +15,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "lint": "biome check .",
     "lint:fix": "biome check --write . && biome check --write .",
-    "test": "vitest run",
+    "test": "vitest run --project unit",
+    "test:integration": "vitest run --project integration",
+    "test:all": "vitest run",
     "smoke": "tsx scripts/smoke-mcp.ts",
     "reset-password": "tsx scripts/reset-password.ts",
     "db:studio": "drizzle-kit studio"
