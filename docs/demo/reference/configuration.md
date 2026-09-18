@@ -26,9 +26,9 @@ All settings are environment variables read from `.env` (or the container enviro
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `EMBEDDING_PROVIDER` | `local` | `local` (transformers.js on CPU) or `openai` |
-| `EMBEDDING_MODEL` | `Xenova/paraphrase-multilingual-MiniLM-L12-v2` | Hugging Face model id for the local provider |
+| `EMBEDDING_MODEL` | `Xenova/multilingual-e5-small` | Hugging Face model id for the local provider |
 | `EMBEDDING_DIMENSIONS` | `384` | Vector size; must match the model (1536 for `text-embedding-3-small`) |
-| `EMBEDDING_DTYPE` | `fp32` | `fp32` or `q8` (quantized, smaller download) |
+| `EMBEDDING_DTYPE` | `fp32` | `fp32`, `fp16` or `q8` (quantized, smallest download) |
 | `EMBEDDING_BATCH_SIZE` | `16` | Chunks embedded per model call |
 | `MODEL_CACHE_DIR` | `.cache/models` | Where downloaded models are stored |
 | `OPENAI_API_KEY` | empty | Required when the provider is `openai` |
@@ -41,8 +41,8 @@ Changing `EMBEDDING_DIMENSIONS` after data exists requires starting once with
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CHUNK_MAX_TOKENS` | `112` | Target chunk size, counted with the embedding model's own tokenizer |
-| `CHUNK_OVERLAP_TOKENS` | `28` | Overlap between consecutive chunks of one section |
+| `CHUNK_MAX_TOKENS` | `96` | Target chunk size, counted with the embedding model's own tokenizer |
+| `CHUNK_OVERLAP_TOKENS` | `24` | Overlap between consecutive chunks of one section |
 
 Chunks are split at Markdown headings first. Sections that are still too long are split at
 paragraph boundaries, and fenced code blocks are kept intact whenever possible.

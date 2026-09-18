@@ -23,11 +23,16 @@ export interface LocalEmbeddingOptions {
  * `tokenizer.json` and `tokenizer_config.json` and nothing else — so it cannot be discovered at runtime
  * and has to be written down (ADR-0035).
  *
- * Deliberately short: the models this product ships, the ones its documentation names as alternatives,
- * and Phase 1's candidate. Every entry cites the file it came from. The table only ever *lowers* the
- * runtime ceiling, so an entry that is merely absent costs an optimistic check rather than a wrong one.
+ * Deliberately short: the models this product ships and the ones its documentation names as
+ * alternatives. Every entry cites the file it came from. The table only ever *lowers* the runtime
+ * ceiling, so an entry that is merely absent costs an optimistic check rather than a wrong one.
  */
 export const MODEL_WINDOWS: Readonly<Record<string, number>> = {
+  // The default (ADR-0037). sentence_bert_config.json: max_seq_length 512, which is also the tokenizer's
+  // limit — the table changes nothing for this family and the entry is here so that its absence is not
+  // read as an oversight, and so that a tokenizer_config.json without the key still resolves to 512.
+  'xenova/multilingual-e5-small': 512,
+  'intfloat/multilingual-e5-small': 512,
   // sentence_bert_config.json: max_seq_length 128, while tokenizer_config.json says model_max_length 512.
   'xenova/paraphrase-multilingual-minilm-l12-v2': 128,
   'sentence-transformers/paraphrase-multilingual-minilm-l12-v2': 128,
@@ -35,10 +40,6 @@ export const MODEL_WINDOWS: Readonly<Record<string, number>> = {
   'xenova/all-minilm-l6-v2': 256,
   'sentence-transformers/all-minilm-l6-v2': 256,
   'xenova/all-minilm-l12-v2': 256,
-  // sentence_bert_config.json: max_seq_length 512, which is also the tokenizer's limit — the table
-  // changes nothing for this family and is here so the absence is not read as an oversight.
-  'xenova/multilingual-e5-small': 512,
-  'intfloat/multilingual-e5-small': 512,
 };
 
 /**

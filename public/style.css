@@ -623,6 +623,14 @@ button:disabled {
   background: color-mix(in srgb, var(--warn) 20%, transparent);
 }
 
+/* A callout that carries a remedy puts the button on its own row, sized to its text rather than
+   stretched by the column the callout is. */
+.callout .callout-action {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
 .stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

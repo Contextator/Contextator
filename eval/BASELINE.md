@@ -2,8 +2,9 @@
 
 The Phase 0 baseline, recorded before anything in Phase 1 touched retrieval.
 [ROADMAP.md](../../.ssot/ROADMAP.md) Item 3 carries the same table and is the authority; this file is the
-product repository's copy, so a checkout of it is self-sufficient. What Item 1's first change did to
-these numbers is the second half of this file.
+product repository's copy, so a checkout of it is self-sufficient. What Item 1 has done to these numbers
+since is the rest of this file, one section per change: the tokenizer and the chunk budget first, then
+the retrieval model.
 
 It is recorded including how bad it is. A baseline chosen for how it reads is not a baseline.
 
@@ -159,3 +160,130 @@ every metric.
 A movement of one or two points on forty-eight questions is noise; `README.md` in this directory says
 so and it applies to this table too. What is not noise is the 400 → 112 column: `recall@5` +8.4 points,
 `heading@5` +29.2.
+
+---
+
+# What the model swap did to it
+
+`npm run eval` with no arguments now measures `Xenova/multilingual-e5-small` at
+`CHUNK_MAX_TOKENS=96` / `CHUNK_OVERLAP_TOKENS=24`, which is the shipped default
+([ADR-0037](../../.ssot/ADR.md#adr-0037), superseding [ADR-0007](../../.ssot/ADR.md#adr-0007)). The
+corpus, the questions and the search path are the ones above; the model and the budget are not.
+
+The comparison is against the best the old model could do — 112/28 — and **not** against its broken
+400/50 default. Both columns were re-measured on this branch.
+
+| | `MiniLM` at 112/28 | `e5-small` at 96/24 |
+|---|--:|--:|
+| Provider | `local:Xenova/paraphrase-multilingual-MiniLM-L12-v2:fp32` | `local:Xenova/multilingual-e5-small:fp32` |
+| Window the model reads | 128 | 512 |
+| Corpus | 26 documents, 452 chunks | 26 documents, **560 chunks** |
+| recall@1 | 60.4 % | **77.1 %** |
+| recall@5 | 79.2 % | **85.4 %** |
+| MRR | 0.683 | **0.803** |
+| heading@5 | 75.0 % | **81.2 %** |
+| lang `en` | 59.1 / 72.7 | **72.7 / 86.4** |
+| lang `tr` | 61.5 / 84.6 | **80.8** / 84.6 |
+| `cross-lingual` (7 q) | **42.9 / 42.9** | 14.3 / 14.3 |
+| mean similarity of a correct hit | 0.610 | 0.890 |
+
+In counts: 37 of 48 questions are answered at rank 1 against 29, and 41 within the top 5 against 38.
+Turkish `recall@5` is unchanged at 84.6 % and Turkish `recall@1` rises by five questions.
+
+## The sweep it came out of
+
+Each row is a full `npm run eval` on the same corpus and questions, with the same model, and the chunk
+count is in the table for the same reason it was last time: a smaller budget means more chunks and
+therefore more shots at the target, and that effect should be visible rather than hidden inside a
+percentage. `tr recall@5` has its own column because it is the number the decision was gated on — the
+old model's 84.6 % is the floor the new one was not allowed to fall below.
+
+| `CHUNK_MAX_TOKENS` | overlap | chunks | recall@1 | recall@5 | MRR | mean score | heading@5 | `tr` recall@5 |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 496 | 124 | 175 | 72.9 % | 83.3 % | 0.774 | 0.876 | 81.2 % | 80.8 % |
+| 384 | 96 | 177 | 72.9 % | 83.3 % | 0.774 | 0.876 | 81.2 % | 80.8 % |
+| 256 | 64 | 211 | 75.0 % | 83.3 % | 0.791 | 0.880 | 81.2 % | 80.8 % |
+| 192 | 48 | 258 | 77.1 % | 83.3 % | 0.803 | 0.882 | 83.3 % | 80.8 % |
+| 144 | 36 | 347 | 79.2 % | 85.4 % | 0.822 | 0.885 | 81.2 % | 80.8 % |
+| 128 | 32 | 395 | 70.8 % | 85.4 % | 0.772 | 0.885 | 85.4 % | 80.8 % |
+| 120 | 30 | 427 | 72.9 % | 85.4 % | 0.778 | 0.889 | 83.3 % | 80.8 % |
+| 112 | 28 | 464 | 75.0 % | 83.3 % | 0.785 | 0.889 | 79.2 % | 80.8 % |
+| 108 | 27 | 489 | 79.2 % | 85.4 % | 0.815 | 0.888 | 81.2 % | 84.6 % |
+| 104 | 26 | 510 | 77.1 % | 85.4 % | 0.803 | 0.889 | 81.2 % | 84.6 % |
+| **96** | **24** | **560** | **77.1 %** | **85.4 %** | **0.803** | **0.890** | **81.2 %** | **84.6 %** |
+| 88 | 22 | 627 | 75.0 % | 85.4 % | 0.791 | 0.891 | 79.2 % | 84.6 % |
+| 80 | 20 | 682 | 75.0 % | 83.3 % | 0.785 | 0.892 | 77.1 % | 84.6 % |
+| 64 | 16 | 921 | 77.1 % | 83.3 % | 0.799 | 0.894 | 81.2 % | 84.6 % |
+
+**Filling the window is the worst thing you can do with it.** 496 is what the budget check suggests
+against a 512-token model, and it measures four points of `recall@5` and four of `recall@1` below 96.
+A chunk is embedded as one mean-pooled vector, so a longer chunk is an average of more things and points
+at nothing in particular; and 175 chunks over the corpus is a third of what 96 produces. The old model's
+budget was set by what it could read. This one's is set by what measures best, and the two are nowhere
+near each other.
+
+**The plateau is broad and 96 is inside it, not on its edge.** 88, 96, 104 and 108 all measure 85.4 %
+`recall@5` and 84.6 % on Turkish; 112 and above drop Turkish to 80.8 % because one question's answer
+stops having a chunk of its own. A default sitting one step from that edge would be tuned to this
+corpus rather than to the model, so the middle of the plateau was taken over the best single row in it
+(108/27, which is better by one question on `recall@1` and cheaper by 71 chunks).
+
+**The overlap does not matter at this budget either**, exactly as it did not at 112:
+
+| `CHUNK_MAX_TOKENS` | overlap | chunks | recall@1 | recall@5 | MRR | mean score | heading@5 | `tr` recall@5 |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 96 | 0 | 559 | 77.1 % | 85.4 % | 0.803 | 0.890 | 81.2 % | 84.6 % |
+| 96 | 12 | 559 | 77.1 % | 85.4 % | 0.803 | 0.890 | 81.2 % | 84.6 % |
+| 96 | 24 | 560 | 77.1 % | 85.4 % | 0.803 | 0.890 | 81.2 % | 84.6 % |
+| 96 | 48 | 560 | 77.1 % | 85.4 % | 0.803 | 0.890 | 81.2 % | 84.6 % |
+
+24 is kept for the reason 28 was: a quarter of the budget is about one sentence, and a sentence does not
+get shorter because the budget did.
+
+## Two results that are worth more than the headline
+
+**Cross-lingual retrieval collapsed, from 42.9 % to 14.3 %.** Six of the seven cross-lingual questions
+now miss the top ten. The model prefers a passage in the language of the question: `HLY-4015 hatası ne
+anlama geliyor?` returns Turkish troubleshooting pages about other error codes rather than the English
+reference table that defines this one. This is the same-language bias of a retrieval-trained encoder, and
+it is **flat across the entire sweep** — 14.3 % at every budget from 64 to 496. It is not a chunking
+effect and no budget recovers it. The baseline at the top of this file already called cross-lingual
+retrieval "the worst thing here"; it is now worse, against everything else being better, and it is the
+one thing the swap costs.
+
+**The `query: ` / `passage: ` prefixes recover none of it.** As a throwaway experiment — not shipped,
+not implemented as an interface, and to be re-done properly in PR 1.4 — the two prefixes were prepended
+by hand to both sides of the eval and the run repeated:
+
+| | without prefixes | with prefixes, by hand |
+|---|--:|--:|
+| 96/24 recall@5 | 85.4 % | 85.4 % |
+| 96/24 recall@1 | 77.1 % | 79.2 % |
+| 96/24 `tr` recall@1 | 80.8 % | 84.6 % |
+| 96/24 `cross-lingual` | 14.3 % | 14.3 % |
+| 192/48 recall@5 | 83.3 % | 81.2 % |
+| 496/124 recall@5 | 83.3 % | 81.2 % |
+
+One question of `recall@1`, nothing at `recall@5`, nothing at all cross-lingually, and a loss at the
+large budgets. The roadmap's expectation was that a model used without its prefixes "quietly
+underperforms and the switch looks like a failure". On this corpus the switch does not look like a
+failure and the prefixes are not what is holding cross-lingual retrieval back. PR 1.4 should still add
+them — they are how the model was trained and they cost nothing — but it should not be surprised when
+the number does not move, and it should not be sold on this evidence as the cross-lingual fix.
+
+**Similarity scores are compressed and every threshold has to be re-learnt.** A correct hit averaged
+0.610 with the old model and averages 0.890 with this one, but a *wrong* hit averaged 0.470 and now
+averages 0.853. The gap between right and wrong shrank from 0.09 to 0.02 in absolute terms. Nothing in
+the product reads a score for a decision today, which is why this is a note rather than a defect — but
+the dashboard's score bar now shows every result as nearly full, and the score floor of Item 7 cannot
+reuse any number anybody had in mind before this change.
+
+## Reproducing it
+
+```bash
+npm run eval                                                                    # the shipped default
+EMBEDDING_MODEL=Xenova/paraphrase-multilingual-MiniLM-L12-v2 \
+  CHUNK_MAX_TOKENS=112 CHUNK_OVERLAP_TOKENS=28 npm run eval                     # the old model at its best
+```
+
+The second command needs the old model in `.cache/models` and will download it if it is not there.

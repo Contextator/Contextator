@@ -25,8 +25,9 @@ export interface EmbeddingProvider {
   readonly maxInputTokens: number;
   /**
    * Where the runtime actually cuts the input, or `null` when nothing discovered it. Reported next to
-   * `maxInputTokens` everywhere, because the two commonly differ — 128 against 512 for the default
-   * model — and an operator told the window is 128 who then watches a 400-token chunk be accepted
+   * `maxInputTokens` everywhere, because the two commonly differ — 128 against 512 for
+   * `paraphrase-multilingual-MiniLM-L12-v2`, though they are both 512 for the model shipped since
+   * ADR-0037 — and an operator told the window is 128 who then watches a 400-token chunk be accepted
    * without complaint has been told something that looks false.
    */
   readonly truncatesAtTokens: number | null;

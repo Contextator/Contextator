@@ -139,7 +139,7 @@ jobs:
       # and the dtype are half of `provider.id` and therefore half of what the numbers mean, so a CI
       # figure and a laptop figure are only the same figure when both are stated. And the cache key
       # below is derived from them: a faster dtype is a different download and must not be a cache hit.
-      EMBEDDING_MODEL: Xenova/paraphrase-multilingual-MiniLM-L12-v2
+      EMBEDDING_MODEL: Xenova/multilingual-e5-small
       EMBEDDING_DTYPE: fp32
     steps:
       - uses: actions/checkout@v7
@@ -150,7 +150,7 @@ jobs:
 
       # Path filters in `on:` are workflow-wide, and this workflow's other three jobs must run on every
       # pull request. So the filter lives here, in the one job it applies to: a documentation change
-      # should not pay for a 465 MB model download and a container, and a retrieval change must.
+      # should not pay for a 470 MB model download and a container, and a retrieval change must.
       - name: Does this change touch retrieval?
         id: relevant
         run: |

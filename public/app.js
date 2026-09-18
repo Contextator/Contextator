@@ -464,13 +464,33 @@ function renderDetail() {
       ]),
     );
   }
+  // A mismatch is the one state the server will not resolve on its own: search is refused for this
+  // project and stays refused until somebody presses a button, which is why the button is in the
+  // callout rather than only in the header above it (ADR-0037).
   if (modelMismatch) {
     main.append(
       el('div', { class: 'callout warn' }, [
         el('span', { class: 'callout-title', text: 'Indexed with a different embedding model' }),
         el('span', {
-          text: `Chunks were embedded with ${p.embeddingModel}; the server now runs ${state.health.embeddings.id}. Re-index before searching.`,
+          text:
+            `Chunks were embedded with ${p.embeddingModel}; the server now runs ${state.health.embeddings.id}. ` +
+            'Vectors from two models cannot be compared, so search and `search_docs` refuse this project until it is ' +
+            're-indexed — and nothing re-indexes it by itself.',
         }),
+        el('div', { class: 'callout-action' }, [
+          el(
+            'button',
+            {
+              type: 'button',
+              class: 'primary',
+              disabled: busy || !mayEdit,
+              // A plain run is enough: the indexer sees the stored id differ and makes it a full one.
+              title: readOnly ?? 'Drops every chunk and rebuilds it with the model the server now runs',
+              onclick: () => reindex(p, false),
+            },
+            [icon('refresh'), busy ? 'Indexing…' : 'Re-index now'],
+          ),
+        ]),
       ]),
     );
   }

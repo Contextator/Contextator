@@ -203,19 +203,26 @@ describe('the injected token counter', () => {
 });
 
 /**
- * The one test here that needs the model cache, and it is gated on it rather than downloading 465 MB
+ * The one test here that needs the model cache, and it is gated on it rather than downloading 470 MB
  * into `npm test`. Only the tokenizer is loaded — a few hundred kilobytes of `tokenizer.json` — because
  * the claim under test is about counting, not about embedding.
  *
- * It is the acceptance test for ADR-0036: with the shipped budget, nothing the indexer hands the model
- * is longer than the window the model was trained at.
+ * It is the acceptance test for ADR-0036 and ADR-0037: with the shipped budget and the shipped model,
+ * nothing the indexer hands the model is longer than the window the model was trained at.
+ *
+ * The window is no longer the binding constraint — 96 against 512 clears it by a factor of five — so
+ * the budget itself is asserted alongside it. That is the tight one, and it is the claim that would
+ * actually break: a breadcrumb the packer forgot to charge for, or an overlap allowed past the budget,
+ * shows up here and not in the window check.
  */
-const MODEL = 'Xenova/paraphrase-multilingual-MiniLM-L12-v2';
+const MODEL = 'Xenova/multilingual-e5-small';
+const MODEL_WINDOW_TOKENS = 512;
+const BUDGET_TOKENS = 96;
 const CACHE_DIR = path.resolve('.cache/models');
 const cached = existsSync(path.join(CACHE_DIR, MODEL, 'tokenizer.json'));
 
 describe.skipIf(!cached)('the real tokenizer, on Turkish', () => {
-  it('keeps every chunk of a Turkish page inside the window it is embedded into', async () => {
+  it('keeps every chunk of a Turkish page inside the budget, and the budget inside the window', async () => {
     const { AutoTokenizer, env } = await import('@huggingface/transformers');
     env.cacheDir = CACHE_DIR;
     env.allowLocalModels = true;
@@ -226,7 +233,7 @@ describe.skipIf(!cached)('the real tokenizer, on Turkish', () => {
     // The eval corpus, so the fixture and the thing `npm run eval` measures cannot drift apart.
     const page = readFileSync(path.resolve('eval/corpus/tr/kurulum/tek-sunucu.md'), 'utf8');
     const { chunks } = chunkMarkdown(page, 'tr/kurulum/tek-sunucu.md', {
-      maxTokens: 112,
+      maxTokens: BUDGET_TOKENS,
       overlapTokens: 24,
       countTokens,
       reserveTokens: 2,
@@ -234,8 +241,10 @@ describe.skipIf(!cached)('the real tokenizer, on Turkish', () => {
 
     expect(chunks.length).toBeGreaterThan(1);
     for (const chunk of chunks) {
-      // 128 is the window of this model (ADR-0035); `+ 2` is the `<s>`/`</s>` the count leaves out.
-      expect(countTokens(embeddingText(chunk)) + 2).toBeLessThanOrEqual(128);
+      // `+ 2` is the `<s>`/`</s>` pair the count deliberately leaves out (ADR-0036).
+      const cost = countTokens(embeddingText(chunk)) + 2;
+      expect(cost).toBeLessThanOrEqual(BUDGET_TOKENS);
+      expect(cost).toBeLessThanOrEqual(MODEL_WINDOW_TOKENS);
     }
   });
 });

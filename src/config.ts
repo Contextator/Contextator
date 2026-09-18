@@ -105,7 +105,13 @@ export const EnvSchema = z
 
     // Embeddings
     EMBEDDING_PROVIDER: z.enum(['local', 'openai']).default('local'),
-    EMBEDDING_MODEL: z.string().default('Xenova/paraphrase-multilingual-MiniLM-L12-v2'),
+    /**
+     * `multilingual-e5-small` is trained for retrieval rather than for paraphrase similarity, reads 512
+     * tokens where the previous default read 128, and is 384-dimensional — so the swap needs no
+     * `EMBEDDING_DIMENSIONS` change, no re-typed column and no `RESET_VECTORS` (ADR-0037). It does change
+     * the provider id, and every project indexed with the old one re-indexes itself on its next run.
+     */
+    EMBEDDING_MODEL: z.string().default('Xenova/multilingual-e5-small'),
     // 2000 is the pgvector HNSW limit for the `vector` type
     EMBEDDING_DIMENSIONS: z.coerce.number().int().min(1).max(2000).default(384),
     EMBEDDING_DTYPE: z.enum(['fp32', 'fp16', 'q8']).default('fp32'),
@@ -125,13 +131,15 @@ export const EnvSchema = z
 
     // Chunking (counted with the embedding model's own tokenizer — ADR-0036)
     /**
-     * 112 is `128 - CHUNK_BUDGET_RESERVE_TOKENS`: what the default model reads usefully, less the
-     * margin the budget check holds back. It is also what measured best of 400, 256, 112 and 96 on the
-     * golden set with that model (ADR-0036). An operator on OpenAI's 8191-token window should raise it.
+     * 96, and it is a measurement rather than a derivation. The default model reads 512 tokens, so the
+     * budget check would allow 496 — and 496 measures worse than 96 on the golden set, because a long
+     * passage's mean-pooled vector is an average of more things and there are fewer chunks to hit
+     * (ADR-0037). 88, 96, 104 and 108 all measure identically; 96 is the interior of that plateau rather
+     * than its edge, which is at 112. An operator on OpenAI's 8191-token window should still raise it.
      */
-    CHUNK_MAX_TOKENS: z.coerce.number().int().min(CHUNK_MAX_TOKENS_MIN).max(4000).default(112),
+    CHUNK_MAX_TOKENS: z.coerce.number().int().min(CHUNK_MAX_TOKENS_MIN).max(4000).default(96),
     /** A quarter of the budget, because what has to survive a chunk boundary is a sentence, and a sentence does not get shorter when the budget does. */
-    CHUNK_OVERLAP_TOKENS: z.coerce.number().int().min(0).default(28),
+    CHUNK_OVERLAP_TOKENS: z.coerce.number().int().min(0).default(24),
   })
   .superRefine((c, ctx) => {
     if (c.EMBEDDING_PROVIDER === 'openai' && !c.OPENAI_API_KEY) {

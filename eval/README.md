@@ -89,10 +89,10 @@ going to fix:
 1. **Identifier-dense passages.** Environment variable names, header names, error strings, flags,
    version numbers. A dense retriever is poor at these and hybrid search is the answer; the corpus has to
    contain them now so that the before and after are comparable.
-2. **Sections long enough to be split.** With the shipped `CHUNK_MAX_TOKENS=112`, counted with the
-   model's own tokenizer, a section of more than roughly 400 characters becomes more than one chunk.
+2. **Sections long enough to be split.** With the shipped `CHUNK_MAX_TOKENS=96`, counted with the
+   model's own tokenizer, a section of more than roughly 340 characters becomes more than one chunk.
    Several are many times longer than that, so the effect of a change to the chunk budget is visible
-   rather than theoretical — the same corpus produces 177 chunks at a 400-token budget and 452 at 112.
+   rather than theoretical — the same corpus produces 175 chunks at a 496-token budget and 560 at 96.
 3. **Turkish that is genuinely agglutinative.** The Turkish pages were written in Turkish, not translated
    from the English ones. This matters because the entire premise of Phase 1's first item is that an
    XLM-R tokenizer splits Turkish morphology into far more pieces per character than English, so one

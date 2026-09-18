@@ -28,11 +28,11 @@ biçiminde bir yol verilir. Güvenlik nedeniyle `/docs` dışındaki yollar redd
 
 ## Türkçe belgeler için model seçimi
 
-Varsayılan model `Xenova/paraphrase-multilingual-MiniLM-L12-v2` elliden fazla dili, Türkçe
-dahil, destekler. Yalnızca İngilizce belgeleriniz varsa `.env` dosyasında
-`EMBEDDING_MODEL=Xenova/all-MiniLM-L6-v2` seçerek daha küçük ve hızlı bir model kullanabilirsiniz.
-İki model de 384 boyutlu vektör üretir; bu yüzden geçiş yapmak için yalnızca projeleri
-yeniden indekslemek yeterlidir.
+Varsayılan model `Xenova/multilingual-e5-small` yüz dili, Türkçe dahil, destekler ve bir soruyu
+onu yanıtlayan pasajla eşleştirmek üzere eğitilmiştir. Yalnızca İngilizce belgeleriniz varsa `.env`
+dosyasında `EMBEDDING_MODEL=Xenova/all-MiniLM-L6-v2` seçerek daha küçük ve hızlı bir model
+kullanabilirsiniz. İki model de 384 boyutlu vektör üretir; bu yüzden geçiş yapmak için yalnızca
+projeleri yeniden indekslemek yeterlidir.
 
 ## Yeniden indeksleme
 
