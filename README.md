@@ -437,7 +437,7 @@ no ambient credential.
 
 | Method & path | Description |
 |---------------|-------------|
-| `GET /api/health` | DB status, embedding provider/model/dtype/readiness, open MCP sessions, version |
+| `GET /api/health` | DB status, embedding provider/model/dtype/readiness, open MCP sessions, version. `503` with the same body while the database is unreachable, `200` otherwise |
 | `GET /api/projects` | Projects with counts, `mcpUrl` and the live indexing `job` (phase, files done/total/skipped/removed, chunks; for queued jobs `queue.aheadProjectName`) |
 | `POST /api/projects` `{ name, rootPath, index?: true }` | Create a project; `400` invalid name/path, `409` duplicate |
 | `POST /api/projects/:id/reindex?force=true` | Queue (incremental or full) re-index → `202 { job }` |
@@ -576,7 +576,7 @@ public/pages/                 body of each product/legal page + the shell they s
 scripts/smoke-mcp.ts          end-to-end MCP client check
 scripts/reset-password.ts     last-resort password reset straight against the database; ships in the image and runs there
 test/*.test.ts                unit suite — pure functions, no database, no Docker (`npm test`)
-test/integration/*.itest.ts   ensure-schema, vector-store and the password reset against a real PostgreSQL + pgvector
+test/integration/*.itest.ts   ensure-schema, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
 test/integration/fixtures/    a pre-v3 `0.1` schema, derived from history, for the upgrade case
 docs/demo/                    sample documentation (English, Turkish, MDX)

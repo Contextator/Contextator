@@ -106,13 +106,20 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
    * they were, so an external monitor watching this endpoint does not notice; everything that says
    * something about the machine (document roots, data directory, model, open sessions) waits for a
    * principal, and the filesystem paths wait for an administrator.
+   *
+   * The status is `200` while the database answers and `503` while it does not (ADR-0032), with the
+   * same body either way: the code is what the image's HEALTHCHECK reads, and the body is what turns
+   * "something is wrong" into "the database is". `ok` reports the database, not the process — a
+   * process that is gone answers nothing at all rather than answering `ok: false`.
    */
-  app.get('/api/health', async (req) => {
+  app.get('/api/health', async (req, reply) => {
     const principal = req.principal;
+    const dbUp = await pingDb(db);
+    if (!dbUp) reply.code(503);
     const base = {
-      ok: true,
+      ok: dbUp,
       version: ctx.version,
-      db: (await pingDb(db)) ? 'up' : 'down',
+      db: dbUp ? 'up' : 'down',
       authRequired: true,
       needsSetup: ctx.setup.needsSetup,
     };

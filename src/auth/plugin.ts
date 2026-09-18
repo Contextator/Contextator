@@ -5,6 +5,7 @@ import { ForbiddenError, UnauthorizedError } from '../services/errors.js';
 import { resolveProjectAccess } from '../services/auth/memberships.js';
 import { findSessionUser, touchSession } from '../services/auth/sessions.js';
 import { checkProjectAccess, checkRequest } from './authorize.js';
+import { PUBLIC_ROUTES } from './policy.js';
 import { clearSessionCookie, readSessionCookie } from './cookies.js';
 import type { Principal } from './types.js';
 
@@ -45,7 +46,19 @@ export function installAuth(app: FastifyInstance, ctx: AppContext): void {
     }
     const raw = readSessionCookie(req);
     if (!raw) return;
-    const session = await findSessionUser(db, raw, config.AUTH_SESSION_IDLE_MS);
+    let session: Awaited<ReturnType<typeof findSessionUser>>;
+    try {
+      session = await findSessionUser(db, raw, config.AUTH_SESSION_IDLE_MS);
+    } catch (err) {
+      // A session is a row, so an unreachable database cannot identify anybody. On a public route
+      // that is not an error: /api/health has to be able to answer its 503 to the dashboard poll
+      // that carries a cookie, and it answers the anonymous shape because that is all it knows
+      // (ADR-0032). Everywhere else this stays the 500 it has always been — pretending the caller
+      // is anonymous there would answer 401 and send a signed-in operator back to /login.
+      if (!PUBLIC_ROUTES.has(req.routeOptions.url ?? '')) throw err;
+      req.log.warn({ err }, 'could not resolve the session cookie; answering this public route anonymously');
+      return;
+    }
     if (!session) {
       clearSessionCookie(reply, req, config);
       return;

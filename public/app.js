@@ -223,24 +223,33 @@ function renderHealth() {
   const h = state.health;
   const node = $('#health');
   node.replaceChildren();
+  // No body at all means nothing answered. A body that says the database is down did answer, and
+  // saying "server unreachable" to that would point at the wrong thing to go and fix.
   if (!h) {
     node.append(el('span', { class: 'pill error', text: 'server unreachable' }));
     return;
   }
   const model = h.embeddings;
-  node.append(
-    el('span', { class: `pill ${h.db === 'up' ? 'idle' : 'error'}`, text: h.db === 'up' ? 'Database up' : 'Database down' }),
-    el('span', { class: `pill ${model.ready ? 'idle' : 'loading'}`, text: model.ready ? 'Model ready' : 'Model loading' }),
-    el('span', {
-      class: 'chip mono',
-      title: 'embedding provider · model · dimensions',
-      text: `${model.provider} · ${model.model} · ${model.dimensions}d`,
-    }),
-    el('span', { class: 'chip', title: 'open MCP sessions', text: `${h.sessions.total} open session${h.sessions.total === 1 ? '' : 's'}` }),
-    el('span', { class: 'version', text: `v${h.version}` }),
-  );
-  $('#allowed-roots').textContent = (h.allowedDocRoots || []).join(', ');
+  node.append(el('span', { class: `pill ${h.db === 'up' ? 'idle' : 'error'}`, text: h.db === 'up' ? 'Database up' : 'Database down' }));
+  // While the database is unreachable the server cannot resolve the session cookie either, so what
+  // comes back is the anonymous shape: a version, and the bad news. There is no model to report.
+  if (model) {
+    node.append(
+      el('span', { class: `pill ${model.ready ? 'idle' : 'loading'}`, text: model.ready ? 'Model ready' : 'Model loading' }),
+      el('span', {
+        class: 'chip mono',
+        title: 'embedding provider · model · dimensions',
+        text: `${model.provider} · ${model.model} · ${model.dimensions}d`,
+      }),
+      el('span', { class: 'chip', title: 'open MCP sessions', text: `${h.sessions.total} open session${h.sessions.total === 1 ? '' : 's'}` }),
+    );
+  }
+  node.append(el('span', { class: 'version', text: `v${h.version}` }));
   $('#version').textContent = `v${h.version}`;
+  // Left alone in the reduced shape: an empty list here would blank the New-project directory
+  // prefix for as long as the outage lasts, and the roots have not changed.
+  if (!model) return;
+  $('#allowed-roots').textContent = (h.allowedDocRoots || []).join(', ');
   renderRootPrefix(h.allowedDocRoots || []);
 }
 
@@ -376,7 +385,7 @@ function renderDetail() {
   const mayEdit = canEdit(p);
   const readOnly = mayEdit ? undefined : 'Your role on this project is viewer — re-indexing is done by an editor';
   // `embeddingModel` on a project is the provider-qualified id (e.g. `local:<model>:fp32`), compared with health's `id`.
-  const modelMismatch = Boolean(p.embeddingModel && state.health?.embeddings.id && p.embeddingModel !== state.health.embeddings.id);
+  const modelMismatch = Boolean(p.embeddingModel && state.health?.embeddings?.id && p.embeddingModel !== state.health.embeddings.id);
 
   // Header
   main.append(
@@ -700,10 +709,19 @@ function sourceDetail(s) {
 
 // ---------- actions ----------
 
+/**
+ * `/api/health` answers 503 with its usual body while the database is down, and api() turns every
+ * non-2xx into a throw. The body is the whole point of that 503, so read it back off the error
+ * rather than losing it and rendering "server unreachable" at a server that answered.
+ */
+function healthBody(err) {
+  return err instanceof ApiError && typeof err.body?.db === 'string' ? err.body : null;
+}
+
 async function refresh() {
   // `me` rides along so a role change on the server reaches the UI without a reload.
   const [healthRes, projectsRes, meRes] = await Promise.allSettled([api('/api/health'), api('/api/projects'), api('/api/auth/me')]);
-  state.health = healthRes.status === 'fulfilled' ? healthRes.value : null;
+  state.health = healthRes.status === 'fulfilled' ? healthRes.value : healthBody(healthRes.reason);
   if (meRes.status === 'fulfilled') state.me = meRes.value;
   renderHealth();
   renderUserMenu();
@@ -733,7 +751,7 @@ async function refresh() {
 function schedule() {
   clearTimeout(state.timer);
   const active = state.projects.some(isActive);
-  const modelLoading = state.health && !state.health.embeddings.ready;
+  const modelLoading = state.health?.embeddings && !state.health.embeddings.ready;
   state.timer = setTimeout(refresh, active || modelLoading ? POLL_ACTIVE_MS : POLL_IDLE_MS);
 }
 
