@@ -141,6 +141,15 @@ jobs:
       # below is derived from them: a faster dtype is a different download and must not be a cache hit.
       EMBEDDING_MODEL: Xenova/multilingual-e5-small
       EMBEDDING_DTYPE: fp32
+      # The floors this job fails on, and the reason they are two numbers rather than one (ADR-0044).
+      # Each is the figure Phase 1 shipped less one question of the sixty-four — 87.5 % and 84.4 %,
+      # rounded down to the nearest half point — so one question may regress and two may not. They are
+      # written here rather than defaulted inside `scripts/eval.ts` because an operator sweeping a
+      # setting on a laptop is not running a gate, and because a floor that can be changed without
+      # changing a file that says what it was measured at is a floor that drifts. `eval/BASELINE.md`
+      # carries both numbers and the commit they came from; the two must move together.
+      MIN_RECALL5: "0.855"
+      MIN_HEADING5: "0.825"
     steps:
       - uses: actions/checkout@v7
         with:
@@ -191,17 +200,28 @@ jobs:
       # harness the integration suite uses, carves a database out of it and drops both at the end
       # (ADR-0034). The numbers go to the run summary, where they can be read without downloading
       # anything, and the JSON goes to an artifact so two runs can be diffed.
-      - name: Score the golden set
+      #
+      # With the two floors it is a gate: a run that measures below either exits 2 and this step fails,
+      # having already written the summary and the report — so the numbers survive the failure, which is
+      # the difference between a gate somebody debugs and a gate somebody deletes (ADR-0044). It is
+      # guarded by the same condition as every step above it, so a pull request the filter decided is
+      # not about retrieval never reaches the gate: the job does nothing and is green, exactly as it was
+      # when it only reported.
+      - name: Score the golden set, and fail below the floor
         if: steps.relevant.outputs.run == 'true'
-        run: npm run eval -- --markdown="$GITHUB_STEP_SUMMARY" --json=eval-report.json
+        run: npm run eval -- --markdown="$GITHUB_STEP_SUMMARY" --json=eval-report.json --min-recall5="$MIN_RECALL5" --min-heading5="$MIN_HEADING5"
 
+      # `always()` and not the step condition alone: the report is most worth having on the run where
+      # the gate failed. Still inside the path filter, so a skipped job uploads nothing.
       - uses: actions/upload-artifact@v4
-        if: steps.relevant.outputs.run == 'true'
+        if: always() && steps.relevant.outputs.run == 'true'
         with:
           name: eval-report
           path: eval-report.json
 
-# This job reports and does not gate: it exits 0 whatever `recall@5` turns out to be, and `npm run eval`
-# accepts a `--min-recall5` that nothing enforces yet. Phase 1 is what sets a floor worth failing a build
-# over, and it should find the flag already plumbed rather than having to add it while also arguing about
-# the number (ADR-0034).
+# This job gates. It reported and did not gate for the whole of Phase 1, on the stated understanding that
+# it would become a gate once there was a floor worth failing a build over (ADR-0034); Phase 1 set one and
+# ADR-0044 turns it on. What a red build here means is narrow and worth stating: retrieval got worse on
+# twenty-six pages and sixty-four questions, which is the only corpus this repository can speak for. A
+# change that means to move the floor moves `eval/BASELINE.md` and the two numbers above in the same
+# commit, and says in its message why the new figure is the right one.

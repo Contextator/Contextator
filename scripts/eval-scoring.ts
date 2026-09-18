@@ -20,7 +20,11 @@ export const GoldenRowSchema = z.strictObject({
   query: z.string().min(1),
   /** Relative to `eval/corpus/`, exactly as the file is spelled on disk. */
   expectFile: z.string().min(1),
-  /** Matched as a breadcrumb suffix, scored separately, gates nothing. */
+  /**
+   * Matched as a breadcrumb suffix and scored apart from the file-level metrics — never folded into
+   * them. ADR-0034 said it gates nothing; since [ADR-0044](../../.ssot/ADR.md#adr-0044) it has a floor
+   * of its own, which is still not the same thing as being folded in.
+   */
   expectHeading: z.string().min(1).optional(),
   tags: z.array(z.string().min(1)).default([]),
   /** Why this question is here, when that is not obvious. Ignored by the scorer. */
@@ -243,17 +247,38 @@ export interface RunContext {
   searchMs: number;
 }
 
+/**
+ * The floors a run is judged against ([ADR-0044](../../.ssot/ADR.md#adr-0044)). Both are `null` by
+ * default, and with both null `npm run eval` is the report it has always been: it measures, it prints,
+ * it exits `0`.
+ *
+ * There are two of them and not one because they fail differently. `recall@5` asks whether the right
+ * *document* came back; `heading@5` asks whether the right *chunk* of it did, over the same sixty-four
+ * questions. A chunk budget the model cannot read to the end of keeps the first and loses the second —
+ * measured, not supposed: `CHUNK_MAX_TOKENS=496` on the shipped model measures `recall@5` 85.9 %, which
+ * clears the floor below, and `heading@5` 78.1 %, which is four questions down and is the defect
+ * ROADMAP.md Item 1 existed to fix.
+ */
+export interface Floors {
+  /** `--min-recall5`: the answer's file is in the top five. */
+  recall5: number | null;
+  /** `--min-heading5`: the answer's chunk is, over the questions carrying an `expectHeading`. */
+  headingRecall5: number | null;
+}
+
+export const NO_FLOORS: Floors = { recall5: null, headingRecall5: null };
+
 export interface Report {
   context: RunContext;
   overall: Metrics;
   byLang: Record<string, Metrics>;
   byTag: Record<string, Metrics>;
-  /** Accepted and deliberately not enforced in this phase; Phase 1 turns it into a gate. */
-  minRecall5: number | null;
+  /** What the run was gated on, carried into the JSON so an artifact says what it had to clear. */
+  floors: Floors;
   results: RowResult[];
 }
 
-export function buildReport(results: readonly RowResult[], context: RunContext, minRecall5: number | null): Report {
+export function buildReport(results: readonly RowResult[], context: RunContext, floors: Floors): Report {
   const toRecord = (groups: Map<string, RowResult[]>): Record<string, Metrics> =>
     Object.fromEntries([...groups.entries()].map(([key, rows]) => [key, aggregate(rows)]));
   return {
@@ -261,14 +286,69 @@ export function buildReport(results: readonly RowResult[], context: RunContext, 
     overall: aggregate(results),
     byLang: toRecord(groupBy(results, (r) => [r.row.lang])),
     byTag: toRecord(groupBy(results, (r) => r.row.tags)),
-    minRecall5,
+    floors,
     results: [...results],
   };
+}
+
+export interface GateVerdict {
+  /** False when no floor was given at all, which is the report-only run. */
+  enforced: boolean;
+  passed: boolean;
+  /** One line per floor, then the configuration the numbers are about. Rendered for a log, not a table. */
+  lines: string[];
+}
+
+/**
+ * Compares the measured figures against the floors and says so in words.
+ *
+ * The lines are the whole point. A build that goes red on a percentage nobody can see is a build
+ * somebody turns off, so a failing run states the measured figure, the count behind it, the floor it
+ * missed, and the configuration it was measured at — because `recall@5` is a number about a
+ * configuration and a run at a different `CHUNK_MAX_TOKENS` or a different model is not the same
+ * measurement (ADR-0034, ADR-0044).
+ */
+export function gateVerdict(report: Report): GateVerdict {
+  const { overall, floors } = report;
+  if (floors.headingRecall5 !== null && overall.headingQuestions === 0) {
+    throw new Error('--min-heading5 was given, but no question in the set carries an expectHeading, so heading@5 is not a measurement.');
+  }
+
+  const checks = [
+    { label: 'recall@5 ', measured: overall.recall5, of: overall.questions, floor: floors.recall5 },
+    { label: 'heading@5', measured: overall.headingRecall5, of: overall.headingQuestions, floor: floors.headingRecall5 },
+  ].flatMap((c) => (c.floor === null ? [] : [{ ...c, floor: c.floor }]));
+
+  if (checks.length === 0) return { enforced: false, passed: true, lines: [] };
+
+  const lines = checks.map((c) => {
+    const verdict = c.measured < c.floor ? 'BELOW' : 'above';
+    // The count as well as the percentage: sixty-four questions means one of them is 1.6 points, and a
+    // floor argued in questions should be readable in questions.
+    return `${c.label}  ${pct(c.measured)} (${Math.round(c.measured * c.of)} of ${c.of})  ${verdict} the ${pct(c.floor).trim()} floor`;
+  });
+  lines.push(`measured at ${configurationSummary(report.context)}`);
+  return { enforced: true, passed: checks.every((c) => c.measured >= c.floor), lines };
 }
 
 const pct = (value: number): string => `${(value * 100).toFixed(1).padStart(5)}%`;
 const sim = (value: number | null): string => (value === null ? '    —' : value.toFixed(3));
 const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
+
+/**
+ * The configuration a number is about, on one line. `tick` wraps each value — a backtick for the
+ * Markdown summary, nothing for a log line that is read as plain text. One function rather than two
+ * strings, because the failing gate message and the pull request summary must not drift into naming
+ * different halves of the same configuration.
+ */
+function configurationSummary(c: RunContext, tick = ''): string {
+  const v = (value: string): string => `${tick}${value}${tick}`;
+  return (
+    `${v(c.providerId)} · ${v(`CHUNK_MAX_TOKENS=${c.chunkMaxTokens}`)} · ${v(`CHUNK_OVERLAP_TOKENS=${c.chunkOverlapTokens}`)} · ` +
+    `${c.documents} documents, ${c.chunks} chunks · ${c.hnswScan} · ${v(`to_tsvector('${c.textSearchConfig}', …)`)} · ` +
+    `${c.resultSelection} · commit ${v(c.commit)}`
+  );
+}
 
 function metricRow(label: string, m: Metrics, width: number): string {
   const heading = m.headingQuestions === 0 ? '   —  ' : pct(m.headingRecall5);
@@ -343,9 +423,10 @@ export function formatText(report: Report): string {
   }
   out.push('');
 
-  if (report.minRecall5 !== null) {
-    const verdict = overall.recall5 >= report.minRecall5 ? 'above' : 'below';
-    out.push(`  --min-recall5 ${report.minRecall5}: recall@5 is ${verdict} it. Not enforced in this phase; the run still exits 0.`);
+  const gate = gateVerdict(report);
+  if (gate.enforced) {
+    out.push(gate.passed ? '  The gate passed.' : '  THE GATE FAILED.');
+    for (const line of gate.lines) out.push(`    ${line}`);
     out.push('');
   }
   return out.join('\n');
@@ -363,10 +444,18 @@ export function formatMarkdown(report: Report): string {
 
   out.push('## Retrieval evaluation');
   out.push('');
-  out.push(
-    `\`${c.providerId}\` · \`CHUNK_MAX_TOKENS=${c.chunkMaxTokens}\` · \`CHUNK_OVERLAP_TOKENS=${c.chunkOverlapTokens}\` · ${c.documents} documents, ${c.chunks} chunks · ${c.hnswScan} · \`to_tsvector('${c.textSearchConfig}', …)\` · ${c.resultSelection} · commit \`${c.commit}\``,
-  );
+  out.push(configurationSummary(c, '`'));
   out.push('');
+
+  // First, above the tables: on a red build this is the line somebody is looking for, and a summary
+  // that buries it under nine rows of per-tag metrics has made them scroll for it.
+  const gate = gateVerdict(report);
+  if (gate.enforced) {
+    out.push(gate.passed ? '**The retrieval gate passed.**' : '**The retrieval gate failed.**');
+    out.push('');
+    for (const line of gate.lines) out.push(`- ${line.replace(/\s{2,}/g, ' ').trim()}`);
+    out.push('');
+  }
   out.push('| group | n | recall@1 | recall@5 | MRR | mean score | heading@5 |');
   out.push('|---|--:|--:|--:|--:|--:|--:|');
   out.push(mdRow('**overall**', report.overall));

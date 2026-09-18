@@ -5,12 +5,16 @@ import {
   buildReport,
   formatMarkdown,
   formatText,
+  gateVerdict,
   GoldenSetError,
   headingMatches,
+  NO_FLOORS,
   parseGoldenSet,
   scoreRow,
   worstMisses,
+  type Floors,
   type GoldenRow,
+  type Report,
   type RunContext,
   type ScoredHit,
 } from '../scripts/eval-scoring.js';
@@ -202,7 +206,7 @@ describe('the report', () => {
       scoreRow(question({ id: 'b', lang: 'tr', tags: ['install', 'cross-lingual'], expectFile: 'tr/kurulum.md' }), INSTALL_HITS),
     ],
     context,
-    0.45,
+    { recall5: 0.45, headingRecall5: null },
   );
 
   it('breaks the same four metrics down by language and by tag', () => {
@@ -214,8 +218,9 @@ describe('the report', () => {
     expect(report.byTag['cross-lingual'].questions).toBe(1);
   });
 
-  it('says the floor was not enforced rather than leaving it out', () => {
-    expect(formatText(report)).toContain('Not enforced in this phase');
+  it('says which floor the run was judged against, in both formats', () => {
+    expect(formatText(report)).toContain('The gate passed.');
+    expect(formatMarkdown(report)).toContain('**The retrieval gate passed.**');
   });
 
   it('renders both formats without throwing, and names the configuration in each', () => {
@@ -243,7 +248,7 @@ describe('the report', () => {
   });
 
   it('names every gated question in the report, because a count alone cannot be argued with', () => {
-    const gated = buildReport([scoreRow(question({ id: 'refused' }), INSTALL_HITS, true)], context, null);
+    const gated = buildReport([scoreRow(question({ id: 'refused' }), INSTALL_HITS, true)], context, NO_FLOORS);
     const text = formatText(gated);
 
     expect(text).toContain('1 of 1 questions would be told "no good match"');
@@ -253,5 +258,72 @@ describe('the report', () => {
 
   it('says so when nothing falls under the floor, rather than printing nothing at all', () => {
     expect(formatText(report)).toContain('no question in the set falls under it');
+  });
+
+  /**
+   * The gate decides whether a pull request merges, so its arithmetic is tested here for the reason the
+   * rest of this file exists: a gate that is wrong in the lenient direction is invisible, and one that
+   * is wrong in the strict direction gets switched off ([ADR-0044](../../.ssot/ADR.md#adr-0044)).
+   */
+  describe('the gate', () => {
+    // Four questions: two answered at rank 1, two missed entirely. recall@5 is 0.5. Three carry a
+    // heading and one of those found it, so heading@5 is 1/3 — deliberately different from recall@5,
+    // because a gate that confused the two would pass every test written on a fixture where they agree.
+    const rows = [
+      scoreRow(question({ id: 'a', expectHeading: 'Install > Docker' }), INSTALL_HITS),
+      scoreRow(question({ id: 'b', expectHeading: 'Install > From source' }), INSTALL_HITS),
+      scoreRow(question({ id: 'c', expectHeading: 'Kurulum', expectFile: 'tr/kurulum.md' }), [INSTALL_HITS[0]]),
+      scoreRow(question({ id: 'd', expectFile: 'tr/kurulum.md' }), [INSTALL_HITS[0]]),
+    ];
+    const withFloors = (floors: Floors): Report => buildReport(rows, context, floors);
+
+    it('is not enforced at all when no floor was given, and the report says nothing about one', () => {
+      const verdict = gateVerdict(withFloors(NO_FLOORS));
+      expect(verdict.enforced).toBe(false);
+      expect(verdict.passed).toBe(true);
+      expect(formatText(withFloors(NO_FLOORS))).not.toContain('gate');
+    });
+
+    it('passes when the measured figure equals the floor, because a floor is a floor and not a margin', () => {
+      expect(gateVerdict(withFloors({ recall5: 0.5, headingRecall5: null })).passed).toBe(true);
+      expect(gateVerdict(withFloors({ recall5: 0.51, headingRecall5: null })).passed).toBe(false);
+    });
+
+    it('names the measured figure, the questions behind it, the floor and the configuration when it fails', () => {
+      const verdict = gateVerdict(withFloors({ recall5: 0.75, headingRecall5: null }));
+      expect(verdict.passed).toBe(false);
+      // The whole point of the message: a CI log that explains itself without opening the artifact.
+      expect(verdict.lines[0]).toContain('50.0%');
+      expect(verdict.lines[0]).toContain('(2 of 4)');
+      expect(verdict.lines[0]).toContain('BELOW');
+      expect(verdict.lines[0]).toContain('75.0%');
+      expect(verdict.lines[1]).toContain('local:a-model:fp32');
+      expect(verdict.lines[1]).toContain('CHUNK_MAX_TOKENS=400');
+    });
+
+    /**
+     * The reason there are two floors. `CHUNK_MAX_TOKENS=496` on the shipped model measures `recall@5`
+     * 85.9 % — over the floor — and `heading@5` 78.1 %, four questions down: the right document found
+     * through the wrong chunk of it, which is the defect ROADMAP.md Item 1 existed to fix. A gate on
+     * one number would let it through.
+     */
+    it('fails on heading@5 alone, which is the case a file-level floor cannot see', () => {
+      const verdict = gateVerdict(withFloors({ recall5: 0.5, headingRecall5: 0.5 }));
+      expect(verdict.passed).toBe(false);
+      expect(verdict.lines[0]).toContain('above');
+      expect(verdict.lines[1]).toContain('BELOW');
+      // heading@5 is measured over the three questions that carry a heading, not over all four.
+      expect(verdict.lines[1]).toContain('(1 of 3)');
+    });
+
+    it('refuses a heading floor over a question set with no headings, rather than scoring it zero', () => {
+      const headless = buildReport([scoreRow(question({ id: 'a' }), INSTALL_HITS)], context, { recall5: null, headingRecall5: 0.5 });
+      expect(() => gateVerdict(headless)).toThrow(/no question in the set carries an expectHeading/);
+    });
+
+    it('tells a red build apart from a green one in the run summary', () => {
+      expect(formatMarkdown(withFloors({ recall5: 0.75, headingRecall5: null }))).toContain('**The retrieval gate failed.**');
+      expect(formatMarkdown(withFloors({ recall5: 0.25, headingRecall5: null }))).toContain('**The retrieval gate passed.**');
+    });
   });
 });

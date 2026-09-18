@@ -30,7 +30,19 @@ import {
   type RunningPostgres,
   type TestDatabase,
 } from '../test/integration/support/postgres.js';
-import { buildReport, formatMarkdown, formatText, parseGoldenSet, scoreRow, type RowResult, type RunContext } from './eval-scoring.js';
+import {
+  buildReport,
+  formatMarkdown,
+  formatText,
+  gateVerdict,
+  NO_FLOORS,
+  parseGoldenSet,
+  scoreRow,
+  type Floors,
+  type GateVerdict,
+  type RowResult,
+  type RunContext,
+} from './eval-scoring.js';
 
 /**
  * `npm run eval` — the retrieval measurement of [ADR-0034](../.ssot/ADR.md#adr-0034), FR-190 to FR-195.
@@ -56,8 +68,11 @@ import { buildReport, formatMarkdown, formatText, parseGoldenSet, scoreRow, type
  * and a run that silently measured chunks written by the previous configuration is the worst kind of
  * defect this could have: wrong, and believable.
  *
- * It exits 0 whatever it finds. This is a report, not a gate; `--min-recall5` is accepted now so that
- * Phase 1 turns it on rather than having to plumb it first.
+ * **With a floor, it is a gate.** `--min-recall5` and `--min-heading5` compare the measured figures
+ * against numbers Phase 1 earned and exit `2` when either is short ([ADR-0044](../.ssot/ADR.md#adr-0044)).
+ * With neither, it is the report it has always been and exits `0` whatever it finds — which is what an
+ * operator sweeping a setting on a laptop wants, and the reason the floor is an argument and not a
+ * constant in this file.
  */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -100,15 +115,21 @@ interface OutputTarget {
 
 interface Options {
   outputs: OutputTarget[];
-  minRecall5: number | null;
+  floors: Floors;
 }
 
 const USAGE = `Usage: npm run eval [-- <options>]
 
   --markdown[=<file>]      Markdown tables. With a file, written there and the text report still prints.
   --json[=<file>]          The same numbers as JSON, same rule about the file.
-  --min-recall5=<0..1>     Compare recall@5 against a floor and say so. Not enforced in this phase.
+  --min-recall5=<0..1>     Fail the run when recall@5 is below this. The shipped floor is in eval/BASELINE.md.
+  --min-heading5=<0..1>    The same for heading@5 — the right chunk of the right file, not just the file.
   -h, --help               This.
+
+  With a floor, a completed run whose numbers are short exits 2; without one it exits 0 whatever it
+  finds. A harness failure — a malformed question, a skipped corpus file — is exit 1 either way, and
+  the two are different codes on purpose: "retrieval got worse" and "this run measured nothing" are
+  not the same news.
 
   EVAL_DATABASE_URL, or DATABASE_URL, points at a PostgreSQL to carve a throwaway database out of.
   With neither, a pgvector container is started for the run and stopped at the end.
@@ -119,9 +140,18 @@ const USAGE = `Usage: npm run eval [-- <options>]
   twice with one of them changed rather than a flag this file has to grow.
 `;
 
+/** A floor is a fraction, because every metric in the report is one. `--min-recall5=85` is a mistake. */
+function parseFloor(flag: string, value: string | null): number {
+  const parsed = Number(value);
+  if (value === null || value === '' || !Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    throw new Error(`${flag} takes a number between 0 and 1, e.g. ${flag}=0.855`);
+  }
+  return parsed;
+}
+
 function parseArgs(argv: readonly string[]): Options {
   const outputs: OutputTarget[] = [];
-  let minRecall5: number | null = null;
+  const floors: Floors = { ...NO_FLOORS };
   let quietText = false;
 
   for (const arg of argv) {
@@ -141,21 +171,19 @@ function parseArgs(argv: readonly string[]): Options {
         if (value === null) quietText = true;
         break;
       }
-      case '--min-recall5': {
-        const parsed = Number(value);
-        if (value === null || !Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
-          throw new Error('--min-recall5 takes a number between 0 and 1, e.g. --min-recall5=0.45');
-        }
-        minRecall5 = parsed;
+      case '--min-recall5':
+        floors.recall5 = parseFloor(flag, value);
         break;
-      }
+      case '--min-heading5':
+        floors.headingRecall5 = parseFloor(flag, value);
+        break;
       default:
         throw new Error(`Unknown option ${JSON.stringify(arg)}\n\n${USAGE}`);
     }
   }
 
   if (!quietText) outputs.unshift({ format: 'text', file: null });
-  return { outputs, minRecall5 };
+  return { outputs, floors };
 }
 
 /** Progress on stderr so that `--json > file` is still valid JSON. */
@@ -308,7 +336,7 @@ async function indexCorpus(
   return { documents: files.length, chunks: chunkCount };
 }
 
-async function run(options: Options): Promise<void> {
+async function run(options: Options): Promise<GateVerdict> {
   const startedAt = new Date();
   const totalStart = Date.now();
   const config = loadEvalConfig();
@@ -421,7 +449,11 @@ async function run(options: Options): Promise<void> {
       searchMs,
     };
 
-    const report = buildReport(results, context, options.minRecall5);
+    const report = buildReport(results, context, options.floors);
+    // The verdict is computed before anything is written, so a floor that cannot be judged — a
+    // `--min-heading5` over a question set carrying no headings — fails the run rather than being
+    // rendered into a summary as a pass.
+    const verdict = gateVerdict(report);
     for (const output of options.outputs) {
       const text =
         output.format === 'json'
@@ -433,6 +465,7 @@ async function run(options: Options): Promise<void> {
         step(`eval: wrote ${output.format} to ${output.file}`);
       }
     }
+    return verdict;
   } finally {
     if (database) await dropTestDatabase(baseUrl, database).catch((err: unknown) => step(`eval: could not drop the database: ${String(err)}`));
     if (container) await container.stop().catch((err: unknown) => step(`eval: could not stop the container: ${String(err)}`));
@@ -442,13 +475,22 @@ async function run(options: Options): Promise<void> {
 const invokedDirectly = process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
+  let verdict: GateVerdict;
   try {
-    await run(parseArgs(process.argv.slice(2)));
+    verdict = await run(parseArgs(process.argv.slice(2)));
   } catch (err) {
     // A failure here is the harness refusing to report a number it cannot stand behind, so it is loud
-    // and it is non-zero. The metrics themselves never fail the run in this phase.
+    // and it is non-zero — and it is a *different* non-zero from the one below.
     process.stderr.write(`\neval failed: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exit(1);
+  }
+
+  if (!verdict.passed) {
+    // Repeated on stderr rather than left in the report: a `--json > file` run prints no text report
+    // at all, and a CI log that says only "exit 2" is a gate somebody disables instead of reading.
+    process.stderr.write(`\neval: the retrieval gate failed.\n${verdict.lines.map((line) => `  ${line}\n`).join('')}`);
+    process.stderr.write('The floors are in eval/BASELINE.md, with the commit they were measured at (ADR-0044).\n');
+    process.exit(2);
   }
   process.exit(0);
 }
