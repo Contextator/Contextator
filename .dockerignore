@@ -5,5 +5,4 @@ dist
 .git
 docs
 test
-drizzle
 *.log

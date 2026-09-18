@@ -54,6 +54,10 @@ COPY --from=build --chown=node:node /app/dist ./dist
 # dependency for exactly that reason (ADR-0032). src/ is here because scripts/reset-password.ts
 # imports the config, the database client and the schema out of it.
 COPY --from=build --chown=node:node /app/src ./src
+# The generated migrations. Without this the image boots against an empty database and
+# `migrate()` cannot find `drizzle/meta/_journal.json` — which is why `drizzle` is no longer in
+# `.dockerignore`, and why the CI image job lists this directory (ADR-0033).
+COPY --chown=node:node drizzle ./drizzle
 COPY --chown=node:node scripts ./scripts
 COPY --chown=node:node public ./public
 COPY --chown=node:node package.json LICENSE ./

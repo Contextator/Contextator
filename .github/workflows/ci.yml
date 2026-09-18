@@ -39,6 +39,13 @@ jobs:
       # ubuntu-latest rather than run across a matrix.
       - run: npm run lint
 
+      # `src/db/schema.ts` and `drizzle/*.sql` are two halves of one statement (ADR-0033) and
+      # nothing in the compiler or in Biome notices when only one of them is edited. This is the
+      # guard, and it is its own step rather than part of `npm run lint` so that "the schema drifted"
+      # never reads as "the formatter is unhappy" — ADR-0029 gave that script one job.
+      - name: The migrations and the schema still agree
+        run: npm run db:check
+
       # Both tsconfigs: the one that builds dist/, and the one that covers test/ and scripts/.
       - run: npm run typecheck
 
@@ -90,6 +97,20 @@ jobs:
           tags: contextator:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # The migrations are the other thing that can drop out of an image silently, and the failure
+      # mode is worse than the recovery tool's: not a command nobody reaches for, but every
+      # containerised upgrade dying at boot with "Can't find meta/_journal.json". `drizzle/` was in
+      # `.dockerignore` until this change, so this is a defect that existed before the feature did
+      # (ADR-0033). Listing is enough here — unlike the tool below, there is no loader and no import
+      # graph to get wrong, and the integration suite runs the migrations themselves.
+      - name: The migrations are inside the image
+        run: |
+          set -o pipefail
+          output=$(docker run --rm --entrypoint sh contextator:ci -c 'ls /app/drizzle /app/drizzle/meta')
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep -qF '0000_baseline.sql'
+          printf '%s\n' "$output" | grep -qF '_journal.json'
 
       # The recovery tool dropped out of the image once already, silently, and nothing noticed until
       # somebody needed it (ADR-0032). Checking that the file is present would not have caught the

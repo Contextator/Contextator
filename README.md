@@ -529,8 +529,8 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 ```
 src/server.ts                 Fastify entrypoint / composition root
 src/config.ts                 zod-validated environment
-src/db/schema.ts              Drizzle schema (projects, document_sources, documents, chunks, index_runs, settings, users, user_sessions, project_members)
-src/db/ensure-schema.ts       idempotent DDL applied at startup (extension, tables, HNSW index, dimension guard)
+src/db/schema.ts              Drizzle schema — the source `drizzle/*.sql` is generated from, and the only description of the tables
+src/db/bootstrap.ts           startup: the extension, the migration journal, `migrate()`, the vector dimension, the HNSW index
 src/services/chunker.ts       Markdown/MDX-aware chunking with heading breadcrumbs
 src/services/fs-scan.ts       safe directory walking + path-escape checks
 src/services/sources.ts       source CRUD and the zod schema of each type's config
@@ -576,9 +576,10 @@ public/pages/                 body of each product/legal page + the shell they s
 scripts/smoke-mcp.ts          end-to-end MCP client check
 scripts/reset-password.ts     last-resort password reset straight against the database; ships in the image and runs there
 test/*.test.ts                unit suite — pure functions, no database, no Docker (`npm test`)
-test/integration/*.itest.ts   ensure-schema, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
+test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
-test/integration/fixtures/    a pre-v3 `0.1` schema, derived from history, for the upgrade case
+test/integration/fixtures/    a pre-v3 `0.1` schema derived from history, and the frozen DDL ladder the migrations replaced
+drizzle/                      generated migrations (`npm run db:generate`), applied at startup and shipped in the image
 docs/demo/                    sample documentation (English, Turkish, MDX)
 Dockerfile                    one image: postgres:16 + pgvector + Node 22 + the app
 docker/entrypoint.sh          starts PostgreSQL, then the app; stops both in order on SIGTERM
@@ -599,18 +600,31 @@ as the unprivileged `node` user with the libpq `PG*` variables pointing at that 
 the app first and then PostgreSQL (fast shutdown); if either process dies the other is stopped and the
 container exits so `restart: unless-stopped` can bring the pair back.
 
-### Why no migrations?
+### How the schema evolves
 
-The vector column's dimension is a deployment setting (`vector(384)` vs `vector(1536)`), which
-generated migrations would hard-code. Instead `ensure-schema.ts` runs idempotent `CREATE … IF NOT EXISTS`
-DDL on every start under an advisory lock and records the dimension in a `settings` table so a
-mismatch fails fast with a clear message. `src/db/schema.ts` is kept in sync by hand and powers Drizzle's
-typed queries and Drizzle Studio. Schema version 4 added `users`, `user_sessions` and `project_members`, and
-version 5 added `mcp_tokens` and `projects.mcp_auth`; an existing database picks them up on the next start with
-nothing to run by hand, and every project keeps the MCP behaviour it already had. What used to rest on
-review now has a test: `test/integration/schema.itest.ts` applies that DDL to an empty database, applies it
-again and compares the two schemas byte for byte, and carries a pre-v3 `0.1` database forward — on every
-pull request, against a real server.
+There is one way to change the schema and it has four steps: edit `src/db/schema.ts`, run
+`npm run db:generate`, read the SQL drizzle-kit wrote into `drizzle/`, and commit both. Nothing else
+creates or alters a table, and `npm run db:check` — a step in CI — fails if the schema and the
+migrations stop agreeing.
+
+Nothing is asked of the operator. `src/db/bootstrap.ts` runs `migrate()` at startup, under a
+session-scoped advisory lock, with `drizzle/*.sql` baked into the image: upgrading is still
+`docker compose up -d` and there is still no migration command to forget. An installation that
+predates the migrations is adopted on its first start — its schema is already the baseline, so a row
+is written to drizzle's journal saying so and nothing is applied.
+
+Two things stay out of the generated SQL because they cannot be in it. The vector column's dimension
+is a deployment setting (`vector(384)` vs `vector(1536)`), so `schema.ts` carries a constant 384 for
+the migration to bake in and the bootstrap re-types the column to the configured dimension
+afterwards, once, before any row exists — drizzle-kit diffs `schema.ts` against its own snapshot and
+never against the live database, so a deployment at 1536 cannot be seen by it, let alone broken by it.
+The HNSW index is the second: it needs a fixed dimension and blocks the re-typing while it exists, so
+the bootstrap creates it after. The dimension is still recorded in `settings` and a mismatch still
+fails fast with the remedy in the message.
+
+What used to rest on review has a test: `test/integration/schema-equivalence.itest.ts` applies the
+frozen DDL ladder to one database and the new bootstrap to another and compares the two schemas as
+text, on every pull request, against a real server.
 
 ## Security notes
 

@@ -20,6 +20,8 @@
     "test:all": "vitest run",
     "smoke": "tsx scripts/smoke-mcp.ts",
     "reset-password": "tsx scripts/reset-password.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:check": "drizzle-kit check",
     "db:studio": "drizzle-kit studio"
   },
   "dependencies": {
