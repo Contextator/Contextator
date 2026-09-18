@@ -75,7 +75,7 @@ export interface TestDatabase {
 export async function createTestDatabase(baseUrl: string, name: string): Promise<TestDatabase> {
   if (!DATABASE_NAME_RE.test(name)) throw new Error(`Not a usable PostgreSQL database name: ${JSON.stringify(name)}`);
 
-  const admin = createDb(baseUrl);
+  const admin = createDb(baseUrl, silentLogger);
   try {
     // CREATE DATABASE cannot run inside a transaction block, which is why this is a bare execute.
     await admin.db.execute(sql.raw(`CREATE DATABASE ${name}`));
@@ -85,7 +85,7 @@ export async function createTestDatabase(baseUrl: string, name: string): Promise
 
   const url = new URL(baseUrl);
   url.pathname = `/${name}`;
-  const { db, pool } = createDb(url.toString());
+  const { db, pool } = createDb(url.toString(), silentLogger);
   return { db, pool, url: url.toString(), name };
 }
 
@@ -95,7 +95,7 @@ export async function createTestDatabase(baseUrl: string, name: string): Promise
  */
 export async function dropTestDatabase(baseUrl: string, database: TestDatabase): Promise<void> {
   await database.pool.end();
-  const admin = createDb(baseUrl);
+  const admin = createDb(baseUrl, silentLogger);
   try {
     await admin.db.execute(sql.raw(`DROP DATABASE IF EXISTS ${database.name} WITH (FORCE)`));
   } finally {

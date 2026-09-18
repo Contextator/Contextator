@@ -45,7 +45,7 @@ async function main(): Promise<void> {
   });
   const log = app.log;
 
-  const { db, pool } = createDb(config.DATABASE_URL);
+  const { db, pool } = createDb(config.DATABASE_URL, log);
   const embeddings = createEmbeddingProvider(config, log);
   const sessions = new SessionRegistry(log);
   const locks = new KeyedMutex();

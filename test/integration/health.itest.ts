@@ -67,7 +67,7 @@ beforeAll(async () => {
   database = await createTestDatabase(baseUrl, 'health');
   await ensureSchema(database.db, { dimensions: TEST_EMBEDDING_DIMENSIONS, resetVectors: false, log: silentLogger });
 
-  appDb = createDb(database.url);
+  appDb = createDb(database.url, silentLogger);
   app = await buildApi(appDb.db);
 
   const user = await createUser(database.db, { username: 'watcher', role: 'admin', password: 'watching-the-lights-1!' });
