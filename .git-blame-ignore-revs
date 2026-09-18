@@ -1,0 +1,9 @@
+# Revisions `git blame` should look straight through: commits that changed how the code is printed
+# without changing what it does. Nothing here should ever be the answer to "who wrote this line".
+#
+# Point git at this file once, locally:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub reads it from the default branch without being asked.
+
+# Reformat every file with the formatter that now governs them (Biome, ADR-0029)
+6892132b65e2840db0d4d6246ccc1ddf19ca1484

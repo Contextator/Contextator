@@ -26,14 +26,16 @@ interface StubPage {
 /** Counts every call so the test can assert the second sync really skipped the unchanged pages. */
 class StubNotion {
   readonly calls: string[] = [];
-  constructor(private pages: StubPage[]) {}
+  // Named `store`, not `pages`: the Notion client's own `pages` member is stubbed below, and a
+  // constructor parameter property of the same name silently overwrote it at construction time.
+  constructor(private store: StubPage[]) {}
 
   setPages(pages: StubPage[]): void {
-    this.pages = pages;
+    this.store = pages;
   }
 
   private page(id: string): StubPage | undefined {
-    return this.pages.find((p) => p.id === id);
+    return this.store.find((p) => p.id === id);
   }
 
   /** Set to make every call reject, the way an invalid or revoked token does. */
@@ -74,9 +76,9 @@ class StubNotion {
     this.calls.push(`search:${args.start_cursor ?? 'first'}`);
     this.guard();
     // Two pages of results, so pagination is covered.
-    const half = Math.ceil(this.pages.length / 2);
+    const half = Math.ceil(this.store.length / 2);
     const firstPage = !args.start_cursor;
-    const slice = firstPage ? this.pages.slice(0, half) : this.pages.slice(half);
+    const slice = firstPage ? this.store.slice(0, half) : this.store.slice(half);
     return {
       results: slice.map((p) => ({
         object: 'page',
@@ -86,7 +88,7 @@ class StubNotion {
         parent: p.parent,
         properties: titleProp(p.title),
       })),
-      next_cursor: firstPage && this.pages.length > half ? 'cursor-2' : null,
+      next_cursor: firstPage && this.store.length > half ? 'cursor-2' : null,
     };
   };
 

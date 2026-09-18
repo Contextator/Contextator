@@ -36,7 +36,10 @@ async function connect() {
   return { client, transport, kind: 'sse' as const };
 }
 
-const firstText = (result: { content?: unknown }): string => {
+// `callTool` is typed as a union of the modern result and the legacy `{ toolResult }` shape. The index
+// signature keeps this from being a weak type, so the legacy arm is accepted rather than rejected for
+// having no property in common; a result without `content` simply reads as empty.
+const firstText = (result: { content?: unknown; [key: string]: unknown }): string => {
   const content = (result.content as TextContent[] | undefined) ?? [];
   return content.find((c) => c.type === 'text')?.text ?? '';
 };

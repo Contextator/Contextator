@@ -506,6 +506,14 @@ npm run smoke -- http://localhost:3444/mcp/demo "kurulum" --sse   # exercise the
 
 `npm run db:studio` opens Drizzle Studio against `DATABASE_URL`.
 
+The first four of those commands are exactly what CI runs on every pull request, alongside a build of
+the Docker image, so running them before you push is the whole of staying green. Tell `git blame` to
+skip the one commit that reformatted the tree:
+
+```bash
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
 ## Project layout
 
 ```
@@ -564,6 +572,8 @@ docker-compose.yml            the `contextator` container and its volumes
 docker-compose.dev.yml        PostgreSQL only, for `npm run dev`
 biome.jsonc                   the one formatter and linter, and why each rule is set as it is
 tsconfig.test.json            typechecks test/ and scripts/, which the build's tsconfig cannot see
+.github/workflows/ci.yml      the gate on every pull request: lint, typecheck, tests, image build
+.git-blame-ignore-revs        commits that only reformatted; `git blame` should look through them
 ```
 
 ### How the single container works

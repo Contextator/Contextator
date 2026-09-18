@@ -1,0 +1,70 @@
+# The gate every pull request has to pass: lint, typecheck, the test suite, and proof that the image
+# still builds. See ADR-0029 and NFR-15 in the specification repository.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A second push to the same branch makes the first one's answer worthless, so stop paying for it.
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, typecheck and test
+    runs-on: ubuntu-latest
+    env:
+      # Mirrors the Dockerfile. onnxruntime-node's postinstall fetches optional GPU binaries that
+      # nothing here uses; without this the install pulls a CUDA runtime to run unit tests.
+      ONNXRUNTIME_NODE_INSTALL: skip
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          # The image runs node:22-bookworm-slim; CI matches it rather than the engines floor of 20.
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      # Biome ships as a platform-specific native binary, which is why this job is pinned to
+      # ubuntu-latest rather than run across a matrix.
+      - run: npm run lint
+
+      # Both tsconfigs: the one that builds dist/, and the one that covers test/ and scripts/.
+      - run: npm run typecheck
+
+      - run: npm test
+
+  image:
+    name: Build the image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # type=gha writes to the Actions cache, which needs more than the read-only default above.
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          # Built and thrown away. There are no registry credentials here on purpose: publishing is
+          # a later phase, and a workflow that can push is a workflow that has to be trusted to.
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+# Two more jobs belong here and are deliberately absent rather than stubbed: `integration`, running
+# the suite against a real PostgreSQL + pgvector service, and `eval`, scoring retrieval quality
+# against a fixed question set. An empty job that always reports success is a lie told in a status
+# check; the absence of a check is the more honest signal until the check exists.
