@@ -120,12 +120,12 @@ const QUERY_TEXT = 'a phrase that appears in none of the seeded chunks';
  * Five directions rather than one, for the two starvation cases below.
  *
  * pgvector picks each element's HNSW level pseudo-randomly, and `setseed` on the writing session does
- * not make that reproducible — the graph differs between runs, and whether one particular query's
- * hundred global candidates happen to contain ten of this project's thousand rows differs with it.
- * Asked of one direction, "iterative scan off starves this project" failed about one run in three, on
- * this branch and on the one that introduced it. Asked of five, the claim is that *approximate search
- * without the iterative scan does not reliably answer this project* — which is what ADR-0040 actually
- * says, is what an operator experiences, and does not depend on the graph coming out a particular way.
+ * not make that reproducible — the graph differs between runs, and so does which rows a given query's
+ * hundred candidates contain. Asked of one direction, "iterative scan off starves this project" is a
+ * claim about one draw from that graph. Asked of five, it is the claim ADR-0040 actually makes:
+ * *approximate search without the iterative scan does not answer this project*, whichever way the
+ * graph came out. Every one of the five is required to starve — see `forceVectorIndex`, which is what
+ * makes that affordable to assert.
  *
  * Only for the negative claim. The corpus is arranged around `QUERY` — the bands in `CORPUS` are
  * similarities to it — so "the iterative scan makes the answer exact" is asserted for `QUERY` alone,
@@ -240,8 +240,9 @@ async function seedProject(spec: Spec, index: number): Promise<void> {
     // pseudo-randomly, so the graph differs between runs. Seeding the session's PRNG is kept because
     // it costs nothing and removes one source of that — but it is **not** sufficient, measured: the
     // two starvation cases below still varied run to run with it in place, which is why they ask five
-    // directions instead of one. Anything in this file that has to be exact is asserted against
-    // `bruteForce`, which uses no index at all.
+    // directions rather than one and why they force the plan they are about (`forceVectorIndex`).
+    // Anything in this file that has to be exact is asserted against `bruteForce`, which uses no index
+    // at all.
     await client.query('SELECT setseed($1)', [0.42]);
     for (let start = 0; start < spec.chunks; start += INSERT_BATCH) {
       const indexes: number[] = [];
@@ -298,42 +299,114 @@ async function bruteForce(
 }
 
 /**
- * The dense candidate query of `searchChunks`, run on its own under the given scan settings
- * ([ADR-0041](../../.ssot/ADR.md#adr-0041)). Two cases below need the *candidate* count to be a
- * variable, because the starvation this file was written about depends on it: at the ten the product
- * used to ask for, PostgreSQL reaches `small` through the vector index and the post-filter bites; at
- * the fifty the fused search now asks for, it reads the project's own rows and sorts them exactly.
- * Going through `searchChunks` would fix that count at fifty and the evidence would disappear.
+ * **Why the two starvation cases force a plan instead of asserting one, which is the other thing this
+ * file is now evidence about.**
+ *
+ * `small` sits on PostgreSQL's own crossover, and that is not an accident of the corpus — ADR-0040
+ * measured the crossover ("somewhere between 500 and 1 000 chunks") and 1 000 was chosen because it is
+ * where the starvation lives. Moving the corpus off the crossover would make this file green by
+ * removing the condition it exists to demonstrate, so the corpus does not move. What moves is the
+ * *question*: from "did the planner choose the HNSW scan this time" to "here is what the HNSW scan
+ * does when it is the plan".
+ *
+ * **The crossover is a coin toss, and which way it lands has nothing to do with the HNSW graph.**
+ * Measured over repeated builds of this same corpus: at the shipped `ef_search = 100` the HNSW scan of
+ * `small` is costed at 1 184.52..1 598.51 every single time — pgvector's estimate is a function of the
+ * settings and the row count, not of a graph it has not walked. Its competitor is what moves. `ANALYZE`
+ * samples the physical correlation of `chunks_project_idx`, and across builds the same thousand rows
+ * came back at 1 297.43, 2 126.39 and 2 542.86. When the sample lands low, reading the project's own
+ * rows and sorting them exactly wins, the post-filter never runs at all, and a case asking whether this
+ * project starves is answered **no** — correctly, and about a plan this file is not about. That is the
+ * whole flake, roughly one build in five: the question had two right answers and the corpus picked
+ * between them. Nothing was wrong with the code under test on the builds where it failed.
+ *
+ * So the probes take the planner's discretion away and then check, in the same transaction, that
+ * taking it away left the plan the case is about. `bruteForce` above already does exactly this from
+ * the other side. Neither is a plan the product issues; both are how two plans are compared over one
+ * corpus.
  */
-async function denseCandidates(projectId: string, limit: number, settings: HnswScan, query: number[] = QUERY): Promise<number[]> {
+async function forceVectorIndex(client: pg.PoolClient): Promise<void> {
+  await client.query('SET LOCAL enable_seqscan = off');
+  await client.query('SET LOCAL enable_bitmapscan = off');
+  // The third is the one that is easy to leave out and would quietly not work: with only the other two
+  // off, an index scan on `chunks_project_idx` feeding a `Sort` is still available, and at a thousand
+  // rows it is precisely what the planner takes. Disabling the sort leaves producing the `ORDER BY`
+  // from the vector index as the only way. Asserted rather than trusted — every probe below reads back
+  // the plan it actually ran under.
+  await client.query('SET LOCAL enable_sort = off');
+}
+
+const VECTOR_INDEX = 'chunks_embedding_hnsw_idx';
+
+/**
+ * The dense candidate query of `searchChunks`, run on its own under the given scan settings
+ * ([ADR-0041](../../.ssot/ADR.md#adr-0041)) and through the vector index. Two cases below need the
+ * *candidate* count to be a variable, because the starvation this file was written about depends on
+ * it: at the ten the product used to ask for, the post-filter bites; at the fifty the fused search now
+ * asks for, PostgreSQL reads the project's own rows and sorts them exactly. Going through
+ * `searchChunks` would fix that count at fifty and the evidence would disappear.
+ *
+ * It returns the plan it ran under alongside the rows, and both callers assert it. That is where the
+ * non-vacuity guarantee lives now: the statement whose rows are being judged is the statement whose
+ * plan was read — same settings, same connection, same transaction — so "these rows came through
+ * `chunks_embedding_hnsw_idx`, and therefore were post-filtered" is observed on every run rather than
+ * inferred from a similar query run nearby at different settings.
+ */
+async function denseCandidates(
+  projectId: string,
+  limit: number,
+  settings: HnswScan,
+  query: number[] = QUERY,
+): Promise<{ rows: number[]; throughVectorIndex: boolean }> {
   const client = await database.pool.connect();
   try {
     await client.query('BEGIN');
+    await forceVectorIndex(client);
     await client.query('SELECT set_config($1, $2, true)', ['hnsw.ef_search', String(settings.efSearch)]);
     await client.query('SELECT set_config($1, $2, true)', ['hnsw.iterative_scan', settings.iterativeScan]);
     await client.query('SELECT set_config($1, $2, true)', ['hnsw.max_scan_tuples', String(settings.maxScanTuples)]);
-    const result = await client.query<{ chunk_index: number }>(
-      `SELECT c.chunk_index FROM chunks c WHERE c.project_id = $1::uuid AND c.index_generation = ${LIVE}
-       ORDER BY c.embedding <=> $2::vector LIMIT ${limit}`,
-      [projectId, vectorLiteral(query)],
-    );
+    const text = `SELECT c.chunk_index FROM chunks c WHERE c.project_id = $1::uuid AND c.index_generation = ${LIVE}
+       ORDER BY c.embedding <=> $2::vector LIMIT ${limit}`;
+    const parameters = [projectId, vectorLiteral(query)];
+    const plan = await client.query<{ 'QUERY PLAN': string }>(`EXPLAIN ${text}`, parameters);
+    const result = await client.query<{ chunk_index: number }>(text, parameters);
     await client.query('COMMIT');
-    return result.rows.map((row) => row.chunk_index);
+    return {
+      rows: result.rows.map((row) => row.chunk_index),
+      throughVectorIndex: plan.rows.some((r) => r['QUERY PLAN'].includes(VECTOR_INDEX)),
+    };
   } finally {
     client.release();
   }
 }
 
-/** Whether a search of `projectId` reaches the vector index at all, which is the planner's decision. */
-async function usesVectorIndex(projectId: string, limit: number = K): Promise<boolean> {
+/**
+ * Whether a search of `projectId` reaches the vector index, which is the planner's decision — asked
+ * under the settings that search would carry, and optionally with the alternatives taken away.
+ *
+ * **The settings are not decoration.** pgvector's cost estimate depends on `hnsw.ef_search`: measured
+ * on this corpus, the same scan of `small` starts at 591.64 at pgvector's default of 40 and at
+ * 1 184.52 at the 100 this product ships. An `EXPLAIN` that leaves them unset describes a query nobody
+ * issues, and describes it *more* favourably to the index — the direction that hides a disagreement
+ * between what was asserted and what ran, rather than surfacing it. It hid this one: on the builds
+ * where the starvation cases failed, this helper went on reporting the HNSW scan they had not got.
+ */
+async function usesVectorIndex(projectId: string, probe: { limit?: number; settings?: HnswScan; force?: boolean } = {}): Promise<boolean> {
+  const { limit = K, settings = DEFAULT_HNSW_SCAN, force = false } = probe;
   const client = await database.pool.connect();
   try {
+    await client.query('BEGIN');
+    if (force) await forceVectorIndex(client);
+    await client.query('SELECT set_config($1, $2, true)', ['hnsw.ef_search', String(settings.efSearch)]);
+    await client.query('SELECT set_config($1, $2, true)', ['hnsw.iterative_scan', settings.iterativeScan]);
+    await client.query('SELECT set_config($1, $2, true)', ['hnsw.max_scan_tuples', String(settings.maxScanTuples)]);
     const plan = await client.query<{ 'QUERY PLAN': string }>(
       `EXPLAIN SELECT chunk_index FROM chunks WHERE project_id = $1::uuid AND index_generation = ${LIVE}
        ORDER BY embedding <=> $2::vector LIMIT ${limit}`,
       [projectId, vectorLiteral(QUERY)],
     );
-    return plan.rows.some((r) => r['QUERY PLAN'].includes('chunks_embedding_hnsw_idx'));
+    await client.query('COMMIT');
+    return plan.rows.some((r) => r['QUERY PLAN'].includes(VECTOR_INDEX));
   } finally {
     client.release();
   }
@@ -362,13 +435,22 @@ afterAll(async () => {
 const scan = (overrides: Partial<HnswScan> = {}): HnswScan => ({ ...DEFAULT_HNSW_SCAN, ...overrides });
 
 describe('a project crowded out of the global top-k of a shared index', () => {
-  it('is the planner that decides whether any of this matters, so that is checked first', async () => {
-    // The finding that shaped this file. A 50-chunk project is fetched by `chunks_project_idx` and
-    // sorted exactly — it can never be post-filtered, because it is never approached through the
-    // vector index. A 1 000-chunk one is, on this instance. Everything below depends on that split
-    // and would quietly stop testing anything if it moved.
+  it('is the planner that decides whether any of this matters, so that is settled first', async () => {
+    // The finding that shaped this file, and the half of it that is decided by a factor of fifty: a
+    // 50-chunk project is fetched by `chunks_project_idx` and sorted exactly, so it can never be
+    // post-filtered, because it is never approached through the vector index. ≈175 against ≈9 460 at
+    // the shipped `ef_search` — the sampled cost of the exact path moves by 20 % between builds and
+    // never comes near.
     expect(await usesVectorIndex(ids.tiny)).toBe(false);
-    expect(await usesVectorIndex(ids.small)).toBe(true);
+
+    // The 1 000-chunk project is the other half, and what it gets is **not** asserted, because the
+    // planner's answer for it is not a fact about this code: ≈1 600 against a competitor `ANALYZE`
+    // samples somewhere between ≈1 300 and ≈2 540, which is a coin toss rather than a threshold. See
+    // `forceVectorIndex`. What is asserted is the precondition everything below actually needs — that
+    // the vector index *can* answer this project's query, so that taking the alternatives away leaves
+    // the plan the starvation cases are about. A dropped index, a changed operator class or an
+    // `ORDER BY` the index no longer matches would all fail here, which is what this line is for.
+    expect(await usesVectorIndex(ids.small, { force: true })).toBe(true);
   });
 
   it('changed its mind about this project when the candidate count went from ten to fifty', async () => {
@@ -377,8 +459,12 @@ describe('a project crowded out of the global top-k of a shared index', () => {
     // `small`'s thousand rows by `chunks_project_idx` and sorting them exactly becomes cheaper than an
     // HNSW descent, so the post-filter cannot starve this project any more, because it is no longer
     // post-filtering it. The project that *does* still go through the index is the one that dominates.
-    expect(await usesVectorIndex(ids.small, DENSE_CANDIDATES)).toBe(false);
-    expect(await usesVectorIndex(ids.beta, DENSE_CANDIDATES)).toBe(true);
+    //
+    // Both of these hold by a margin, unlike the free choice at ten: at fifty candidates the HNSW scan
+    // of `small` is costed at ≈3 250 against an exact path `ANALYZE` has never sampled above ≈2 580,
+    // and for `beta` it is ≈1 600 against five times as many rows to fetch and sort.
+    expect(await usesVectorIndex(ids.small, { limit: DENSE_CANDIDATES })).toBe(false);
+    expect(await usesVectorIndex(ids.beta, { limit: DENSE_CANDIDATES })).toBe(true);
     // The exactness this buys is asserted below, against a brute-force scan, rather than assumed here.
   });
 
@@ -402,10 +488,10 @@ describe('a project crowded out of the global top-k of a shared index', () => {
     }
   });
 
-  it('is not reliably answered at all by the same query with iterative scan off — which is the defect', async () => {
+  it('is not answered at all by the same query with iterative scan off — which is the defect', async () => {
     // Without this the assertion above passes on any implementation that looks correct, the previous
     // one included. The project's best rows sit roughly 2 600 places down the global distance
-    // ordering, so a hundred candidates rarely contain them and the post-filter has little left.
+    // ordering, so a hundred candidates do not contain them and the post-filter has nothing left.
     //
     // Asked at ten candidates rather than through `searchChunks`, and that is the point of the case
     // above: at the fifty the fused search asks for, this project is no longer reached through the
@@ -413,16 +499,33 @@ describe('a project crowded out of the global top-k of a shared index', () => {
     // they are what `beta` and every project past the crossover still depends on — so the evidence for
     // them is kept in the shape that produces it.
     //
-    // Over five directions rather than one, and asserted as "not every one of them is right" rather
-    // than as a row count. See PROBE_QUERIES.
+    // Over five directions, and **every one of them** rather than "at least one", which is what
+    // forcing the plan buys: the rows below are known to have come through the vector index, so a
+    // right answer here could only mean the post-filter did not bite. Once the plan stopped being a
+    // coin toss it bit on every direction of every build measured — thirty of them.
     const wrong: string[] = [];
     for (const [i, query] of PROBE_QUERIES.entries()) {
       const off = await denseCandidates(ids.small, K, scan({ iterativeScan: 'off' }), query);
       const exact = (await bruteForce(ids.small, K, query)).map((row) => row.chunkIndex);
-      if (!sameOrder(off, exact)) wrong.push(`#${i} returned ${off.length} of ${K}`);
+      expect(off.throughVectorIndex).toBe(true);
+      if (!sameOrder(off.rows, exact)) wrong.push(`#${i} returned ${off.rows.length} of ${K}`);
     }
+    expect(wrong).toHaveLength(PROBE_QUERIES.length);
 
-    expect(wrong.length).toBeGreaterThan(0);
+    // The other half of the demonstration, and the reason none of this is vacuous. Same project, same
+    // forced HNSW scan, same transaction shape — only the scan settings differ, and the shipped ones
+    // return the rows an index-free scan returns. A plan that read the project's own rows and sorted
+    // them would be exact in *both* modes and could not produce this contrast; the contrast is
+    // therefore evidence that what the two cases here measure is post-filtering, not the planner.
+    //
+    // For `QUERY` alone, and as a set: the corpus is arranged around `QUERY` (see PROBE_QUERIES), and
+    // `relaxed_order` is allowed to return the right rows in the wrong order — the product re-sorts
+    // them in JS, which this probe deliberately bypasses, and which the case below asserts.
+    const on = await denseCandidates(ids.small, K, scan());
+    const exact = (await bruteForce(ids.small, K)).map((row) => row.chunkIndex);
+    expect(on.throughVectorIndex).toBe(true);
+    expect([...on.rows].sort((a, b) => a - b)).toEqual([...exact].sort((a, b) => a - b));
+
     console.log(`hnsw-scan: iterative_scan=off missed the exact answer for ${wrong.length} of ${PROBE_QUERIES.length} queries — ${wrong.join(', ')}`);
   });
 
@@ -467,15 +570,18 @@ describe('a project crowded out of the global top-k of a shared index', () => {
     // The number that actually ends an iterative scan is not `ef_search`, it is this — and it counts
     // the *instance's* tuples, not the project's. 2 000 is below the ~2 600 this project needs, and
     // the default 20 000 is above it; both facts are the reason the variable is nameable at all.
-    // At ten candidates, and over the same five directions, for the two reasons the
-    // `iterative_scan = off` case above gives.
+    // At ten candidates, through the forced vector index, and over the same five directions, for the
+    // three reasons the `iterative_scan = off` case above gives. 2 000 tuples is 9.5 % of the instance,
+    // so a tenth of this project's rows are ever looked at and the ten best of those are not its ten
+    // best — every direction, every build.
     let starved = 0;
     for (const query of PROBE_QUERIES) {
       const cut = await denseCandidates(ids.small, K, scan({ maxScanTuples: 2_000 }), query);
       const exact = (await bruteForce(ids.small, K, query)).map((row) => row.chunkIndex);
-      if (!sameOrder(cut, exact)) starved++;
+      expect(cut.throughVectorIndex).toBe(true);
+      if (!sameOrder(cut.rows, exact)) starved++;
     }
-    expect(starved).toBeGreaterThan(0);
+    expect(starved).toBe(PROBE_QUERIES.length);
   });
 
   it('answers a project that dominates the index the same way, so this is not a small-project patch', async () => {
@@ -539,7 +645,7 @@ describe('a third predicate, which is what ADR-0040 said this file would have to
     // Not vacuous: this is the project the planner reaches through `chunks_embedding_hnsw_idx`, so
     // the filter here really is a post-filter over index candidates rather than a predicate on rows
     // PostgreSQL was going to read anyway.
-    expect(await usesVectorIndex(ids.beta, DENSE_CANDIDATES)).toBe(true);
+    expect(await usesVectorIndex(ids.beta, { limit: DENSE_CANDIDATES })).toBe(true);
     expect(hits).toHaveLength(K);
     expect(hits.map((h) => h.chunkIndex)).toEqual(exact.map((e) => e.chunkIndex));
   });
