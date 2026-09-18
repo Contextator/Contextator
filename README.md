@@ -431,10 +431,13 @@ all. `recall@1` falls from 78.1 % to 75.0 %, which is the trade rank fusion make
 half alone cannot outrank a chunk found respectably by both. Cross-lingual retrieval, which a hybrid
 search was expected to help, **did not improve** on the questions that measure it.
 
-A source can name the language its documents are written in, which picks the text search configuration
-they are indexed with. Leave it unset unless you have measured it — this version searches in the unset
-configuration, so a source indexed with stemming is matched *less* well. There is no Turkish option
-because PostgreSQL has no Turkish configuration; Turkish is indexed word for word.
+The keyword half indexes every source in PostgreSQL's `simple` configuration — words as written, no
+stemming — and asks its questions in the same one. That is the honest default here: PostgreSQL has no
+Turkish configuration at all, a project is routinely two languages, and an unstemmed index returns an
+identifier as the string it is. A per-source `language` exists in the source config and the admin API
+accepts it, so the version that varies the query side needs no migration and no re-index; it is not
+offered in the dashboard, because until that version ships a source indexed with stemming is matched by
+a `simple` query *less* well, not better.
 
 ## Configuration
 
