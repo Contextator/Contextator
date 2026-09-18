@@ -1196,11 +1196,131 @@ button:focus-visible {
   transform: translateX(-50%) translateY(0);
 }
 
+/* ---------- search panel ---------- */
+
+.search-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 38px;
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 14px;
+  outline: none;
+}
+
+.search-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.search-input:disabled {
+  opacity: 0.55;
+}
+
+.search-limit {
+  flex: 0 0 auto;
+  height: 38px;
+  padding: 0 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+}
+
+.search-form button {
+  flex: 0 0 auto;
+  height: 38px;
+}
+
+.hit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.hit-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.hit-rank {
+  flex: 0 0 auto;
+  width: 20px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.hit-path {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hit-crumb {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The number an operator compares two configurations with: never truncated, never pushed off. */
+.hit-score {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+
+.hit-body {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-2);
+}
+
 /* ---------- responsive ---------- */
 
 @media (max-width: 1200px) {
   .stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .search-form {
+    flex-wrap: wrap;
+  }
+  .search-input {
+    flex-basis: 100%;
   }
   .two-col {
     grid-template-columns: minmax(0, 1fr);

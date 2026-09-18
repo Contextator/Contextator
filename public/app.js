@@ -27,10 +27,13 @@ import {
 import { canCreateProject, canDeleteProject, canEdit, initAuthUi, loadMe, renderUserMenu } from './auth.js';
 import { authHeaderFor, initMcpUi, loadMcpTokens, renderMcpAccess } from './mcp.js';
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
+import { renderSearch } from './search.js';
 import { initUsersUi, renderUsersView } from './users.js';
 
 const POLL_ACTIVE_MS = 2000;
 const POLL_IDLE_MS = 15000;
+/** While the search box has focus. See schedule(). */
+const POLL_TYPING_MS = 30000;
 const ACTIVE_PHASES = new Set(['queued', 'scanning', 'embedding', 'finalizing']);
 
 const TOOLS = [
@@ -495,6 +498,8 @@ function renderDetail() {
     ]),
   );
 
+  // Next to the counts it is read against: the stats say how much is indexed, this says what comes back.
+  main.append(renderSearch(p));
   main.append(renderSources(p, busy));
   main.append(renderMembers(p));
   main.append(renderMcpAccess(p));
@@ -752,7 +757,12 @@ function schedule() {
   clearTimeout(state.timer);
   const active = state.projects.some(isActive);
   const modelLoading = state.health?.embeddings && !state.health.embeddings.ready;
-  state.timer = setTimeout(refresh, active || modelLoading ? POLL_ACTIVE_MS : POLL_IDLE_MS);
+  // A poll calls renderDetail(), which replaces #detail wholesale — including the search box
+  // somebody is typing into. search.js restores the caret for the renders it cannot avoid; this
+  // keeps the avoidable ones out of the way, at the cost of a staler job phase while the box is
+  // focused. It is the cheapest fix for the whole class of "my typing vanished".
+  const typing = state.search.focused;
+  state.timer = setTimeout(refresh, typing ? POLL_TYPING_MS : active || modelLoading ? POLL_ACTIVE_MS : POLL_IDLE_MS);
 }
 
 async function reindex(project, force) {

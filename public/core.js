@@ -56,6 +56,22 @@ export const state = {
   confirmDeleteUser: null,
   filter: '',
   connectTab: 0,
+  /**
+   * The search panel (search.js), whole. app.js rebuilds #detail on every poll, so a query typed
+   * into the DOM would be thrown away a second or two later — the caret and the focus flag are here
+   * for the same reason, and `projectId` is what clears the hits when the selection moves.
+   */
+  search: {
+    projectId: null,
+    query: '',
+    limit: 5,
+    caret: 0,
+    focused: false,
+    status: 'idle', // 'idle' | 'searching' | 'done' | 'error'
+    error: '',
+    ranQuery: '', // the query the hits below actually answer
+    hits: [],
+  },
   confirmDelete: null,
   confirmTimer: null,
   timer: null,

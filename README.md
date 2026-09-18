@@ -573,6 +573,7 @@ public/auth.js                the signed-in account, the top-bar menu, permissio
 public/users.js               the account list at #/~users
 public/members.js             a project's Members panel
 public/mcp.js                 a project's MCP access panel and its tokens
+public/search.js              a project's search box and the hits it renders, scores and all
 public/auth-page.js           /login, /setup and /change-password — imports nothing from the dashboard
 public/pages/                 body of each product/legal page + the shell they share
 scripts/smoke-mcp.ts          end-to-end MCP client check
