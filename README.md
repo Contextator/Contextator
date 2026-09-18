@@ -578,10 +578,16 @@ public/auth-page.js           /login, /setup and /change-password — imports no
 public/pages/                 body of each product/legal page + the shell they share
 scripts/smoke-mcp.ts          end-to-end MCP client check
 scripts/reset-password.ts     last-resort password reset straight against the database; ships in the image and runs there
+scripts/eval.ts               `npm run eval` — indexes eval/corpus, asks eval/golden.jsonl, prints recall@1, recall@5, MRR
+scripts/eval-scoring.ts       the scoring arithmetic and the report, with no database or model in it, so it can be unit-tested
 test/*.test.ts                unit suite — pure functions, no database, no Docker (`npm test`)
 test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
 test/integration/fixtures/    a pre-v3 `0.1` schema derived from history, and the frozen DDL ladder the migrations replaced
+eval/corpus/                  the fixture corpus the golden set asks about: 15 English and 11 Turkish pages, written for this
+eval/golden.jsonl             48 questions, one JSON object per line, each naming the file that answers it
+eval/README.md                what a good question is, how to add one, and why the failures are kept
+eval/BASELINE.md              the last recorded run of the default configuration
 drizzle/                      generated migrations (`npm run db:generate`), applied at startup and shipped in the image
 CONTRIBUTING.md               how to run it, the four checks, the pairs kept in sync, and the licence grant
 CLA.md                        the contributor licence grant — a draft, not yet in force

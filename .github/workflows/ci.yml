@@ -7,6 +7,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  # The `eval` job is the reason this is here: an operator comparing two retrieval configurations
+  # wants to run the measurement against `main` on demand, not by pushing something.
+  workflow_dispatch:
 
 # A second push to the same branch makes the first one's answer worthless, so stop paying for it.
 concurrency:
@@ -124,7 +127,81 @@ jobs:
           printf '%s\n' "$output"
           printf '%s\n' "$output" | grep -qF 'Usage: npm run reset-password -- <username>'
 
-# One more job belongs here and is deliberately absent rather than stubbed: `eval`, scoring retrieval
-# quality against a fixed question set. An empty job that always reports success is a lie told in a
-# status check; the absence of a check is the more honest signal until the check exists. `integration`
-# was the other one, and it is above now.
+  eval:
+    name: Retrieval evaluation
+    runs-on: ubuntu-latest
+    env:
+      # Same reason as the jobs above, and the same evidence: the Dockerfile installs with this set and
+      # the image it produces embeds locally on the CPU. The postinstall fetches GPU binaries; the CPU
+      # ones ship in the package.
+      ONNXRUNTIME_NODE_INSTALL: skip
+      # Pinned rather than left to the default in `src/config.ts`, for two different reasons. The model
+      # and the dtype are half of `provider.id` and therefore half of what the numbers mean, so a CI
+      # figure and a laptop figure are only the same figure when both are stated. And the cache key
+      # below is derived from them: a faster dtype is a different download and must not be a cache hit.
+      EMBEDDING_MODEL: Xenova/paraphrase-multilingual-MiniLM-L12-v2
+      EMBEDDING_DTYPE: fp32
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The filter below diffs against the pull request's base commit, which the default shallow
+          # checkout does not have.
+          fetch-depth: 0
+
+      # Path filters in `on:` are workflow-wide, and this workflow's other three jobs must run on every
+      # pull request. So the filter lives here, in the one job it applies to: a documentation change
+      # should not pay for a 465 MB model download and a container, and a retrieval change must.
+      - name: Does this change touch retrieval?
+        id: relevant
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only '${{ github.event.pull_request.base.sha }}' HEAD)
+          printf '%s\n' "$changed"
+          if printf '%s\n' "$changed" | grep -qE '^(src/services/|eval/|scripts/eval)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo 'No retrieval evaluation: this change touches neither `src/services/**`, `eval/**` nor `scripts/eval.ts`.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/setup-node@v7
+        if: steps.relevant.outputs.run == 'true'
+        with:
+          node-version: 22
+          cache: npm
+
+      # Keyed on the model and the dtype, and deliberately not on package-lock.json: the contents of
+      # this directory do not depend on the lockfile, and keying it there would throw away a
+      # several-hundred-megabyte download on every dependency bump.
+      - name: Cache the embedding model
+        if: steps.relevant.outputs.run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .cache/models
+          key: "models-${{ env.EMBEDDING_MODEL }}-${{ env.EMBEDDING_DTYPE }}"
+
+      - run: npm ci --no-audit --no-fund
+        if: steps.relevant.outputs.run == 'true'
+
+      # No database is handed to it, so it starts pgvector/pgvector:pg16 through the same testcontainers
+      # harness the integration suite uses, carves a database out of it and drops both at the end
+      # (ADR-0034). The numbers go to the run summary, where they can be read without downloading
+      # anything, and the JSON goes to an artifact so two runs can be diffed.
+      - name: Score the golden set
+        if: steps.relevant.outputs.run == 'true'
+        run: npm run eval -- --markdown="$GITHUB_STEP_SUMMARY" --json=eval-report.json
+
+      - uses: actions/upload-artifact@v4
+        if: steps.relevant.outputs.run == 'true'
+        with:
+          name: eval-report
+          path: eval-report.json
+
+# This job reports and does not gate: it exits 0 whatever `recall@5` turns out to be, and `npm run eval`
+# accepts a `--min-recall5` that nothing enforces yet. Phase 1 is what sets a floor worth failing a build
+# over, and it should find the flag already plumbed rather than having to add it while also arguing about
+# the number (ADR-0034).
