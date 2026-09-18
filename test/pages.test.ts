@@ -186,11 +186,12 @@ describe('authPageRoutes', () => {
 });
 
 /**
- * The Cookie and Privacy pages make claims about this software. They were true before accounts
- * existed and would be lies afterwards, so the claims are pinned here: change the behaviour and
- * these fail until the page is rewritten.
+ * The Cookie and Privacy pages, the README and the dashboard itself make claims about this
+ * software. They were true before accounts and before per-project MCP tokens existed and would be
+ * lies afterwards, so the claims are pinned here: change the behaviour and these fail until the
+ * prose is rewritten.
  */
-describe('the legal pages tell the truth about accounts', () => {
+describe('the shipped prose tells the truth about accounts and MCP', () => {
   it('names the session cookie and no longer claims there is none', async () => {
     const body = await readFile(new URL('../public/pages/cookies.html', import.meta.url), 'utf8');
     expect(body).toContain(SESSION_COOKIE);
@@ -215,5 +216,16 @@ describe('the legal pages tell the truth about accounts', () => {
     expect(privacy).toContain('MCP tokens');
     expect(privacy).toContain('bearer token');
     expect(terms).toContain('bearer token');
+  });
+
+  it('says the same thing in the README and in the dashboard, where operators actually read it', async () => {
+    const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
+    const dashboard = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');
+    // Both once claimed the endpoint could not be protected at all. It can, per project.
+    expect(readme).not.toContain('unauthenticated by design');
+    expect(dashboard).not.toContain('unauthenticated by design');
+    // And both have to state the door that replaced that claim.
+    expect(readme).toContain('bearer token');
+    expect(dashboard).toContain('bearer token');
   });
 });

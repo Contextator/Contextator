@@ -583,8 +583,16 @@ nothing to run by hand, and every project keeps the MCP behaviour it already had
 
 ## Security notes
 
-- The MCP endpoints are **unauthenticated by design** (MCP clients have no standard way to pass a token yet).
-  Bind the server to a private network, or put it behind a reverse proxy that handles auth.
+- An MCP endpoint is **open** by default — the historical behaviour — and can be closed per project with a
+  bearer token; the mechanism and who may change it are in [MCP access](#mcp-access). Tokens are stored as hashes,
+  shown once, scoped to one project, and revoking one closes that project's live MCP sessions rather than waiting
+  for the next request.
+- A token is a credential for the endpoint, not an account: it has no identity and no per-document rules, so a holder
+  reads everything indexed in that project. A project left `open` is readable by anyone who can reach its URL,
+  whatever the dashboard roles say.
+- So an instance that leaves its projects open belongs on a private network, or behind a reverse proxy that handles
+  auth — the endpoint itself is the only thing a project token closes.
+- Browser `Origin` headers on `/mcp/*` are validated (DNS-rebinding protection) in both modes; CLI clients send none.
 - Local source directories are confined to `ALLOWED_DOC_ROOTS`; `..`, symlinks that escape, and non-directories are rejected.
 - Git and Notion tokens are encrypted at rest with `SECRET_KEY` (AES-256-GCM) and never returned by the API; credentials pasted into a repository URL are stripped before storage.
 - Push webhooks verify the provider's signature against the per-source secret before anything is queued; the endpoint is otherwise unauthenticated by necessity.
@@ -604,14 +612,8 @@ nothing to run by hand, and every project keeps the MCP behaviour it already had
 - Cookie-authenticated writes must come from this site (`Sec-Fetch-Site`, falling back to `Origin`/`Referer`). CORS is
   deliberately left without `credentials`, so `ALLOWED_ORIGINS` cannot be used to read the API as a signed-in user.
 - The last active root account cannot be deleted, demoted or disabled, and an admin cannot touch a root account.
-- `ADMIN_TOKEN` bypasses the account system with root permissions. It is meant for scripts; do not paste it into a browser.
-- An MCP endpoint is **open** by default — the historical behaviour — and can be closed per project with a bearer
-  token. Tokens are stored as hashes, shown once, scoped to one project, and revoking one closes that project's live
-  MCP sessions rather than waiting for the next request.
-- A token is a credential for the endpoint, not an account: it has no identity and no per-document rules, so a holder
-  reads everything indexed in that project. A project left `open` is readable by anyone who can reach its URL,
-  whatever the dashboard roles say.
-- Browser `Origin` headers on `/mcp/*` are validated (DNS-rebinding protection); CLI clients send none.
+- `ADMIN_TOKEN` bypasses the account system with root permissions. It is meant for scripts; do not paste it into a
+  browser. It does not open a token-protected MCP endpoint — that takes one of the project's own tokens.
 - The embedded PostgreSQL is reachable only from inside the container (`listen_addresses=127.0.0.1`, no published port).
 
 ## Troubleshooting

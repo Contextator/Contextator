@@ -270,7 +270,7 @@
       <form id="user-form" method="dialog" novalidate>
         <div class="dialog-head">
           <h2 id="user-dialog-title">New user</h2>
-          <p class="muted">Accounts govern the dashboard and the admin API. They do not gate <code>/mcp/*</code>, which stays unauthenticated by design.</p>
+          <p class="muted">Accounts govern the dashboard and the admin API. They do not reach <code>/mcp/*</code>, which is open by default and closed per project with a bearer token.</p>
         </div>
         <div class="dialog-body">
           <div class="field-row">
