@@ -358,8 +358,8 @@ header already in place. See [MCP access](#mcp-access).
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
 | `search_docs` | `query: string`, `limit?: 1-20` (default 5), `source?: string`, `path_prefix?: string` | Hybrid search over the project's chunks — meaning and exact wording at once, so `HALYARD_DISPATCH_TIMEOUT` finds its page as readily as a question does. Returns ranked excerpts with file path, heading breadcrumb (`Guide > Install > Docker`), score and the passage either side of each excerpt. `source` and `path_prefix` narrow it to one source or one directory; both are optional and omitting them searches everything, as it always did. When nothing clears the relevance floor it says *no good match* and points at `list_topics` instead of returning its least bad hit. |
-| `list_topics` | – | Every indexed document grouped by directory, with title and chunk count. The first path segment is the source it came from. |
-| `read_document` | `path: string` | Full Markdown of one indexed file (path as shown by the other tools, e.g. `handbook/install.md`). Only indexed paths are served; capped at 512 KB. |
+| `list_topics` | `cursor?: string`, `limit?: 1-1000` (default 200) | Indexed documents grouped by directory, with title and chunk count. The first path segment is the source it came from. A project larger than one page ends its answer with a `next_cursor:` to hand back, so a thousand documents can be listed to the end. |
+| `read_document` | `path: string`, `heading?: string`, `from?: int`, `to?: int`, `max_tokens?: 200-20000` (default 4000) | Markdown of one indexed file (path as shown by the other tools, e.g. `handbook/install.md`). Served from the database, so it works after the file has moved or gone. `heading` takes a breadcrumb straight out of a search result and returns that section and the subsections under it; `from`/`to` take a chunk range. Output is capped at `max_tokens`, counted with the embedding model's own tokenizer, and says where it cut and how to ask for the rest. |
 
 The server also sends MCP `instructions` describing the project so agents know when to use which tool.
 
@@ -369,6 +369,16 @@ after it, marked with a leading and trailing `…`, so an agent usually does not
 any one document, because five results that are five consecutive chunks of one page answer the question
 once and crowd out four other pages. The whole answer is capped at `SEARCH_MAX_RESULT_CHARS` and says
 so when it cuts. All three are settings; see the configuration table.
+
+**Reading a document is not the same as reading a file.** `read_document` serves `documents.content` —
+the text this server indexed, stored beside the chunks — and never touches the filesystem. So a document
+stays readable after its file is renamed, its git checkout is re-cloned, or the whole source directory is
+unmounted, and a page that was *never* indexed can never be served by mistake. The text is stored as the
+indexer transformed it, which is what keeps `read_document` and `search_docs` from ever disagreeing about
+what a page says; the price is that an Obsidian note's original `[[wikilink]]` syntax is not readable
+through MCP, only the Markdown link it became. Documents indexed by an older version hold no stored text
+and are read from disk until their next index run, which is the one case where a missing file is still an
+error.
 
 **The relevance floor is the one setting to know about before you change the embedding model.** Below
 `SEARCH_SCORE_FLOOR` — a cosine similarity, defaulting to `0.82` — `search_docs` answers *no good
@@ -472,6 +482,7 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `IGNORE_GLOBS` | – | e.g. `**/CHANGELOG.md,drafts/**`. Applies to every source |
 | `DATA_DIR` | `.data` | Writable directory holding the materialised sources (git checkouts, uploads, Notion pulls). `/data` inside the container |
 | `SECRET_KEY` | – | At least 32 characters (`openssl rand -hex 32`). Encrypts git/Notion tokens at rest (AES-256-GCM). Needed only once such a source exists; changing it invalidates stored tokens |
+| `MAX_STORED_DOCUMENT_BYTES` | `1048576` (1 MB) | How much of each document's text is kept in the database for `read_document`. Past it the prefix is stored and the tool says so. Compressed out of line by PostgreSQL, so the cost is a small fraction of the same document's vectors |
 | `UPLOAD_MAX_FILE_BYTES` | `52428800` (50 MB) | Per uploaded file |
 | `UPLOAD_MAX_FILES_PER_REQUEST` | `500` | The dashboard splits large folders across requests by itself |
 | `UPLOAD_MAX_ARCHIVE_BYTES` | `268435456` (256 MB) | Per uploaded archive |
@@ -653,6 +664,7 @@ src/services/text-search.ts   which PostgreSQL text search configuration the key
 src/services/search.ts        the one search path: the guards, the query embedding and the top-k query, shared by the MCP tool and the search API
 src/mcp/router.ts             /mcp/:project — Streamable HTTP + legacy SSE on one URL
 src/mcp/tools.ts              search_docs, list_topics, read_document
+src/services/document-read.ts  joining chunks back into a section, and cutting text to a token budget
 src/mcp/sessions.ts           per-connection McpServer/transport registry + idle reaper
 src/auth/policy.ts            every authorization rule as data — no DB, no Fastify, fully unit-tested
 src/auth/authorize.ts         the request checks that need no database, in the order they must happen
@@ -765,7 +777,7 @@ text, on every pull request, against a real server.
 - Push webhooks verify the provider's signature against the per-source secret before anything is queued; the endpoint is otherwise unauthenticated by necessity.
 - Uploads and archives are extracted into a scratch directory first and only then copied in: entries that escape, dot-directories, non-portable names and unselected file types are dropped, and `ARCHIVE_MAX_ENTRIES` / `ARCHIVE_MAX_TOTAL_BYTES` bound a zip bomb. Nested archives are unpacked one level deep.
 - A git subdirectory is resolved inside the checkout; `..` segments are rejected.
-- `read_document` only serves files that were indexed for that project, never arbitrary paths.
+- `read_document` only serves documents that were indexed for that project, never arbitrary paths — and since it reads the stored text rather than the filesystem, there is no path for it to traverse.
 - The dashboard requires an account. Roles are `root`, `admin` and `member`, with a per-project `viewer`/`editor` role
   on top; every rule is enforced server-side from a single policy table, and a route that forgets to declare one fails
   the test suite. Hiding a button in the browser is cosmetic and the code says so.

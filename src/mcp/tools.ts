@@ -1,25 +1,37 @@
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
-import { MAX_SEARCH_LIMIT } from '../config.js';
-import type { ProjectRow } from '../db/schema.js';
-import { isInside, normalizeRelativePath } from '../services/fs-scan.js';
+import {
+  LIST_TOPICS_DEFAULT_LIMIT,
+  LIST_TOPICS_MAX_LIMIT,
+  MAX_SEARCH_LIMIT,
+  READ_DOCUMENT_DEFAULT_MAX_TOKENS,
+  READ_DOCUMENT_MAX_MAX_TOKENS,
+  READ_DOCUMENT_MIN_MAX_TOKENS,
+} from '../config.js';
+import type { DocumentRow, ProjectRow } from '../db/schema.js';
+import { chunksWithinBudget, joinChunks, truncateToTokens } from '../services/document-read.js';
+import { normalizeRelativePath } from '../services/fs-scan.js';
 import { getProjectById } from '../services/projects.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
-import { driverFor } from '../services/sources/driver.js';
-import { getSourceById, listSources } from '../services/sources.js';
-import { getDocument, getDocumentBySuffix, listDocumentsForProject, scanFrom, selectionFrom, type SearchHit } from '../services/vector-store.js';
+import { listSources } from '../services/sources.js';
+import {
+  getDocument,
+  getDocumentBySuffix,
+  getDocumentChunks,
+  listDocumentHeadings,
+  listDocumentsForProject,
+  scanFrom,
+  selectionFrom,
+  type SearchHit,
+} from '../services/vector-store.js';
+import { readIndexedFileFromDisk } from './legacy-file-read.js';
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
 const ok = (text: string): ToolResult => ({ content: [{ type: 'text', text }] });
 const fail = (text: string): ToolResult => ({ content: [{ type: 'text', text }], isError: true });
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
-
-const MAX_DOCUMENT_BYTES = 512 * 1024;
-const MAX_TOPIC_LINES = 500;
 
 /**
  * The first line of each hit — path, breadcrumb, score — is what [API.md](../../.ssot/API.md) §1
@@ -68,8 +80,32 @@ function formatHits(query: string, projectName: string, hits: SearchHit[], maxCh
   return out;
 }
 
+/**
+ * `list_topics`' cursor ([ADR-0043](../../.ssot/ADR.md#adr-0043)): the last `relative_path` of the page
+ * just returned, base64url so that an agent copies one token rather than a path it might be tempted to
+ * edit. Opaque is the contract — it is not promised to stay a path — and `decodeCursor` re-encodes what
+ * it decoded so that a cursor somebody assembled by hand is refused rather than silently read as some
+ * other position.
+ */
+const encodeCursor = (relativePath: string): string => Buffer.from(relativePath, 'utf8').toString('base64url');
+
+function decodeCursor(cursor: string): string | null {
+  const trimmed = cursor.trim();
+  if (trimmed === '' || trimmed.length > 2048) return null;
+  const decoded = Buffer.from(trimmed, 'base64url').toString('utf8');
+  if (decoded === '' || decoded.length > 1024) return null;
+  return Buffer.from(decoded, 'utf8').toString('base64url') === trimmed ? decoded : null;
+}
+
+/**
+ * What the three tools actually reach for, named rather than taken as the whole `AppContext`. The
+ * server hands them the composition root; a test hands them four fields and a stub provider, which is
+ * the difference between a tool contract that can be exercised and one that can only be deployed.
+ */
+export type ToolContext = Pick<AppContext, 'db' | 'embeddings' | 'config' | 'log'>;
+
 /** Registers the per-project tool set on a fresh McpServer instance. Handlers never throw; failures come back as `isError`. */
-export function registerTools(server: McpServer, ctx: AppContext, project: ProjectRow): void {
+export function registerTools(server: McpServer, ctx: ToolContext, project: ProjectRow): void {
   const { db, embeddings, config, log } = ctx;
   const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 
@@ -83,7 +119,7 @@ export function registerTools(server: McpServer, ctx: AppContext, project: Proje
         'Returns the most relevant excerpts with their file path, heading breadcrumb and similarity score, each shown with the ' +
         'passage before and after it for context. Narrow it with source or path_prefix when you already know where the answer lives. ' +
         'When nothing is a good match it says so rather than returning the least bad thing it found. ' +
-        'Use read_document with a returned file path to read the whole file.',
+        'Use read_document with a returned file path to read the whole file, or its heading breadcrumb to read just that section.',
       inputSchema: {
         query: z.string().min(1).max(2000).describe('Natural-language question or keywords'),
         limit: z
@@ -169,21 +205,53 @@ export function registerTools(server: McpServer, ctx: AppContext, project: Proje
     {
       title: 'List documentation topics',
       description:
-        `Lists every indexed document of the "${project.name}" project grouped by source and directory (paths are "<source>/<path>"), ` +
-        'with titles and chunk counts. Use it to discover what documentation exists before searching or reading.',
-      inputSchema: {},
+        `Lists the indexed documents of the "${project.name}" project grouped by source and directory (paths are "<source>/<path>"), ` +
+        'with titles and chunk counts. Use it to discover what documentation exists before searching or reading. ' +
+        `One call returns ${LIST_TOPICS_DEFAULT_LIMIT} documents unless limit says otherwise (at most ${LIST_TOPICS_MAX_LIMIT}); when more ` +
+        'remain the answer ends with a next_cursor value to pass back as cursor for the following page.',
+      inputSchema: {
+        // Both optional, and both defaulting to the first page of the same listing this tool always
+        // returned — API.md §1's rule about a new argument (ADR-0043).
+        cursor: z
+          .string()
+          .max(2048)
+          .optional()
+          .describe('Continue a previous listing: pass the next_cursor value it ended with. Omit to start at the beginning.'),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(LIST_TOPICS_MAX_LIMIT)
+          .default(LIST_TOPICS_DEFAULT_LIMIT)
+          .describe(`Documents per page (1-${LIST_TOPICS_MAX_LIMIT}, default ${LIST_TOPICS_DEFAULT_LIMIT})`),
+      },
       annotations: readOnly,
     },
-    async () => {
+    async ({ cursor, limit }) => {
       try {
         // Re-read for the live generation, for `searchProject`'s reason: a session outlives a
         // re-index, and the row bound to it at connect time can name a generation that has since been
         // superseded — which would list the documents of an index nobody is being served (ADR-0039).
         const live = await getProjectById(db, project.id);
         if (!live) return fail(`Project "${project.name}" no longer exists.`);
-        const docs = await listDocumentsForProject(db, project.id, live.liveGeneration);
-        if (docs.length === 0) return ok(`Project "${project.name}" has no indexed documents yet.`);
-        const sources = await listSources(db, project.id);
+
+        const after = cursor === undefined ? undefined : (decodeCursor(cursor) ?? undefined);
+        if (cursor !== undefined && after === undefined) {
+          return fail('That cursor is not one this tool issued. Call list_topics without a cursor to start again from the beginning.');
+        }
+
+        // One more than the page, so "is there a next page" is answered by the same query rather than
+        // by a second `count(*)` over a table the first query has already walked.
+        const rows = await listDocumentsForProject(db, project.id, live.liveGeneration, { limit: limit + 1, after });
+        const hasMore = rows.length > limit;
+        const docs = rows.slice(0, limit);
+        if (docs.length === 0) {
+          return ok(
+            after === undefined
+              ? `Project "${project.name}" has no indexed documents yet.`
+              : `No further documents in project "${project.name}"; that cursor was already at the end of the listing.`,
+          );
+        }
 
         const groups = new Map<string, typeof docs>();
         for (const doc of docs) {
@@ -192,19 +260,29 @@ export function registerTools(server: McpServer, ctx: AppContext, project: Proje
           list.push(doc);
           groups.set(dir, list);
         }
-        const totalChunks = docs.reduce((n, d) => n + d.chunkCount, 0);
-        const lines: string[] = [`Project "${project.name}": ${docs.length} documents, ${totalChunks} chunks`];
-        if (sources.length > 0) {
-          lines.push(`Sources (the first path segment): ${sources.map((s) => `${s.name} (${s.type}${s.label ? `: ${s.label}` : ''})`).join(', ')}`);
+
+        const lines: string[] = [`Project "${project.name}": ${live.documentCount} documents, ${live.chunkCount} chunks`];
+        if (after === undefined) {
+          // Only on the first page. The source list describes the project and not the page, and
+          // repeating it on every continuation is context spent to say the same thing again.
+          const sources = await listSources(db, project.id);
+          if (sources.length > 0) {
+            lines.push(`Sources (the first path segment): ${sources.map((s) => `${s.name} (${s.type}${s.label ? `: ${s.label}` : ''})`).join(', ')}`);
+          }
+        } else {
+          lines.push(`Continuing after "${after}".`);
         }
+        // Documents are ordered by path, so a directory's documents are contiguous — but one can still
+        // straddle a page boundary, and the count on its line is the count *on this page*.
         for (const [dir, list] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
           lines.push('', `${dir} — ${list.length} document${list.length === 1 ? '' : 's'}, ${list.reduce((n, d) => n + d.chunkCount, 0)} chunks`);
           for (const doc of list) lines.push(`  • ${doc.relativePath} — ${doc.title} (${doc.chunkCount} chunk${doc.chunkCount === 1 ? '' : 's'})`);
         }
-        if (lines.length > MAX_TOPIC_LINES) {
-          const hidden = lines.length - MAX_TOPIC_LINES;
-          lines.length = MAX_TOPIC_LINES;
-          lines.push(`… ${hidden} more lines omitted. Use search_docs to find specific documents.`);
+
+        if (hasMore) {
+          const next = encodeCursor(docs[docs.length - 1].relativePath);
+          lines.push('', `next_cursor: ${next}`);
+          lines.push(`More documents follow. Call list_topics again with cursor: "${next}" to continue from here.`);
         }
         return ok(lines.join('\n'));
       } catch (err) {
@@ -219,17 +297,39 @@ export function registerTools(server: McpServer, ctx: AppContext, project: Proje
     {
       title: 'Read a documentation file',
       description:
-        `Returns the full Markdown content of one indexed file of the "${project.name}" project. ` +
-        'Pass the path exactly as shown by search_docs or list_topics (e.g. "docs/guides/install.md"; the first segment is the source).',
+        `Returns the Markdown of one indexed file of the "${project.name}" project. ` +
+        'Pass the path exactly as shown by search_docs or list_topics (e.g. "docs/guides/install.md"; the first segment is the source). ' +
+        'Pass heading with a breadcrumb from a search result to read only that section and the subsections under it, or from/to to read a ' +
+        `range of chunks — either is far cheaper than a whole page. Output is capped at max_tokens (default ${READ_DOCUMENT_DEFAULT_MAX_TOKENS}) ` +
+        'and says where it cut and how to ask for the rest.',
       inputSchema: {
         path: z.string().min(1).max(1024).describe('Relative file path as listed by search_docs / list_topics'),
+        // The three that narrow, all optional: absent, this tool returns the document, which is what
+        // it returned before they existed (API.md §1).
+        heading: z
+          .string()
+          .max(512)
+          .optional()
+          .describe('Read only this section: a heading breadcrumb as search_docs shows it, e.g. "Guide > Install > Docker". Subsections included.'),
+        from: z.number().int().min(0).optional().describe('First chunk index to read (0-based, as the chunk counts in list_topics are numbered)'),
+        to: z.number().int().min(0).optional().describe('Last chunk index to read, inclusive'),
+        max_tokens: z
+          .number()
+          .int()
+          .min(READ_DOCUMENT_MIN_MAX_TOKENS)
+          .max(READ_DOCUMENT_MAX_MAX_TOKENS)
+          .default(READ_DOCUMENT_DEFAULT_MAX_TOKENS)
+          .describe(
+            `Token budget for the text returned (${READ_DOCUMENT_MIN_MAX_TOKENS}-${READ_DOCUMENT_MAX_MAX_TOKENS}, default ${READ_DOCUMENT_DEFAULT_MAX_TOKENS})`,
+          ),
       },
       annotations: readOnly,
     },
-    async ({ path: requested }) => {
+    async ({ path: requested, heading, from, to, max_tokens }) => {
       try {
         const relativePath = normalizeRelativePath(requested);
         if (!relativePath) return fail(`Invalid path "${requested}".`);
+        if (from !== undefined && to !== undefined && to < from) return fail(`"to" (${to}) is before "from" (${from}).`);
 
         const live = await getProjectById(db, project.id);
         if (!live) return fail(`Project "${project.name}" no longer exists.`);
@@ -243,31 +343,112 @@ export function registerTools(server: McpServer, ctx: AppContext, project: Proje
           (await getDocument(db, project.id, generation, relativePath)) ?? (await getDocumentBySuffix(db, project.id, generation, relativePath));
         if (!doc) return fail(`Unknown document "${relativePath}". Use list_topics or the file paths returned by search_docs.`);
 
-        const source = doc.sourceId ? await getSourceById(db, doc.sourceId) : undefined;
-        if (!source) return fail(`The source of "${doc.relativePath}" no longer exists. Re-index the project from the dashboard.`);
-        const rootReal = await driverFor(source, { db, log, config }).docRoot();
-        const inside = doc.relativePath.slice(source.name.length + 1);
-        const absolute = path.resolve(rootReal, ...inside.split('/'));
-        if (!isInside(rootReal, absolute)) return fail('Path escapes the source root.');
-
-        let buf: Buffer;
-        try {
-          buf = await fs.readFile(absolute);
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-            return fail(`"${relativePath}" was removed from disk after the last index. Re-index the project from the dashboard.`);
-          }
-          throw err;
-        }
-        let body = buf.toString('utf8');
-        if (buf.byteLength > MAX_DOCUMENT_BYTES) {
-          body = `${buf.subarray(0, MAX_DOCUMENT_BYTES).toString('utf8')}\n\n[truncated: file is ${buf.byteLength} bytes, showing the first ${MAX_DOCUMENT_BYTES}]`;
-        }
-        return ok(`File: ${doc.relativePath}\nTitle: ${doc.title}\n\n---\n\n${body}`);
+        const count = (text: string): number => embeddings.countTokens(text);
+        const sectional = heading !== undefined || from !== undefined || to !== undefined;
+        const body = sectional
+          ? await readSection(doc, { heading, from, to, maxTokens: max_tokens, count })
+          : await readWholeDocument(doc, max_tokens, count);
+        return typeof body === 'string' ? fail(body) : ok(body.text);
       } catch (err) {
         log.error({ err, tool: 'read_document', project: project.name }, 'tool failed');
         return fail(`read_document failed: ${message(err)}`);
       }
     },
   );
+
+  /** A header an agent can cite from, then the text. The first two lines have not changed since 0.1.0. */
+  const render = (doc: DocumentRow, extra: string[], text: string, notes: string[]): { text: string } => ({
+    text: [`File: ${doc.relativePath}`, `Title: ${doc.title}`, ...extra, '', '---', '', text, ...(notes.length > 0 ? ['', ...notes] : [])].join('\n'),
+  });
+
+  /**
+   * A section, served **out of the chunks that are already there** rather than by parsing the document
+   * again ([ADR-0043](../../.ssot/ADR.md#adr-0043)). The chunker wrote every chunk's breadcrumb when it
+   * indexed the file, so "the section called X" is a predicate on `heading_path` — exact, cheap, and the
+   * same text `search_docs` quoted, which is what makes a breadcrumb an agent copied out of a search
+   * result a thing it can hand straight back.
+   *
+   * It works whether or not `documents.content` was ever written, which is the other reason it is built
+   * this way: on a database that has not been re-indexed since the upgrade, a sectional read is exact
+   * while a whole read is still coming off the filesystem.
+   */
+  async function readSection(
+    doc: DocumentRow,
+    opts: { heading?: string; from?: number; to?: number; maxTokens: number; count: (text: string) => number },
+  ): Promise<{ text: string } | string> {
+    const rows = await getDocumentChunks(db, doc.id, { heading: opts.heading, from: opts.from, to: opts.to });
+    if (rows.length === 0) {
+      if (opts.heading !== undefined) {
+        const headings = await listDocumentHeadings(db, doc.id);
+        const known = headings.length > 0 ? headings.slice(0, 40).join('; ') : 'none — this document has no headings';
+        return `"${doc.relativePath}" has no section matching "${opts.heading}". Its sections are: ${known}.`;
+      }
+      const range = `${opts.from ?? 0}-${opts.to ?? doc.chunkCount - 1}`;
+      return `"${doc.relativePath}" has ${doc.chunkCount} chunk${doc.chunkCount === 1 ? '' : 's'} (0-${doc.chunkCount - 1}); ${range} selects none of them.`;
+    }
+
+    const joined = joinChunks(rows.map((r) => r.content));
+    const fitting = chunksWithinBudget(joined, opts.maxTokens, opts.count);
+    const first = rows[0].chunkIndex;
+    const notes: string[] = [];
+    let text = joined.text;
+
+    if (fitting === 0) {
+      // Not even one chunk fits — only possible at a small `max_tokens` against a chunk budget an
+      // operator has raised a long way. Cut inside it and say so rather than answer nothing.
+      const cut = truncateToTokens(joined.text, opts.maxTokens, opts.count);
+      text = cut.text;
+      notes.push(`[…truncated at ${opts.maxTokens} tokens, inside chunk ${first}. Raise max_tokens to see the whole of it.]`);
+    } else if (fitting < rows.length) {
+      text = joined.text.slice(0, joined.offsets[fitting]).trimEnd();
+      const last = rows[fitting - 1].chunkIndex;
+      notes.push(
+        `[…truncated at ${opts.maxTokens} tokens: chunks ${first}-${last} of the ${rows.length} that matched. ` +
+          `Call read_document again with from: ${rows[fitting].chunkIndex} for the rest.]`,
+      );
+    }
+
+    const shown = fitting === 0 ? first : rows[Math.max(fitting - 1, 0)].chunkIndex;
+    const extra = [
+      ...(opts.heading !== undefined ? [`Section: ${rows[0].headingPath || '(the document itself)'}`] : []),
+      `Chunks: ${first}-${shown} of ${doc.chunkCount}`,
+    ];
+    return render(doc, extra, text, notes);
+  }
+
+  /**
+   * The whole document, out of `documents.content` — the flavor-transformed text the chunker was given,
+   * so what this returns is what `search_docs` quoted excerpts of, down to the character.
+   *
+   * The filesystem branch below is the migration window and nothing else, and it is the only reason any
+   * of `mcp/` still knows what a path on disk is.
+   */
+  async function readWholeDocument(doc: DocumentRow, maxTokens: number, count: (text: string) => number): Promise<{ text: string } | string> {
+    const notes: string[] = [];
+    let content = doc.content;
+
+    if (content === null) {
+      const fallback = await readIndexedFileFromDisk({ db, log, config }, doc);
+      if (typeof fallback === 'string') return fallback;
+      content = fallback.content;
+      log.info(
+        { tool: 'read_document', project: project.name, file: doc.relativePath },
+        'served a document from the filesystem because its stored text predates ADR-0043; it will stop needing this at its next index run',
+      );
+    } else if (doc.contentTruncated) {
+      notes.push(
+        `[this document was larger than MAX_STORED_DOCUMENT_BYTES (${config.MAX_STORED_DOCUMENT_BYTES}) when it was indexed, so only its ` +
+          'first part is stored. search_docs reaches every part of it; read_document does not.]',
+      );
+    }
+
+    const cut = truncateToTokens(content, maxTokens, count);
+    if (cut.truncated) {
+      notes.push(
+        `[…truncated at ${maxTokens} tokens. This document is ${doc.chunkCount} chunk${doc.chunkCount === 1 ? '' : 's'}; ask for one section ` +
+          'with heading:, or a range with from:/to:, or raise max_tokens.]',
+      );
+    }
+    return render(doc, [`Tokens: ${cut.tokens}`], cut.text, notes);
+  }
 }

@@ -7,7 +7,8 @@ function buildInstructions(project: ProjectRow): string {
   return [
     `Documentation server for the "${project.name}" project (${project.documentCount} documents, ${project.chunkCount} indexed chunks).`,
     'Use search_docs for semantic search: it returns ranked excerpts with file paths and heading breadcrumbs.',
-    'Use list_topics to browse the documentation tree, and read_document to read a full file by the path shown in search results.',
+    'Use list_topics to browse the documentation tree (it pages: hand back the next_cursor it prints), and read_document to read a file by the ' +
+      'path shown in search results — pass its heading breadcrumb to read one section instead of the whole page.',
     'Answers should cite the file path of the documentation they are based on.',
   ].join(' ');
 }

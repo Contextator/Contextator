@@ -4,8 +4,13 @@
  *   npm run smoke -- [url] [query] [--sse]
  *
  * Defaults: url = http://localhost:3444/mcp/${SMOKE_PROJECT ?? 'demo'}, query = "how do I install".
+ *
  * Connects with Streamable HTTP first and falls back to legacy SSE (the MCP spec's client algorithm);
  * `--sse` forces the legacy path so both server transports can be exercised.
+ *
+ * It drives every argument of every tool, including the ones ADR-0043 added: a sectional read whose
+ * heading is taken out of the search result printed above it, a token budget small enough to cut, and a
+ * one-document page of list_topics so the cursor is exercised on any corpus at all.
  */
 import 'dotenv/config';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -59,11 +64,35 @@ const search = await client.callTool({ name: 'search_docs', arguments: { query, 
 console.log(`\n--- search_docs("${query}") ${search.isError ? '[ERROR]' : ''} ---`);
 console.log(firstText(search).slice(0, 1500));
 
-const firstFile = /^### 1\. (\S+)/m.exec(firstText(search))?.[1];
+const hit = /^### 1\. (\S+)(?: — (.+?))? \(score/m.exec(firstText(search));
+const firstFile = hit?.[1];
+const firstHeading = hit?.[2];
 if (firstFile) {
   const doc = await client.callTool({ name: 'read_document', arguments: { path: firstFile } });
   console.log(`\n--- read_document("${firstFile}") ${doc.isError ? '[ERROR]' : ''} ---`);
   console.log(firstText(doc).slice(0, 400));
+
+  // The two arguments ADR-0043 added, driven with a breadcrumb taken straight out of the search result
+  // above — which is the whole claim: what one tool prints, the next one accepts.
+  if (firstHeading) {
+    const section = await client.callTool({ name: 'read_document', arguments: { path: firstFile, heading: firstHeading } });
+    console.log(`\n--- read_document("${firstFile}", heading: "${firstHeading}") ${section.isError ? '[ERROR]' : ''} ---`);
+    console.log(firstText(section).slice(0, 600));
+  }
+  const budgeted = await client.callTool({ name: 'read_document', arguments: { path: firstFile, max_tokens: 200 } });
+  console.log(`\n--- read_document("${firstFile}", max_tokens: 200) ${budgeted.isError ? '[ERROR]' : ''} ---`);
+  console.log(firstText(budgeted).slice(-300));
+}
+
+// One document per page, so the cursor is exercised on any corpus at all rather than only on a large one.
+const page = await client.callTool({ name: 'list_topics', arguments: { limit: 1 } });
+const cursor = /next_cursor: (\S+)/.exec(firstText(page))?.[1];
+console.log(`\n--- list_topics(limit: 1) ${page.isError ? '[ERROR]' : ''} ---`);
+console.log(firstText(page));
+if (cursor) {
+  const second = await client.callTool({ name: 'list_topics', arguments: { limit: 1, cursor } });
+  console.log(`\n--- list_topics(limit: 1, cursor) ${second.isError ? '[ERROR]' : ''} ---`);
+  console.log(firstText(second));
 }
 
 if (kind === 'streamable') await (transport as StreamableHTTPClientTransport).terminateSession();

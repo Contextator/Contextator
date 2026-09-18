@@ -12,7 +12,7 @@
   <li><strong>Many sources per project.</strong> A mounted directory, a git repository (or one subdirectory of it), uploaded files and archives, an Obsidian vault or a Notion workspace — combined into one searchable endpoint, each source mounted under its own name.</li>
   <li><strong>Semantic search, not grep.</strong> Documents are chunked with their heading breadcrumbs intact and embedded into PostgreSQL with pgvector, so an agent finds the passage that answers the question rather than the page that repeats the keyword.</li>
   <li><strong>Incremental indexing.</strong> Files are hashed; only what changed is re-embedded, and deleted files disappear from the index. A push webhook can trigger a run on every commit.</li>
-  <li><strong>Three tools for the agent.</strong> <code>search_docs</code> for ranked excerpts, <code>list_topics</code> for the document tree, <code>read_document</code> for the full Markdown of one indexed file.</li>
+  <li><strong>Three tools for the agent.</strong> <code>search_docs</code> for ranked excerpts, <code>list_topics</code> for the document tree, <code>read_document</code> for the Markdown of one indexed file, whole or one section of it.</li>
 </ul>
 
 <h2>How it works</h2>

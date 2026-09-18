@@ -41,8 +41,8 @@ const TOOLS = [
     name: 'search_docs',
     text: 'Hybrid search — meaning and exact wording, fused. Ranked excerpts with path, breadcrumb, score and the passage around them; optional source and path_prefix filters, and an honest "no good match".',
   },
-  { name: 'list_topics', text: 'Every indexed document grouped by directory, with title and chunk count.' },
-  { name: 'read_document', text: 'Full Markdown of one indexed file, capped at 512 KB.' },
+  { name: 'list_topics', text: 'Indexed documents grouped by directory, with title and chunk count; paged with a cursor.' },
+  { name: 'read_document', text: 'Markdown of one indexed file from the database — a whole page, or one section by its heading.' },
 ];
 
 const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN' };
