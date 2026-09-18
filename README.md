@@ -393,6 +393,15 @@ right one has of being returned. On the golden set the budget was swept from 496
 through 108 all measured the same — 96 is the middle of that plateau rather than its edge. The budget is
 charged for the heading breadcrumb as well as the content, because the breadcrumb is part of what is
 embedded, and the overlap between chunks is dropped rather than allowed to push a chunk past the budget.
+
+The default model is also **asymmetric**: its authors trained it with `query: ` in front of a search query
+and `passage: ` in front of an indexed passage, so the server puts them there. Nothing you index or search
+mentions them, and a model without prefixes — every other one this README names — encodes a query and a
+passage identically, which costs nothing. The passage prefix is charged against `CHUNK_MAX_TOKENS` like
+the breadcrumb is, because it is part of what the model reads. On the retrieval corpus the prefixes were
+worth one question at rank 1 and nothing at `recall@5`; they are on because that is how the model was
+trained, not because the measurement demanded it, and `EMBEDDING_QUERY_PREFIX=none` with
+`EMBEDDING_PASSAGE_PREFIX=none` turns them off and restores the previous model id exactly.
 Raise it on OpenAI, whose window is 8191.
 
 On the golden set in [`eval/`](eval/), the tokenizer and budget work moved `recall@5` from 70.8 % to
@@ -427,6 +436,7 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `EMBEDDING_DTYPE` | `fp32` | `fp16` halves the download, `q8` downloads a ~4× smaller quantized model. The default model publishes all three; another model may not, and a missing artefact fails the download with a 404 |
 | `OPENAI_API_KEY`, `OPENAI_EMBEDDING_MODEL` | – / `text-embedding-3-small` | Used when the provider is `openai` |
 | `EMBEDDING_MAX_INPUT_TOKENS` | – | What the model reads **usefully** — the window it was trained at, not where its tokenizer truncates. Left empty the server discovers it from the loaded model and warns after startup if `CHUNK_MAX_TOKENS` does not fit; set, it overrules that and a contradicting `CHUNK_MAX_TOKENS` refuses to start |
+| `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_PASSAGE_PREFIX` | – | The instruction prefixes the model was trained with, put on by the server and never by you. Empty means the model decides: `query: ` / `passage: ` for `multilingual-e5-*`, nothing for anything else. The trailing space matters and `.env` strips an unquoted one, so write `EMBEDDING_QUERY_PREFIX="query: "`. An empty value reads as *unset*, so `none` is how you say *no prefix* on a model that has them. Either value is part of the model id, so changing one re-indexes every project |
 | `CHUNK_MAX_TOKENS` / `CHUNK_OVERLAP_TOKENS` | `96` / `24` | Counted with the model's own tokenizer. `96` is what measured best on the golden set, not what fits the model's 512-token window — filling the window measures *worse*. Raise both on OpenAI (8191). Changing either re-chunks every project on its next index run |
 | `ADMIN_TOKEN` | – | **Machine access** to `/api/*` via `Authorization: Bearer …`, acting with root permissions. Browsers sign in with an account instead; treat this token like a root password |
 | `AUTH_SESSION_IDLE_MS` | `43200000` (12 h) | A dashboard session unused for this long has to sign in again. Refreshed while the dashboard is in use |
@@ -453,6 +463,10 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
   new one up on upgrade and every existing project reads as a mismatch until it is re-indexed. Pin the old
   value in `.env` to postpone that. Going *back* is not a matter of reverting the setting alone: a project
   already re-indexed under the new model needs another re-index to return.
+- **Changing a prefix counts as changing the model.** `EMBEDDING_QUERY_PREFIX` and
+  `EMBEDDING_PASSAGE_PREFIX` are part of the id stamped on each project, because a corpus indexed without
+  them and searched with them is a mismatch nothing else would catch. Setting either — including setting
+  both to `none` — makes every project re-index on its next run, exactly as a model change does.
 - **Different dimension** (e.g. OpenAI `text-embedding-3-small` = 1536): set `EMBEDDING_PROVIDER=openai`,
   `OPENAI_API_KEY`, `EMBEDDING_DIMENSIONS=1536`, then start **once** with `RESET_VECTORS=1`. The vector
   column is re-typed and every chunk is dropped; re-index each project afterwards. Without the flag the

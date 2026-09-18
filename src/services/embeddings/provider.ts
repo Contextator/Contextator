@@ -35,6 +35,18 @@ export interface EmbeddingProvider {
   /** True once the model has produced at least one embedding. */
   readonly ready: boolean;
   /**
+   * The instruction prefix this model was trained to see in front of a search query, or `''` for a model
+   * that is symmetric (ADR-0038). Read-only and read-only from outside: a caller never prepends it — the
+   * provider does, inside `embedQuery`. It is exposed because `/api/health` reports it and because
+   * `provider.id` is built from it, not so that anybody can apply it themselves.
+   */
+  readonly queryPrefix: string;
+  /**
+   * The same for an indexed passage. It is part of the string the model reads, so it is also part of the
+   * chunk budget: `chunkReserveTokens` charges `countTokens(passagePrefix)` against `CHUNK_MAX_TOKENS`.
+   */
+  readonly passagePrefix: string;
+  /**
    * How many tokens `text` costs this model, **not counting the special tokens** the model adds around
    * an input — those are the chunker's `reserveTokens` (ADR-0036), and counting them here would count
    * them twice.
@@ -44,10 +56,19 @@ export interface EmbeddingProvider {
    * contract: the chunker is a pure function and the whole point of injecting this is to keep it one.
    */
   countTokens(text: string): number;
-  /** Loads the model (downloading it on first use) and runs one embedding. */
+  /** Loads the model (downloading it on first use) and runs one embedding, through `embedPassages`. */
   warmup(): Promise<void>;
-  /** Returns one L2-normalised vector per input, each of length `dimensions`. */
-  embed(texts: string[]): Promise<number[][]>;
+  /**
+   * Indexing side: one L2-normalised vector per input, each of length `dimensions`, each text encoded
+   * behind `passagePrefix`.
+   *
+   * There is deliberately no symmetric `embed()` and no alias for one (ADR-0038). The two sides of an
+   * asymmetric model are different functions, and a call site that picked the wrong one would produce
+   * vectors that are wrong, plausible and silent.
+   */
+  embedPassages(texts: string[]): Promise<number[][]>;
+  /** Retrieval side: one vector for one query, encoded behind `queryPrefix`. */
+  embedQuery(text: string): Promise<number[]>;
 }
 
 export class EmbeddingDimensionError extends Error {

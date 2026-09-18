@@ -26,7 +26,12 @@ export const CHUNK_BUDGET_RESERVE_TOKENS = 16;
 /**
  * What the chunker itself sets aside, per chunk, on top of the breadcrumb it counts (ADR-0036): the
  * `<s>`/`</s>` the tokenizer wraps every input in, which `EmbeddingProvider.countTokens` deliberately
- * does not report. PR 1.4's `passage: ` prefix is added here when it lands.
+ * does not report.
+ *
+ * It is not the whole reserve any more. The provider's `passage: ` prefix is part of the string the model
+ * reads too (ADR-0038), and it is counted with the model's own tokenizer rather than written down here,
+ * because an operator can change it. `chunkReserveTokens` in `services/chunk-budget.ts` is the sum, and
+ * is what the indexer and the eval harness both hand the chunker.
  */
 export const CHUNK_TOKENIZER_RESERVE_TOKENS = 2;
 
@@ -128,6 +133,17 @@ export const EnvSchema = z
      * Setting it both overrules what the provider discovers and makes the check below fire at startup.
      */
     EMBEDDING_MAX_INPUT_TOKENS: z.coerce.number().int().min(64).max(32_000).optional(),
+    /**
+     * Overrides the instruction prefixes the provider's table picks for the configured model (ADR-0038).
+     * Unset, the table decides — `query: ` / `passage: ` for the `multilingual-e5-*` family, nothing for
+     * everything else.
+     *
+     * `loadConfig` drops empty-string values below, so an empty assignment means "unset" and cannot say
+     * "no prefix" on a model the table knows. `none` is how that is said; `resolvePrefixes` maps it to the
+     * empty string. Either value changes `provider.id` and therefore forces a re-index.
+     */
+    EMBEDDING_QUERY_PREFIX: z.string().optional(),
+    EMBEDDING_PASSAGE_PREFIX: z.string().optional(),
 
     // Chunking (counted with the embedding model's own tokenizer — ADR-0036)
     /**

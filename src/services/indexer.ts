@@ -1,8 +1,9 @@
 import { eq } from 'drizzle-orm';
-import { CHUNK_TOKENIZER_RESERVE_TOKENS, type Config } from '../config.js';
+import type { Config } from '../config.js';
 import type { Logger } from '../context.js';
 import type { Db } from '../db/client.js';
 import { projects, type DocumentSourceRow } from '../db/schema.js';
+import { chunkReserveTokens } from './chunk-budget.js';
 import { chunkMarkdown, embeddingText } from './chunker.js';
 import type { EmbeddingProvider } from './embeddings/provider.js';
 import { transformContent, type Flavor } from './flavors.js';
@@ -271,6 +272,10 @@ export class Indexer {
         await embeddings.warmup();
         job.phase = 'embedding';
 
+        // After warmup, so the prefix is counted by the model's tokenizer rather than estimated, and
+        // once for the run rather than once per document.
+        const reserveTokens = chunkReserveTokens(embeddings);
+
         const seen = new Set<string>();
         for (const file of files) {
           seen.add(file.relativePath);
@@ -286,9 +291,10 @@ export class Indexer {
             maxTokens: config.CHUNK_MAX_TOKENS,
             overlapTokens: config.CHUNK_OVERLAP_TOKENS,
             // The model's own tokenizer, exact by the time this runs — nothing is indexed before the
-            // pipeline has loaded — and the reserve for the special tokens it adds (ADR-0036).
+            // pipeline has loaded — and the reserve for the special tokens it adds (ADR-0036) plus the
+            // provider's passage prefix, which `embedPassages` will prepend (ADR-0038).
             countTokens,
-            reserveTokens: CHUNK_TOKENIZER_RESERVE_TOKENS,
+            reserveTokens,
           });
 
           if (chunks.length === 0) {
@@ -302,7 +308,7 @@ export class Indexer {
           const rows: NewChunk[] = [];
           for (let i = 0; i < chunks.length; i += config.EMBEDDING_BATCH_SIZE) {
             const batch = chunks.slice(i, i + config.EMBEDDING_BATCH_SIZE);
-            const vectors = await embeddings.embed(batch.map(embeddingText));
+            const vectors = await embeddings.embedPassages(batch.map(embeddingText));
             batch.forEach((c, j) => {
               rows.push({ chunkIndex: c.index, headingPath: c.headingPath, content: c.content, tokenCount: c.tokenCount, embedding: vectors[j] });
             });

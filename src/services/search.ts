@@ -60,7 +60,9 @@ export async function searchProject({ db, embeddings }: SearchDeps, input: Searc
     return { status: 'model_mismatch', project, indexedWith: project.embeddingModel, serverUses: embeddings.id };
   }
 
-  const [vector] = await embeddings.embed([input.query]);
+  // `embedQuery`, never `embedPassages`: on an asymmetric model these are different encodings of the
+  // same string, and the wrong one here costs recall without failing (ADR-0038).
+  const vector = await embeddings.embedQuery(input.query);
   const hits = await searchChunks(db, project.id, vector, input.limit ?? DEFAULT_SEARCH_LIMIT);
   return { status: 'ok', project, hits };
 }

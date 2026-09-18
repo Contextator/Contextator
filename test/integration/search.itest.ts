@@ -62,8 +62,13 @@ const embeddings: EmbeddingProvider = {
   truncatesAtTokens: 512,
   windowSource: 'default',
   countTokens: (text) => Math.ceil(text.length / 4),
+  // Symmetric on purpose: this stub is a bag of words, and the two sides being the same function is
+  // exactly what an empty prefix pair means (ADR-0038).
+  queryPrefix: '',
+  passagePrefix: '',
   warmup: async () => {},
-  embed: async (texts) => texts.map(stubVector),
+  embedPassages: async (texts: string[]) => texts.map(stubVector),
+  embedQuery: async (text: string) => stubVector(text),
 };
 
 interface Excerpt {
@@ -225,7 +230,7 @@ describe('a viewer searching a project they are a member of', () => {
     const res = await search('reader', indexedId, `q=${encodeURIComponent(QUERY)}&limit=2`);
     expect(res.statusCode).toBe(200);
 
-    const [vector] = await embeddings.embed([QUERY]);
+    const vector = await embeddings.embedQuery(QUERY);
     const expected = await searchChunks(database.db, indexedId, vector, 2);
 
     expect(res.json().limit).toBe(2);

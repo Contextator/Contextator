@@ -1,6 +1,7 @@
 import { env, pipeline } from '@huggingface/transformers';
 import type { Logger } from '../../context.js';
 import { estimateTokens } from '../chunker.js';
+import { type EmbeddingPrefixes, NO_PREFIXES, prefixIdSegment } from './prefixes.js';
 import { EmbeddingDimensionError, type EmbeddingProvider, type EmbeddingWindowSource } from './provider.js';
 
 export type LocalDtype = 'fp32' | 'fp16' | 'q8';
@@ -13,6 +14,8 @@ export interface LocalEmbeddingOptions {
   offline: boolean;
   /** `EMBEDDING_MAX_INPUT_TOKENS`. Overrules both the table below and the tokenizer. */
   maxInputTokens?: number;
+  /** What this model was trained to read in front of a query and a passage (ADR-0038). Absent means symmetric. */
+  prefixes?: EmbeddingPrefixes;
   log: Logger;
 }
 
@@ -136,6 +139,8 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   readonly model: string;
   readonly dimensions: number;
   readonly id: string;
+  readonly queryPrefix: string;
+  readonly passagePrefix: string;
   private isReady = false;
   /**
    * The window is a runtime fact (ADR-0035), so this starts as the best answer available without a
@@ -154,7 +159,11 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   constructor(private readonly opts: LocalEmbeddingOptions) {
     this.model = opts.model;
     this.dimensions = opts.dimensions;
-    this.id = `local:${opts.model}:${opts.dtype}`;
+    const prefixes = opts.prefixes ?? NO_PREFIXES;
+    this.queryPrefix = prefixes.query;
+    this.passagePrefix = prefixes.passage;
+    // Empty prefixes add no segment, so a model outside the table keeps exactly the id it had (ADR-0038).
+    this.id = `local:${opts.model}:${opts.dtype}${prefixIdSegment(prefixes)}`;
     this.window = resolveWindow(opts.model, Number.POSITIVE_INFINITY, opts.maxInputTokens);
   }
 
@@ -205,10 +214,20 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
 
   async warmup(): Promise<void> {
     this.adoptWindow(await loadExtractor(this.opts));
-    await this.embed(['warmup']);
+    await this.embedPassages(['warmup']);
   }
 
-  async embed(texts: string[]): Promise<number[][]> {
+  async embedPassages(texts: string[]): Promise<number[][]> {
+    return this.encode(texts.map((text) => this.passagePrefix + text));
+  }
+
+  async embedQuery(text: string): Promise<number[]> {
+    const [vector] = await this.encode([this.queryPrefix + text]);
+    return vector;
+  }
+
+  /** The forward pass both sides share. Private: the prefix is applied above it, never around it. */
+  private async encode(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
     const extractor = this.adoptWindow(await loadExtractor(this.opts));
     const out = await extractor(texts, { pooling: 'mean', normalize: true });

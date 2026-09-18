@@ -4,10 +4,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eq } from 'drizzle-orm';
 
-import { CHUNK_TOKENIZER_RESERVE_TOKENS, loadConfig, type Config } from '../src/config.js';
+import { loadConfig, type Config } from '../src/config.js';
 import type { Logger } from '../src/context.js';
 import type { Db } from '../src/db/client.js';
 import { projects } from '../src/db/schema.js';
+import { chunkReserveTokens } from '../src/services/chunk-budget.js';
 import { chunkMarkdown, embeddingText } from '../src/services/chunker.js';
 import { createEmbeddingProvider, type EmbeddingProvider } from '../src/services/embeddings/index.js';
 import { readAndHash } from '../src/services/fs-scan.js';
@@ -33,9 +34,11 @@ import { buildReport, formatMarkdown, formatText, parseGoldenSet, scoreRow, type
  *
  * Two things about this file are load-bearing and easy to undo by accident.
  *
- * **The indexing loop is the indexer's, lifted.** `chunkMarkdown` → `embeddingText` → `embed` →
+ * **The indexing loop is the indexer's, lifted.** `chunkMarkdown` → `embeddingText` → `embedPassages` →
  * `replaceDocument`, in batches of `EMBEDDING_BATCH_SIZE`, exactly as `services/indexer.ts` does it —
- * including the token counter and the reserve it hands the chunker (ADR-0036).
+ * including the token counter and the reserve it hands the chunker (ADR-0036, ADR-0038). The passage
+ * side is the indexing side and the query side is `searchProject`'s; a harness that embedded the corpus
+ * as queries would measure a configuration nobody runs.
  * What is left out is only what a corpus already sitting in the repository does not need: the source
  * drivers, the filesystem walk and the `document_sources` rows. `embeddingText` is imported rather than
  * re-derived — a harness that embedded a differently-assembled string would produce numbers that are
@@ -205,6 +208,9 @@ async function indexCorpus(
   const existing = await getExistingDocuments(db, projectId);
   const skipped: string[] = [];
   let chunkCount = 0;
+  // The indexer's, and for its reason: the passage prefix is part of what the model reads (ADR-0038).
+  // Computed after warmup, which `run` has already done, so the prefix is counted and not estimated.
+  const reserveTokens = chunkReserveTokens(embeddings);
 
   for (const relativePath of files) {
     const { content, hash, sizeBytes } = await readAndHash(path.join(CORPUS_DIR, relativePath));
@@ -219,10 +225,10 @@ async function indexCorpus(
     const { title, chunks } = chunkMarkdown(content, relativePath, {
       maxTokens: config.CHUNK_MAX_TOKENS,
       overlapTokens: config.CHUNK_OVERLAP_TOKENS,
-      // The indexer's own two arguments (ADR-0036). A harness that counted tokens differently from the
-      // product would sweep `CHUNK_MAX_TOKENS` over chunks the product never produces.
+      // The indexer's own two arguments (ADR-0036, ADR-0038). A harness that counted tokens differently
+      // from the product would sweep `CHUNK_MAX_TOKENS` over chunks the product never produces.
       countTokens: (text: string) => embeddings.countTokens(text),
-      reserveTokens: CHUNK_TOKENIZER_RESERVE_TOKENS,
+      reserveTokens,
     });
     if (chunks.length === 0) {
       skipped.push(`${relativePath} (produced no chunks)`);
@@ -232,7 +238,7 @@ async function indexCorpus(
     const rows: NewChunk[] = [];
     for (let i = 0; i < chunks.length; i += config.EMBEDDING_BATCH_SIZE) {
       const batch = chunks.slice(i, i + config.EMBEDDING_BATCH_SIZE);
-      const vectors = await embeddings.embed(batch.map(embeddingText));
+      const vectors = await embeddings.embedPassages(batch.map(embeddingText));
       batch.forEach((c, j) => {
         rows.push({ chunkIndex: c.index, headingPath: c.headingPath, content: c.content, tokenCount: c.tokenCount, embedding: vectors[j] });
       });

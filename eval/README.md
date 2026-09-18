@@ -136,4 +136,6 @@ one or two points is noise. The real fix is not more invented questions — it i
 queries people actually asked, which is what the query log of Phase 2 is for.
 
 Two runs are comparable only if `EMBEDDING_MODEL`, `EMBEDDING_DTYPE`, `CHUNK_MAX_TOKENS` and
-`CHUNK_OVERLAP_TOKENS` were the same. The report prints all four, and the run's `provider.id` with them.
+`CHUNK_OVERLAP_TOKENS` were the same. The report prints all four, and the run's `provider.id` with them —
+and since [ADR-0038](../../.ssot/ADR.md#adr-0038) that id also carries the query and passage prefixes, so
+two runs that differ only in `EMBEDDING_QUERY_PREFIX` are visibly two runs and not one repeated.

@@ -287,3 +287,68 @@ EMBEDDING_MODEL=Xenova/paraphrase-multilingual-MiniLM-L12-v2 \
 ```
 
 The second command needs the old model in `.cache/models` and will download it if it is not there.
+
+---
+
+# What the query/passage prefixes did to it
+
+[ADR-0038](../../.ssot/ADR.md#adr-0038). The last of Item 1, and the only one of the four that did not
+move `recall@5`. It shipped anyway, on the model card rather than on this table, and the table is here so
+that a future reader can check that claim rather than take it.
+
+| | |
+|---|---|
+| Commit | `3fb3c1e-dirty` (branch `asymmetric-embeddings`) |
+| Date | 2026-09-18 |
+| Provider | `local:Xenova/multilingual-e5-small:fp32:"query: "+"passage: "` |
+| `CHUNK_MAX_TOKENS` | 96 |
+| `CHUNK_OVERLAP_TOKENS` | 24 |
+| Corpus | 26 documents, 577 chunks (560 without the prefixes) |
+
+The previous section's figures were a throwaway experiment: the two strings prepended by hand, nothing
+implemented, and — the part that mattered — nothing charged against the chunk budget. The real
+implementation charges it, because `passage: ` is part of the string the model reads, so the corpus packs
+into 577 chunks instead of 560 and every boundary in it moved. **The numbers did not.**
+
+| | prefixes off | prefixes on | by hand, previous section |
+|---|--:|--:|--:|
+| chunks over the corpus | 560 | 577 | 560 |
+| recall@1 | 77.1 % | **79.2 %** | 79.2 % |
+| recall@5 | 85.4 % | 85.4 % | 85.4 % |
+| MRR | 0.803 | **0.818** | – |
+| heading@5 | 81.3 % | 81.3 % | – |
+| lang `en` recall@1 / @5 | 72.7 / 86.4 | 72.7 / 86.4 | – |
+| lang `tr` recall@1 / @5 | 80.8 / 84.6 | **84.6** / 84.6 | 84.6 / – |
+| `cross-lingual` (7 questions) | 14.3 % | 14.3 % | 14.3 % |
+| mean score of the correct hit | 0.890 | 0.884 | – |
+
+In counts: 37 of 48 questions answered at rank 1 without the prefixes, 38 with. Two arrive — `security`
+(0 % → 100 %) and `upgrade` (66.7 % → 100 %) — and one leaves, `getting-started` (100 % → 0 %, and it
+stays inside the top five). The one that nets out is Turkish, which is why `tr recall@1` moves by a whole
+question while English does not move at all.
+
+**That a 3 % change in the chunking left every headline number where it was is worth more than the
+numbers.** It says the effect is a property of the encoder rather than of where the packer happened to
+cut, which is the one thing the hand-run experiment could not have told anybody.
+
+**Cross-lingual is untouched for the third time.** 14.3 % without, 14.3 % with, 14.3 % at every budget
+from 64 to 496 in the previous section. Nothing in Item 1 was ever going to move it; Item 2's hybrid
+search is the remedy.
+
+**Why this shipped on a flat `recall@5`.** Phase 1's rule is that a change which does not move `recall@5`
+does not ship. `multilingual-e5-*` is documented by its authors as trained with `query: ` and `passage: `,
+and running it without them is running it in a mode its authors say is wrong. Forty-eight questions over
+twenty-six pages failing to resolve the difference is weak evidence against a model card, not strong
+evidence for ignoring one — and the interface split is right regardless of which model is in place, since
+a single `embed()` cannot express an asymmetric model at all. It is also cheap to undo: the two variables
+below restore the behaviour *and* the previous provider id byte for byte.
+
+## Reproducing it
+
+```bash
+npm run eval                                                                    # the shipped default
+EMBEDDING_QUERY_PREFIX=none EMBEDDING_PASSAGE_PREFIX=none npm run eval          # the same model, no prefixes
+```
+
+The second is a configuration change and not a code change, which is the point of putting the prefixes
+in the provider and the override in the environment.

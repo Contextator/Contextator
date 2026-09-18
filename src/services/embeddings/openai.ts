@@ -1,6 +1,7 @@
 import type OpenAI from 'openai';
 import type { Logger } from '../../context.js';
 import { estimateTokens } from '../chunker.js';
+import { type EmbeddingPrefixes, NO_PREFIXES, prefixIdSegment } from './prefixes.js';
 import { EmbeddingDimensionError, type EmbeddingProvider, type EmbeddingWindowSource } from './provider.js';
 
 /**
@@ -18,6 +19,13 @@ export interface OpenAIEmbeddingOptions {
   dimensions: number;
   /** `EMBEDDING_MAX_INPUT_TOKENS`. The only way this provider learns about a model it does not know. */
   maxInputTokens?: number;
+  /**
+   * Empty for every model this provider is likely to see — no OpenAI embedding model is documented as
+   * taking an instruction prefix — but the two variables still reach here, because the abstraction costs
+   * nothing when the strings are empty and an operator on a self-hosted OpenAI-compatible endpoint may
+   * well be running an e5 behind it (ADR-0038).
+   */
+  prefixes?: EmbeddingPrefixes;
   log: Logger;
 }
 
@@ -31,13 +39,18 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   /** The API refuses an over-long input instead of silently cutting it, so the two limits coincide here. */
   readonly truncatesAtTokens: number;
   readonly windowSource: EmbeddingWindowSource;
+  readonly queryPrefix: string;
+  readonly passagePrefix: string;
   private client: OpenAI | undefined;
   private isReady = false;
 
   constructor(private readonly opts: OpenAIEmbeddingOptions) {
     this.model = opts.model;
     this.dimensions = opts.dimensions;
-    this.id = `openai:${opts.model}:${opts.dimensions}`;
+    const prefixes = opts.prefixes ?? NO_PREFIXES;
+    this.queryPrefix = prefixes.query;
+    this.passagePrefix = prefixes.passage;
+    this.id = `openai:${opts.model}:${opts.dimensions}${prefixIdSegment(prefixes)}`;
     this.maxInputTokens = opts.maxInputTokens ?? OPENAI_WINDOW_TOKENS;
     this.truncatesAtTokens = this.maxInputTokens;
     this.windowSource = opts.maxInputTokens === undefined ? 'known-model' : 'configured';
@@ -67,10 +80,20 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   }
 
   async warmup(): Promise<void> {
-    await this.embed(['warmup']);
+    await this.embedPassages(['warmup']);
   }
 
-  async embed(texts: string[]): Promise<number[][]> {
+  async embedPassages(texts: string[]): Promise<number[][]> {
+    return this.encode(texts.map((text) => this.passagePrefix + text));
+  }
+
+  async embedQuery(text: string): Promise<number[]> {
+    const [vector] = await this.encode([this.queryPrefix + text]);
+    return vector;
+  }
+
+  /** The one API call both sides share. Private: the prefix is applied above it, never around it. */
+  private async encode(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
     const client = await this.getClient();
     // Only the text-embedding-3 family accepts a custom `dimensions` value.

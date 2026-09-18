@@ -1,4 +1,4 @@
-import { CHUNK_BUDGET_RESERVE_TOKENS, CHUNK_MAX_TOKENS_MIN, type Config } from '../config.js';
+import { CHUNK_BUDGET_RESERVE_TOKENS, CHUNK_MAX_TOKENS_MIN, CHUNK_TOKENIZER_RESERVE_TOKENS, type Config } from '../config.js';
 import type { Logger } from '../context.js';
 import type { EmbeddingProvider, EmbeddingWindowSource } from './embeddings/provider.js';
 
@@ -38,6 +38,23 @@ export interface ChunkBudgetState {
 }
 
 export const newChunkBudgetState = (): ChunkBudgetState => ({ checked: false, warning: null });
+
+/**
+ * What the chunker holds back per chunk, on top of the breadcrumb it counts for itself: the tokenizer's
+ * special tokens (ADR-0036) plus the provider's passage prefix (ADR-0038), measured with the model's own
+ * tokenizer because an operator can change it and `passage: ` does not cost the same in every vocabulary.
+ *
+ * The indexer and the eval harness both call this rather than each summing it. A second copy of the sum
+ * is a second place to forget the prefix, and forgetting it is a chunk that overruns the window by
+ * exactly as much as the prefix costs — which nothing would report.
+ *
+ * It does not touch `checkChunkBudget` below: a larger reserve makes chunks smaller, so the window check
+ * stays true without knowing about it.
+ */
+export function chunkReserveTokens(embeddings: Pick<EmbeddingProvider, 'passagePrefix' | 'countTokens'>): number {
+  if (embeddings.passagePrefix === '') return CHUNK_TOKENIZER_RESERVE_TOKENS;
+  return CHUNK_TOKENIZER_RESERVE_TOKENS + embeddings.countTokens(embeddings.passagePrefix);
+}
 
 /** The largest budget that still leaves the reserve inside the window, floored at what the schema accepts. */
 export const suggestChunkMaxTokens = (maxInputTokens: number): number => Math.max(CHUNK_MAX_TOKENS_MIN, maxInputTokens - CHUNK_BUDGET_RESERVE_TOKENS);

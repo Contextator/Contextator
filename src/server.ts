@@ -149,6 +149,9 @@ async function main(): Promise<void> {
         {
           provider: embeddings.provider,
           model: embeddings.model,
+          // The id carries the prefixes (ADR-0038), and it is the value every project is stamped with,
+          // so the line that says the model is ready says which configuration it is ready as.
+          id: embeddings.id,
           dimensions: embeddings.dimensions,
           maxInputTokens: embeddings.maxInputTokens,
           truncatesAtTokens: embeddings.truncatesAtTokens,

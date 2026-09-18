@@ -144,6 +144,9 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         dimensions: embeddings.dimensions,
         dtype: embeddings.provider === 'local' ? config.EMBEDDING_DTYPE : null,
         ready: embeddings.ready,
+        /** Empty strings for a symmetric model; part of `id` whenever they are not (ADR-0038). */
+        queryPrefix: embeddings.queryPrefix,
+        passagePrefix: embeddings.passagePrefix,
         /** What the model reads usefully; `truncatesAtTokens` is where the runtime cuts (ADR-0035). */
         maxInputTokens: embeddings.maxInputTokens,
         truncatesAtTokens: embeddings.truncatesAtTokens,

@@ -110,9 +110,12 @@ const stubProvider = (over: Partial<EmbeddingProvider> = {}): EmbeddingProvider 
   truncatesAtTokens: 512,
   windowSource: 'known-model',
   ready: true,
+  queryPrefix: '',
+  passagePrefix: '',
   countTokens: estimateTokens,
   warmup: async () => {},
-  embed: async () => [],
+  embedPassages: async () => [],
+  embedQuery: async () => [],
   ...over,
 });
 
