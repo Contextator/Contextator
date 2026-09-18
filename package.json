@@ -19,6 +19,7 @@
     "test:integration": "vitest run --project integration",
     "test:all": "vitest run",
     "smoke": "tsx scripts/smoke-mcp.ts",
+    "eval": "tsx scripts/eval.ts",
     "reset-password": "tsx scripts/reset-password.ts",
     "db:generate": "drizzle-kit generate",
     "db:check": "drizzle-kit check",

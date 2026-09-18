@@ -87,7 +87,12 @@ export interface NewChunk {
 
 export interface DocumentInput {
   projectId: string;
-  sourceId: string;
+  /**
+   * Nullable because the column is: pre-v3 documents carried no source, and the evaluation harness
+   * (`scripts/eval.ts`, ADR-0034) indexes a corpus that is already on disk in the repository and has
+   * therefore no `document_sources` row to point at. The indexer always supplies one.
+   */
+  sourceId: string | null;
   relativePath: string;
   title: string;
   contentHash: string;
