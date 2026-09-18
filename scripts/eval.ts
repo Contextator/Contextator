@@ -14,7 +14,7 @@ import { createEmbeddingProvider, type EmbeddingProvider } from '../src/services
 import { readAndHash } from '../src/services/fs-scan.js';
 import { searchProject } from '../src/services/search.js';
 import { isTextSearchConfig, QUERY_TEXT_SEARCH_CONFIG, TEXT_SEARCH_CONFIGS, type TextSearchConfig } from '../src/services/text-search.js';
-import { getExistingDocuments, replaceDocument, scanFrom, type NewChunk } from '../src/services/vector-store.js';
+import { getExistingDocuments, replaceDocument, scanFrom, selectionFrom, type NewChunk } from '../src/services/vector-store.js';
 import {
   applySchema,
   createTestDatabase,
@@ -107,6 +107,9 @@ const USAGE = `Usage: npm run eval [-- <options>]
   With neither, a pgvector container is started for the run and stopped at the end.
   EVAL_TEXT_SEARCH_CONFIG names the text search configuration the lexical half indexes and queries
   with, on both sides. Default "simple"; "english" is the comparison ADR-0041 was decided on.
+  SEARCH_MAX_PER_DOCUMENT, SEARCH_NEIGHBOR_CONTEXT and SEARCH_SCORE_FLOOR are read from the
+  environment like every other setting, so measuring what the cap or the floor costs is running this
+  twice with one of them changed rather than a flag this file has to grow.
 `;
 
 function parseArgs(argv: readonly string[]): Options {
@@ -344,6 +347,10 @@ async function run(options: Options): Promise<void> {
       .where(eq(projects.id, project.id));
 
     const scan = scanFrom(config);
+    // The server's own result selection as well as its own scan settings, for the same reason and with
+    // the same risk: SEARCH_MAX_PER_DOCUMENT changes `recall@5` by a question, so a harness that
+    // hard-coded either would measure a product nobody runs (ADR-0042).
+    const selection = selectionFrom(config);
     step(`eval: asking ${golden.length} questions`);
     const searchStart = Date.now();
     const results: RowResult[] = [];
@@ -353,7 +360,7 @@ async function run(options: Options): Promise<void> {
       // measured a different `ef_search` from the one an agent searches under would be measuring
       // something nobody runs, which is the mistake this whole file exists to avoid.
       const outcome = await searchProject(
-        { db, embeddings, scan, textSearchConfig },
+        { db, embeddings, scan, textSearchConfig, selection, scoreFloor: config.SEARCH_SCORE_FLOOR },
         { projectId: project.id, query: row.query, limit: SEARCH_LIMIT },
       );
       if (outcome.status !== 'ok') {
@@ -363,6 +370,10 @@ async function run(options: Options): Promise<void> {
         scoreRow(
           row,
           outcome.hits.map((hit) => ({ file: hit.file, headingPath: hit.headingPath, score: hit.score })),
+          // What the agent would have been told, recorded beside the rank rather than instead of it.
+          // The hits are scored either way: the floor's cost is "the answer was here and we refused
+          // it", and folding a refusal into `recall@5` would hide exactly that (ADR-0042).
+          outcome.belowFloor,
         ),
       );
     }
@@ -379,6 +390,8 @@ async function run(options: Options): Promise<void> {
       searchLimit: SEARCH_LIMIT,
       hnswScan: `ef_search=${scan.efSearch}, iterative_scan=${scan.iterativeScan}, max_scan_tuples=${scan.maxScanTuples}`,
       textSearchConfig,
+      resultSelection:
+        `max_per_document=${selection.maxPerDocument}, neighbor_context=${selection.neighborContext}, ` + `score_floor=${config.SEARCH_SCORE_FLOOR}`,
       documents: indexed.documents,
       chunks: indexed.chunks,
       startedAt: startedAt.toISOString(),

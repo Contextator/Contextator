@@ -186,6 +186,7 @@ describe('the report', () => {
     searchLimit: 10,
     hnswScan: 'ef_search=100, iterative_scan=relaxed_order, max_scan_tuples=20000',
     textSearchConfig: 'simple',
+    resultSelection: 'max_per_document=2, neighbor_context=1, score_floor=0.82',
     documents: 3,
     chunks: 9,
     startedAt: '2026-09-18T03:00:00.000Z',
@@ -221,6 +222,36 @@ describe('the report', () => {
     for (const rendered of [formatText(report), formatMarkdown(report)]) {
       expect(rendered).toContain('local:a-model:fp32');
       expect(rendered).toContain('400');
+      // The cap and the floor are part of the configuration a number is about, exactly as `ef_search`
+      // is: two runs at different values are not comparable (ADR-0042).
+      expect(rendered).toContain('max_per_document=2');
     }
+  });
+
+  it('counts what the relevance floor refused apart from what retrieval missed', () => {
+    // Three questions, two of them gated. One of the gated ones had its answer at rank 1 — that is the
+    // floor's price — and the other had missed anyway, which costs nothing to refuse. `recall@5` is
+    // unmoved by either, which is the whole reason these are separate numbers.
+    const gatedWithAnswer = scoreRow(question({ id: 'gated-hit' }), INSTALL_HITS, true);
+    const gatedMiss = scoreRow(question({ id: 'gated-miss', expectFile: 'tr/kurulum.md' }), [INSTALL_HITS[0]], true);
+    const answered = scoreRow(question({ id: 'answered' }), INSTALL_HITS);
+    const metrics = aggregate([gatedWithAnswer, gatedMiss, answered]);
+
+    expect(metrics.gated).toBe(2);
+    expect(metrics.gatedWithAnswer).toBe(1);
+    expect(metrics.recall5).toBeCloseTo(2 / 3, 10);
+  });
+
+  it('names every gated question in the report, because a count alone cannot be argued with', () => {
+    const gated = buildReport([scoreRow(question({ id: 'refused' }), INSTALL_HITS, true)], context, null);
+    const text = formatText(gated);
+
+    expect(text).toContain('1 of 1 questions would be told "no good match"');
+    expect(text).toContain('refused');
+    expect(formatMarkdown(gated)).toContain('relevance floor would refuse 1 of 1');
+  });
+
+  it('says so when nothing falls under the floor, rather than printing nothing at all', () => {
+    expect(formatText(report)).toContain('no question in the set falls under it');
   });
 });

@@ -85,6 +85,16 @@ export interface ScoredHit {
 
 export interface RowResult {
   row: GoldenRow;
+  /**
+   * Whether the relevance floor would have answered "no good match" for this question instead of the
+   * hits below ([ADR-0042](../../.ssot/ADR.md#adr-0042)).
+   *
+   * It is recorded beside the rank rather than folded into it, because the two say different things
+   * and only one of them is a retrieval result. A gated question whose answer was at rank 1 is the
+   * floor being wrong; a gated question that missed anyway is the floor being right. `recall@5` cannot
+   * tell them apart, which is why it is not the number the floor is judged on.
+   */
+  belowFloor: boolean;
   /** 0-based rank of the first hit from `expectFile`, or `null` when it is not in the returned hits. */
   rank: number | null;
   /** 0-based rank of the first hit from `expectFile` whose breadcrumb also matches `expectHeading`. */
@@ -104,13 +114,19 @@ export function headingMatches(headingPath: string, expected: string): boolean {
   return headingPath === expected || headingPath.endsWith(` > ${expected}`);
 }
 
-export function scoreRow(row: GoldenRow, hits: readonly ScoredHit[]): RowResult {
+/**
+ * `belowFloor` defaults to false so that a caller measuring retrieval alone — every test in
+ * `test/eval-scoring.test.ts` — says nothing about a gate it is not exercising. `scripts/eval.ts`
+ * passes what `searchProject` answered.
+ */
+export function scoreRow(row: GoldenRow, hits: readonly ScoredHit[], belowFloor = false): RowResult {
   const rank = hits.findIndex((hit) => hit.file === row.expectFile);
   const headingRank = row.expectHeading
     ? hits.findIndex((hit) => hit.file === row.expectFile && headingMatches(hit.headingPath, row.expectHeading as string))
     : -1;
   return {
     row,
+    belowFloor,
     rank: rank === -1 ? null : rank,
     headingRank: !row.expectHeading || headingRank === -1 ? null : headingRank,
     score: rank === -1 ? null : hits[rank].score,
@@ -129,6 +145,14 @@ export interface Metrics {
   headingQuestions: number;
   headingRecall1: number;
   headingRecall5: number;
+  /** Questions the relevance floor would have refused rather than answered (ADR-0042). */
+  gated: number;
+  /**
+   * Of those, how many had their answer inside the top five anyway — **the floor's price**, and the
+   * only number that says whether it is worth having. A question that was going to miss regardless
+   * costs nothing to refuse; one whose answer was on the page costs everything.
+   */
+  gatedWithAnswer: number;
 }
 
 const mean = (values: readonly number[]): number => (values.length === 0 ? 0 : values.reduce((a, b) => a + b, 0) / values.length);
@@ -145,6 +169,8 @@ export function aggregate(results: readonly RowResult[]): Metrics {
     headingQuestions: withHeading.length,
     headingRecall1: mean(withHeading.map((r) => (r.headingRank === 0 ? 1 : 0))),
     headingRecall5: mean(withHeading.map((r) => (r.headingRank !== null && r.headingRank < 5 ? 1 : 0))),
+    gated: results.filter((r) => r.belowFloor).length,
+    gatedWithAnswer: results.filter((r) => r.belowFloor && r.rank !== null && r.rank < 5).length,
   };
 }
 
@@ -200,6 +226,13 @@ export interface RunContext {
    * configurations are not comparable, and without this line nothing would say so.
    */
   textSearchConfig: string;
+  /**
+   * How the fused list was turned into an answer ([ADR-0042](../../.ssot/ADR.md#adr-0042)): the
+   * per-document cap, the neighbour context and the relevance floor, rendered for the report. Here for
+   * `hnswScan`'s reason — the cap changes `recall@5` and the floor changes what a caller is told, so a
+   * run that did not print them is a run nobody can compare.
+   */
+  resultSelection: string;
   documents: number;
   chunks: number;
   startedAt: string;
@@ -257,6 +290,7 @@ export function formatText(report: Report): string {
   out.push(`  search limit        ${c.searchLimit} (MRR is MRR@${c.searchLimit})`);
   out.push(`  HNSW scan           ${c.hnswScan}`);
   out.push(`  text search config  ${c.textSearchConfig} (both sides — the corpus and the questions)`);
+  out.push(`  result selection    ${c.resultSelection}`);
   out.push(
     `  timing              ${seconds(c.totalMs)} total — model ${seconds(c.modelLoadMs)}, index ${seconds(c.indexMs)}, search ${seconds(c.searchMs)}`,
   );
@@ -273,6 +307,24 @@ export function formatText(report: Report): string {
   out.push('');
   for (const [tag, m] of Object.entries(report.byTag)) out.push(metricRow(`tag ${tag}`, m, width));
   out.push('');
+
+  // The floor's own line, and deliberately not a column in the table above: it is not a retrieval
+  // metric. `recall@5` counts a question the floor refused as answered, because retrieval did answer
+  // it — what the floor costs is the second number here (ADR-0042).
+  if (overall.gated > 0) {
+    out.push(
+      `  relevance floor     ${overall.gated} of ${overall.questions} questions would be told "no good match"` +
+        ` — ${overall.gatedWithAnswer} of them had the answer inside the top five.`,
+    );
+    for (const gated of report.results.filter((r) => r.belowFloor)) {
+      const where = gated.rank === null ? `missed anyway` : `answer at rank ${gated.rank + 1}`;
+      out.push(`    ${gated.row.id} [${gated.row.lang}] ${(gated.hits[0]?.score ?? 0).toFixed(3)} — ${where} — ${gated.row.query}`);
+    }
+    out.push('');
+  } else {
+    out.push('  relevance floor     no question in the set falls under it.');
+    out.push('');
+  }
 
   const misses = worstMisses(report.results, 5);
   if (misses.length === 0) {
@@ -312,7 +364,7 @@ export function formatMarkdown(report: Report): string {
   out.push('## Retrieval evaluation');
   out.push('');
   out.push(
-    `\`${c.providerId}\` · \`CHUNK_MAX_TOKENS=${c.chunkMaxTokens}\` · \`CHUNK_OVERLAP_TOKENS=${c.chunkOverlapTokens}\` · ${c.documents} documents, ${c.chunks} chunks · ${c.hnswScan} · \`to_tsvector('${c.textSearchConfig}', …)\` · commit \`${c.commit}\``,
+    `\`${c.providerId}\` · \`CHUNK_MAX_TOKENS=${c.chunkMaxTokens}\` · \`CHUNK_OVERLAP_TOKENS=${c.chunkOverlapTokens}\` · ${c.documents} documents, ${c.chunks} chunks · ${c.hnswScan} · \`to_tsvector('${c.textSearchConfig}', …)\` · ${c.resultSelection} · commit \`${c.commit}\``,
   );
   out.push('');
   out.push('| group | n | recall@1 | recall@5 | MRR | mean score | heading@5 |');
@@ -321,6 +373,14 @@ export function formatMarkdown(report: Report): string {
   for (const [lang, m] of Object.entries(report.byLang)) out.push(mdRow(`lang \`${lang}\``, m));
   for (const [tag, m] of Object.entries(report.byTag)) out.push(mdRow(`tag \`${tag}\``, m));
   out.push('');
+
+  if (report.overall.gated > 0) {
+    out.push(
+      `**The relevance floor would refuse ${report.overall.gated} of ${report.overall.questions} questions**, ` +
+        `${report.overall.gatedWithAnswer} of which had the answer inside the top five.`,
+    );
+    out.push('');
+  }
 
   const misses = worstMisses(report.results, 5);
   if (misses.length > 0) {
