@@ -14,7 +14,14 @@ import { createEmbeddingProvider, type EmbeddingProvider } from '../src/services
 import { readAndHash } from '../src/services/fs-scan.js';
 import { searchProject } from '../src/services/search.js';
 import { isTextSearchConfig, QUERY_TEXT_SEARCH_CONFIG, TEXT_SEARCH_CONFIGS, type TextSearchConfig } from '../src/services/text-search.js';
-import { getExistingDocuments, replaceDocument, scanFrom, selectionFrom, type NewChunk } from '../src/services/vector-store.js';
+import {
+  getExistingDocuments,
+  replaceDocument,
+  scanFrom,
+  selectionFrom,
+  storedDocumentContent,
+  type NewChunk,
+} from '../src/services/vector-store.js';
 import {
   applySchema,
   createTestDatabase,
@@ -272,7 +279,20 @@ async function indexCorpus(
 
     await replaceDocument(
       db,
-      { projectId, sourceId: null, relativePath, title, contentHash: hash, sizeBytes, indexGeneration: generation },
+      {
+        projectId,
+        sourceId: null,
+        relativePath,
+        title,
+        contentHash: hash,
+        sizeBytes,
+        indexGeneration: generation,
+        // The corpus text, stored as the indexer stores it (ADR-0043). It changes no vector and no
+        // chunk, so it moves no number in this report — it is here because the harness is the
+        // indexer's loop, and a loop that had stopped writing one of the columns the product writes
+        // would be a loop that no longer measures the product.
+        ...storedDocumentContent(content, config.MAX_STORED_DOCUMENT_BYTES),
+      },
       rows,
       textSearchConfig,
     );

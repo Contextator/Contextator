@@ -90,6 +90,29 @@ export const LEXICAL_TERM_MAX_DOCUMENT_FREQUENCY = 0.05;
  */
 export const LEXICAL_TERM_MIN_DOCUMENT_FLOOR = 10;
 
+/**
+ * `read_document`'s token budget ([ADR-0043](../../.ssot/ADR.md#adr-0043)), in tokens counted by the
+ * embedding provider's own tokenizer rather than in bytes pretending to be tokens.
+ *
+ * 4 000 is a deliberate answer to the 512 KB cap it replaces: a 100 KB Markdown file is around 25 000
+ * tokens, spent in one tool call by an agent that asked for a file and had no way to ask for less. The
+ * ceiling is 20 000, so an agent that genuinely wants a whole manual can still say so — it just has to
+ * say so.
+ *
+ * Constants and not settings: they are the *tool's* contract, they are stated in the prompt-visible
+ * description an agent reads, and an instance where `read_document` means something different from
+ * every other instance is a tool an agent cannot be told about once.
+ */
+export const READ_DOCUMENT_DEFAULT_MAX_TOKENS = 4_000;
+export const READ_DOCUMENT_MAX_MAX_TOKENS = 20_000;
+
+/** Below this a budget cannot hold a chunk and its header, so the tool would answer nothing at all. */
+export const READ_DOCUMENT_MIN_MAX_TOKENS = 200;
+
+/** Documents per `list_topics` page, and the ceiling on what one call may ask for (ADR-0043). */
+export const LIST_TOPICS_DEFAULT_LIMIT = 200;
+export const LIST_TOPICS_MAX_LIMIT = 1_000;
+
 /** Exported for the tests: the cross-field rules are the only part of this file that has behaviour. */
 export const EnvSchema = z
   .object({
@@ -140,6 +163,22 @@ export const EnvSchema = z
       .transform((p) => path.resolve(p)),
     /** Encrypts source secrets (git / Notion tokens) at rest. Only needed once such a source exists. */
     SECRET_KEY: z.string().min(32, 'must be at least 32 characters').optional(),
+    /**
+     * How much of a document's text is kept in `documents.content`, in bytes of UTF-8
+     * ([ADR-0043](../../.ssot/ADR.md#adr-0043)). Past it the prefix is stored and
+     * `documents.content_truncated` is set, so `read_document` can say what it is not showing.
+     *
+     * A megabyte of Markdown is a document nobody wrote by hand, and the row is TOAST-compressed out
+     * of line, so the steady-state cost is a fraction of the vectors the same document produces — see
+     * [OPERATIONS.md](../../.ssot/OPERATIONS.md) §7. It is a setting rather than a constant because
+     * the one installation that needs it lowered is the one with a generated corpus, and it would
+     * otherwise have to fork the product to get it.
+     */
+    MAX_STORED_DOCUMENT_BYTES: z.coerce
+      .number()
+      .int()
+      .min(4096)
+      .default(1024 * 1024),
 
     // Uploads and archives
     UPLOAD_MAX_FILE_BYTES: z.coerce

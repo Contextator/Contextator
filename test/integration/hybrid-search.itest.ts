@@ -177,6 +177,8 @@ beforeAll(async () => {
       contentHash: 'hash-filler',
       sizeBytes: 4096,
       indexGeneration: LIVE,
+      content: null,
+      contentTruncated: false,
     },
     filler,
   );
@@ -190,6 +192,8 @@ beforeAll(async () => {
       contentHash: 'hash-codes',
       sizeBytes: 256,
       indexGeneration: LIVE,
+      content: null,
+      contentTruncated: false,
     },
     [chunk(0, 'Error codes > 4xxx', ANSWER)],
   );

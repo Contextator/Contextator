@@ -172,6 +172,23 @@ export const documents = pgTable(
     contentHash: text('content_hash').notNull(),
     sizeBytes: integer('size_bytes').notNull().default(0),
     chunkCount: integer('chunk_count').notNull().default(0),
+    /**
+     * The document's text, as `read_document` serves it ([ADR-0043](../../.ssot/ADR.md#adr-0043)).
+     *
+     * **The flavor-transformed string, not the raw bytes** — the exact text the indexer hands
+     * `chunkMarkdown`, which is what `chunks.content` was cut from and what the vectors were built
+     * from. Storing the raw file instead would make `read_document` and `search_docs` disagree about
+     * what an Obsidian or Notion document says, which is the worse of the two failures.
+     *
+     * **Nullable, and that is the upgrade path**, as `chunks.content_tsv` is. Every document written
+     * before this column existed holds NULL and keeps holding it until its file is re-indexed — an
+     * incremental run skips a file whose sha256 has not moved, and unlike `content_tsv` this column is
+     * *not* recoverable from anything already in the database. `read_document` falls back to the
+     * filesystem while it is NULL and says so in the log.
+     */
+    content: text('content'),
+    /** True when `content` holds only the first `MAX_STORED_DOCUMENT_BYTES` of the document. */
+    contentTruncated: boolean('content_truncated').notNull().default(false),
     indexedAt: timestamp('indexed_at', { withTimezone: true }).notNull().defaultNow(),
     /**
      * The generation this row belongs to. Equal to the project's `live_generation` for everything a

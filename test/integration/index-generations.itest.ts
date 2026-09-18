@@ -128,6 +128,7 @@ const indexerConfig = {
   EMBEDDING_BATCH_SIZE: 64,
   DATA_DIR: '',
   SECRET_KEY: '0'.repeat(64),
+  MAX_STORED_DOCUMENT_BYTES: 1024 * 1024,
 };
 
 /** The four documents of the corpus, in the order `walkMarkdown` sorts them. */

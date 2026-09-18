@@ -74,7 +74,18 @@ async function seed(relativePath: string, sourceId: string, count: number, body:
   });
   await replaceDocument(
     database.db,
-    { projectId, sourceId, relativePath, title: relativePath, contentHash: `hash-${relativePath}`, sizeBytes: 1024, indexGeneration: LIVE },
+    // Hand-written chunks and no document text behind them, so `content` is null on purpose.
+    {
+      projectId,
+      sourceId,
+      relativePath,
+      title: relativePath,
+      contentHash: `hash-${relativePath}`,
+      sizeBytes: 1024,
+      indexGeneration: LIVE,
+      content: null,
+      contentTruncated: false,
+    },
     rows,
   );
 }

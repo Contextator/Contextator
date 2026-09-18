@@ -29,6 +29,13 @@
       "when": 1789757530345,
       "tag": "0003_chunk_neighbours",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1789758758724,
+      "tag": "0004_document_content",
+      "breakpoints": true
     }
   ]
 }

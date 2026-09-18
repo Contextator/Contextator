@@ -109,6 +109,8 @@ describe('replaceDocument when an insert slice fails', () => {
       contentHash: 'hash-original',
       sizeBytes: 4096,
       indexGeneration: LIVE,
+      content: null,
+      contentTruncated: false,
     };
     const documentId = await replaceDocument(database.db, original, buildChunks('original'));
 
@@ -177,7 +179,15 @@ describe('searchChunks across two projects', () => {
 
     // Byte-identical documents in both projects: same path, same title, same hash, same chunk text.
     // Only the embeddings differ, so nothing but the project scope can separate the two result sets.
-    const sharedDocument = { relativePath: 'handbook/guide.md', title: 'Guide', contentHash: 'hash-shared', sizeBytes: 2048, indexGeneration: LIVE };
+    const sharedDocument = {
+      relativePath: 'handbook/guide.md',
+      title: 'Guide',
+      contentHash: 'hash-shared',
+      sizeBytes: 2048,
+      indexGeneration: LIVE,
+      content: null,
+      contentTruncated: false,
+    };
     const sharedChunk = (chunkIndex: number, embedding: number[]): NewChunk => ({
       chunkIndex,
       headingPath: 'Guide > Install',

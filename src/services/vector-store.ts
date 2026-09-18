@@ -1,4 +1,4 @@
-import { and, asc, count, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gt, gte, inArray, lte, ne, sql } from 'drizzle-orm';
 import {
   DENSE_CANDIDATES,
   LEXICAL_CANDIDATES,
@@ -430,8 +430,30 @@ export interface DocumentSummary {
   indexedAt: Date;
 }
 
-export async function listDocumentsForProject(db: Db, projectId: string, generation: number): Promise<DocumentSummary[]> {
-  return db
+/**
+ * One page of a project's documents, in the order they have always been listed
+ * ([ADR-0043](../../.ssot/ADR.md#adr-0043)).
+ *
+ * **Keyset and not `OFFSET`.** `after` is the last `relative_path` of the previous page, and
+ * `UNIQUE (project_id, index_generation, relative_path)` is what makes that a key rather than a guess:
+ * the predicate is a range scan over the ordering the query already had, so page two costs what page
+ * one cost, and a document written between two calls cannot shift a row from one page onto both.
+ *
+ * `limit` is what the caller wants to *show*; it is the caller that asks for one more than it needs to
+ * learn whether a next page exists, because only the caller knows what it does with the answer.
+ */
+export async function listDocumentsForProject(
+  db: Db,
+  projectId: string,
+  generation: number,
+  page: { limit?: number; after?: string } = {},
+): Promise<DocumentSummary[]> {
+  const where = and(
+    eq(documents.projectId, projectId),
+    eq(documents.indexGeneration, generation),
+    page.after === undefined ? undefined : gt(documents.relativePath, page.after),
+  );
+  const query = db
     .select({
       relativePath: documents.relativePath,
       title: documents.title,
@@ -440,8 +462,60 @@ export async function listDocumentsForProject(db: Db, projectId: string, generat
       indexedAt: documents.indexedAt,
     })
     .from(documents)
-    .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation)))
+    .where(where)
     .orderBy(asc(documents.relativePath));
+  return page.limit === undefined ? query : query.limit(page.limit);
+}
+
+/**
+ * A document's chunks in document order, optionally narrowed to a heading breadcrumb or to a range of
+ * chunk indices ([ADR-0043](../../.ssot/ADR.md#adr-0043)).
+ *
+ * **The heading is matched against `chunks.heading_path` rather than re-parsed out of the text.** The
+ * chunker already walked the document and wrote the breadcrumb of every chunk, so "the section called
+ * X" is `heading_path = 'X'` — plus `heading_path LIKE 'X > %'`, which is what makes naming a parent
+ * return the subsections under it. Case is folded because an agent copies a breadcrumb out of a search
+ * result and a human types one, and the two differ by capitalisation far more often than by content.
+ *
+ * No generation predicate: `document_id` belongs to exactly one document, which belongs to exactly one
+ * generation, so its id already carries one.
+ */
+export async function getDocumentChunks(
+  db: Db,
+  documentId: string,
+  filter: { heading?: string; from?: number; to?: number } = {},
+): Promise<Array<{ chunkIndex: number; headingPath: string; content: string; tokenCount: number }>> {
+  const heading = filter.heading?.trim();
+  const breadcrumb = heading ? `${escapeLikePattern(heading.toLowerCase())} > %` : undefined;
+  return db
+    .select({
+      chunkIndex: chunks.chunkIndex,
+      headingPath: chunks.headingPath,
+      content: chunks.content,
+      tokenCount: chunks.tokenCount,
+    })
+    .from(chunks)
+    .where(
+      and(
+        eq(chunks.documentId, documentId),
+        filter.from === undefined ? undefined : gte(chunks.chunkIndex, filter.from),
+        filter.to === undefined ? undefined : lte(chunks.chunkIndex, filter.to),
+        heading === undefined || heading === ''
+          ? undefined
+          : sql`(lower(${chunks.headingPath}) = ${heading.toLowerCase()} OR lower(${chunks.headingPath}) LIKE ${breadcrumb} ESCAPE '\\')`,
+      ),
+    )
+    .orderBy(asc(chunks.chunkIndex));
+}
+
+/** Every heading breadcrumb of a document, in document order and without repeats — what an unmatched `heading` is answered with. */
+export async function listDocumentHeadings(db: Db, documentId: string): Promise<string[]> {
+  const rows = await db
+    .selectDistinctOn([chunks.headingPath], { headingPath: chunks.headingPath, chunkIndex: chunks.chunkIndex })
+    .from(chunks)
+    .where(eq(chunks.documentId, documentId))
+    .orderBy(asc(chunks.headingPath), asc(chunks.chunkIndex));
+  return rows.map((r) => r.headingPath).filter((h) => h !== '');
 }
 
 export async function getDocument(db: Db, projectId: string, generation: number, relativePath: string): Promise<DocumentRow | undefined> {
@@ -493,6 +567,36 @@ export interface DocumentInput {
   sizeBytes: number;
   /** The generation this document belongs to; the run decides it, not this function. */
   indexGeneration: number;
+  /**
+   * The document's text as `read_document` will serve it — **the flavor-transformed string the chunker
+   * was given**, not the bytes `contentHash` was taken over ([ADR-0043](../../.ssot/ADR.md#adr-0043)).
+   *
+   * Required rather than optional, and required on both writers. A caller that could leave it out is a
+   * caller that can write a document which reads from the filesystem forever, and the compiler is the
+   * only thing that would ever notice. `null` says "there is no text to store" deliberately.
+   */
+  content: string | null;
+  /** Set by `storedDocumentContent`; a caller does not decide this for itself. */
+  contentTruncated: boolean;
+}
+
+/**
+ * What of a document's text is kept, and whether anything was left behind
+ * ([ADR-0043](../../.ssot/ADR.md#adr-0043)).
+ *
+ * The cut is on **bytes** because the column's cost is bytes — but it is walked back to a character
+ * boundary first. A `Buffer.subarray` that lands in the middle of a UTF-8 sequence decodes to a
+ * `�`, and an agent handed one at the end of every truncated Turkish document would read it as
+ * corruption of the source file rather than as a cap this product applied. Continuation bytes are
+ * `10xxxxxx`, so stepping back over them until a lead byte is found is the whole of it, bounded at
+ * three steps because no UTF-8 sequence is longer than four bytes.
+ */
+export function storedDocumentContent(text: string, maxBytes: number): { content: string; contentTruncated: boolean } {
+  const buf = Buffer.from(text, 'utf8');
+  if (buf.byteLength <= maxBytes) return { content: text, contentTruncated: false };
+  let end = maxBytes;
+  for (let back = 0; back < 4 && end > 0 && (buf[end] & 0b1100_0000) === 0b1000_0000; back++) end--;
+  return { content: buf.subarray(0, end).toString('utf8'), contentTruncated: true };
 }
 
 /**
@@ -544,6 +648,11 @@ export async function replaceDocument(
           sizeBytes: doc.sizeBytes,
           chunkCount: newChunks.length,
           indexedAt: now,
+          // In the `SET` and not only in the `VALUES`: an incremental run re-writing a changed file
+          // has to replace the text as well as the chunks, or `read_document` would serve the previous
+          // revision of a document `search_docs` has already re-indexed (ADR-0043).
+          content: doc.content,
+          contentTruncated: doc.contentTruncated,
         },
       })
       .returning({ id: documents.id });

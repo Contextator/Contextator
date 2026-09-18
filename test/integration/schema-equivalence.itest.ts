@@ -42,10 +42,13 @@ const opened: TestDatabase[] = [];
  * unread, which is the whole thing this assertion is for. `0001_index_generations`
  * ([ADR-0039](../../.ssot/ADR.md#adr-0039)) is the first four; `0002_hybrid_search`
  * ([ADR-0041](../../.ssot/ADR.md#adr-0041)) is the fifth; `0003_chunk_neighbours`
- * ([ADR-0042](../../.ssot/ADR.md#adr-0042)) is the sixth.
+ * ([ADR-0042](../../.ssot/ADR.md#adr-0042)) is the sixth; `0004_document_content`
+ * ([ADR-0043](../../.ssot/ADR.md#adr-0043)) is the last two, and the `documents` qualifier on the
+ * first of them is not decoration — `chunks.content` is a baseline column, and a term that matched it
+ * too would wave through a future migration that re-typed the text every search result is cut from.
  */
 const POST_BASELINE_MARKERS =
-  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq/;
+  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated/;
 
 afterAll(async () => {
   for (const database of opened) await dropTestDatabase(baseUrl, database);

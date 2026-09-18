@@ -14,7 +14,15 @@ import { getProjectById } from './projects.js';
 import { driverFor } from './sources/driver.js';
 import { listSources, recountSources, setSourceStatus } from './sources.js';
 import { textSearchConfigFor, type TextSearchConfig } from './text-search.js';
-import { deleteDocuments, getExistingDocuments, recountProject, replaceDocument, sweepGenerations, type NewChunk } from './vector-store.js';
+import {
+  deleteDocuments,
+  getExistingDocuments,
+  recountProject,
+  replaceDocument,
+  storedDocumentContent,
+  sweepGenerations,
+  type NewChunk,
+} from './vector-store.js';
 
 export type JobPhase = 'queued' | 'syncing' | 'scanning' | 'embedding' | 'finalizing' | 'done' | 'error';
 
@@ -61,7 +69,14 @@ export interface IndexerDeps {
   embeddings: EmbeddingProvider;
   config: Pick<
     Config,
-    'ALLOWED_DOC_ROOTS' | 'IGNORE_GLOBS' | 'CHUNK_MAX_TOKENS' | 'CHUNK_OVERLAP_TOKENS' | 'EMBEDDING_BATCH_SIZE' | 'DATA_DIR' | 'SECRET_KEY'
+    | 'ALLOWED_DOC_ROOTS'
+    | 'IGNORE_GLOBS'
+    | 'CHUNK_MAX_TOKENS'
+    | 'CHUNK_OVERLAP_TOKENS'
+    | 'EMBEDDING_BATCH_SIZE'
+    | 'DATA_DIR'
+    | 'SECRET_KEY'
+    | 'MAX_STORED_DOCUMENT_BYTES'
   >;
   log: Logger;
   locks: KeyedMutex;
@@ -353,7 +368,12 @@ export class Indexer {
             continue;
           }
 
-          const { title, chunks } = chunkMarkdown(transformContent(file.flavor, content), file.relativePath, {
+          // **One string, used twice, and that is the point of ADR-0043.** What is chunked and what is
+          // stored are the same value — the flavor-transformed text — so `read_document` cannot come
+          // to disagree with `search_docs` about what an Obsidian note says. Deriving it twice, or
+          // storing `content` instead, is how that drift starts.
+          const transformed = transformContent(file.flavor, content);
+          const { title, chunks } = chunkMarkdown(transformed, file.relativePath, {
             maxTokens: config.CHUNK_MAX_TOKENS,
             overlapTokens: config.CHUNK_OVERLAP_TOKENS,
             // The model's own tokenizer, exact by the time this runs — nothing is indexed before the
@@ -390,6 +410,7 @@ export class Indexer {
               contentHash: hash,
               sizeBytes,
               indexGeneration: generation,
+              ...storedDocumentContent(transformed, config.MAX_STORED_DOCUMENT_BYTES),
             },
             rows,
             file.textSearchConfig,

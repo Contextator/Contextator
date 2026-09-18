@@ -185,6 +185,8 @@ async function seedProject(name: string, excerpts: Excerpt[], embeddingModel: st
           contentHash: excerpt.path,
           sizeBytes: 512,
           indexGeneration: LIVE,
+          content: null,
+          contentTruncated: false,
         },
         [chunk],
       );
