@@ -1,0 +1,10 @@
+# A security problem filed as an issue is public the moment it is filed, so the chooser offers the
+# route out of here before it offers a blank issue.
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Contextator/Contextator/blob/main/SECURITY.md
+    about: Do not open an issue. SECURITY.md says where a report goes instead.
+  - name: How to contribute
+    url: https://github.com/Contextator/Contextator/blob/main/CONTRIBUTING.md
+    about: Running it, the checks a change has to pass, and the licence grant.

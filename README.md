@@ -593,6 +593,8 @@ docker-compose.dev.yml        PostgreSQL only, for `npm run dev`
 biome.jsonc                   the one formatter and linter, and why each rule is set as it is
 tsconfig.test.json            typechecks test/ and scripts/, which the build's tsconfig cannot see
 .github/workflows/ci.yml      the gate on every pull request: lint, typecheck, tests, image build
+.github/PULL_REQUEST_TEMPLATE.md   the FR/ADR reference, the checks, and the documented claims a change touches
+.github/ISSUE_TEMPLATE/       bug report, feature request, and the links the issue chooser offers first
 .git-blame-ignore-revs        commits that only reformatted; `git blame` should look through them
 ```
 
