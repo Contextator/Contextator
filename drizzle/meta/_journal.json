@@ -22,6 +22,13 @@
       "when": 1789751902331,
       "tag": "0002_hybrid_search",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789757530345,
+      "tag": "0003_chunk_neighbours",
+      "breakpoints": true
     }
   ]
 }

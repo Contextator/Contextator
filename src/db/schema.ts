@@ -233,6 +233,13 @@ export const chunks = pgTable(
     foreignKey({ name: 'chunks_document_id_fkey', columns: [t.documentId], foreignColumns: [documents.id] }).onDelete('cascade'),
     index('chunks_project_idx').on(t.projectId),
     index('chunks_document_idx').on(t.documentId),
+    // **An invariant that was always true and had never been said** ([ADR-0042](../../.ssot/ADR.md#adr-0042)).
+    // `replaceDocument` deletes a document's chunks and rewrites them in one transaction, numbering
+    // them from the chunker's own counter, so a document has never held two chunks at one index. Saying
+    // it makes neighbour expansion — "chunk `i − 1` and `i + 1` of this document" — a point lookup with
+    // one answer rather than a query that trusts the writer. A generation predicate is not needed
+    // beside it: a document row belongs to exactly one generation, so its id already carries one.
+    unique('chunks_document_chunk_index_uq').on(t.documentId, t.chunkIndex),
     index('chunks_project_generation_idx').on(t.projectId, t.indexGeneration),
     // Unlike `chunks_embedding_hnsw_idx` above, this one *is* declared here and *is* generated. A GIN
     // index over a `tsvector` needs no fixed dimension and blocks no `ALTER COLUMN … TYPE`, so none of

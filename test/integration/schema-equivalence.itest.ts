@@ -41,9 +41,11 @@ const opened: TestDatabase[] = [];
  * a term per migration, on purpose: a regex that said "anything" would let the next one through
  * unread, which is the whole thing this assertion is for. `0001_index_generations`
  * ([ADR-0039](../../.ssot/ADR.md#adr-0039)) is the first four; `0002_hybrid_search`
- * ([ADR-0041](../../.ssot/ADR.md#adr-0041)) is the fifth.
+ * ([ADR-0041](../../.ssot/ADR.md#adr-0041)) is the fifth; `0003_chunk_neighbours`
+ * ([ADR-0042](../../.ssot/ADR.md#adr-0042)) is the sixth.
  */
-const POST_BASELINE_MARKERS = /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv/;
+const POST_BASELINE_MARKERS =
+  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq/;
 
 afterAll(async () => {
   for (const database of opened) await dropTestDatabase(baseUrl, database);

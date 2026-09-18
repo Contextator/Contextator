@@ -173,20 +173,45 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     // Step one of the remedy: start 0.1.0 once. This *is* 0.1.0's startup DDL, frozen.
     await ensureSchema(db, { dimensions: TEST_EMBEDDING_DIMENSIONS, resetVectors: false, log: silentLogger });
 
+    // **Rows before the migration, and chunks specifically.** `0003_chunk_neighbours` adds a UNIQUE
+    // constraint over `(document_id, chunk_index)` ([ADR-0042](../../../.ssot/ADR.md#adr-0042)), and a
+    // unique constraint is the one kind of migration that can fail on data rather than on schema — on
+    // an operator's database, at startup, with the dashboard behind it. The invariant has always held
+    // because `replaceDocument` deletes a document's chunks and rewrites them from the chunker's own
+    // counter in one transaction, but "always held" is a claim about a writer, and this is the claim
+    // about the ladder: a 0.1.0 database carrying chunks migrates.
+    // By suffix: the ladder's own v3 step prefixes every path with the source it invented for it.
+    const documentRow = await db.execute(sql`SELECT id FROM documents WHERE relative_path LIKE '%guides/install.md'`);
+    const documentId = (documentRow.rows[0] as { id: string }).id;
+    const vector = `[${Array(TEST_EMBEDDING_DIMENSIONS).fill('0.1').join(',')}]`;
+    await db.execute(sql`
+      INSERT INTO chunks (project_id, document_id, chunk_index, heading_path, content, token_count, embedding)
+      SELECT ${projectId}::uuid, ${documentId}::uuid, i, 'Install > Step ' || i, 'step ' || i, 4, ${vector}::vector
+      FROM generate_series(0, 2) AS i`);
+
     const afterLadder = await captureSchema(db);
 
     // Step two: the upgrade. It adopts the baseline rather than applying it — had it applied it, the
     // first `CREATE TABLE` would have failed — and then applies the migrations cut since, which today
     // is `0001_index_generations` ([ADR-0039](../../../.ssot/ADR.md#adr-0039)) and
-    // `0002_hybrid_search` ([ADR-0041](../../../.ssot/ADR.md#adr-0041)). So the claim is no
+    // `0002_hybrid_search` ([ADR-0041](../../../.ssot/ADR.md#adr-0041)) and `0003_chunk_neighbours`
+    // ([ADR-0042](../../../.ssot/ADR.md#adr-0042)). So the claim is no
     // longer "nothing changed": it is that nothing changed *except* what those migrations say they
     // change, and the lines that moved are checked by name rather than counted.
     await applySchema(database);
     const changed = snapshotDifference(afterLadder, await captureSchema(db));
     expect(changed).not.toHaveLength(0);
-    expect(changed.filter((line) => !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv/.test(line))).toEqual(
-      [],
-    );
+    expect(
+      changed.filter(
+        (line) =>
+          !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq/.test(line),
+      ),
+    ).toEqual([]);
+
+    // The chunks are still there and still one per (document, index): the constraint was satisfied by
+    // data that predates it, which is the only way to find out that it is an invariant and not a wish.
+    const kept = await db.execute(sql`SELECT count(*)::int AS n FROM chunks WHERE document_id = ${documentId}`);
+    expect((kept.rows[0] as { n: number }).n).toBe(3);
 
     // And the carried-forward rows kept the generation every pre-ADR-0039 document is already in.
     const generations = await db.execute(sql`SELECT DISTINCT index_generation FROM documents`);
