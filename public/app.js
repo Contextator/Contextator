@@ -27,7 +27,7 @@ import {
 import { canCreateProject, canDeleteProject, canEdit, initAuthUi, loadMe, renderUserMenu } from './auth.js';
 import { authHeaderFor, initMcpUi, loadMcpTokens, renderMcpAccess } from './mcp.js';
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
-import { renderSearch } from './search.js';
+import { captureSearchFocus, renderSearch } from './search.js';
 import { initUsersUi, renderUsersView } from './users.js';
 
 const POLL_ACTIVE_MS = 2000;
@@ -352,6 +352,9 @@ function renderList() {
 
 function renderDetail() {
   const main = $('#detail');
+  // Before the wipe, not after: emptying #detail takes the search box's focus with it, and nothing
+  // downstream can then tell whether the operator was typing. search.js restores what this records.
+  captureSearchFocus();
   main.replaceChildren();
 
   if (state.view === 'users') {

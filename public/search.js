@@ -40,13 +40,13 @@ export function renderSearch(project) {
       s.query = event.target.value;
       s.caret = event.target.selectionStart ?? event.target.value.length;
     },
+    // No blur handler on purpose. Chrome fires blur when a focused node is removed, and it does so
+    // while the node still looks connected — so a blur handler cannot tell "the operator left the
+    // box" from "renderDetail() wiped the panel". captureSearchFocus() below settles it instead, by
+    // asking the document before the wipe rather than guessing after it. Measured, not assumed: the
+    // first version of this file used the isConnected guard and lost the caret on every poll.
     onfocus: () => {
       s.focused = true;
-    },
-    onblur: (event) => {
-      // A rebuild removes this node while it is focused, and the blur that follows is not the
-      // operator leaving the box. Only a blur of a node still in the document is.
-      if (event.target.isConnected) s.focused = false;
     },
     onkeydown: (event) => {
       if (event.key === 'Escape') clear();
@@ -95,6 +95,19 @@ export function renderSearch(project) {
     ]),
     el('div', { class: 'panel-body' }, [form, results(s)]),
   ]);
+}
+
+/**
+ * Called by app.js as the first thing renderDetail() does, while `document.activeElement` still
+ * means something: once #detail has been emptied, whether this box had focus is unknowable.
+ * Also the moment the caret is read, so moving it with the arrow keys is remembered too.
+ */
+export function captureSearchFocus() {
+  const node = input;
+  if (!node) return;
+  const active = document.activeElement === node;
+  state.search.focused = active;
+  if (active) state.search.caret = node.selectionStart ?? node.value.length;
 }
 
 /** Everything but the chosen `limit`, which is a preference and survives a change of project. */
@@ -180,6 +193,7 @@ function clear() {
 function restoreFocus(node, caret) {
   if (!state.search.focused) return;
   setTimeout(() => {
+    // Only for the panel still on screen, and never over a focus the operator has moved since.
     if (node !== input || !node.isConnected || document.activeElement === node) return;
     node.focus();
     const at = Math.min(caret, node.value.length);
