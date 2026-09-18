@@ -5,10 +5,10 @@ import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
 import { isInside, normalizeRelativePath } from '../services/fs-scan.js';
-import { getProjectById } from '../services/projects.js';
+import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { driverFor } from '../services/sources/driver.js';
 import { getSourceById, listSources } from '../services/sources.js';
-import { getDocument, getDocumentBySuffix, listDocumentsForProject, searchChunks, type SearchHit } from '../services/vector-store.js';
+import { getDocument, getDocumentBySuffix, listDocumentsForProject, type SearchHit } from '../services/vector-store.js';
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
@@ -18,7 +18,6 @@ const message = (err: unknown): string => (err instanceof Error ? err.message : 
 
 const MAX_DOCUMENT_BYTES = 512 * 1024;
 const MAX_TOPIC_LINES = 500;
-const DEFAULT_LIMIT = 5;
 
 function formatHits(query: string, projectName: string, hits: SearchHit[]): string {
   const lines: string[] = [`Found ${hits.length} result${hits.length === 1 ? '' : 's'} for "${query}" in project "${projectName}":`, ''];
@@ -46,27 +45,27 @@ export function registerTools(server: McpServer, ctx: AppContext, project: Proje
         'Use read_document with a returned file path to read the whole file.',
       inputSchema: {
         query: z.string().min(1).max(2000).describe('Natural-language question or keywords'),
-        limit: z.number().int().min(1).max(20).default(DEFAULT_LIMIT).describe('Maximum number of excerpts to return (1-20, default 5)'),
+        limit: z.number().int().min(1).max(20).default(DEFAULT_SEARCH_LIMIT).describe('Maximum number of excerpts to return (1-20, default 5)'),
       },
       annotations: readOnly,
     },
     async ({ query, limit }) => {
       try {
-        const current = await getProjectById(db, project.id);
-        if (!current) return fail(`Project "${project.name}" no longer exists.`);
-        if (current.chunkCount === 0) {
+        // The guards, the query embedding and the top-k query are services/search.ts; what is left
+        // here is the wording, which is prompt-visible and belongs to the tool.
+        const outcome = await searchProject({ db, embeddings }, { projectId: project.id, query, limit });
+        if (outcome.status === 'project_gone') return fail(`Project "${project.name}" no longer exists.`);
+        if (outcome.status === 'not_indexed') {
           return ok(`Project "${project.name}" has no indexed content yet. Trigger indexing from the Contextator dashboard and try again.`);
         }
-        if (current.embeddingModel && current.embeddingModel !== embeddings.id) {
+        if (outcome.status === 'model_mismatch') {
           return fail(
-            `This project was indexed with "${current.embeddingModel}" but the server now embeds with "${embeddings.id}". ` +
+            `This project was indexed with "${outcome.indexedWith}" but the server now embeds with "${outcome.serverUses}". ` +
               'Re-index the project from the Contextator dashboard before searching.',
           );
         }
-        const [vector] = await embeddings.embed([query]);
-        const hits = await searchChunks(db, project.id, vector, limit ?? DEFAULT_LIMIT);
-        if (hits.length === 0) return ok(`No matching documentation for "${query}". Try different wording or call list_topics to browse.`);
-        return ok(formatHits(query, project.name, hits));
+        if (outcome.hits.length === 0) return ok(`No matching documentation for "${query}". Try different wording or call list_topics to browse.`);
+        return ok(formatHits(query, project.name, outcome.hits));
       } catch (err) {
         log.error({ err, tool: 'search_docs', project: project.name }, 'tool failed');
         return fail(`search_docs failed: ${message(err)}`);

@@ -32,3 +32,19 @@ export class RateLimitedError extends Error {
     this.retryAfterSec = Math.max(1, Math.ceil(retryAfterSec));
   }
 }
+
+/**
+ * A project the caller may read that cannot answer a search right now. `409` rather than an empty
+ * result set, because "nothing is indexed" and "indexed with a model this server no longer runs"
+ * have different remedies and neither is "your query was bad". Kept apart from `ConflictError`'s
+ * generic `conflict` so a script can tell the three apart.
+ */
+export class SearchUnavailableError extends Error {
+  /** `not_indexed` or `model_mismatch`. */
+  readonly code: string;
+  constructor(code: 'not_indexed' | 'model_mismatch', message: string) {
+    super(message);
+    this.name = 'SearchUnavailableError';
+    this.code = code;
+  }
+}

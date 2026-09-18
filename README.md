@@ -443,6 +443,7 @@ no ambient credential.
 | `POST /api/projects/:id/reindex?force=true` | Queue (incremental or full) re-index → `202 { job }` |
 | `GET /api/projects/:id/status` | Project row + live job |
 | `GET /api/projects/:id/runs` | The project's last 20 index runs (mode, counts, duration, error), newest first |
+| `GET /api/projects/:id/search?q=…&limit=…` | The same search the project's `search_docs` tool runs, as JSON: `{ query, limit, hits: [{ score, path, title, headingPath, chunkIndex, content }] }`. `limit` is 1–20 (default 5). `409 not_indexed` when the project has no chunks, `409 model_mismatch` when they were embedded with another model |
 | `DELETE /api/projects/:id` | Delete project, its chunks and open MCP sessions (`409` while indexing) |
 | `GET /api/projects/:id/sources` | The project's sources (type, name, config, status, document count). Secrets are never returned — only `hasSecret` |
 | `POST /api/projects/:id/sources` `{ type, name, label?, flavor?, config?, secret?, index? }` | Add a source. `type` is `local`, `git`, `upload` or `notion`; `config` is type-specific (`path` / `url`+`branch`+`subdir` / `rootIds`) |
@@ -543,6 +544,7 @@ src/services/crypto.ts        AES-256-GCM encryption of source tokens (SECRET_KE
 src/services/embeddings/      provider interface, local (transformers.js) and OpenAI implementations
 src/services/indexer.ts       incremental background indexing queue
 src/services/vector-store.ts  pgvector cosine search and chunk persistence
+src/services/search.ts        the one search path: the guards, the query embedding and the top-k query, shared by the MCP tool and the search API
 src/mcp/router.ts             /mcp/:project — Streamable HTTP + legacy SSE on one URL
 src/mcp/tools.ts              search_docs, list_topics, read_document
 src/mcp/sessions.ts           per-connection McpServer/transport registry + idle reaper

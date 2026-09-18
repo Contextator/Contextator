@@ -7,10 +7,11 @@ import { pingDb } from '../db/client.js';
 import type { ProjectRow } from '../db/schema.js';
 import { SecretDecryptError, SecretKeyMissingError } from '../services/crypto.js';
 import { removeProjectDir } from '../services/data-dir.js';
-import { ForbiddenError, RateLimitedError, UnauthorizedError } from '../services/errors.js';
+import { ForbiddenError, RateLimitedError, SearchUnavailableError, UnauthorizedError } from '../services/errors.js';
 import { PathNotAllowedError } from '../services/fs-scan.js';
 import { listIndexRuns } from '../services/index-runs.js';
 import { PasswordPolicyError } from '../services/passwords.js';
+import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { listProjectsForUser, membershipMap } from '../services/auth/memberships.js';
 import { ConflictError, NotFoundError, ValidationError, createProject, deleteProject, getProjectById, listProjects } from '../services/projects.js';
 import { countSourcesByProject, createSource, slugifySourceName } from '../services/sources.js';
@@ -28,6 +29,12 @@ const CreateProjectBody = z.object({
 });
 const IdParams = z.object({ id: z.uuid() });
 const ReindexQuery = z.object({ force: z.enum(['true', 'false', '1', '0']).optional() });
+/** Same bounds as the `search_docs` tool's, because it is the same search. A query string is text,
+ *  so `limit` is coerced — `"3"` is the only way a browser can send 3. */
+const SearchQuery = z.object({
+  q: z.string().min(1).max(2000),
+  limit: z.coerce.number().int().min(1).max(20).optional(),
+});
 
 /**
  * REST API consumed by the dashboard in public/. Every request is authenticated either by the
@@ -63,6 +70,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     }
     if (err instanceof NotFoundError) return reply.code(404).send({ error: 'not_found', message: err.message });
     if (err instanceof ConflictError) return reply.code(409).send({ error: 'conflict', message: err.message });
+    if (err instanceof SearchUnavailableError) return reply.code(409).send({ error: err.code, message: err.message });
     const e = err as { statusCode?: number; message?: string };
     const status = typeof e.statusCode === 'number' ? e.statusCode : 500;
     if (status >= 500) req.log.error({ err }, 'admin api error');
@@ -171,6 +179,44 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     const project = await getProjectById(db, id);
     if (!project) throw new NotFoundError('Project not found');
     return { runs: await listIndexRuns(db, id) };
+  });
+
+  /**
+   * What the agent sees, for the person who has to judge it (ROADMAP Item 3). No `:projectId` here
+   * and no registration outside this plugin: `isProjectScoped()` matches the literal `/api/projects/:id`
+   * prefix and the auth hooks are installed on this instance, so a `GET` is a viewer's by the policy
+   * table's default and this handler declares nothing of its own.
+   */
+  app.get('/api/projects/:id/search', async (req) => {
+    const { id } = IdParams.parse(req.params);
+    const { q, limit } = SearchQuery.parse(req.query);
+    const outcome = await searchProject({ db, embeddings }, { projectId: id, query: q, limit });
+    // Deleted between the policy hook resolving access and this read — the same 404 a caller who
+    // may not see it would have got.
+    if (outcome.status === 'project_gone') throw new NotFoundError('Project not found');
+    if (outcome.status === 'not_indexed') {
+      throw new SearchUnavailableError('not_indexed', 'This project has no indexed content yet. Index it and try again.');
+    }
+    if (outcome.status === 'model_mismatch') {
+      throw new SearchUnavailableError(
+        'model_mismatch',
+        `This project was indexed with "${outcome.indexedWith}" but the server now embeds with "${outcome.serverUses}". Re-index it before searching.`,
+      );
+    }
+    return {
+      query: q,
+      limit: limit ?? DEFAULT_SEARCH_LIMIT,
+      // The raw score and the path, deliberately: a score an operator cannot see is a score they
+      // cannot reason about, and the path is what read_document takes next. Phase 1 adds fields here.
+      hits: outcome.hits.map((hit) => ({
+        score: hit.score,
+        path: hit.file,
+        title: hit.title,
+        headingPath: hit.headingPath,
+        chunkIndex: hit.chunkIndex,
+        content: hit.content,
+      })),
+    };
   });
 
   app.post('/api/projects', async (req, reply) => {
