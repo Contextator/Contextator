@@ -31,6 +31,12 @@ RUN set -eux; \
     groupadd --system node; \
     useradd --system --gid node --home-dir /app --shell /usr/sbin/nologin node
 COPY --from=build /usr/local/bin/node /usr/local/bin/node
+# npm comes with it, because the last-resort password reset is run as `npm run reset-password`
+# inside this container and there is nowhere else it can be run from (ADR-0032). npm is a JavaScript
+# program under /usr/local/lib rather than a binary next to node, and COPY dereferences the symlink
+# in /usr/local/bin into a file that can no longer find its own modules — hence the link below.
+COPY --from=build /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 
 WORKDIR /app
 # PGDATA=/var/lib/postgresql/data is inherited from the postgres image.
@@ -44,6 +50,11 @@ ENV NODE_ENV=production \
     POSTGRES_DB=contextator
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
+# The server runs dist/; the operator scripts run from source through tsx, which is a runtime
+# dependency for exactly that reason (ADR-0032). src/ is here because scripts/reset-password.ts
+# imports the config, the database client and the schema out of it.
+COPY --from=build --chown=node:node /app/src ./src
+COPY --chown=node:node scripts ./scripts
 COPY --chown=node:node public ./public
 COPY --chown=node:node package.json LICENSE ./
 # Runs once when the PostgreSQL cluster is first created (upstream entrypoint behaviour).

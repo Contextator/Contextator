@@ -574,9 +574,9 @@ public/mcp.js                 a project's MCP access panel and its tokens
 public/auth-page.js           /login, /setup and /change-password — imports nothing from the dashboard
 public/pages/                 body of each product/legal page + the shell they share
 scripts/smoke-mcp.ts          end-to-end MCP client check
-scripts/reset-password.ts     last-resort password reset straight against the database
+scripts/reset-password.ts     last-resort password reset straight against the database; ships in the image and runs there
 test/*.test.ts                unit suite — pure functions, no database, no Docker (`npm test`)
-test/integration/*.itest.ts   ensure-schema and vector-store against a real PostgreSQL + pgvector
+test/integration/*.itest.ts   ensure-schema, vector-store and the password reset against a real PostgreSQL + pgvector
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
 test/integration/fixtures/    a pre-v3 `0.1` schema, derived from history, for the upgrade case
 docs/demo/                    sample documentation (English, Turkish, MDX)
@@ -663,7 +663,7 @@ pull request, against a real server.
 | `Could not load the sharp module` in the container | Regenerate `package-lock.json` on Linux or run `npm install --os=linux --cpu=x64 sharp` before building. |
 | I missed the first-run setup code | Set `SETUP_CODE` in `.env` to something you choose and restart — it is read on every start until the first account exists. Or just restart and read the fresh code the server prints: `docker compose restart contextator && docker compose logs -f`. |
 | I forgot my password | Any root or admin can reset it from **Users → Reset password**, which hands them a temporary one for you. |
-| Nobody can sign in any more | With `ADMIN_TOKEN` set, `curl -XPOST -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:3444/api/users/<id>/password` hands out a temporary one; the same token creates a fresh `root` with `POST /api/users` if every account is gone. This is the only path on a container install: `scripts/` is not copied into the image and `tsx` is pruned from it, so `npm run reset-password` cannot run there. From a source checkout that can reach the database, `npm run reset-password -- <username>` does the same and needs no token. Either way the account's sessions end. |
+| Nobody can sign in any more | `docker compose exec contextator npm run reset-password -- <username>` — the tool ships in the image and has to run there, because the container's PostgreSQL is published nowhere. From a source checkout the same command runs against `DATABASE_URL`. It prints a new temporary password and ends that account's sessions. With `ADMIN_TOKEN` set, `curl -XPOST -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:3444/api/users/<id>/password` does the same. |
 | I cannot delete the last root account | By design — the server answers `409` and the dashboard disables the button. Promote somebody else to `root` first. |
 | Sign-in says *too many attempts* | Rate limiting. Wait out `AUTH_LOGIN_WINDOW_MIN`, or raise `AUTH_LOGIN_MAX_ATTEMPTS`. |
 | The dashboard bounces between `/` and `/login` | The cookie is not coming back. Usually `AUTH_COOKIE_SECURE=1` on a plain-HTTP origin, or a reverse proxy dropping `Set-Cookie`. Set `AUTH_COOKIE_SECURE=0` for an HTTP-only LAN install. |
