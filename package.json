@@ -14,7 +14,7 @@
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "lint": "biome check .",
-    "lint:fix": "biome check --write .",
+    "lint:fix": "biome check --write . && biome check --write .",
     "test": "vitest run",
     "smoke": "tsx scripts/smoke-mcp.ts",
     "reset-password": "tsx scripts/reset-password.ts",
