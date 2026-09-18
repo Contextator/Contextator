@@ -45,7 +45,7 @@ ENV NODE_ENV=production \
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node public ./public
-COPY --chown=node:node package.json ./
+COPY --chown=node:node package.json LICENSE ./
 # Runs once when the PostgreSQL cluster is first created (upstream entrypoint behaviour).
 COPY db/init.sql /docker-entrypoint-initdb.d/01-init.sql
 COPY docker/entrypoint.sh /usr/local/bin/contextator-entrypoint
