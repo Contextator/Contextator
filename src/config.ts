@@ -19,9 +19,24 @@ const EnvSchema = z
     HOST: z.string().default('0.0.0.0'),
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
     PUBLIC_BASE_URL: z.url().optional(),
+    /** Machine access to /api/*, acting with root permissions. People sign in with an account. */
     ADMIN_TOKEN: z.string().min(1).optional(),
     ALLOWED_ORIGINS: z.string().default('').transform(csv),
+    /** MCP transport sessions, not dashboard sign-ins — those are AUTH_SESSION_IDLE_MS. */
     SESSION_IDLE_TTL_MS: z.coerce.number().int().min(60_000).default(30 * 60_000),
+
+    // Authentication (dashboard accounts). See src/auth/.
+    /** A dashboard session that goes unused for this long has to sign in again. */
+    AUTH_SESSION_IDLE_MS: z.coerce.number().int().min(60_000).default(12 * 60 * 60_000),
+    /** Hard ceiling on a session's life, however actively it is used. */
+    AUTH_SESSION_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+    /** `auto` sets Secure when the request arrived over HTTPS; force it behind a proxy. */
+    AUTH_COOKIE_SECURE: z.enum(['auto', '1', '0']).default('auto'),
+    AUTH_LOGIN_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(1000).default(10),
+    AUTH_LOGIN_WINDOW_MIN: z.coerce.number().int().min(1).max(1440).default(15),
+    PASSWORD_MIN_LENGTH: z.coerce.number().int().min(8).max(128).default(12),
+    /** Pins the first-run setup code instead of generating one. Ignored once an account exists. */
+    SETUP_CODE: z.string().min(8).max(128).optional(),
 
     // Database: a connection string, or (when unset) the libpq PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE
     // variables that node-postgres reads itself. The Docker image uses the latter for its embedded PostgreSQL.
@@ -68,6 +83,9 @@ const EnvSchema = z
     }
     if (c.ALLOWED_DOC_ROOTS.length === 0) {
       ctx.addIssue({ code: 'custom', path: ['ALLOWED_DOC_ROOTS'], message: 'at least one directory is required' });
+    }
+    if (c.AUTH_SESSION_TTL_DAYS * 24 * 60 * 60_000 < c.AUTH_SESSION_IDLE_MS) {
+      ctx.addIssue({ code: 'custom', path: ['AUTH_SESSION_TTL_DAYS'], message: 'must not be shorter than AUTH_SESSION_IDLE_MS' });
     }
   });
 

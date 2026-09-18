@@ -1,7 +1,33 @@
 // Contextator admin dashboard — plain ES module, no build step.
 // Master/detail layout: project list on the left, the selected project on the right.
+// Shared helpers live in core.js; accounts in auth.js, users.js and members.js.
 
-const TOKEN_KEY = 'contextator_admin_token';
+import {
+  $,
+  ApiError,
+  api,
+  capitalize,
+  clearLegacyToken,
+  closeDialog,
+  copyText,
+  el,
+  fmt,
+  formatBytes,
+  formatDuration,
+  icon,
+  onBus,
+  openDialog,
+  postForm,
+  relativeTime,
+  shortError,
+  stat,
+  state,
+  toast,
+} from './core.js';
+import { canCreateProject, canDeleteProject, canEdit, initAuthUi, loadMe, renderUserMenu } from './auth.js';
+import { initMembersUi, loadMembers, renderMembers } from './members.js';
+import { initUsersUi, renderUsersView } from './users.js';
+
 const POLL_ACTIVE_MS = 2000;
 const POLL_IDLE_MS = 15000;
 const ACTIVE_PHASES = new Set(['queued', 'scanning', 'embedding', 'finalizing']);
@@ -11,13 +37,6 @@ const TOOLS = [
   { name: 'list_topics', text: 'Every indexed document grouped by directory, with title and chunk count.' },
   { name: 'read_document', text: 'Full Markdown of one indexed file, capped at 512 KB.' },
 ];
-
-const ICON = {
-  copy: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15V6a2 2 0 0 1 2-2h9"></path></svg>',
-  refresh: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 3v6h-6"></path></svg>',
-  trash: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"></path></svg>',
-  plus: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>',
-};
 
 const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN' };
 const SOURCE_TITLE = { local: 'Local directory', git: 'Git repository', upload: 'Uploaded files', notion: 'Notion workspace' };
@@ -34,100 +53,10 @@ const SOURCE_KINDS = {
   notion: { type: 'notion', title: 'Notion', subtitle: 'Pages shared with an internal integration are rendered to Markdown on every sync.' },
 };
 
-const $ = (sel) => document.querySelector(sel);
-const el = (tag, attrs = {}, children = []) => {
-  const node = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') node.className = v;
-    else if (k === 'text') node.textContent = v;
-    else if (k === 'html') node.innerHTML = v; // static icon markup only, never user data
-    else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
-    else if (v !== undefined && v !== null && v !== false) node.setAttribute(k, v === true ? '' : v);
-  }
-  for (const child of [].concat(children)) if (child != null) node.append(child);
-  return node;
-};
-const icon = (name) => el('span', { class: 'icon-wrap', html: ICON[name], 'aria-hidden': 'true' });
-
-const state = {
-  token: safeStorage('get'),
-  projects: [],
-  health: null,
-  selectedId: decodeURIComponent(location.hash.replace(/^#\/?/, '')) || null,
-  runs: [], // index-run history of the selected project
-  runsFor: null, // project id the runs belong to
-  runsStamp: null, // finishedAt of the newest job seen; refetch when it changes
-  sources: [], // document sources of the selected project
-  sourcesFor: null,
-  sourcesStamp: null,
-  confirmDeleteSource: null,
-  filter: '',
-  connectTab: 0,
-  confirmDelete: null,
-  confirmTimer: null,
-  timer: null,
-  authFailed: false,
-};
-
-function safeStorage(op, value) {
-  try {
-    if (op === 'get') return localStorage.getItem(TOKEN_KEY) || '';
-    if (op === 'set') localStorage.setItem(TOKEN_KEY, value);
-    if (op === 'clear') localStorage.removeItem(TOKEN_KEY);
-  } catch {
-    /* storage unavailable (private mode etc.) */
-  }
-  return '';
-}
-
-class ApiError extends Error {
-  constructor(status, body) {
-    super(body?.message || body?.error || `HTTP ${status}`);
-    this.status = status;
-    this.body = body;
-  }
-}
-
-async function api(path, { method = 'GET', body } = {}) {
-  const headers = { accept: 'application/json' };
-  if (body !== undefined) headers['content-type'] = 'application/json';
-  if (state.token) headers.authorization = `Bearer ${state.token}`;
-  const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
-  if (res.status === 401) {
-    state.authFailed = Boolean(state.token);
-    showAuth(true);
-    throw new ApiError(401, { message: 'Admin token required' });
-  }
-  if (res.status === 204) return null;
-  const text = await res.text();
-  const json = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new ApiError(res.status, json);
-  return json;
-}
-
 // ---------- helpers ----------
 
 const isActive = (p) => Boolean(p.job && ACTIVE_PHASES.has(p.job.phase)) || p.status === 'indexing';
 const displayStatus = (p) => (p.job && p.job.phase === 'queued' ? 'queued' : isActive(p) ? 'indexing' : p.status);
-
-function relativeTime(iso) {
-  if (!iso) return 'never';
-  const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
-  if (s < 45) return 'just now';
-  const m = Math.round(s / 60);
-  if (m < 60) return `${m} min ago`;
-  const h = Math.round(m / 60);
-  if (h < 24) return `${h} h ago`;
-  const d = Math.round(h / 24);
-  if (d < 14) return `${d} d ago`;
-  return new Date(iso).toLocaleDateString();
-}
-
-function formatDuration(ms) {
-  const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s} s`;
-  return `${Math.floor(s / 60)} min ${s % 60} s`;
-}
 
 function jobDuration(job) {
   if (!job?.startedAt) return '';
@@ -139,46 +68,6 @@ function jobDuration(job) {
 function runResult(run) {
   if (run.status === 'error') return `failed: ${run.error || 'unknown error'}`;
   return `${fmt(run.filesSkipped)} unchanged · ${fmt(run.filesUpdated)} updated · ${fmt(run.filesRemoved)} removed · ${fmt(run.chunksWritten)} chunks embedded`;
-}
-
-/** First line of an error, shortened for the project list. */
-function shortError(message, max = 40) {
-  const line = String(message || '').split('\n')[0].trim();
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
-}
-
-const fmt = (n) => new Intl.NumberFormat().format(n ?? 0);
-
-let toastTimer;
-function toast(message) {
-  let node = $('.toast');
-  if (!node) {
-    node = el('div', { class: 'toast', role: 'status' });
-    document.body.append(node);
-  }
-  node.textContent = message;
-  node.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => node.classList.remove('show'), 1800);
-}
-
-async function copyText(text) {
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-    } else {
-      // Plain-http LAN origins have no navigator.clipboard.
-      const ta = el('textarea', { style: 'position:fixed;opacity:0;top:0;left:0' });
-      ta.value = text;
-      document.body.append(ta);
-      ta.select();
-      document.execCommand('copy');
-      ta.remove();
-    }
-    toast('Copied');
-  } catch {
-    toast('Copy failed — select the text manually');
-  }
 }
 
 function snippetsFor(project) {
@@ -196,11 +85,48 @@ function snippetsFor(project) {
   ];
 }
 
+/**
+ * Hash routing. Project names are `^[a-z0-9][a-z0-9_-]*`, so a leading `~` can never collide
+ * with one: `#/~users` is the account list, anything else is a project.
+ */
+function parseHash() {
+  const raw = decodeURIComponent(location.hash.replace(/^#\/?/, ''));
+  if (raw === '~users') return { view: 'users', selected: null };
+  return { view: 'projects', selected: raw || null };
+}
+
+function applyHash() {
+  const { view, selected } = parseHash();
+  const changed = view !== state.view;
+  state.view = view;
+  if (view === 'projects' && selected) state.selectedId = selected;
+  document.body.classList.toggle('no-sidebar', view === 'users');
+  if (view === 'users') void loadUsers();
+  if (changed || view === 'users') renderAll();
+}
+
+function renderAll() {
+  renderList();
+  renderDetail();
+}
+
+async function loadUsers() {
+  try {
+    state.users = await api('/api/users');
+    state.usersLoaded = true;
+    if (state.view === 'users') renderDetail();
+  } catch (err) {
+    if (!(err instanceof ApiError && err.status === 401)) toast(err.message);
+  }
+}
+
 function selectedProject() {
   return state.projects.find((p) => p.id === state.selectedId) ?? null;
 }
 
 function select(id) {
+  state.view = 'projects';
+  document.body.classList.remove('no-sidebar');
   state.selectedId = id;
   state.connectTab = 0;
   state.confirmDelete = null;
@@ -211,6 +137,7 @@ function select(id) {
   renderDetail();
   void loadRuns();
   void loadSources();
+  void loadMembers();
 }
 
 /** Fetches the selected project's run history when the selection or the newest job changes. */
@@ -306,6 +233,8 @@ function selectedRoot() {
 function renderList() {
   const container = $('#project-list');
   container.replaceChildren();
+  // Creating a project opens a new unauthenticated /mcp/<name> surface, so it is an admin's call.
+  $('#new-btn').hidden = !canCreateProject();
   const active = state.projects.filter((p) => displayStatus(p) === 'indexing').length;
   $('#project-count').textContent = state.projects.length
     ? `${state.projects.length} project${state.projects.length === 1 ? '' : 's'}${active ? ` · ${active} indexing` : ''}`
@@ -371,18 +300,27 @@ function renderList() {
 function renderDetail() {
   const main = $('#detail');
   main.replaceChildren();
+
+  if (state.view === 'users') {
+    main.append(renderUsersView());
+    return;
+  }
+
   const p = selectedProject();
 
   if (!p) {
+    const mayCreate = canCreateProject();
     main.append(
       el('div', { class: 'empty-state' }, [
         el('h1', { text: state.projects.length ? 'Select a project' : 'No projects yet' }),
         el('p', {
           text: state.projects.length
             ? 'Pick a project on the left to see its status and connection snippets.'
-            : 'Point Contextator at a folder of Markdown files. Every project becomes its own MCP endpoint that agents can search.',
+            : mayCreate
+              ? 'Point Contextator at a folder of Markdown files. Every project becomes its own MCP endpoint that agents can search.'
+              : 'No project has been shared with your account yet. Ask an administrator to add you to one.',
         }),
-        state.projects.length ? null : el('button', { type: 'button', class: 'primary', onclick: openCreate }, [icon('plus'), 'New project']),
+        state.projects.length || !mayCreate ? null : el('button', { type: 'button', class: 'primary', onclick: openCreate }, [icon('plus'), 'New project']),
       ]),
     );
     return;
@@ -392,6 +330,8 @@ function renderDetail() {
   const busy = isActive(p);
   const job = p.job;
   const confirming = state.confirmDelete === p.id;
+  const mayEdit = canEdit(p);
+  const readOnly = mayEdit ? undefined : 'Your role on this project is viewer — re-indexing is done by an editor';
   // `embeddingModel` on a project is the provider-qualified id (e.g. `local:<model>:fp32`), compared with health's `id`.
   const modelMismatch = Boolean(p.embeddingModel && state.health?.embeddings.id && p.embeddingModel !== state.health.embeddings.id);
 
@@ -407,18 +347,31 @@ function renderDetail() {
         ]),
       ]),
       el('div', { class: 'detail-actions' }, [
-        el('button', { type: 'button', class: 'primary', disabled: busy, onclick: () => reindex(p, false) }, [icon('refresh'), busy ? 'Indexing…' : 'Re-index']),
-        el('button', { type: 'button', class: 'ghost', disabled: busy, title: 'Drop and rebuild every chunk', onclick: () => reindex(p, true), text: 'Force re-index' }),
-        el(
-          'button',
-          {
-            type: 'button',
-            class: `danger${confirming ? ' confirm' : ''}`,
-            disabled: busy,
-            onclick: () => (confirming ? remove(p) : askDelete(p)),
-          },
-          confirming ? ['Confirm delete'] : [icon('trash'), 'Delete'],
-        ),
+        // Disabled rather than hidden: a viewer should see that re-indexing exists, and who to ask.
+        el('button', { type: 'button', class: 'primary', disabled: busy || !mayEdit, title: readOnly, onclick: () => reindex(p, false) }, [
+          icon('refresh'),
+          busy ? 'Indexing…' : 'Re-index',
+        ]),
+        el('button', {
+          type: 'button',
+          class: 'ghost',
+          disabled: busy || !mayEdit,
+          title: readOnly ?? 'Drop and rebuild every chunk',
+          onclick: () => reindex(p, true),
+          text: 'Force re-index',
+        }),
+        canDeleteProject()
+          ? el(
+              'button',
+              {
+                type: 'button',
+                class: `danger${confirming ? ' confirm' : ''}`,
+                disabled: busy,
+                onclick: () => (confirming ? remove(p) : askDelete(p)),
+              },
+              confirming ? ['Confirm delete'] : [icon('trash'), 'Delete'],
+            )
+          : null,
       ]),
     ]),
   );
@@ -472,6 +425,7 @@ function renderDetail() {
   );
 
   main.append(renderSources(p, busy));
+  main.append(renderMembers(p));
 
   // Connect + tools
   const snippets = snippetsFor(p);
@@ -562,22 +516,27 @@ function sourceSummary(p) {
 /** One line per source: where it comes from, how many documents it contributed, when it last synced. */
 function renderSources(project, busy) {
   const sources = state.sourcesFor === project.id ? state.sources : [];
+  const mayEdit = canEdit(project);
   const rows = sources.map((s) => {
     const confirming = state.confirmDeleteSource === s.id;
     const failed = s.status === 'error';
     const actions = [
-      s.type === 'git' || s.type === 'notion'
+      mayEdit && (s.type === 'git' || s.type === 'notion')
         ? el('button', { type: 'button', class: 'ghost small', title: 'Check the connection without indexing', text: 'Test', onclick: () => testSource(project, s) })
         : null,
-      el('button', { type: 'button', class: 'ghost small', disabled: busy, title: 'Sync this source and re-index the project', text: 'Sync', onclick: () => syncSource(project, s) }),
-      el('button', { type: 'button', class: 'ghost small', text: s.type === 'upload' ? 'Files' : 'Edit', onclick: () => openSourceDialog(project, s) }),
-      el('button', {
-        type: 'button',
-        class: `danger small${confirming ? ' confirm' : ''}`,
-        disabled: busy,
-        text: confirming ? 'Confirm' : 'Delete',
-        onclick: () => (confirming ? removeSource(project, s) : askDeleteSource(s)),
-      }),
+      mayEdit
+        ? el('button', { type: 'button', class: 'ghost small', disabled: busy, title: 'Sync this source and re-index the project', text: 'Sync', onclick: () => syncSource(project, s) })
+        : null,
+      el('button', { type: 'button', class: 'ghost small', text: mayEdit ? (s.type === 'upload' ? 'Files' : 'Edit') : 'View', onclick: () => openSourceDialog(project, s) }),
+      mayEdit
+        ? el('button', {
+            type: 'button',
+            class: `danger small${confirming ? ' confirm' : ''}`,
+            disabled: busy,
+            text: confirming ? 'Confirm' : 'Delete',
+            onclick: () => (confirming ? removeSource(project, s) : askDeleteSource(s)),
+          })
+        : null,
     ];
     return el('div', { class: 'source-row' }, [
       el('span', { class: `source-glyph ${failed ? 'error' : s.type}`, text: SOURCE_GLYPH[s.type] ?? '?' }),
@@ -599,11 +558,16 @@ function renderSources(project, busy) {
         el('h3', { text: 'Document sources' }),
         el('p', { text: 'Every source is mounted under its own name; a document\u2019s path is <source>/<path inside it>. All of them are synced at the start of an index run.' }),
       ]),
-      el('button', { type: 'button', class: 'primary small', onclick: () => openSourceDialog(project, null) }, [icon('plus'), 'Add source']),
+      mayEdit ? el('button', { type: 'button', class: 'primary small', onclick: () => openSourceDialog(project, null) }, [icon('plus'), 'Add source']) : null,
     ]),
     rows.length
       ? el('div', {}, rows)
-      : el('p', { class: 'sources-empty', text: 'No sources yet. Add a local directory, a git repository, an upload or a Notion workspace to give this project something to index.' }),
+      : el('p', {
+          class: 'sources-empty',
+          text: mayEdit
+            ? 'No sources yet. Add a local directory, a git repository, an upload or a Notion workspace to give this project something to index.'
+            : 'No sources yet. An editor on this project can add one.',
+        }),
   ]);
 }
 
@@ -627,51 +591,34 @@ function sourceDetail(s) {
   return ext || '—';
 }
 
-function stat(label, value, sub, title, mono = false, warn = false) {
-  return el('div', { class: 'stat' }, [
-    el('span', { class: 'label', text: label }),
-    el('span', { class: `value${mono ? ' mono' : ''}`, text: value, title: title || undefined }),
-    sub ? el('span', { class: `sub${warn ? ' warn' : ''}`, text: sub }) : null,
-  ]);
-}
-
-const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-
-function showAuth(show) {
-  const gate = $('#auth-gate');
-  gate.hidden = !show;
-  if (show) {
-    const err = $('#auth-error');
-    err.hidden = !state.authFailed;
-    err.textContent = state.authFailed ? 'That token was rejected. Check ADMIN_TOKEN on the server.' : '';
-    $('#auth-token').focus();
-  }
-}
-
 // ---------- actions ----------
 
 async function refresh() {
-  // Health is exempt from ADMIN_TOKEN, so the top bar stays live even while the token gate is shown.
-  const [healthRes, projectsRes] = await Promise.allSettled([api('/api/health'), api('/api/projects')]);
+  // `me` rides along so a role change on the server reaches the UI without a reload.
+  const [healthRes, projectsRes, meRes] = await Promise.allSettled([api('/api/health'), api('/api/projects'), api('/api/auth/me')]);
   state.health = healthRes.status === 'fulfilled' ? healthRes.value : null;
+  if (meRes.status === 'fulfilled') state.me = meRes.value;
   renderHealth();
+  renderUserMenu();
 
   if (projectsRes.status === 'fulfilled') {
     state.projects = projectsRes.value;
-    state.authFailed = false;
-    showAuth(false);
     if (!state.projects.some((p) => p.id === state.selectedId)) {
       // A hash may carry the project *name* on first load; otherwise fall back to the first project.
       const byName = state.projects.find((p) => p.name === state.selectedId);
       state.selectedId = byName?.id ?? state.projects[0]?.id ?? null;
       const p = selectedProject();
-      if (p) history.replaceState(null, '', `#/${encodeURIComponent(p.name)}`);
+      // Only while the projects view is the one on screen — otherwise this would rewrite #/~users.
+      if (p && state.view === 'projects') history.replaceState(null, '', `#/${encodeURIComponent(p.name)}`);
     }
     renderList();
     renderDetail();
     void loadRuns();
     void loadSources();
+    void loadMembers(); // no-op unless the selection moved; the dialog forces its own reload
   }
+  // The account list is not part of a project poll; refresh it only while it is on screen.
+  if (state.view === 'users') void loadUsers();
   schedule();
 }
 
@@ -727,14 +674,12 @@ function openCreate() {
   createForm.reset();
   createForm.elements.index.checked = true;
   updateUrlPreview();
-  if (typeof dialog.showModal === 'function') dialog.showModal();
-  else dialog.setAttribute('open', '');
+  openDialog(dialog);
   createForm.elements.name.focus();
 }
 
 function closeCreate() {
-  if (dialog.open) dialog.close();
-  else dialog.removeAttribute('open');
+  closeDialog(dialog);
 }
 
 function updateUrlPreview() {
@@ -833,19 +778,12 @@ const SECRET_HINT_HTML = $('#secret-hint').innerHTML;
 const QUEUE_LABEL = { queued: 'queued', busy: 'uploading…', ok: 'uploaded', skip: 'skipped', fail: 'failed' };
 const ARCHIVE_RE = /\.(zip|tar|tgz|tar\.gz|rar)$/i;
 
-const srcUi = { kind: 'local', project: null, editing: null, queue: [], existingFiles: [], busy: false };
+const srcUi = { kind: 'local', project: null, editing: null, queue: [], existingFiles: [], busy: false, readOnly: false };
 
 const kindOfSource = (s) => (s.type === 'upload' && s.flavor === 'obsidian' ? 'obsidian' : s.type);
 const isUploadKind = (kind) => SOURCE_KINDS[kind].type === 'upload';
 const uploadMode = () => srcForm.elements.mode.value;
 const allowedRoots = () => state.health?.allowedDocRoots || [];
-
-function formatBytes(n) {
-  if (!n) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
-  return `${(n / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-}
 
 /** Mirrors the New-project directory field: fixed prefix for one allowed root, a select for several. */
 function renderSrcRootPrefix() {
@@ -896,8 +834,14 @@ function setKind(kind) {
     row.hidden = !(editing?.hasSecret && meta.type === type);
     if (row.hidden) row.querySelector('input').checked = false;
   }
-  $('#webhook-box').hidden = !(editing && meta.type === 'git');
+  // A viewer may read a source's settings but not its secrets, its files or the save button.
+  $('#webhook-box').hidden = !(editing && meta.type === 'git') || srcUi.readOnly;
+  $('#dropzone').hidden = srcUi.readOnly;
+  $('#upload-mode-row').hidden = $('#upload-mode-row').hidden || srcUi.readOnly;
+  $('#source-submit').hidden = srcUi.readOnly;
+  $('#source-test').hidden = $('#source-test').hidden || srcUi.readOnly;
   $('#source-submit').textContent = editing ? 'Save changes' : 'Add source';
+  $('#source-cancel').textContent = srcUi.readOnly ? 'Close' : 'Cancel';
   renderQueue();
 }
 
@@ -907,6 +851,7 @@ function openSourceDialog(project, source) {
   srcUi.queue = [];
   srcUi.existingFiles = [];
   srcUi.busy = false;
+  srcUi.readOnly = !canEdit(project);
   $('#source-error').hidden = true;
   srcForm.reset();
   srcForm.elements.secret.placeholder = 'leave empty for public repositories';
@@ -915,23 +860,25 @@ function openSourceDialog(project, source) {
   renderSrcRootPrefix();
 
   // Type and name are the mount prefix of every document path, so neither can change after creation.
-  for (const tab of srcTabs) tab.disabled = Boolean(source);
+  for (const tab of srcTabs) tab.disabled = Boolean(source) || srcUi.readOnly;
   srcForm.elements.name.disabled = Boolean(source);
   srcForm.elements.index.checked = true;
   if (source) fillSourceForm(source);
   setKind(source ? kindOfSource(source) : 'local');
+  if (srcUi.readOnly) {
+    for (const field of srcForm.querySelectorAll('input, select, textarea')) field.disabled = true;
+    for (const secret of [srcForm.elements.secret, srcForm.elements.notionSecret]) secret.value = '';
+  }
 
-  if (typeof srcDialog.showModal === 'function') srcDialog.showModal();
-  else srcDialog.setAttribute('open', '');
+  openDialog(srcDialog);
   (source ? srcForm.elements.label : srcForm.elements.name).focus();
 
-  if (source?.type === 'git') renderWebhook(project, source);
-  if (source?.type === 'upload') void loadSourceFiles(project, source);
+  if (source?.type === 'git' && !srcUi.readOnly) renderWebhook(project, source);
+  if (source?.type === 'upload' && !srcUi.readOnly) void loadSourceFiles(project, source);
 }
 
 function closeSourceDialog() {
-  if (srcDialog.open) srcDialog.close();
-  else srcDialog.removeAttribute('open');
+  closeDialog(srcDialog);
 }
 
 function fillSourceForm(s) {
@@ -1137,22 +1084,6 @@ async function loadSourceFiles(project, source) {
   }
 }
 
-/** Multipart sibling of api(): FormData sets its own content-type boundary. */
-async function postForm(path, form) {
-  const headers = { accept: 'application/json' };
-  if (state.token) headers.authorization = `Bearer ${state.token}`;
-  const res = await fetch(path, { method: 'POST', headers, body: form });
-  if (res.status === 401) {
-    state.authFailed = Boolean(state.token);
-    showAuth(true);
-    throw new ApiError(401, { message: 'Admin token required' });
-  }
-  const text = await res.text();
-  const json = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new ApiError(res.status, json);
-  return json;
-}
-
 /**
  * Uploads the queue into a staging session and commits it. Files go up in batches so a folder of
  * thousands stays inside the server's per-request limits; archives large enough to matter go alone.
@@ -1331,14 +1262,7 @@ srcForm.addEventListener('submit', async (event) => {
   }
 });
 
-// ---------- auth + filter ----------
-
-$('#auth-form').addEventListener('submit', (event) => {
-  event.preventDefault();
-  state.token = $('#auth-token').value.trim();
-  safeStorage('set', state.token);
-  refresh();
-});
+// ---------- filter, shortcuts and boot ----------
 
 $('#filter').addEventListener('input', (event) => {
   state.filter = event.target.value;
@@ -1346,7 +1270,7 @@ $('#filter').addEventListener('input', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'n' && !event.metaKey && !event.ctrlKey && !event.altKey && !dialog.open && !srcDialog.open && !$('#auth-gate').matches(':not([hidden])')) {
+  if (event.key === 'n' && !event.metaKey && !event.ctrlKey && !event.altKey && !dialog.open && !srcDialog.open && state.view === 'projects' && canCreateProject()) {
     const tag = document.activeElement?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') return;
     event.preventDefault();
@@ -1354,7 +1278,28 @@ document.addEventListener('keydown', (event) => {
   }
 });
 
+window.addEventListener('hashchange', applyHash);
+
+// A feature module changed something the dashboard shows; it cannot import refresh() back (cycle).
+onBus('refresh', () => void refresh());
+onBus('render', () => renderAll());
+
 // The footer's version arrives with the first health poll; the year does not have to wait for it.
 $('#footer-year').textContent = String(new Date().getFullYear());
 
-refresh();
+/**
+ * The server only serves this page to a signed-in account, so `me` is there before the first paint.
+ * `booting` keeps the chrome hidden until it is, so no frame shows an empty user menu.
+ */
+async function boot() {
+  clearLegacyToken(); // the Cookie Policy promises this
+  initAuthUi();
+  initUsersUi();
+  initMembersUi();
+  await loadMe();
+  applyHash();
+  document.body.classList.remove('booting');
+  await refresh();
+}
+
+void boot();

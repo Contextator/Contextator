@@ -13,15 +13,18 @@
     />
     <link rel="stylesheet" href="/style.css" />
   </head>
-  <body>
+  <body class="booting">
     <header class="topbar">
       <div class="brand">
         <span class="logo" aria-hidden="true">C</span>
         <span class="brand-name">Contextator</span>
         <span class="brand-tag">MCP documentation server</span>
       </div>
-      <div id="health" class="health" aria-live="polite">
-        <span class="pill queued">connecting…</span>
+      <div class="topbar-right">
+        <div id="health" class="health" aria-live="polite">
+          <span class="pill queued">connecting…</span>
+        </div>
+        <div id="user-menu" class="user-menu"></div>
       </div>
     </header>
 
@@ -263,23 +266,134 @@
       </form>
     </dialog>
 
-    <section id="auth-gate" class="gate" hidden>
-      <form id="auth-form" class="gate-card">
-        <span class="gate-icon" aria-hidden="true">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path></svg>
-        </span>
-        <h1>Admin token required</h1>
-        <p class="muted">This server runs with <code>ADMIN_TOKEN</code> set. Paste it once; it stays in this browser only.</p>
-        <label class="field">
-          <span class="field-label">Token</span>
-          <input id="auth-token" type="password" placeholder="ADMIN_TOKEN" autocomplete="off" required />
-        </label>
-        <p id="auth-error" class="form-error" role="alert" hidden></p>
-        <button type="submit" class="primary block">Unlock dashboard</button>
-        <p class="field-hint center">The MCP endpoints under <code>/mcp/*</code> are not affected by this token.</p>
+    <dialog id="user-dialog" class="dialog">
+      <form id="user-form" method="dialog" novalidate>
+        <div class="dialog-head">
+          <h2 id="user-dialog-title">New user</h2>
+          <p class="muted">Accounts govern the dashboard and the admin API. They do not gate <code>/mcp/*</code>, which stays unauthenticated by design.</p>
+        </div>
+        <div class="dialog-body">
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">Username</span>
+              <input name="username" pattern="[a-z0-9][a-z0-9._\-]{1,62}" maxlength="63" autocomplete="off" autocapitalize="none" spellcheck="false" required />
+              <span class="field-hint">Used to sign in; cannot change later</span>
+            </label>
+            <label class="field">
+              <span class="field-label">Display name</span>
+              <input name="displayName" maxlength="100" autocomplete="off" />
+              <span class="field-hint">Optional</span>
+            </label>
+          </div>
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">Email <span class="muted">— optional</span></span>
+              <input name="email" type="email" maxlength="200" autocomplete="off" />
+              <span class="field-hint">Contact detail only. This server sends no mail.</span>
+            </label>
+            <label class="field">
+              <span class="field-label">Role</span>
+              <select name="role"></select>
+              <span class="field-hint">A member only sees the projects it is added to.</span>
+            </label>
+          </div>
+          <div class="field" id="user-password-field">
+            <label class="field-label" for="user-password">Temporary password</label>
+            <div class="btn-row">
+              <input id="user-password" name="password" type="text" class="mono grow" autocomplete="off" placeholder="leave empty to generate one" />
+              <button type="button" class="ghost" id="user-generate">Generate</button>
+            </div>
+            <span class="field-hint">Shown once after you save. Send it over a channel you trust.</span>
+          </div>
+          <label class="check" id="user-must-change">
+            <input type="checkbox" name="mustChangePassword" checked />
+            <span>
+              <span class="check-title">Require a password change at first sign-in</span>
+              <span class="field-hint">Until they do, every other endpoint answers 403 for them.</span>
+            </span>
+          </label>
+          <label class="check-inline" id="user-active-row"><input type="checkbox" name="isActive" /> <span>Account is active</span></label>
+          <p id="user-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-foot">
+          <button type="button" class="ghost" id="user-cancel">Cancel</button>
+          <button type="submit" class="primary" id="user-submit">Create user</button>
+        </div>
       </form>
-    </section>
+    </dialog>
 
-    <script type="module" src="/app.js"></script>
+    <dialog id="temp-password-dialog" class="dialog">
+      <div class="dialog-head">
+        <h2>Temporary password</h2>
+        <p class="muted">For <code id="temp-password-who"></code>. This is the only time it is shown — the server keeps only a hash.</p>
+      </div>
+      <div class="dialog-body">
+        <div class="snippet">
+          <pre id="temp-password-value"></pre>
+          <button type="button" class="copy" id="temp-password-copy">Copy</button>
+        </div>
+        <p class="field-hint">Send it over a channel you trust. They must replace it the first time they sign in.</p>
+      </div>
+      <div class="dialog-foot">
+        <button type="button" class="primary" id="temp-password-close">Done</button>
+      </div>
+    </dialog>
+
+    <dialog id="member-dialog" class="dialog">
+      <form id="member-form" method="dialog" novalidate>
+        <div class="dialog-head">
+          <h2>Add member</h2>
+          <p class="muted">Give a member account access to this project.</p>
+        </div>
+        <div class="dialog-body">
+          <p id="member-empty" class="field-hint" hidden>Every member account already has access to this project. Create one from <a href="#/~users">Users</a> first.</p>
+          <div id="member-picker">
+            <label class="field">
+              <span class="field-label">Account</span>
+              <select name="userId"></select>
+            </label>
+            <div class="radio-row">
+              <label><input type="radio" name="role" value="viewer" checked /> Viewer — reads the project</label>
+              <label><input type="radio" name="role" value="editor" /> Editor — adds sources, uploads, re-indexes</label>
+            </div>
+          </div>
+          <p id="member-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-foot">
+          <button type="button" class="ghost" id="member-cancel">Cancel</button>
+          <button type="submit" class="primary" id="member-submit">Add member</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="password-dialog" class="dialog">
+      <form id="password-form" method="dialog" novalidate>
+        <div class="dialog-head">
+          <h2>Change password</h2>
+          <p class="muted">Your other sessions are signed out when you save.</p>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span class="field-label">Current password</span>
+            <input name="currentPassword" type="password" autocomplete="current-password" required />
+          </label>
+          <label class="field">
+            <span class="field-label">New password</span>
+            <input name="newPassword" type="password" autocomplete="new-password" required />
+          </label>
+          <label class="field">
+            <span class="field-label">Repeat new password</span>
+            <input name="confirmPassword" type="password" autocomplete="new-password" required />
+          </label>
+          <p id="password-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-foot">
+          <button type="button" class="ghost" id="password-cancel">Cancel</button>
+          <button type="submit" class="primary" id="password-submit">Change password</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="/app.js?v={{version}}"></script>
   </body>
 </html>

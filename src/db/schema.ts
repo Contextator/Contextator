@@ -1,4 +1,4 @@
-import { index, integer, jsonb, pgEnum, pgTable, text, timestamp, unique, uuid, vector } from 'drizzle-orm/pg-core';
+import { boolean, index, integer, jsonb, pgEnum, pgTable, primaryKey, text, timestamp, unique, uuid, vector } from 'drizzle-orm/pg-core';
 import { embeddingDimensionsFromEnv } from '../config.js';
 
 /**
@@ -124,12 +124,78 @@ export const indexRuns = pgTable(
   (t) => [index('index_runs_project_idx').on(t.projectId, t.startedAt)],
 );
 
+/** Dashboard accounts. `root` and `admin` reach every project; a `member` only its memberships. */
+export const users = pgTable('users', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  /** Login identifier, lowercased by the service layer. There is no mail transport, so it is not an e-mail. */
+  username: text('username').notNull().unique(),
+  /** Optional contact detail only; nothing is ever sent to it. */
+  email: text('email'),
+  displayName: text('display_name').notNull().default(''),
+  /** `root` | `admin` | `member` (CHECK constraint lives in ensure-schema.ts). */
+  role: text('role').notNull().default('member').$type<UserRole>(),
+  /** services/passwords.ts wire format; never returned by the API. */
+  passwordHash: text('password_hash').notNull(),
+  isActive: boolean('is_active').notNull().default(true),
+  mustChangePassword: boolean('must_change_password').notNull().default(false),
+  failedLoginCount: integer('failed_login_count').notNull().default(0),
+  lockedUntil: timestamp('locked_until', { withTimezone: true }),
+  lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+  passwordChangedAt: timestamp('password_changed_at', { withTimezone: true }).notNull().defaultNow(),
+  createdBy: uuid('created_by'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** One row per signed-in browser. Only the hash of the cookie's token is stored. */
+export const userSessions = pgTable(
+  'user_sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tokenHash: text('token_hash').notNull().unique(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Idle expiry is measured from here against AUTH_SESSION_IDLE_MS, so the TTL stays a live setting. */
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    userAgent: text('user_agent').notNull().default(''),
+    ip: text('ip'),
+  },
+  (t) => [index('user_sessions_user_idx').on(t.userId), index('user_sessions_expires_idx').on(t.expiresAt)],
+);
+
+/** Which member account reaches which project, and how far. */
+export const projectMembers = pgTable(
+  'project_members',
+  {
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id, { onDelete: 'cascade' }),
+    /** `viewer` | `editor` (CHECK constraint lives in ensure-schema.ts). */
+    role: text('role').notNull().$type<ProjectMemberRole>(),
+    createdBy: uuid('created_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.projectId] }), index('project_members_project_idx').on(t.projectId)],
+);
+
 export const settings = pgTable('settings', {
   key: text('key').primaryKey(),
   value: text('value').notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+export type UserRole = 'root' | 'admin' | 'member';
+export type ProjectMemberRole = 'viewer' | 'editor';
+
+export type UserRow = typeof users.$inferSelect;
+export type UserSessionRow = typeof userSessions.$inferSelect;
+export type ProjectMemberRow = typeof projectMembers.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 export type DocumentSourceRow = typeof documentSources.$inferSelect;
 export type DocumentRow = typeof documents.$inferSelect;

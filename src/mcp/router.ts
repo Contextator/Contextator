@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
+import { isOriginAllowed } from '../services/origin.js';
 import { getProjectByName } from '../services/projects.js';
 import { createProjectMcpServer } from './server-factory.js';
 
@@ -29,30 +30,16 @@ interface McpRoute {
 
 const rpcError = (code: number, message: string) => ({ jsonrpc: '2.0' as const, error: { code, message }, id: null });
 const headerValue = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
-const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
 export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
   const { config, sessions, log } = ctx;
   const legacySsePingMs = 25_000;
 
-  /**
-   * Origin validation (DNS-rebinding protection). Non-browser clients send no Origin and pass.
-   * Browser origins pass when listed in ALLOWED_ORIGINS, when they are local, or when they match the request host.
-   */
-  function isOriginAllowed(origin: string, req: FastifyRequest): boolean {
-    if (config.ALLOWED_ORIGINS.includes(origin)) return true;
-    try {
-      const url = new URL(origin);
-      if (LOCAL_HOSTS.has(url.hostname)) return true;
-      return url.host === req.host;
-    } catch {
-      return false;
-    }
-  }
-
+  // Origin validation (DNS-rebinding protection). Non-browser clients send no Origin and pass.
+  // Browser origins pass when listed in ALLOWED_ORIGINS, when they are local, or when they match the host.
   app.addHook('onRequest', async (req, reply) => {
     const origin = req.headers.origin;
-    if (origin && !isOriginAllowed(origin, req)) {
+    if (origin && !isOriginAllowed(origin, req.host, config.ALLOWED_ORIGINS)) {
       return reply.code(403).send(rpcError(-32000, 'Forbidden origin'));
     }
   });

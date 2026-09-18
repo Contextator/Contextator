@@ -1,9 +1,14 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import Fastify from 'fastify';
 import { describe, expect, it } from 'vitest';
+import { AUTH_PAGES, authPageRoutes, safeNext } from '../src/admin/auth-pages.js';
+import { SESSION_COOKIE } from '../src/auth/cookies.js';
 import { PAGES, footerNav, pageRoutes, renderPage } from '../src/admin/pages.js';
+import type { AppContext } from '../src/context.js';
+import { SetupGate } from '../src/services/auth/setup.js';
 
 describe('renderPage', () => {
   it('substitutes every placeholder in one pass', () => {
@@ -27,6 +32,11 @@ describe('footerNav', () => {
     for (const page of PAGES) expect(nav).toContain(`href="/${page.slug}"`);
     expect(nav).toContain('href="/cookies" aria-current="page"');
     expect(nav.match(/aria-current/g)).toHaveLength(1);
+  });
+
+  it('carries the product and legal pages only — /login and /setup never belong in a footer', () => {
+    expect(footerNav().match(/<a /g)).toHaveLength(PAGES.length);
+    for (const page of AUTH_PAGES) expect(footerNav()).not.toContain(`href="/${page.slug}"`);
   });
 });
 
@@ -77,5 +87,121 @@ describe('pageRoutes', () => {
     expect((await app.inject({ method: 'GET', url: '/' })).body).toContain('<div class="layout">');
     expect((await app.inject({ method: 'GET', url: '/style.css' })).statusCode).toBe(200);
     await app.close();
+  });
+});
+
+/** No cookie is ever sent in these, so the plugin never reaches the database. */
+async function buildAuthPages(needsSetup: boolean) {
+  const app = Fastify();
+  await app.register(cookie);
+  const setup = new SetupGate();
+  setup.arm(needsSetup ? 0 : 1);
+  const ctx = { config: { AUTH_SESSION_IDLE_MS: 1000 }, db: {}, setup, version: '9.9.9' } as unknown as AppContext;
+  await app.register(fastifyStatic, {
+    root: fileURLToPath(new URL('../public', import.meta.url)),
+    prefix: '/',
+    index: false, // `/` must be the guarded route, not the static file
+  });
+  await app.register(authPageRoutes, { ctx });
+  return app;
+}
+
+describe('safeNext', () => {
+  it('accepts a path on this server and rejects anything that could be another origin', () => {
+    expect(safeNext('/%23%2Fbilling')).toBe('/#/billing');
+    expect(safeNext('/settings?tab=1')).toBe('/settings?tab=1');
+    expect(safeNext(undefined)).toBe('/');
+    expect(safeNext('')).toBe('/');
+    expect(safeNext('//evil.example/')).toBe('/');
+    expect(safeNext('/\\evil.example/')).toBe('/');
+    expect(safeNext('https://evil.example/')).toBe('/');
+    expect(safeNext('%E0%A4%A')).toBe('/'); // malformed percent-encoding must not throw
+  });
+});
+
+describe('authPageRoutes', () => {
+  it('serves the sign-in page without a trace of the dashboard', async () => {
+    const app = await buildAuthPages(false);
+    const res = await app.inject({ method: 'GET', url: '/login' });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toContain('text/html');
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.body).toContain('<title>Sign in · Contextator</title>');
+    expect(res.body).not.toContain('{{');
+    // The whole point of a separate page: an anonymous visitor never receives the dashboard.
+    expect(res.body).not.toContain('<div class="layout">');
+    expect(res.body).not.toContain('/app.js');
+    await app.close();
+  });
+
+  it('sends an anonymous visitor from / to /login, remembering where they were', async () => {
+    const app = await buildAuthPages(false);
+    for (const url of ['/', '/index.html']) {
+      const res = await app.inject({ method: 'GET', url });
+      expect(res.statusCode).toBe(302);
+      expect(res.headers.location).toBe('/login?next=%2F');
+    }
+    await app.close();
+  });
+
+  it('sends everyone to /setup while the instance has no account', async () => {
+    const app = await buildAuthPages(true);
+    expect((await app.inject({ method: 'GET', url: '/' })).headers.location).toBe('/setup');
+    expect((await app.inject({ method: 'GET', url: '/setup' })).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('closes /setup for good once an account exists', async () => {
+    const app = await buildAuthPages(false);
+    const res = await app.inject({ method: 'GET', url: '/setup' });
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe('/login');
+    await app.close();
+  });
+
+  it('keeps /change-password behind a session', async () => {
+    const app = await buildAuthPages(false);
+    const res = await app.inject({ method: 'GET', url: '/change-password' });
+    expect(res.statusCode).toBe(302);
+    expect(res.headers.location).toBe('/login?next=%2Fchange-password');
+    await app.close();
+  });
+
+  it('wins over the static wildcard for / and index.html', async () => {
+    const app = await buildAuthPages(false);
+    // A stale `index: ['index.html']` on @fastify/static would serve the dashboard unguarded here.
+    expect((await app.inject({ method: 'GET', url: '/' })).statusCode).toBe(302);
+    expect((await app.inject({ method: 'GET', url: '/style.css' })).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('ignores a cookie name it does not set', async () => {
+    const app = await buildAuthPages(false);
+    const res = await app.inject({ method: 'GET', url: '/', headers: { cookie: 'unrelated=1' } });
+    expect(res.statusCode).toBe(302);
+    expect(SESSION_COOKIE).toBe('contextator_session');
+    await app.close();
+  });
+});
+
+/**
+ * The Cookie and Privacy pages make claims about this software. They were true before accounts
+ * existed and would be lies afterwards, so the claims are pinned here: change the behaviour and
+ * these fail until the page is rewritten.
+ */
+describe('the legal pages tell the truth about accounts', () => {
+  it('names the session cookie and no longer claims there is none', async () => {
+    const body = await readFile(new URL('../public/pages/cookies.html', import.meta.url), 'utf8');
+    expect(body).toContain(SESSION_COOKIE);
+    expect(body).not.toContain('sets no cookies');
+    expect(body).not.toContain('they are not planned');
+  });
+
+  it('no longer claims the software has no accounts', async () => {
+    const body = await readFile(new URL('../public/pages/privacy.html', import.meta.url), 'utf8');
+    expect(body).not.toContain('has no accounts');
+    expect(body).toContain(SESSION_COOKIE);
+    expect(body).toContain('scrypt');
   });
 });

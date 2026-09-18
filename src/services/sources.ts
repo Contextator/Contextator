@@ -52,8 +52,10 @@ export interface SourceView {
   flavor: Flavor;
   config: Record<string, unknown>;
   hasSecret: boolean;
-  /** Git only: shared secret the provider signs webhook deliveries with. */
+  /** Git only: shared secret the provider signs webhook deliveries with. Editors only. */
   webhookSecret: string | null;
+  /** So a viewer's dashboard can say a webhook is configured without showing its secret. */
+  hasWebhookSecret: boolean;
   status: string;
   lastSyncedAt: Date | null;
   lastError: string | null;
@@ -61,7 +63,13 @@ export interface SourceView {
   createdAt: Date;
 }
 
-export function toSourceView(row: DocumentSourceRow): SourceView {
+export interface SourceViewOptions {
+  /** A project viewer may read a source's settings but not the secret a push webhook signs with. */
+  revealWebhookSecret?: boolean;
+}
+
+export function toSourceView(row: DocumentSourceRow, opts: SourceViewOptions = {}): SourceView {
+  const reveal = opts.revealWebhookSecret ?? true;
   return {
     id: row.id,
     projectId: row.projectId,
@@ -71,7 +79,8 @@ export function toSourceView(row: DocumentSourceRow): SourceView {
     flavor: row.flavor as Flavor,
     config: row.config,
     hasSecret: Boolean(row.secretEnc),
-    webhookSecret: row.type === 'git' ? row.webhookSecret : null,
+    webhookSecret: reveal && row.type === 'git' ? row.webhookSecret : null,
+    hasWebhookSecret: row.type === 'git' && Boolean(row.webhookSecret),
     status: row.status,
     lastSyncedAt: row.lastSyncedAt,
     lastError: row.lastError,

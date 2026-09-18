@@ -17,7 +17,7 @@ export interface EnsureSchemaOptions {
   log: Logger;
 }
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const ADVISORY_LOCK_KEY = 7213001;
 
 /**
@@ -126,6 +126,55 @@ export async function ensureSchema(db: Db, opts: EnsureSchemaOptions): Promise<v
       error text
     )`);
     await run(`CREATE INDEX IF NOT EXISTS index_runs_project_idx ON index_runs (project_id, started_at DESC)`);
+
+    // v4: dashboard accounts. A CHECK rather than an enum, so the set of roles can move with an
+    // idempotent DROP/ADD CONSTRAINT instead of the pain of ALTER TYPE.
+    await run(`CREATE TABLE IF NOT EXISTS users (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      username text NOT NULL UNIQUE,
+      email text,
+      display_name text NOT NULL DEFAULT '',
+      role text NOT NULL DEFAULT 'member',
+      password_hash text NOT NULL,
+      is_active boolean NOT NULL DEFAULT true,
+      must_change_password boolean NOT NULL DEFAULT false,
+      failed_login_count integer NOT NULL DEFAULT 0,
+      locked_until timestamptz,
+      last_login_at timestamptz,
+      password_changed_at timestamptz NOT NULL DEFAULT now(),
+      created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await run(`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`);
+    await run(`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('root', 'admin', 'member'))`);
+
+    await run(`CREATE TABLE IF NOT EXISTS user_sessions (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      token_hash text NOT NULL UNIQUE,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      last_seen_at timestamptz NOT NULL DEFAULT now(),
+      expires_at timestamptz NOT NULL,
+      revoked_at timestamptz,
+      user_agent text NOT NULL DEFAULT '',
+      ip text
+    )`);
+    await run(`CREATE INDEX IF NOT EXISTS user_sessions_user_idx ON user_sessions (user_id)`);
+    await run(`CREATE INDEX IF NOT EXISTS user_sessions_expires_idx ON user_sessions (expires_at)`);
+
+    // PK order is (user_id, project_id): the hot queries are "this account's projects" and the
+    // point lookup, both served by that index. The reverse direction gets its own.
+    await run(`CREATE TABLE IF NOT EXISTS project_members (
+      user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      project_id uuid NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      role text NOT NULL,
+      created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (user_id, project_id)
+    )`);
+    await run(`ALTER TABLE project_members DROP CONSTRAINT IF EXISTS project_members_role_check`);
+    await run(`ALTER TABLE project_members ADD CONSTRAINT project_members_role_check CHECK (role IN ('viewer', 'editor'))`);
+    await run(`CREATE INDEX IF NOT EXISTS project_members_project_idx ON project_members (project_id)`);
 
     // Dimension guard: the column type is fixed once created.
     const stored = await tx.execute(sql`SELECT value FROM settings WHERE key = 'embedding_dimensions'`);

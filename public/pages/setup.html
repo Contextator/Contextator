@@ -1,0 +1,37 @@
+<form class="gate-card" id="setup-form" novalidate>
+  <span class="gate-icon" aria-hidden="true">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3m0 12v3m9-9h-3M6 12H3m13.5-6.5-2 2m-7 7-2 2m0-11 2 2m7 7 2 2"></path><circle cx="12" cy="12" r="3.5"></circle></svg>
+  </span>
+  <h1>First-run setup</h1>
+  <p class="muted">
+    No account exists on this instance yet. The server printed a one-time code to its log; paste it here to create the
+    first <strong>root</strong> account. Restart the server if you no longer have the code — a new one is printed every
+    start until an account exists.
+  </p>
+  <label class="field">
+    <span class="field-label">Setup code</span>
+    <input name="code" class="mono" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD-EFGH-JKLM" required />
+    <span class="field-hint">From <code>docker compose logs -f</code>. Dashes and case do not matter.</span>
+  </label>
+  <label class="field">
+    <span class="field-label">Username</span>
+    <input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" pattern="[a-z0-9][a-z0-9._\-]{1,62}" required />
+    <span class="field-hint">Lowercase letters, digits, <code>.</code>, <code>-</code> or <code>_</code>.</span>
+  </label>
+  <label class="field">
+    <span class="field-label">Display name <span class="muted">— optional</span></span>
+    <input name="displayName" autocomplete="name" maxlength="100" />
+  </label>
+  <label class="field">
+    <span class="field-label">Password</span>
+    <input name="password" type="password" autocomplete="new-password" required />
+    <span class="field-hint" id="setup-password-hint">At least 12 characters. Nothing else is required of it.</span>
+  </label>
+  <label class="field">
+    <span class="field-label">Repeat password</span>
+    <input name="confirmPassword" type="password" autocomplete="new-password" required />
+  </label>
+  <p id="setup-error" class="form-error" role="alert" hidden></p>
+  <button type="submit" class="primary block" id="setup-submit">Create the root account</button>
+  <p class="field-hint center">The root account can never be deleted while it is the last one — that is what keeps you in.</p>
+</form>
