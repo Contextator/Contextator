@@ -251,11 +251,18 @@ export async function invalidateSourceDocuments(db: Db, sourceId: string): Promi
   await db.update(documents).set({ contentHash: '' }).where(eq(documents.sourceId, sourceId));
 }
 
-/** Refreshes `document_count` of every source of the project from the documents table. */
-export async function recountSources(db: Db, projectId: string): Promise<void> {
+/**
+ * Refreshes `document_count` of every source of the project from the documents table, counting **one
+ * generation** ([ADR-0039](../../.ssot/ADR.md#adr-0039)).
+ *
+ * The generation is not optional and is not defaulted. While a rebuild is in flight a project holds
+ * two generations of the same corpus, so a count over `source_id` alone is roughly double — and a
+ * doubled number on the dashboard is the kind of wrong that reads as plausible.
+ */
+export async function recountSources(db: Db, projectId: string, generation: number): Promise<void> {
   await db.execute(sql`
     UPDATE document_sources s
-    SET document_count = (SELECT count(*) FROM documents d WHERE d.source_id = s.id)
+    SET document_count = (SELECT count(*) FROM documents d WHERE d.source_id = s.id AND d.index_generation = ${generation})
     WHERE s.project_id = ${projectId}`);
 }
 

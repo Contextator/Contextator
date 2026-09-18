@@ -33,6 +33,15 @@ describe('buildRunRecord', () => {
     expect(row.filesUpdated).toBe(128);
   });
 
+  it('records the generation a rebuild wrote into, and NULL for a run that wrote into the live one', () => {
+    // The column is how "which run produced the index being served" is answered — it is only
+    // meaningful when the run chose a generation, which an incremental run does not (ADR-0039).
+    expect(buildRunRecord(base).generation).toBeNull();
+    expect(buildRunRecord({ ...base, force: true, generation: 4 }).generation).toBe(4);
+    // Generation 0 is a real generation, and `?? null` rather than `|| null` is what keeps it one.
+    expect(buildRunRecord({ ...base, force: true, generation: 0 }).generation).toBe(0);
+  });
+
   it('never produces negative counts or durations', () => {
     const row = buildRunRecord({ ...base, filesSkipped: 200, startedAt: '2026-09-17T10:00:10.000Z' });
     expect(row.filesUpdated).toBe(0);

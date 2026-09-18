@@ -32,6 +32,8 @@ import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_E
 const baseUrl = inject('postgresBaseUrl');
 const DIMS = TEST_EMBEDDING_DIMENSIONS;
 const MODEL_ID = 'local:stub-bag-of-words:fp32';
+/** Every project here is freshly created, so its live generation is the column's default (ADR-0039). */
+const LIVE = 0;
 
 /** Word-hash bag of words, L2-normalised. Shared vocabulary is the whole of the similarity. */
 function stubVector(text: string): number[] {
@@ -160,7 +162,15 @@ async function seedProject(name: string, excerpts: Excerpt[], embeddingModel: st
       };
       await replaceDocument(
         database.db,
-        { projectId: project.id, sourceId: source.id, relativePath: excerpt.path, title: excerpt.title, contentHash: excerpt.path, sizeBytes: 512 },
+        {
+          projectId: project.id,
+          sourceId: source.id,
+          relativePath: excerpt.path,
+          title: excerpt.title,
+          contentHash: excerpt.path,
+          sizeBytes: 512,
+          indexGeneration: LIVE,
+        },
         [chunk],
       );
     }
@@ -231,7 +241,7 @@ describe('a viewer searching a project they are a member of', () => {
     expect(res.statusCode).toBe(200);
 
     const vector = await embeddings.embedQuery(QUERY);
-    const expected = await searchChunks(database.db, indexedId, vector, 2);
+    const expected = await searchChunks(database.db, indexedId, LIVE, vector, 2);
 
     expect(res.json().limit).toBe(2);
     expect(res.json().hits).toEqual(

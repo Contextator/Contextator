@@ -9,7 +9,7 @@ import { bootstrapDatabase, MIGRATIONS_FOLDER } from '../../src/db/bootstrap.js'
 import { createDb } from '../../src/db/client.js';
 import { ensureSchema } from './fixtures/ensure-schema-v5.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
-import { captureSchema, renderSchemaSnapshot } from './support/schema-snapshot.js';
+import { captureSchema, renderSchemaSnapshot, snapshotDifference } from './support/schema-snapshot.js';
 
 /**
  * The review of ADR-0033, executed rather than argued.
@@ -23,10 +23,20 @@ import { captureSchema, renderSchemaSnapshot } from './support/schema-snapshot.j
  * The projection covers the `public` schema. Drizzle's journal lives in a schema of its own
  * (`drizzle.__drizzle_migrations`), so the new mechanism's own bookkeeping is outside the comparison
  * by construction rather than by an exclusion somebody had to remember to write.
+ *
+ * **The comparison is made at the head of the journal, not at the baseline, and it had to move there
+ * the moment a second migration existed.** `0001_index_generations` ([ADR-0039](../../.ssot/ADR.md#adr-0039))
+ * adds columns the frozen ladder cannot know about, so "the baseline equals the ladder" is no longer
+ * something `bootstrapDatabase` can be asked — it always applies everything. What replaces it is the
+ * stronger question anyway, and the one an operator actually has: **does a `0.1.0` database carried
+ * forward end up byte-identical to a database created from scratch today?**
  */
 
 const baseUrl = inject('postgresBaseUrl');
 const opened: TestDatabase[] = [];
+
+/** Every generation column this migration added, and the constraint it replaced. */
+const GENERATION_MARKERS = /index_generation|live_generation|\| generation \||documents_project_path_uq/;
 
 afterAll(async () => {
   for (const database of opened) await dropTestDatabase(baseUrl, database);
@@ -43,11 +53,14 @@ async function journalRows(database: TestDatabase): Promise<Array<{ hash: string
   return result.rows as Array<{ hash: string; created_at: string }>;
 }
 
-describe('the generated baseline against the DDL ladder it replaces', () => {
+describe('a database carried forward from the DDL ladder against one created today', () => {
   it('produces an identical catalogue projection', async () => {
     const [ladderDb, migratedDb] = await Promise.all([freshDatabase('equiv_ladder'), freshDatabase('equiv_migrated')]);
 
+    // The left-hand side is a `0.1.0` installation: the frozen ladder, then every start since.
     await ensureSchema(ladderDb.db, { dimensions: TEST_EMBEDDING_DIMENSIONS, resetVectors: false, log: silentLogger });
+    await applySchema(ladderDb);
+    // The right-hand side is an empty volume today.
     await applySchema(migratedDb);
 
     const ladder = await captureSchema(ladderDb.db);
@@ -60,7 +73,7 @@ describe('the generated baseline against the DDL ladder it replaces', () => {
 });
 
 describe('adopting a database that already has the schema', () => {
-  it('records exactly one journal row and changes no DDL', async () => {
+  it('marks the baseline applied rather than running it, and then applies only what came after', async () => {
     const database = await freshDatabase('equiv_adopt');
 
     // The shape a `0.1.0` installation is sitting at right now: schema 5, and no journal at all.
@@ -71,13 +84,21 @@ describe('adopting a database that already has the schema', () => {
 
     await applySchema(database);
 
-    expect(renderSchemaSnapshot(await captureSchema(database.db))).toBe(renderSchemaSnapshot(before));
+    // The adoption itself still changes nothing — if it had run the baseline instead of marking it,
+    // the first `CREATE TABLE` would have failed and there would be no projection to compare. What
+    // *is* allowed to differ is what the migrations after the baseline did, and that is checked by
+    // name rather than waved through: every line that appeared or disappeared names a generation
+    // column or the unique constraint ADR-0039 replaced, and nothing else moved.
+    const changed = snapshotDifference(before, await captureSchema(database.db));
+    expect(changed).not.toHaveLength(0);
+    expect(changed.filter((line) => !GENERATION_MARKERS.test(line))).toEqual([]);
 
-    // One row, and it is drizzle's own hash of the baseline file — not a hand-rolled digest that
+    // The first row is drizzle's own hash of the baseline file — not a hand-rolled digest that
     // merely looks like one. A row whose hash disagreed would describe a migration nobody applied.
+    const files = readMigrationFiles({ migrationsFolder: MIGRATIONS_FOLDER });
     const rows = await journalRows(database);
-    expect(rows).toHaveLength(1);
-    const baseline = readMigrationFiles({ migrationsFolder: MIGRATIONS_FOLDER })[0];
+    expect(rows).toHaveLength(files.length);
+    const baseline = files[0];
     expect(baseline).toBeDefined();
     expect(rows[0]?.hash).toBe(baseline?.hash);
     expect(Number(rows[0]?.created_at)).toBe(baseline?.folderMillis);
@@ -138,9 +159,9 @@ describe('two containers starting at once', () => {
       await second.pool.end();
     }
 
-    // The session-scoped advisory lock is the whole reason this is one row rather than two, or a
-    // duplicate-table error from whichever start lost the race.
-    expect(await journalRows(database)).toHaveLength(1);
+    // The session-scoped advisory lock is the whole reason this is one row per migration rather than
+    // two, or a duplicate-table error from whichever start lost the race.
+    expect(await journalRows(database)).toHaveLength(readMigrationFiles({ migrationsFolder: MIGRATIONS_FOLDER }).length);
 
     const settings = await database.db.execute(sql`SELECT key, value FROM settings ORDER BY key`);
     expect(settings.rows).toHaveLength(2);

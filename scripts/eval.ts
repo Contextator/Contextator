@@ -200,12 +200,13 @@ async function indexCorpus(
   embeddings: EmbeddingProvider,
   config: Config,
   projectId: string,
+  generation: number,
   files: readonly string[],
 ): Promise<IndexOutcome> {
   // A fresh database cannot hold a previous run's documents, so this map is expected to be empty. It is
   // read anyway: the guard below is what makes "unchanged, skipped" impossible to reach silently, and a
   // guard that only works because of an assumption elsewhere is a guard that stops working quietly.
-  const existing = await getExistingDocuments(db, projectId);
+  const existing = await getExistingDocuments(db, projectId, generation);
   const skipped: string[] = [];
   let chunkCount = 0;
   // The indexer's, and for its reason: the passage prefix is part of what the model reads (ADR-0038).
@@ -244,7 +245,7 @@ async function indexCorpus(
       });
     }
 
-    await replaceDocument(db, { projectId, sourceId: null, relativePath, title, contentHash: hash, sizeBytes }, rows);
+    await replaceDocument(db, { projectId, sourceId: null, relativePath, title, contentHash: hash, sizeBytes, indexGeneration: generation }, rows);
     chunkCount += rows.length;
   }
 
@@ -289,11 +290,17 @@ async function run(options: Options): Promise<void> {
     await applySchema(database, config.EMBEDDING_DIMENSIONS);
     const db = database.db;
 
-    const [project] = await db.insert(projects).values({ name: PROJECT_NAME }).returning({ id: projects.id });
+    // The generation comes off the inserted row rather than being written down as `0` here: the
+    // harness indexes through the product's own functions and those take a generation (ADR-0039), and
+    // a literal would be a second place that has to agree with the column's default.
+    const [project] = await db
+      .insert(projects)
+      .values({ name: PROJECT_NAME })
+      .returning({ id: projects.id, liveGeneration: projects.liveGeneration });
 
     step('eval: indexing the corpus');
     const indexStart = Date.now();
-    const indexed = await indexCorpus(db, embeddings, config, project.id, files);
+    const indexed = await indexCorpus(db, embeddings, config, project.id, project.liveGeneration, files);
     const indexMs = Date.now() - indexStart;
 
     // `searchProject` re-reads the project and refuses one with no chunks or a model it does not run,

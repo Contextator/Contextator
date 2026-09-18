@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
 import { isInside, normalizeRelativePath } from '../services/fs-scan.js';
+import { getProjectById } from '../services/projects.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { driverFor } from '../services/sources/driver.js';
 import { getSourceById, listSources } from '../services/sources.js';
@@ -85,7 +86,12 @@ export function registerTools(server: McpServer, ctx: AppContext, project: Proje
     },
     async () => {
       try {
-        const docs = await listDocumentsForProject(db, project.id);
+        // Re-read for the live generation, for `searchProject`'s reason: a session outlives a
+        // re-index, and the row bound to it at connect time can name a generation that has since been
+        // superseded — which would list the documents of an index nobody is being served (ADR-0039).
+        const live = await getProjectById(db, project.id);
+        if (!live) return fail(`Project "${project.name}" no longer exists.`);
+        const docs = await listDocumentsForProject(db, project.id, live.liveGeneration);
         if (docs.length === 0) return ok(`Project "${project.name}" has no indexed documents yet.`);
         const sources = await listSources(db, project.id);
 
@@ -135,9 +141,16 @@ export function registerTools(server: McpServer, ctx: AppContext, project: Proje
         const relativePath = normalizeRelativePath(requested);
         if (!relativePath) return fail(`Invalid path "${requested}".`);
 
+        const live = await getProjectById(db, project.id);
+        if (!live) return fail(`Project "${project.name}" no longer exists.`);
+
         // Only paths that were indexed for this project are served; the client never addresses the filesystem directly.
         // Paths are `<source>/<path>`; a client remembering an older, unprefixed path still resolves when unambiguous.
-        const doc = (await getDocument(db, project.id, relativePath)) ?? (await getDocumentBySuffix(db, project.id, relativePath));
+        // Both lookups are confined to the live generation, so a rebuild in flight neither hides a
+        // document nor makes the suffix fallback ambiguous against its own copy of it (ADR-0039).
+        const generation = live.liveGeneration;
+        const doc =
+          (await getDocument(db, project.id, generation, relativePath)) ?? (await getDocumentBySuffix(db, project.id, generation, relativePath));
         if (!doc) return fail(`Unknown document "${relativePath}". Use list_topics or the file paths returned by search_docs.`);
 
         const source = doc.sourceId ? await getSourceById(db, doc.sourceId) : undefined;

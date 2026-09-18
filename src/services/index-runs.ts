@@ -10,6 +10,8 @@ export interface FinishedJobSummary {
   projectId: string;
   force: boolean;
   phase: 'done' | 'error';
+  /** The generation a rebuild wrote into; absent for an incremental run ([ADR-0039](../../.ssot/ADR.md#adr-0039)). */
+  generation?: number;
   filesTotal: number;
   filesSkipped: number;
   filesRemoved: number;
@@ -35,6 +37,10 @@ export function buildRunRecord(job: FinishedJobSummary): IndexRunInsert {
     startedAt,
     finishedAt,
     durationMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+    // NULL for an incremental run, which writes into whichever generation happens to be live and so
+    // does not identify one. A rebuild does: with this column, "which run produced the index being
+    // served" is `index_runs.generation = projects.live_generation` and nothing else.
+    generation: job.generation ?? null,
     error: job.phase === 'error' ? (job.error ?? 'unknown error').slice(0, 2000) : null,
   };
 }

@@ -86,6 +86,23 @@ export function renderSchemaSnapshot(snapshot: SchemaSnapshot): string {
   ].join('\n');
 }
 
+/**
+ * Every projection line that one of the two snapshots has and the other does not, in one list. The
+ * `# count` headers are excluded: they move whenever anything else does and say nothing of their own.
+ *
+ * This is what a test asserts against when a schema change is *expected* — "these lines and no others
+ * moved" is a claim about the change, where "the two are identical" is only a claim about no change.
+ */
+export function snapshotDifference(before: SchemaSnapshot, after: SchemaSnapshot): string[] {
+  const lines = (snapshot: SchemaSnapshot): string[] =>
+    renderSchemaSnapshot(snapshot)
+      .split('\n')
+      .filter((line) => !line.startsWith('#'));
+  const left = new Set(lines(before));
+  const right = new Set(lines(after));
+  return [...lines(before).filter((line) => !right.has(line)), ...lines(after).filter((line) => !left.has(line))];
+}
+
 function joinRow(row: Record<string, unknown>): string {
   return Object.values(row)
     .map((value) => String(value))

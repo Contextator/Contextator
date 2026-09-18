@@ -46,7 +46,7 @@ export type SearchOutcome =
   | { status: 'project_gone' }
   /** The project exists and has no chunks. Searching it would honestly return nothing at all. */
   | { status: 'not_indexed'; project: ProjectRow }
-  /** Read-side twin of the indexer's wipe: those chunks and this query are not in the same space. */
+  /** Those chunks and this query are not in the same space; the next run re-embeds the project. */
   | { status: 'model_mismatch'; project: ProjectRow; indexedWith: string; serverUses: string };
 
 export async function searchProject({ db, embeddings }: SearchDeps, input: SearchInput): Promise<SearchOutcome> {
@@ -63,6 +63,9 @@ export async function searchProject({ db, embeddings }: SearchDeps, input: Searc
   // `embedQuery`, never `embedPassages`: on an asymmetric model these are different encodings of the
   // same string, and the wrong one here costs recall without failing (ADR-0038).
   const vector = await embeddings.embedQuery(input.query);
-  const hits = await searchChunks(db, project.id, vector, input.limit ?? DEFAULT_SEARCH_LIMIT);
+  // The live generation off the row that was just re-read, passed as a value (ADR-0039). A rebuild
+  // may be filling `liveGeneration + 1` at this very moment; this query cannot see it, and the moment
+  // the swap commits the next call reads the new number here instead. There is no gap between the two.
+  const hits = await searchChunks(db, project.id, project.liveGeneration, vector, input.limit ?? DEFAULT_SEARCH_LIMIT);
   return { status: 'ok', project, hits };
 }

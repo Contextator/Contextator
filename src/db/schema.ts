@@ -69,6 +69,15 @@ export const projects = pgTable(
      * where it physically sits in every database that has been through the ladder.
      */
     mcpAuth: text('mcp_auth').notNull().default('open').$type<McpAuthMode>(),
+    /**
+     * Which generation of `documents`/`chunks` is the published index of this project
+     * ([ADR-0039](../../.ssot/ADR.md#adr-0039)). A rebuild writes generation `live_generation + 1`
+     * beside the live one and this column is what makes the new one live, in a single-row update.
+     *
+     * `0` is the default and the value every pre-generation database already holds, so the backfill
+     * is the default and nothing has to be rewritten.
+     */
+    liveGeneration: integer('live_generation').notNull().default(0),
   },
   (t) => [check('projects_mcp_auth_check', sql`${t.mcpAuth} in ('open', 'token')`)],
 );
@@ -147,13 +156,23 @@ export const documents = pgTable(
     sizeBytes: integer('size_bytes').notNull().default(0),
     chunkCount: integer('chunk_count').notNull().default(0),
     indexedAt: timestamp('indexed_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * The generation this row belongs to. Equal to the project's `live_generation` for everything a
+     * reader may see; a rebuild in flight writes `live_generation + 1` and nothing reads it until the
+     * swap ([ADR-0039](../../.ssot/ADR.md#adr-0039)).
+     */
+    indexGeneration: integer('index_generation').notNull().default(0),
   },
   (t) => [
     foreignKey({ name: 'documents_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
     foreignKey({ name: 'documents_source_id_fkey', columns: [t.sourceId], foreignColumns: [documentSources.id] }).onDelete('cascade'),
-    unique('documents_project_path_uq').on(t.projectId, t.relativePath),
+    // A path is unique *within a generation*, not within a project: two generations of the same
+    // corpus hold the same paths at once, which is the whole point. This replaces
+    // `documents_project_path_uq` and is the upsert target of `replaceDocument`.
+    unique('documents_project_generation_path_uq').on(t.projectId, t.indexGeneration, t.relativePath),
     index('documents_project_idx').on(t.projectId),
     index('documents_source_idx').on(t.sourceId),
+    index('documents_project_generation_idx').on(t.projectId, t.indexGeneration),
   ],
 );
 
@@ -168,6 +187,12 @@ export const chunks = pgTable(
     content: text('content').notNull(),
     tokenCount: integer('token_count').notNull(),
     embedding: vector('embedding', { dimensions: MIGRATION_VECTOR_DIMENSIONS }).notNull(),
+    /**
+     * Denormalised from the owning document, deliberately ([ADR-0039](../../.ssot/ADR.md#adr-0039)).
+     * `searchChunks` has to apply the generation as a plain column predicate on this table with no
+     * join, because that predicate is what pgvector's iterative scan will be given to work against.
+     */
+    indexGeneration: integer('index_generation').notNull().default(0),
   },
   // `chunks_embedding_hnsw_idx` is deliberately absent, and its absence is load-bearing. An HNSW index
   // needs a fixed dimension and blocks the `ALTER COLUMN … TYPE` that sets the real one, so the
@@ -178,6 +203,7 @@ export const chunks = pgTable(
     foreignKey({ name: 'chunks_document_id_fkey', columns: [t.documentId], foreignColumns: [documents.id] }).onDelete('cascade'),
     index('chunks_project_idx').on(t.projectId),
     index('chunks_document_idx').on(t.documentId),
+    index('chunks_project_generation_idx').on(t.projectId, t.indexGeneration),
   ],
 );
 
@@ -200,6 +226,13 @@ export const indexRuns = pgTable(
     finishedAt: timestamp('finished_at', { withTimezone: true }).notNull(),
     durationMs: integer('duration_ms').notNull().default(0),
     error: text('error'),
+    /**
+     * The generation this run wrote into, when it wrote into one of its own — a rebuild's, whether it
+     * went live or was abandoned. NULL for an incremental run, which writes into whatever generation
+     * was already live, and for every run recorded before [ADR-0039](../../.ssot/ADR.md#adr-0039).
+     * With it, "which run produced the index being served" is a join and not an investigation.
+     */
+    generation: integer('generation'),
   },
   (t) => [
     foreignKey({ name: 'index_runs_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),

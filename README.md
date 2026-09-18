@@ -366,7 +366,7 @@ The server also sends MCP `instructions` describing the project so agents know w
 ## How indexing works
 
 1. Every source of the project is synced in turn (git fetch, Notion pull; local and upload sources have nothing to fetch), then its directory is walked for the file types the source selected — `.md`/`.mdx` by default, optionally `.txt` (dotfiles, `node_modules`, `dist`, `build`, symlinks and `IGNORE_GLOBS` are skipped). Every path collected is prefixed with the source name, so two sources can both hold an `install.md` without colliding.
-2. The source's content type is applied (Obsidian wikilinks, Notion export ids), and every file is hashed (sha256). Unchanged files are skipped, changed/new files are re-chunked and re-embedded, files that disappeared are deleted. **Force** re-index wipes the project first. Every finished run (mode, counts, duration, error) is stored in `index_runs`; the last 20 per project are kept and shown in the dashboard.
+2. The source's content type is applied (Obsidian wikilinks, Notion export ids), and every file is hashed (sha256). Unchanged files are skipped, changed/new files are re-chunked and re-embedded, files that disappeared are deleted. A **force** re-index (and one triggered by a changed embedding model) rebuilds everything, and does it *beside* the live index rather than by wiping it first: the project keeps answering `search_docs`, `list_topics` and `read_document` for the whole run, and a run that fails halfway leaves the previous index serving instead of an empty project. Every finished run (mode, counts, duration, error) is stored in `index_runs`; the last 20 per project are kept and shown in the dashboard.
 3. Chunking is Markdown-aware: frontmatter is parsed (`title` wins), MDX `import`/`export` lines and component tags are stripped, the document is split at headings (`#`–`####`) with a breadcrumb kept per chunk, and oversized sections are packed from paragraphs and fenced code blocks (code is never split mid-block when avoidable) with a small overlap.
 4. Each chunk is embedded as `heading breadcrumb + content` and stored in `chunks` with an HNSW cosine index.
 
@@ -457,7 +457,10 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
   The server notices the model id stored on each project differs and performs a full re-index automatically;
   `search_docs` refuses to search a project indexed with another model until then. **Nothing starts that run
   by itself** — the project page shows the mismatch with a `Re-index now` button, and search stays refused
-  until it is pressed.
+  until it is pressed. The run itself is safe to start at any time of day: it is written beside the old
+  index and published in one step at the end, so the project goes from "indexed with another model"
+  straight to "indexed with this one" without passing through "no indexed content". While it runs, that
+  project holds two copies of its chunks and its share of the vector index, so plan disk for the peak.
 - **Upgrading across the default change.** `Xenova/multilingual-e5-small` became the default after
   `Xenova/paraphrase-multilingual-MiniLM-L12-v2`. An installation that never set `EMBEDDING_MODEL` picks the
   new one up on upgrade and every existing project reads as a mismatch until it is re-indexed. Pin the old

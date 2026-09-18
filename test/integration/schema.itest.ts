@@ -3,9 +3,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { sql } from 'drizzle-orm';
+import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { afterAll, describe, expect, inject, it } from 'vitest';
 
-import { SchemaMismatchError } from '../../src/db/bootstrap.js';
+import { MIGRATIONS_FOLDER, SchemaMismatchError } from '../../src/db/bootstrap.js';
 import { ensureSchema } from './fixtures/ensure-schema-v5.js';
 import {
   applySchema,
@@ -17,7 +18,7 @@ import {
   TEST_EMBEDDING_DIMENSIONS,
   type TestDatabase,
 } from './support/postgres.js';
-import { captureSchema, renderSchemaSnapshot } from './support/schema-snapshot.js';
+import { captureSchema, renderSchemaSnapshot, snapshotDifference } from './support/schema-snapshot.js';
 
 /**
  * `src/db/bootstrap.ts` against a real server (ADR-0031): the empty case, the idempotent case, and a
@@ -41,6 +42,9 @@ const EXPECTED_TABLES = [
   'user_sessions',
   'users',
 ];
+
+/** How many migrations `drizzle/` holds — the number of journal rows a finished start must leave. */
+const MIGRATION_COUNT = readMigrationFiles({ migrationsFolder: MIGRATIONS_FOLDER }).length;
 
 const opened: TestDatabase[] = [];
 
@@ -99,9 +103,9 @@ describe('the bootstrap on an empty database', () => {
     expect(row.amname).toBe('hnsw');
     expect([...(row.reloptions ?? [])].sort()).toEqual(['ef_construction=64', 'm=16']);
 
-    // One migration applied, in drizzle's own journal — the thing that now decides what a start does.
+    // Every migration applied, in drizzle's own journal — the thing that now decides what a start does.
     const journal = await db.execute(sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`);
-    expect((journal.rows[0] as { n: number }).n).toBe(1);
+    expect((journal.rows[0] as { n: number }).n).toBe(MIGRATION_COUNT);
   });
 });
 
@@ -117,9 +121,9 @@ describe('the bootstrap twice', () => {
     expect(renderSchemaSnapshot(after)).toBe(renderSchemaSnapshot(before));
     expect(after).toEqual(before);
 
-    // A second start must not re-apply the baseline, and must not add a second journal row either.
+    // A second start must not re-apply anything, and must not add a journal row either.
     const journal = await database.db.execute(sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`);
-    expect((journal.rows[0] as { n: number }).n).toBe(1);
+    expect((journal.rows[0] as { n: number }).n).toBe(MIGRATION_COUNT);
   });
 });
 
@@ -162,7 +166,7 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     expect((version.rows[0] as { value: string }).value).toBe('2');
   });
 
-  it('reaches schema 5 under the 0.1.0 ladder, and the bootstrap then adopts it unchanged', async () => {
+  it('reaches schema 5 under the 0.1.0 ladder, and the bootstrap then adopts it and migrates it', async () => {
     const database = upgradedDatabase;
     const { db } = database;
 
@@ -171,9 +175,21 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
 
     const afterLadder = await captureSchema(db);
 
-    // Step two: the upgrade. It adopts rather than applies, so it changes no DDL at all.
+    // Step two: the upgrade. It adopts the baseline rather than applying it — had it applied it, the
+    // first `CREATE TABLE` would have failed — and then applies the migrations cut since, which today
+    // is `0001_index_generations` ([ADR-0039](../../../.ssot/ADR.md#adr-0039)). So the claim is no
+    // longer "nothing changed": it is that nothing changed *except* what that migration says it
+    // changes, and the lines that moved are checked by name rather than counted.
     await applySchema(database);
-    expect(renderSchemaSnapshot(await captureSchema(db))).toBe(renderSchemaSnapshot(afterLadder));
+    const changed = snapshotDifference(afterLadder, await captureSchema(db));
+    expect(changed).not.toHaveLength(0);
+    expect(changed.filter((line) => !/index_generation|live_generation|\| generation \||documents_project_path_uq/.test(line))).toEqual([]);
+
+    // And the carried-forward rows kept the generation every pre-ADR-0039 document is already in.
+    const generations = await db.execute(sql`SELECT DISTINCT index_generation FROM documents`);
+    expect(generations.rows.map((r) => (r as { index_generation: number }).index_generation)).toEqual([0]);
+    const live = await db.execute(sql`SELECT DISTINCT live_generation FROM projects`);
+    expect(live.rows.map((r) => (r as { live_generation: number }).live_generation)).toEqual([0]);
 
     const tables = await db.execute(sql`
       SELECT table_name FROM information_schema.tables
@@ -220,7 +236,7 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     expect((version.rows[0] as { value: string }).value).toBe('5');
 
     const journal = await db.execute(sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`);
-    expect((journal.rows[0] as { n: number }).n).toBe(1);
+    expect((journal.rows[0] as { n: number }).n).toBe(MIGRATION_COUNT);
   });
 
   it('is idempotent over the upgraded database: a second start creates no second source', async () => {

@@ -1,6 +1,17 @@
-import { and, asc, cosineDistance, count, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, cosineDistance, count, eq, inArray, ne, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { chunks, documents, type DocumentRow } from '../db/schema.js';
+
+/**
+ * Every query in this file is scoped by a **project and a generation**
+ * ([ADR-0039](../../.ssot/ADR.md#adr-0039)). A project's `live_generation` is the published index;
+ * a rebuild writes the next generation beside it and is switched over in one row update, so the two
+ * exist at once and a query that named only the project would see both.
+ *
+ * The generation is a value the caller passes, never a sub-select on `projects`: every read path
+ * already holds the project row it re-read for its own guards, and a sub-select would put a join
+ * between pgvector and the predicate the search below depends on.
+ */
 
 export interface SearchHit {
   /** Cosine similarity in [-1, 1]; higher is better. */
@@ -13,10 +24,13 @@ export interface SearchHit {
 }
 
 /**
- * Top-k cosine similarity search scoped to one project. Orders by the raw `<=>` distance
- * (not by `1 - distance DESC`) so PostgreSQL can use the HNSW index.
+ * Top-k cosine similarity search scoped to one project's live generation. Orders by the raw `<=>`
+ * distance (not by `1 - distance DESC`) so PostgreSQL can use the HNSW index.
+ *
+ * `chunks.index_generation` is denormalised from the document precisely so that this stays two plain
+ * column predicates on the table the index is on — no join between the vector operator and the filter.
  */
-export async function searchChunks(db: Db, projectId: string, queryEmbedding: number[], limit: number): Promise<SearchHit[]> {
+export async function searchChunks(db: Db, projectId: string, generation: number, queryEmbedding: number[], limit: number): Promise<SearchHit[]> {
   const distance = cosineDistance(chunks.embedding, queryEmbedding);
   const score = sql<number>`(1 - (${distance}))::float8`;
   return db
@@ -30,7 +44,7 @@ export async function searchChunks(db: Db, projectId: string, queryEmbedding: nu
     })
     .from(chunks)
     .innerJoin(documents, eq(documents.id, chunks.documentId))
-    .where(eq(chunks.projectId, projectId))
+    .where(and(eq(chunks.projectId, projectId), eq(chunks.indexGeneration, generation)))
     .orderBy(asc(distance))
     .limit(limit);
 }
@@ -43,7 +57,7 @@ export interface DocumentSummary {
   indexedAt: Date;
 }
 
-export async function listDocumentsForProject(db: Db, projectId: string): Promise<DocumentSummary[]> {
+export async function listDocumentsForProject(db: Db, projectId: string, generation: number): Promise<DocumentSummary[]> {
   return db
     .select({
       relativePath: documents.relativePath,
@@ -53,27 +67,34 @@ export async function listDocumentsForProject(db: Db, projectId: string): Promis
       indexedAt: documents.indexedAt,
     })
     .from(documents)
-    .where(eq(documents.projectId, projectId))
+    .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation)))
     .orderBy(asc(documents.relativePath));
 }
 
-export async function getDocument(db: Db, projectId: string, relativePath: string): Promise<DocumentRow | undefined> {
+export async function getDocument(db: Db, projectId: string, generation: number, relativePath: string): Promise<DocumentRow | undefined> {
   const [row] = await db
     .select()
     .from(documents)
-    .where(and(eq(documents.projectId, projectId), eq(documents.relativePath, relativePath)))
+    .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation), eq(documents.relativePath, relativePath)))
     .limit(1);
   return row;
 }
 
+/**
+ * The paths a run writes into, with what is already there under them. A rebuild passes the generation
+ * it is about to write — which holds nothing — so it gets an empty map and skips no file. "Force means
+ * re-embed everything" is therefore a consequence of writing into a fresh generation rather than a
+ * case anybody has to remember to special-case.
+ */
 export async function getExistingDocuments(
   db: Db,
   projectId: string,
+  generation: number,
 ): Promise<Map<string, { id: string; contentHash: string; sourceId: string | null }>> {
   const rows = await db
     .select({ id: documents.id, relativePath: documents.relativePath, contentHash: documents.contentHash, sourceId: documents.sourceId })
     .from(documents)
-    .where(eq(documents.projectId, projectId));
+    .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation)));
   return new Map(rows.map((r) => [r.relativePath, { id: r.id, contentHash: r.contentHash, sourceId: r.sourceId }]));
 }
 
@@ -97,18 +118,23 @@ export interface DocumentInput {
   title: string;
   contentHash: string;
   sizeBytes: number;
+  /** The generation this document belongs to; the run decides it, not this function. */
+  indexGeneration: number;
 }
 
 /**
  * Fallback for clients that remember pre-v3 paths (without the source prefix): the document whose path
- * ends with `/<suffix>`, but only when exactly one matches.
+ * ends with `/<suffix>`, but only when exactly one matches — within the live generation, so a rebuild
+ * in flight cannot turn one match into two and make the fallback stop resolving.
  */
-export async function getDocumentBySuffix(db: Db, projectId: string, suffix: string): Promise<DocumentRow | undefined> {
+export async function getDocumentBySuffix(db: Db, projectId: string, generation: number, suffix: string): Promise<DocumentRow | undefined> {
   const pattern = `%/${suffix.replace(/[\\%_]/g, (c) => `\\${c}`)}`;
   const rows = await db
     .select()
     .from(documents)
-    .where(and(eq(documents.projectId, projectId), sql`${documents.relativePath} LIKE ${pattern} ESCAPE '\\'`))
+    .where(
+      and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation), sql`${documents.relativePath} LIKE ${pattern} ESCAPE '\\'`),
+    )
     .limit(2);
   return rows.length === 1 ? rows[0] : undefined;
 }
@@ -122,8 +148,10 @@ export async function replaceDocument(db: Db, doc: DocumentInput, newChunks: New
     const [row] = await tx
       .insert(documents)
       .values({ ...doc, chunkCount: newChunks.length, indexedAt: now })
+      // Three columns since ADR-0039: the same path in two generations is two rows, and the
+      // conflict target has to be the constraint that says so.
       .onConflictDoUpdate({
-        target: [documents.projectId, documents.relativePath],
+        target: [documents.projectId, documents.indexGeneration, documents.relativePath],
         set: {
           sourceId: doc.sourceId,
           title: doc.title,
@@ -137,23 +165,75 @@ export async function replaceDocument(db: Db, doc: DocumentInput, newChunks: New
 
     await tx.delete(chunks).where(eq(chunks.documentId, row.id));
     for (let i = 0; i < newChunks.length; i += INSERT_BATCH) {
-      await tx.insert(chunks).values(newChunks.slice(i, i + INSERT_BATCH).map((c) => ({ projectId: doc.projectId, documentId: row.id, ...c })));
+      await tx
+        .insert(chunks)
+        .values(
+          newChunks
+            .slice(i, i + INSERT_BATCH)
+            .map((c) => ({ projectId: doc.projectId, documentId: row.id, indexGeneration: doc.indexGeneration, ...c })),
+        );
     }
     return row.id;
   });
 }
 
-export async function deleteDocuments(db: Db, projectId: string, relativePaths: string[]): Promise<void> {
+export async function deleteDocuments(db: Db, projectId: string, generation: number, relativePaths: string[]): Promise<void> {
   if (relativePaths.length === 0) return;
-  await db.delete(documents).where(and(eq(documents.projectId, projectId), inArray(documents.relativePath, relativePaths)));
+  await db
+    .delete(documents)
+    .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation), inArray(documents.relativePath, relativePaths)));
 }
 
-export async function deleteAllDocuments(db: Db, projectId: string): Promise<void> {
-  await db.delete(documents).where(eq(documents.projectId, projectId));
-}
-
-export async function recountProject(db: Db, projectId: string): Promise<{ chunkCount: number; documentCount: number }> {
-  const [c] = await db.select({ n: count() }).from(chunks).where(eq(chunks.projectId, projectId));
-  const [d] = await db.select({ n: count() }).from(documents).where(eq(documents.projectId, projectId));
+export async function recountProject(db: Db, projectId: string, generation: number): Promise<{ chunkCount: number; documentCount: number }> {
+  const [c] = await db
+    .select({ n: count() })
+    .from(chunks)
+    .where(and(eq(chunks.projectId, projectId), eq(chunks.indexGeneration, generation)));
+  const [d] = await db
+    .select({ n: count() })
+    .from(documents)
+    .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation)));
   return { chunkCount: c?.n ?? 0, documentCount: d?.n ?? 0 };
+}
+
+/** How many documents one `sweepGenerations` statement removes before coming up for air. */
+const SWEEP_BATCH = 500;
+
+/** Safety valve: a loop against a table something else is still writing must not be able to spin forever. */
+const SWEEP_MAX_BATCHES = 10_000;
+
+/**
+ * Deletes every document of a project that does not belong to `liveGeneration`, and with them, by
+ * cascade, their chunks. Both directions matter and both are the same statement:
+ *
+ * - `< live` is what a finished swap left behind — the generation that was being served until a
+ *   moment ago.
+ * - `> live` is an attempt that never went live: a rebuild that failed, or one whose process was
+ *   killed between writing rows and swapping. Nothing else would ever collect those.
+ *
+ * That is what makes reclamation idempotent and crash-safe rather than a step a run has to survive
+ * long enough to reach. It runs under the project's mutex, in batches, **outside** the swap's
+ * transaction: one `DELETE` over a whole generation would hold locks for as long as it took and write
+ * a write-ahead log the size of the index it is removing.
+ *
+ * Returns the number of documents removed.
+ */
+export async function sweepGenerations(db: Db, projectId: string, liveGeneration: number): Promise<number> {
+  let removed = 0;
+  for (let batch = 0; batch < SWEEP_MAX_BATCHES; batch++) {
+    const doomed = await db
+      .select({ id: documents.id })
+      .from(documents)
+      .where(and(eq(documents.projectId, projectId), ne(documents.indexGeneration, liveGeneration)))
+      .limit(SWEEP_BATCH);
+    if (doomed.length === 0) return removed;
+    await db.delete(documents).where(
+      inArray(
+        documents.id,
+        doomed.map((d) => d.id),
+      ),
+    );
+    removed += doomed.length;
+  }
+  return removed;
 }

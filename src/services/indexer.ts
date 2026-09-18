@@ -13,7 +13,7 @@ import type { KeyedMutex } from './locks.js';
 import { getProjectById } from './projects.js';
 import { driverFor } from './sources/driver.js';
 import { listSources, recountSources, setSourceStatus } from './sources.js';
-import { deleteAllDocuments, deleteDocuments, getExistingDocuments, recountProject, replaceDocument, type NewChunk } from './vector-store.js';
+import { deleteDocuments, getExistingDocuments, recountProject, replaceDocument, sweepGenerations, type NewChunk } from './vector-store.js';
 
 export type JobPhase = 'queued' | 'syncing' | 'scanning' | 'embedding' | 'finalizing' | 'done' | 'error';
 
@@ -30,6 +30,11 @@ export interface JobState {
   projectId: string;
   force: boolean;
   phase: JobPhase;
+  /**
+   * The generation a **rebuild** writes into, set once the run knows it is one; `undefined` for an
+   * incremental run, which writes into whatever generation is already live (ADR-0039).
+   */
+  generation?: number;
   filesTotal: number;
   filesDone: number;
   filesSkipped: number;
@@ -75,8 +80,13 @@ interface SourceFile {
  * In-process indexing queue. Projects are processed one at a time (embedding is CPU bound).
  * Each run first syncs every source of the project (git fetch, Notion pull; no-op for local and
  * upload sources), then scans all of them. Incremental: unchanged files (same sha256) are skipped,
- * changed files are re-chunked and re-embedded, files removed from disk are deleted. `force`
- * (or a changed embedding model) wipes the project first.
+ * changed files are re-chunked and re-embedded, files removed from disk are deleted — all of it
+ * inside the project's live generation, exactly as before ([ADR-0010](../../.ssot/ADR.md#adr-0010)).
+ *
+ * `force` (or a changed embedding model) is a **rebuild**: it writes a new generation beside the live
+ * one and makes it live in one row update when it is complete ([ADR-0039](../../.ssot/ADR.md#adr-0039)).
+ * Nothing is deleted first, so a client talking to the project is served the previous index for the
+ * whole of the run, and a run that dies halfway leaves that index serving.
  */
 export class Indexer {
   private readonly jobs = new Map<string, JobState>();
@@ -162,6 +172,22 @@ export class Indexer {
   }
 
   /**
+   * Drops every generation of a project that is not `liveGeneration` — the one a swap superseded, and
+   * any that were abandoned. Always best effort: reclaiming disk is not what a run is for, and a
+   * failure here must never turn a successful index into a failed one ([ADR-0039](../../.ssot/ADR.md#adr-0039)).
+   *
+   * Always called with the project's mutex held, so it cannot race the run that is writing.
+   */
+  private async sweep(projectId: string, liveGeneration: number, log: Logger): Promise<void> {
+    try {
+      const removed = await sweepGenerations(this.deps.db, projectId, liveGeneration);
+      if (removed > 0) log.info({ removed, liveGeneration }, 'reclaimed documents of superseded index generations');
+    } catch (err) {
+      log.warn({ err, liveGeneration }, 'could not reclaim superseded index generations; the next run will try again');
+    }
+  }
+
+  /**
    * Syncs one source and collects its files. A failed sync still scans whatever is materialised
    * (e.g. the previous git checkout); only when nothing can be scanned are the source's documents
    * protected from deletion, so a transient error never wipes a source.
@@ -238,16 +264,28 @@ export class Indexer {
     }
 
     await locks.runExclusive(project.id, async () => {
+      // Re-read under the lock. `live_generation` is the one field this run both reads and writes, and
+      // the row above was fetched before the mutex was held.
+      const current = (await getProjectById(db, project.id)) ?? project;
+      const live = current.liveGeneration;
+
+      // Housekeeping before anything else, and under the same mutex: a previous run that was killed
+      // between writing rows and swapping left a generation nobody will ever serve, and this is what
+      // collects it (ADR-0039). Best effort — a project that cannot be tidied can still be indexed.
+      await this.sweep(project.id, live, log);
+
       await db.update(projects).set({ status: 'indexing', lastError: null }).where(eq(projects.id, project.id));
-      log.info({ project: project.name, force: job.force }, 'indexing started');
+
+      const modelChanged = current.embeddingModel !== null && current.embeddingModel !== embeddings.id;
+      const rebuild = job.force || modelChanged;
+      // A rebuild writes beside the live index; an incremental run writes into it. That single
+      // choice is the whole of ADR-0039 at this layer — everything below reads `generation`.
+      const generation = rebuild ? live + 1 : live;
+      if (rebuild) job.generation = generation;
+      if (modelChanged) log.warn({ from: current.embeddingModel, to: embeddings.id }, 'embedding model changed; full re-index');
+      log.info({ project: project.name, force: job.force, rebuild, live, generation }, 'indexing started');
 
       try {
-        const modelChanged = project.embeddingModel !== null && project.embeddingModel !== embeddings.id;
-        if (job.force || modelChanged) {
-          if (modelChanged) log.warn({ from: project.embeddingModel, to: embeddings.id }, 'embedding model changed; full re-index');
-          await deleteAllDocuments(db, project.id);
-        }
-
         // 1. Sync every source and collect its files under the `<source>/` prefix.
         const sources = await listSources(db, project.id);
         job.sources = sources.map((s) => ({ id: s.id, name: s.name, type: s.type, status: 'pending' as const }));
@@ -260,9 +298,27 @@ export class Indexer {
         }
         const failures = job.sources.filter((s) => s.status === 'error').map((s) => `${s.name}: ${s.error}`);
 
-        // 2. Incremental embedding.
+        // 1b. A rebuild that cannot see one of its sources cannot be published, so it is abandoned
+        // here rather than embedded and then thrown away. The swap is all-or-nothing: the new
+        // generation is the whole corpus, and a generation missing a source would go live as a
+        // silent deletion of it. Copying the missing source's documents forward was considered and
+        // rejected — it copies every vector, and it publishes stale content under a fresh generation
+        // number that the run counters cannot describe (ADR-0039).
+        //
+        // `protectedSources` keeps its ADR-0010 meaning on the incremental path below, untouched.
+        if (rebuild && protectedSources.size > 0) {
+          const unscannable = sources.filter((source) => protectedSources.has(source.id)).map((source) => source.name);
+          throw new Error(
+            `Full re-index abandoned: ${unscannable.length} of ${sources.length} sources could not be read ` +
+              `(${unscannable.join(', ')}). The previous index is still being served; fix the source and re-index.`,
+          );
+        }
+
+        // 2. Incremental embedding, within the generation this run writes to. On a rebuild that
+        // generation is empty, so nothing is skipped and every file is re-embedded — "force means
+        // re-embed everything" falls out of the generation rather than being a branch.
         job.phase = 'scanning';
-        const existing = await getExistingDocuments(db, project.id);
+        const existing = await getExistingDocuments(db, project.id, generation);
         job.filesTotal = files.length;
 
         // The chunker counts with the model's own tokenizer (ADR-0036) and chunking happens before the
@@ -299,7 +355,7 @@ export class Indexer {
 
           if (chunks.length === 0) {
             // Empty document: make sure no stale row lingers (`seen.delete` makes it count as removed below).
-            if (previous) await deleteDocuments(db, project.id, [file.relativePath]);
+            if (previous) await deleteDocuments(db, project.id, generation, [file.relativePath]);
             seen.delete(file.relativePath);
             job.filesDone++;
             continue;
@@ -316,7 +372,15 @@ export class Indexer {
 
           await replaceDocument(
             db,
-            { projectId: project.id, sourceId: file.sourceId, relativePath: file.relativePath, title, contentHash: hash, sizeBytes },
+            {
+              projectId: project.id,
+              sourceId: file.sourceId,
+              relativePath: file.relativePath,
+              title,
+              contentHash: hash,
+              sizeBytes,
+              indexGeneration: generation,
+            },
             rows,
           );
           job.filesDone++;
@@ -325,18 +389,23 @@ export class Indexer {
         }
 
         // 3. Delete what disappeared, except documents of sources that could not be scanned at all.
+        // On a rebuild `existing` is empty by construction, so this whole step is a no-op there.
         const removed = [...existing.entries()].filter(([p, d]) => !seen.has(p) && !(d.sourceId && protectedSources.has(d.sourceId))).map(([p]) => p);
         job.filesRemoved = removed.length;
         if (removed.length > 0) {
-          await deleteDocuments(db, project.id, removed);
+          await deleteDocuments(db, project.id, generation, removed);
           log.info({ count: removed.length }, 'removed documents no longer on disk');
         }
 
-        // 4. Finalize.
+        // 4. Finalize — and, on a rebuild, publish.
         job.phase = 'finalizing';
-        const counts = await recountProject(db, project.id);
-        await recountSources(db, project.id);
+        const counts = await recountProject(db, project.id, generation);
+        await recountSources(db, project.id, generation);
         const error = failures.length ? `${job.sources.length - failures.length}/${job.sources.length} sources synced; ${failures.join('; ')}` : null;
+        // **One row, one statement, and that is the entire atomicity mechanism** (ADR-0039). Under
+        // read-committed a concurrent reader either sees this row before the update or after it, so it
+        // reads the old generation or the new one and never a project between the two. `live_generation`
+        // and the counters that describe it move together because they are in the same `SET`.
         await db
           .update(projects)
           .set({
@@ -345,9 +414,14 @@ export class Indexer {
             documentCount: counts.documentCount,
             lastIndexedAt: new Date(),
             embeddingModel: embeddings.id,
+            liveGeneration: generation,
             lastError: error ? error.slice(0, 2000) : null,
           })
           .where(eq(projects.id, project.id));
+
+        // 5. Reclaim what the swap superseded — after it, outside its transaction, in batches. A
+        // failure here costs disk and nothing else, so it is logged and never fails the run.
+        if (generation !== live) await this.sweep(project.id, generation, log);
 
         job.phase = error ? 'error' : 'done';
         if (error) job.error = error;
@@ -361,6 +435,7 @@ export class Indexer {
             skipped: job.filesSkipped,
             removed: job.filesRemoved,
             chunksWritten: job.chunksDone,
+            generation,
             ...counts,
           },
           error ? 'indexing finished with source errors' : 'indexing finished',
@@ -371,12 +446,18 @@ export class Indexer {
         job.phase = 'error';
         job.error = message;
         job.finishedAt = new Date().toISOString();
-        log.error({ err, project: project.name }, 'indexing failed');
+        log.error({ err, project: project.name, rebuild, generation }, 'indexing failed');
+        // `live_generation` is deliberately not in this `SET`. A rebuild that failed leaves the
+        // generation it was building behind and the previous one live, so every client connected to
+        // the project keeps being served the index it was being served before the run started.
         await db
           .update(projects)
           .set({ status: 'error', lastError: message.slice(0, 2000) })
           .where(eq(projects.id, project.id))
           .catch((updateErr: unknown) => log.error({ err: updateErr }, 'failed to record indexing error'));
+        // Drop the half-built generation now rather than leaving it for the next run's sweep. Same
+        // best-effort contract: if this fails the rows stay, and the next run collects them.
+        if (generation !== live) await this.sweep(project.id, live, log);
         await this.recordRun(job, log);
       }
     });

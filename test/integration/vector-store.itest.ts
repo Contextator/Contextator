@@ -15,6 +15,14 @@ const baseUrl = inject('postgresBaseUrl');
 const DIMS = TEST_EMBEDDING_DIMENSIONS;
 
 /**
+ * The generation every project in this file lives at. A project is created with
+ * `live_generation = 0` and nothing here rebuilds, so `0` is both the generation these documents are
+ * written into and the one the searches read (ADR-0039). The generation *mechanism* is
+ * `index-generations.itest.ts`; this file is about the transaction and the distance query.
+ */
+const LIVE = 0;
+
+/**
  * A unit vector in the plane spanned by the first two coordinates. Every embedding in this file is
  * built by this function, so the expected cosine distance of a hit is `1 - cos(theta)` — arithmetic a
  * reviewer can redo, rather than an embedding model's opinion that would have to be trusted.
@@ -90,6 +98,7 @@ describe('replaceDocument when an insert slice fails', () => {
       title: 'Big',
       contentHash: 'hash-original',
       sizeBytes: 4096,
+      indexGeneration: LIVE,
     };
     const documentId = await replaceDocument(database.db, original, buildChunks('original'));
 
@@ -151,7 +160,7 @@ describe('searchChunks across two projects', () => {
 
     // Byte-identical documents in both projects: same path, same title, same hash, same chunk text.
     // Only the embeddings differ, so nothing but the project scope can separate the two result sets.
-    const sharedDocument = { relativePath: 'handbook/guide.md', title: 'Guide', contentHash: 'hash-shared', sizeBytes: 2048 };
+    const sharedDocument = { relativePath: 'handbook/guide.md', title: 'Guide', contentHash: 'hash-shared', sizeBytes: 2048, indexGeneration: LIVE };
     const sharedChunk = (chunkIndex: number, embedding: number[]): NewChunk => ({
       chunkIndex,
       headingPath: 'Guide > Install',
@@ -184,7 +193,7 @@ describe('searchChunks across two projects', () => {
   });
 
   it('returns only the queried project, ordered by ascending distance', async () => {
-    const hits = await searchChunks(database.db, alpha, QUERY, 10);
+    const hits = await searchChunks(database.db, alpha, LIVE, QUERY, 10);
 
     expect(hits).toHaveLength(ANGLES.length);
     expect(hits.map((h) => h.chunkIndex)).toEqual(EXPECTED_ORDER);
@@ -201,7 +210,7 @@ describe('searchChunks across two projects', () => {
   });
 
   it('reports a score that is exactly 1 - the cosine distance PostgreSQL computed', async () => {
-    const hits = await searchChunks(database.db, alpha, QUERY, 10);
+    const hits = await searchChunks(database.db, alpha, LIVE, QUERY, 10);
 
     const raw = await database.db.execute(sql`
       SELECT chunk_index, (embedding <=> ${vectorLiteral(QUERY)}::vector)::float8 AS distance
@@ -216,12 +225,12 @@ describe('searchChunks across two projects', () => {
   });
 
   it('honours the limit', async () => {
-    const hits = await searchChunks(database.db, alpha, QUERY, 3);
+    const hits = await searchChunks(database.db, alpha, LIVE, QUERY, 3);
     expect(hits.map((h) => h.chunkIndex)).toEqual(EXPECTED_ORDER.slice(0, 3));
   });
 
   it('gives the other project its own rows, which are the ones that would have been noticed', async () => {
-    const hits = await searchChunks(database.db, beta, QUERY, 10);
+    const hits = await searchChunks(database.db, beta, LIVE, QUERY, 10);
     expect(hits).toHaveLength(ANGLES.length);
     for (const hit of hits) expect(hit.score).toBeCloseTo(1, 6);
   });

@@ -97,7 +97,12 @@ export const sourceRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     await locks.runExclusive(id, async () => {
       await deleteSource(db, id, sid); // documents/chunks cascade
       await removeSourceDir(config.DATA_DIR, id, sid).catch((err: unknown) => log.warn({ err, sourceId: sid }, 'could not remove source directory'));
-      const counts = await recountProject(db, id);
+      // The live generation, not the project as a whole: the counters describe the index that is
+      // being served, and a superseded generation the sweeper has not reached yet is not it
+      // ([ADR-0039](../../.ssot/ADR.md#adr-0039)). Re-read under the lock, since an index run that
+      // just swapped may have moved it since `requireProject` above.
+      const live = (await getProjectById(db, id)) ?? project;
+      const counts = await recountProject(db, id, live.liveGeneration);
       await db.update(projects).set(counts).where(eq(projects.id, id));
     });
     return reply.code(204).send();
