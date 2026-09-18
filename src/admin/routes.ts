@@ -2,7 +2,7 @@ import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { installAuth } from '../auth/plugin.js';
 import type { Principal } from '../auth/types.js';
-import { MAX_SEARCH_CANDIDATES } from '../config.js';
+import { MAX_SEARCH_LIMIT } from '../config.js';
 import type { AppContext } from '../context.js';
 import { pingDb } from '../db/client.js';
 import type { ProjectRow } from '../db/schema.js';
@@ -35,7 +35,7 @@ const ReindexQuery = z.object({ force: z.enum(['true', 'false', '1', '0']).optio
  *  so `limit` is coerced — `"3"` is the only way a browser can send 3. */
 const SearchQuery = z.object({
   q: z.string().min(1).max(2000),
-  limit: z.coerce.number().int().min(1).max(MAX_SEARCH_CANDIDATES).optional(),
+  limit: z.coerce.number().int().min(1).max(MAX_SEARCH_LIMIT).optional(),
 });
 
 /**
@@ -223,9 +223,18 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       query: q,
       limit: limit ?? DEFAULT_SEARCH_LIMIT,
       // The raw score and the path, deliberately: a score an operator cannot see is a score they
-      // cannot reason about, and the path is what read_document takes next. Phase 1 adds fields here.
+      // cannot reason about, and the path is what read_document takes next.
+      //
+      // Since ADR-0041 the score no longer explains the order, so the three numbers that do are here
+      // beside it, additively (API.md §2): `fusedScore` is what ranked the list and the two ranks say
+      // which half found the chunk. An excerpt with `lexicalRank: 1` and no `denseRank` is the
+      // identifier query this change exists for, visible as such on the operator's own page rather
+      // than inferred from a reordering.
       hits: outcome.hits.map((hit) => ({
         score: hit.score,
+        fusedScore: hit.fusedScore,
+        denseRank: hit.denseRank,
+        lexicalRank: hit.lexicalRank,
         path: hit.file,
         title: hit.title,
         headingPath: hit.headingPath,

@@ -5,6 +5,11 @@
 // an approximation of them. The score is shown on purpose: comparing two configurations needs the
 // number, not just the order.
 //
+// Since ADR-0041 the score no longer *is* the order. Each hit therefore also shows which half of
+// retrieval found it and where — `D3` for third on the dense list, `L1` for first on the lexical one —
+// because an excerpt with no `D` and an `L1` is the identifier query hybrid search exists for, and an
+// operator should be able to see that rather than infer it from a reordering.
+//
 // The awkward part is that app.js rebuilds #detail from scratch on every poll, so nothing typed here
 // may live in the DOM. The query, the caret and whether the box has focus are all in state.search,
 // and the input's `input` event writes there without re-rendering.
@@ -90,7 +95,7 @@ export function renderSearch(project) {
       el('p', {
         text: empty
           ? 'Index this project and its documents become searchable here, exactly as an agent would find them.'
-          : 'The same query your agent would send to search_docs, against the same chunks. The score is the raw cosine similarity.',
+          : 'The same query your agent would send to search_docs, against the same chunks. D and L say which half found each excerpt — vector and keyword — and the score is the raw cosine similarity, which is shown rather than ranked on.',
       }),
     ]),
     el('div', { class: 'panel-body' }, [form, results(s)]),
@@ -117,6 +122,14 @@ function resetSearch(projectId) {
 
 // ---------- the results half ----------
 
+/** `D3 L1`, `D2`, `L5` — the two ranks, and nothing at all for a half that did not return the hit. */
+function halves(hit) {
+  const parts = [];
+  if (hit.denseRank != null) parts.push(`D${hit.denseRank}`);
+  if (hit.lexicalRank != null) parts.push(`L${hit.lexicalRank}`);
+  return parts.join(' ');
+}
+
 function results(s) {
   if (s.status === 'searching') return el('p', { class: 'hint', text: 'Searching…' });
   if (s.status === 'error')
@@ -136,9 +149,16 @@ function results(s) {
           el('code', { class: 'hit-path', text: hit.path, title: hit.path }),
           hit.headingPath ? el('span', { class: 'hit-crumb', text: hit.headingPath, title: hit.headingPath }) : null,
           el('span', {
+            class: 'hit-halves',
+            text: halves(hit),
+            title:
+              'Which half of retrieval returned this excerpt, and at what rank. ' +
+              `D = vector search, L = keyword search. Fused score ${(hit.fusedScore ?? 0).toFixed(5)}, which is what ordered the list.`,
+          }),
+          el('span', {
             class: 'hit-score',
             text: hit.score.toFixed(3),
-            title: `Cosine similarity, higher is better · chunk #${hit.chunkIndex} of ${hit.title}`,
+            title: `Cosine similarity — shown, not used to rank · chunk #${hit.chunkIndex} of ${hit.title}`,
           }),
         ]),
         el('pre', { class: 'hit-body', text: hit.content.trim() }),

@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
-import { MAX_SEARCH_CANDIDATES } from '../config.js';
+import { MAX_SEARCH_LIMIT } from '../config.js';
 import type { ProjectRow } from '../db/schema.js';
 import { isInside, normalizeRelativePath } from '../services/fs-scan.js';
 import { getProjectById } from '../services/projects.js';
@@ -21,6 +21,12 @@ const message = (err: unknown): string => (err instanceof Error ? err.message : 
 const MAX_DOCUMENT_BYTES = 512 * 1024;
 const MAX_TOPIC_LINES = 500;
 
+/**
+ * Unchanged by [ADR-0041](../../.ssot/ADR.md#adr-0041), and that is the decision rather than an
+ * oversight. `hit.score` is still the cosine similarity; what moved is the *order* the hits arrive
+ * in. [API.md](../../.ssot/API.md) §1 freezes the path, the breadcrumb and the score on the first
+ * line of each hit, and MCP gains nothing here: same tool, better results.
+ */
 function formatHits(query: string, projectName: string, hits: SearchHit[]): string {
   const lines: string[] = [`Found ${hits.length} result${hits.length === 1 ? '' : 's'} for "${query}" in project "${projectName}":`, ''];
   hits.forEach((hit, i) => {
@@ -42,7 +48,8 @@ export function registerTools(server: McpServer, ctx: AppContext, project: Proje
     {
       title: 'Search documentation',
       description:
-        `Semantic (vector) search over the "${project.name}" documentation. ` +
+        `Hybrid search over the "${project.name}" documentation: meaning and exact wording at once, ` +
+        'so an identifier — an environment variable, a header, an error code — finds its page as readily as a question does. ' +
         'Returns the most relevant excerpts with their file path, heading breadcrumb and similarity score. ' +
         'Use read_document with a returned file path to read the whole file.',
       inputSchema: {
@@ -51,9 +58,9 @@ export function registerTools(server: McpServer, ctx: AppContext, project: Proje
           .number()
           .int()
           .min(1)
-          .max(MAX_SEARCH_CANDIDATES)
+          .max(MAX_SEARCH_LIMIT)
           .default(DEFAULT_SEARCH_LIMIT)
-          .describe(`Maximum number of excerpts to return (1-${MAX_SEARCH_CANDIDATES}, default ${DEFAULT_SEARCH_LIMIT})`),
+          .describe(`Maximum number of excerpts to return (1-${MAX_SEARCH_LIMIT}, default ${DEFAULT_SEARCH_LIMIT})`),
       },
       annotations: readOnly,
     },

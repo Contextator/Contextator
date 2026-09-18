@@ -357,7 +357,7 @@ header already in place. See [MCP access](#mcp-access).
 
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
-| `search_docs` | `query: string`, `limit?: 1-20` (default 5) | Cosine-similarity search over the project's chunks. Returns ranked excerpts with file path, heading breadcrumb (`Guide > Install > Docker`) and score. |
+| `search_docs` | `query: string`, `limit?: 1-20` (default 5) | Hybrid search over the project's chunks — meaning and exact wording at once, so `HALYARD_DISPATCH_TIMEOUT` finds its page as readily as a question does. Returns ranked excerpts with file path, heading breadcrumb (`Guide > Install > Docker`) and score. |
 | `list_topics` | – | Every indexed document grouped by directory, with title and chunk count. The first path segment is the source it came from. |
 | `read_document` | `path: string` | Full Markdown of one indexed file (path as shown by the other tools, e.g. `handbook/install.md`). Only indexed paths are served; capped at 512 KB. |
 
@@ -368,7 +368,7 @@ The server also sends MCP `instructions` describing the project so agents know w
 1. Every source of the project is synced in turn (git fetch, Notion pull; local and upload sources have nothing to fetch), then its directory is walked for the file types the source selected — `.md`/`.mdx` by default, optionally `.txt` (dotfiles, `node_modules`, `dist`, `build`, symlinks and `IGNORE_GLOBS` are skipped). Every path collected is prefixed with the source name, so two sources can both hold an `install.md` without colliding.
 2. The source's content type is applied (Obsidian wikilinks, Notion export ids), and every file is hashed (sha256). Unchanged files are skipped, changed/new files are re-chunked and re-embedded, files that disappeared are deleted. A **force** re-index (and one triggered by a changed embedding model) rebuilds everything, and does it *beside* the live index rather than by wiping it first: the project keeps answering `search_docs`, `list_topics` and `read_document` for the whole run, and a run that fails halfway leaves the previous index serving instead of an empty project. Every finished run (mode, counts, duration, error) is stored in `index_runs`; the last 20 per project are kept and shown in the dashboard.
 3. Chunking is Markdown-aware: frontmatter is parsed (`title` wins), MDX `import`/`export` lines and component tags are stripped, the document is split at headings (`#`–`####`) with a breadcrumb kept per chunk, and oversized sections are packed from paragraphs and fenced code blocks (code is never split mid-block when avoidable) with a small overlap.
-4. Each chunk is embedded as `heading breadcrumb + content` and stored in `chunks` with an HNSW cosine index.
+4. Each chunk is embedded as `heading breadcrumb + content` and stored in `chunks` with an HNSW cosine index. The same string is also stored as a `tsvector` with a GIN index — that is the keyword half of search, and it is written in the same statement as the row, so the two halves can never describe different text.
 
 **How the chunk budget is spent, and why it is 96.** Tokens are counted with the embedding model's own
 tokenizer — the one the provider has already loaded — rather than approximated from the character count.
@@ -496,7 +496,7 @@ no ambient credential.
 | `POST /api/projects/:id/reindex?force=true` | Queue (incremental or full) re-index → `202 { job }` |
 | `GET /api/projects/:id/status` | Project row + live job |
 | `GET /api/projects/:id/runs` | The project's last 20 index runs (mode, counts, duration, error), newest first |
-| `GET /api/projects/:id/search?q=…&limit=…` | The same search the project's `search_docs` tool runs, as JSON: `{ query, limit, hits: [{ score, path, title, headingPath, chunkIndex, content }] }`. `limit` is 1–20 (default 5). `409 not_indexed` when the project has no chunks, `409 model_mismatch` when they were embedded with another model |
+| `GET /api/projects/:id/search?q=…&limit=…` | The same search the project's `search_docs` tool runs, as JSON: `{ query, limit, hits: [{ score, fusedScore, denseRank, lexicalRank, path, title, headingPath, chunkIndex, content }] }`. `score` is the cosine similarity and is shown rather than ranked on; `fusedScore` is what ordered the list, and the two ranks say which half of search found the excerpt (`null` for the half that did not). `limit` is 1–20 (default 5). `409 not_indexed` when the project has no chunks, `409 model_mismatch` when they were embedded with another model |
 | `DELETE /api/projects/:id` | Delete project, its chunks and open MCP sessions (`409` while indexing) |
 | `GET /api/projects/:id/sources` | The project's sources (type, name, config, status, document count). Secrets are never returned — only `hasSecret` |
 | `POST /api/projects/:id/sources` `{ type, name, label?, flavor?, config?, secret?, index? }` | Add a source. `type` is `local`, `git`, `upload` or `notion`; `config` is type-specific (`path` / `url`+`branch`+`subdir` / `rootIds`) |
@@ -597,7 +597,9 @@ src/services/crypto.ts        AES-256-GCM encryption of source tokens (SECRET_KE
 src/services/embeddings/      provider interface, local (transformers.js) and OpenAI implementations
 src/services/chunk-budget.ts  the after-warmup half of the chunk budget check: what the model reads, against what the chunker produces
 src/services/indexer.ts       incremental background indexing queue
-src/services/vector-store.ts  pgvector cosine search and chunk persistence
+src/services/vector-store.ts  the fused search statement (vector + keyword) and chunk persistence
+src/services/rrf.ts           reciprocal rank fusion: the arithmetic that turns two rankings into one
+src/services/text-search.ts   which PostgreSQL text search configuration the keyword half speaks
 src/services/search.ts        the one search path: the guards, the query embedding and the top-k query, shared by the MCP tool and the search API
 src/mcp/router.ts             /mcp/:project — Streamable HTTP + legacy SSE on one URL
 src/mcp/tools.ts              search_docs, list_topics, read_document

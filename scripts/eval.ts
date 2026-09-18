@@ -13,6 +13,7 @@ import { chunkMarkdown, embeddingText } from '../src/services/chunker.js';
 import { createEmbeddingProvider, type EmbeddingProvider } from '../src/services/embeddings/index.js';
 import { readAndHash } from '../src/services/fs-scan.js';
 import { searchProject } from '../src/services/search.js';
+import { isTextSearchConfig, QUERY_TEXT_SEARCH_CONFIG, TEXT_SEARCH_CONFIGS, type TextSearchConfig } from '../src/services/text-search.js';
 import { getExistingDocuments, replaceDocument, scanFrom, type NewChunk } from '../src/services/vector-store.js';
 import {
   applySchema,
@@ -66,6 +67,24 @@ const SEARCH_LIMIT = 10;
 
 const PROJECT_NAME = 'eval';
 
+/**
+ * Which PostgreSQL text search configuration the lexical half runs in, on **both** sides — the corpus
+ * is indexed with it and the questions are parsed with it ([ADR-0041](../.ssot/ADR.md#adr-0041)).
+ *
+ * A harness knob, like `EVAL_DATABASE_URL`, and deliberately not a product setting: the recommendation
+ * is `simple` and the evidence for it is this variable being swept, not a paragraph. Running the two
+ * sides in different configurations would measure nothing at all, which is why there is one variable
+ * and not two.
+ */
+function evalTextSearchConfig(): TextSearchConfig {
+  const value = process.env.EVAL_TEXT_SEARCH_CONFIG;
+  if (value === undefined || value === '') return QUERY_TEXT_SEARCH_CONFIG;
+  if (!isTextSearchConfig(value)) {
+    throw new Error(`EVAL_TEXT_SEARCH_CONFIG=${JSON.stringify(value)} is not one of: ${TEXT_SEARCH_CONFIGS.join(', ')}`);
+  }
+  return value;
+}
+
 interface OutputTarget {
   format: 'text' | 'json' | 'markdown';
   /** `null` means stdout. */
@@ -86,6 +105,8 @@ const USAGE = `Usage: npm run eval [-- <options>]
 
   EVAL_DATABASE_URL, or DATABASE_URL, points at a PostgreSQL to carve a throwaway database out of.
   With neither, a pgvector container is started for the run and stopped at the end.
+  EVAL_TEXT_SEARCH_CONFIG names the text search configuration the lexical half indexes and queries
+  with, on both sides. Default "simple"; "english" is the comparison ADR-0041 was decided on.
 `;
 
 function parseArgs(argv: readonly string[]): Options {
@@ -202,6 +223,7 @@ async function indexCorpus(
   projectId: string,
   generation: number,
   files: readonly string[],
+  textSearchConfig: TextSearchConfig,
 ): Promise<IndexOutcome> {
   // A fresh database cannot hold a previous run's documents, so this map is expected to be empty. It is
   // read anyway: the guard below is what makes "unchanged, skipped" impossible to reach silently, and a
@@ -245,7 +267,12 @@ async function indexCorpus(
       });
     }
 
-    await replaceDocument(db, { projectId, sourceId: null, relativePath, title, contentHash: hash, sizeBytes, indexGeneration: generation }, rows);
+    await replaceDocument(
+      db,
+      { projectId, sourceId: null, relativePath, title, contentHash: hash, sizeBytes, indexGeneration: generation },
+      rows,
+      textSearchConfig,
+    );
     chunkCount += rows.length;
   }
 
@@ -262,6 +289,7 @@ async function run(options: Options): Promise<void> {
   const startedAt = new Date();
   const totalStart = Date.now();
   const config = loadEvalConfig();
+  const textSearchConfig = evalTextSearchConfig();
 
   const files = await corpusFiles();
   const golden = parseGoldenSet(await fs.readFile(GOLDEN_PATH, 'utf8'), new Set(files));
@@ -300,7 +328,7 @@ async function run(options: Options): Promise<void> {
 
     step('eval: indexing the corpus');
     const indexStart = Date.now();
-    const indexed = await indexCorpus(db, embeddings, config, project.id, project.liveGeneration, files);
+    const indexed = await indexCorpus(db, embeddings, config, project.id, project.liveGeneration, files, textSearchConfig);
     const indexMs = Date.now() - indexStart;
 
     // `searchProject` re-reads the project and refuses one with no chunks or a model it does not run,
@@ -324,7 +352,10 @@ async function run(options: Options): Promise<void> {
       // an otherwise empty database, so iterative scan has nothing to do here — but a harness that
       // measured a different `ef_search` from the one an agent searches under would be measuring
       // something nobody runs, which is the mistake this whole file exists to avoid.
-      const outcome = await searchProject({ db, embeddings, scan }, { projectId: project.id, query: row.query, limit: SEARCH_LIMIT });
+      const outcome = await searchProject(
+        { db, embeddings, scan, textSearchConfig },
+        { projectId: project.id, query: row.query, limit: SEARCH_LIMIT },
+      );
       if (outcome.status !== 'ok') {
         throw new Error(`Question ${row.id} could not be scored: searchProject answered ${outcome.status}`);
       }
@@ -347,6 +378,7 @@ async function run(options: Options): Promise<void> {
       chunkOverlapTokens: config.CHUNK_OVERLAP_TOKENS,
       searchLimit: SEARCH_LIMIT,
       hnswScan: `ef_search=${scan.efSearch}, iterative_scan=${scan.iterativeScan}, max_scan_tuples=${scan.maxScanTuples}`,
+      textSearchConfig,
       documents: indexed.documents,
       chunks: indexed.chunks,
       startedAt: startedAt.toISOString(),

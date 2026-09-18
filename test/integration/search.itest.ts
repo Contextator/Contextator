@@ -247,12 +247,18 @@ describe('a viewer searching a project they are a member of', () => {
     expect(res.statusCode).toBe(200);
 
     const vector = await embeddings.embedQuery(QUERY);
-    const expected = await searchChunks(database.db, indexedId, LIVE, vector, 2);
+    const expected = await searchChunks(database.db, { projectId: indexedId, generation: LIVE, queryEmbedding: vector, queryText: QUERY, limit: 2 });
 
     expect(res.json().limit).toBe(2);
+    // Field for field, including the three ADR-0041 added: the route is a projection of `SearchHit`
+    // and nothing else, so a field that appeared in one and not the other would be a field the
+    // dashboard cannot show or an excerpt the agent and the operator disagree about.
     expect(res.json().hits).toEqual(
       expected.map((hit) => ({
         score: hit.score,
+        fusedScore: hit.fusedScore,
+        denseRank: hit.denseRank,
+        lexicalRank: hit.lexicalRank,
         path: hit.file,
         title: hit.title,
         headingPath: hit.headingPath,

@@ -37,7 +37,7 @@ const POLL_TYPING_MS = 30000;
 const ACTIVE_PHASES = new Set(['queued', 'scanning', 'embedding', 'finalizing']);
 
 const TOOLS = [
-  { name: 'search_docs', text: 'Cosine search over chunks. Returns ranked excerpts with path, heading breadcrumb and score.' },
+  { name: 'search_docs', text: 'Hybrid search — meaning and exact wording, fused. Returns ranked excerpts with path, heading breadcrumb and score.' },
   { name: 'list_topics', text: 'Every indexed document grouped by directory, with title and chunk count.' },
   { name: 'read_document', text: 'Full Markdown of one indexed file, capped at 512 KB.' },
 ];
@@ -1065,6 +1065,7 @@ function fillSourceForm(s) {
   srcForm.elements.name.value = s.name;
   srcForm.elements.label.value = s.label || '';
   srcForm.elements.flavor.value = s.flavor || 'plain';
+  srcForm.elements.language.value = c.language || '';
   for (const box of srcForm.querySelectorAll('input[name="ext"]')) box.checked = (c.extensions || []).includes(box.value);
   if (s.type === 'local') {
     const { root, rest } = splitRoot(c.path);
@@ -1151,6 +1152,9 @@ function configForKind(kind) {
   const { type } = SOURCE_KINDS[kind];
   const extensions = extensionsFromForm();
   if (extensions.length === 0) throw new Error('Pick at least one file type');
+  // Always sent, including as the empty string: the PATCH merges over the stored config, so a key the
+  // form left out would keep whatever was there and "Not set" would be unreachable once set once.
+  const language = srcForm.elements.language.value;
   if (type === 'local') {
     const rest = $('#src-path')
       .value.trim()
@@ -1158,7 +1162,7 @@ function configForKind(kind) {
     const root = srcSelectedRoot();
     const path = root ? `${root}/${rest}` : rest;
     if (!path) throw new Error('A directory is required');
-    return { path, extensions };
+    return { path, extensions, language };
   }
   if (type === 'git') {
     const url = srcForm.elements.url.value.trim();
@@ -1169,13 +1173,14 @@ function configForKind(kind) {
       subdir: srcForm.elements.subdir.value.trim().replace(/^[\\/]+|[\\/]+$/g, ''),
       username: srcForm.elements.username.value.trim(),
       extensions,
+      language,
     };
   }
   if (type === 'notion') {
     const ids = parseNotionIds(srcForm.elements.rootIds.value);
-    return { rootIds: ids, extensions };
+    return { rootIds: ids, extensions, language };
   }
-  return { extensions };
+  return { extensions, language };
 }
 
 const clearSecretRow = (type) => $(type === 'git' ? '#git-clear-secret-row' : '#notion-clear-secret-row');

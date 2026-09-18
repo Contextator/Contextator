@@ -194,6 +194,12 @@ export interface RunContext {
    * two runs at different values are not comparable, and without this line nothing would say so.
    */
   hnswScan: string;
+  /**
+   * The text search configuration the lexical half of retrieval ran in, on both sides
+   * ([ADR-0041](../../.ssot/ADR.md#adr-0041)). Here for `hnswScan`'s reason: two runs at different
+   * configurations are not comparable, and without this line nothing would say so.
+   */
+  textSearchConfig: string;
   documents: number;
   chunks: number;
   startedAt: string;
@@ -250,6 +256,7 @@ export function formatText(report: Report): string {
   out.push(`  corpus              ${c.documents} documents, ${c.chunks} chunks`);
   out.push(`  search limit        ${c.searchLimit} (MRR is MRR@${c.searchLimit})`);
   out.push(`  HNSW scan           ${c.hnswScan}`);
+  out.push(`  text search config  ${c.textSearchConfig} (both sides — the corpus and the questions)`);
   out.push(
     `  timing              ${seconds(c.totalMs)} total — model ${seconds(c.modelLoadMs)}, index ${seconds(c.indexMs)}, search ${seconds(c.searchMs)}`,
   );
@@ -305,7 +312,7 @@ export function formatMarkdown(report: Report): string {
   out.push('## Retrieval evaluation');
   out.push('');
   out.push(
-    `\`${c.providerId}\` · \`CHUNK_MAX_TOKENS=${c.chunkMaxTokens}\` · \`CHUNK_OVERLAP_TOKENS=${c.chunkOverlapTokens}\` · ${c.documents} documents, ${c.chunks} chunks · ${c.hnswScan} · commit \`${c.commit}\``,
+    `\`${c.providerId}\` · \`CHUNK_MAX_TOKENS=${c.chunkMaxTokens}\` · \`CHUNK_OVERLAP_TOKENS=${c.chunkOverlapTokens}\` · ${c.documents} documents, ${c.chunks} chunks · ${c.hnswScan} · \`to_tsvector('${c.textSearchConfig}', …)\` · commit \`${c.commit}\``,
   );
   out.push('');
   out.push('| group | n | recall@1 | recall@5 | MRR | mean score | heading@5 |');
