@@ -1,5 +1,6 @@
 import type OpenAI from 'openai';
 import type { Logger } from '../../context.js';
+import { estimateTokens } from '../chunker.js';
 import { EmbeddingDimensionError, type EmbeddingProvider, type EmbeddingWindowSource } from './provider.js';
 
 /**
@@ -44,6 +45,17 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
 
   get ready(): boolean {
     return this.isReady;
+  }
+
+  /**
+   * The characters ÷ 4 estimate, and deliberately so. Counting exactly would mean `tiktoken` — the
+   * dependency [ADR-0008](../../../.ssot/ADR.md#adr-0008) rejected and ADR-0036 does not reopen, because
+   * the argument for reopening it is a window this provider never comes close to: 8191 tokens against a
+   * budget in the hundreds. The asymmetry is real and documented rather than papered over — an operator
+   * on OpenAI gets approximate chunk boundaries, and nothing they can observe depends on them.
+   */
+  countTokens(text: string): number {
+    return estimateTokens(text);
   }
 
   private async getClient(): Promise<OpenAI> {

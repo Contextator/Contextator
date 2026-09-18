@@ -18,7 +18,7 @@ npm run eval -- --json > run.json # the same numbers for a machine
 EVAL_DATABASE_URL=postgres://… npm run eval   # use a server you already have
 ```
 
-The last recorded run of the default configuration is in [BASELINE.md](BASELINE.md).
+The Phase 0 baseline, and what the first Phase 1 change did to it, are in [BASELINE.md](BASELINE.md).
 
 ## The one rule that makes this worth anything
 
@@ -89,15 +89,20 @@ going to fix:
 1. **Identifier-dense passages.** Environment variable names, header names, error strings, flags,
    version numbers. A dense retriever is poor at these and hybrid search is the answer; the corpus has to
    contain them now so that the before and after are comparable.
-2. **Sections long enough to be split.** With `CHUNK_MAX_TOKENS=400` and tokens approximated as
-   characters ÷ 4, a section over roughly 1600 characters becomes more than one chunk. Several are much
-   longer than that, so the effect of a change to the chunk budget is visible rather than theoretical.
+2. **Sections long enough to be split.** With the shipped `CHUNK_MAX_TOKENS=112`, counted with the
+   model's own tokenizer, a section of more than roughly 400 characters becomes more than one chunk.
+   Several are many times longer than that, so the effect of a change to the chunk budget is visible
+   rather than theoretical — the same corpus produces 177 chunks at a 400-token budget and 452 at 112.
 3. **Turkish that is genuinely agglutinative.** The Turkish pages were written in Turkish, not translated
    from the English ones. This matters because the entire premise of Phase 1's first item is that an
    XLM-R tokenizer splits Turkish morphology into far more pieces per character than English, so one
    `CHUNK_MAX_TOKENS` means two different chunk sizes in two languages. Translated Turkish — English
    sentence structure with Turkish words in it — does not exhibit that, and a corpus made of it would
    quietly hide the defect it is supposed to expose.
+
+   Measuring it found the bias and found it running the other way: 3.6 characters per token in Turkish
+   against 3.4 in English, because the identifier-dense English reference pages fragment harder than
+   Turkish morphology does. The property the corpus was given is what made that answerable at all.
 
 The two languages cover **different pages**, not the same pages twice. That is what a half-translated
 documentation set actually looks like, and it is what makes a cross-lingual question scoreable: there is

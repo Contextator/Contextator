@@ -1,5 +1,6 @@
 import { env, pipeline } from '@huggingface/transformers';
 import type { Logger } from '../../context.js';
+import { estimateTokens } from '../chunker.js';
 import { EmbeddingDimensionError, type EmbeddingProvider, type EmbeddingWindowSource } from './provider.js';
 
 export type LocalDtype = 'fp32' | 'fp16' | 'q8';
@@ -51,10 +52,19 @@ export const DEFAULT_UNKNOWN_WINDOW_TOKENS = 256;
 /** The tokenizer's own `<s>`/`</s>` and a heading breadcrumb `embeddingText` prepends are not free either. */
 const MIN_WINDOW_TOKENS = 16;
 
+/**
+ * Minimal view of the loaded tokenizer we rely on. `encode` is synchronous once the tokenizer has
+ * parsed, which is the fact ADR-0036 rests on: it lets the chunker stay a pure synchronous function.
+ */
+interface LoadedTokenizer {
+  /** `PreTrainedTokenizer.model_max_length`, which falls back to `Infinity` when the config omits it. */
+  readonly model_max_length: number;
+  encode(text: string, options?: { add_special_tokens?: boolean }): number[];
+}
+
 /** Minimal view of the feature-extraction pipeline we rely on (keeps us independent of upstream type churn). */
 type Extractor = ((texts: string[], options: { pooling: 'mean'; normalize: boolean }) => Promise<{ dims: number[]; data: ArrayLike<number> }>) & {
-  /** `PreTrainedTokenizer.model_max_length`, which falls back to `Infinity` when the config omits it. */
-  readonly tokenizer: { readonly model_max_length: number };
+  readonly tokenizer: LoadedTokenizer;
 };
 
 export interface DiscoveredWindow {
@@ -77,9 +87,13 @@ export function resolveWindow(model: string, tokenizerMaxLength: number, configu
   return { effective: DEFAULT_UNKNOWN_WINDOW_TOKENS, truncatesAt: null, source: 'default' };
 }
 
-/** What the singleton hands back: the pipeline, and the one tokenizer fact the window is derived from. */
+/**
+ * What the singleton hands back: the pipeline, the tokenizer the window is derived from and that
+ * ADR-0036 counts chunks with, and the one fact read off it at load time.
+ */
 interface LoadedPipeline {
   extractor: Extractor;
+  tokenizer: LoadedTokenizer;
   tokenizerMaxLength: number;
 }
 
@@ -104,7 +118,8 @@ function loadExtractor(opts: LocalEmbeddingOptions): Promise<LoadedPipeline> {
     }).then((p) => {
       opts.log.info({ model: opts.model, ms: Date.now() - started }, 'embedding model loaded');
       const extractor = p as unknown as Extractor;
-      return { extractor, tokenizerMaxLength: extractor.tokenizer.model_max_length };
+      const tokenizer = extractor.tokenizer;
+      return { extractor, tokenizer, tokenizerMaxLength: tokenizer.model_max_length };
     });
     // Allow a retry after a failed download instead of caching the rejection forever.
     extractorPromise.catch(() => {
@@ -128,6 +143,12 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
    */
   private window: DiscoveredWindow;
   private windowDiscovered = false;
+  /**
+   * The same tokenizer the window was read off, kept so that `countTokens` can answer synchronously
+   * (ADR-0036). `undefined` until the pipeline has resolved, which is the whole of the difference
+   * between an exact count and an estimate.
+   */
+  private tokenizer: LoadedTokenizer | undefined;
 
   constructor(private readonly opts: LocalEmbeddingOptions) {
     this.model = opts.model;
@@ -138,6 +159,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
 
   /** Once, on the first load: the tokenizer's answer replaces the placeholder the constructor set. */
   private adoptWindow(loaded: LoadedPipeline): Extractor {
+    this.tokenizer = loaded.tokenizer;
     if (this.windowDiscovered) return loaded.extractor;
     this.windowDiscovered = true;
     this.window = resolveWindow(this.model, loaded.tokenizerMaxLength, this.opts.maxInputTokens);
@@ -165,6 +187,19 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
 
   get windowSource(): EmbeddingWindowSource {
     return this.window.source;
+  }
+
+  /**
+   * The model's own tokenizer, minus the special tokens it would wrap the input in — those are the
+   * chunker's `reserveTokens` and counting them here would count them twice (ADR-0036).
+   *
+   * Before the pipeline has loaded there is no tokenizer to ask, and this falls back to the characters
+   * ÷ 4 estimate. That window is real but narrow: the indexer only chunks inside a run, and a run
+   * cannot embed anything without the model being loaded first.
+   */
+  countTokens(text: string): number {
+    if (!this.tokenizer) return estimateTokens(text);
+    return this.tokenizer.encode(text, { add_special_tokens: false }).length;
   }
 
   async warmup(): Promise<void> {

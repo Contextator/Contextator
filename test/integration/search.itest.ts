@@ -61,6 +61,7 @@ const embeddings: EmbeddingProvider = {
   maxInputTokens: 512,
   truncatesAtTokens: 512,
   windowSource: 'default',
+  countTokens: (text) => Math.ceil(text.length / 4),
   warmup: async () => {},
   embed: async (texts) => texts.map(stubVector),
 };

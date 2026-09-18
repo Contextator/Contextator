@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import type { Config } from '../config.js';
+import { CHUNK_TOKENIZER_RESERVE_TOKENS, type Config } from '../config.js';
 import type { Logger } from '../context.js';
 import type { Db } from '../db/client.js';
 import { projects, type DocumentSourceRow } from '../db/schema.js';
@@ -221,6 +221,9 @@ export class Indexer {
 
   private async indexProject(job: JobState): Promise<void> {
     const { db, embeddings, config, locks } = this.deps;
+    // Bound once: the local provider answers off the tokenizer it holds, so the method needs its
+    // receiver, and the chunker wants a plain function it can memoise.
+    const countTokens = (text: string): number => embeddings.countTokens(text);
     const log = this.deps.log.child({ projectId: job.projectId });
     job.phase = 'syncing';
     job.startedAt = new Date().toISOString();
@@ -260,6 +263,12 @@ export class Indexer {
         job.phase = 'scanning';
         const existing = await getExistingDocuments(db, project.id);
         job.filesTotal = files.length;
+
+        // The chunker counts with the model's own tokenizer (ADR-0036) and chunking happens before the
+        // first `embed`, so the model has to be loaded before the loop rather than by it — otherwise the
+        // first document of a run that beat the background warmup would be chunked against the estimate.
+        // Idempotent: the pipeline is a process-wide singleton and this is one forward pass over one word.
+        await embeddings.warmup();
         job.phase = 'embedding';
 
         const seen = new Set<string>();
@@ -276,6 +285,10 @@ export class Indexer {
           const { title, chunks } = chunkMarkdown(transformContent(file.flavor, content), file.relativePath, {
             maxTokens: config.CHUNK_MAX_TOKENS,
             overlapTokens: config.CHUNK_OVERLAP_TOKENS,
+            // The model's own tokenizer, exact by the time this runs — nothing is indexed before the
+            // pipeline has loaded — and the reserve for the special tokens it adds (ADR-0036).
+            countTokens,
+            reserveTokens: CHUNK_TOKENIZER_RESERVE_TOKENS,
           });
 
           if (chunks.length === 0) {

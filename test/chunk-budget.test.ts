@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { CHUNK_BUDGET_RESERVE_TOKENS, type Config, EnvSchema } from '../src/config.js';
 import type { Logger } from '../src/context.js';
 import { checkChunkBudget, chunkBudgetMessage, newChunkBudgetState, verifyChunkBudget } from '../src/services/chunk-budget.js';
+import { estimateTokens } from '../src/services/chunker.js';
 import { DEFAULT_UNKNOWN_WINDOW_TOKENS, MODEL_WINDOWS, resolveWindow } from '../src/services/embeddings/local.js';
 import type { EmbeddingProvider } from '../src/services/embeddings/provider.js';
 
@@ -25,8 +26,9 @@ const issuesFor = (result: ReturnType<typeof parse>, field: string): string[] =>
 
 describe('the half that runs over process.env', () => {
   it('says nothing about the window when EMBEDDING_MAX_INPUT_TOKENS is unset', () => {
-    // 400 against a 128-token model is the shipped defect, and this half cannot know it: `process.env`
-    // does not carry a tokenizer. Silence here is the requirement, not an omission.
+    // 400 against a 128-token model was the shipped defect until ADR-0036 moved the default to 112, and
+    // this half still cannot know it: `process.env` does not carry a tokenizer. Silence here is the
+    // requirement, not an omission.
     const result = parse({ CHUNK_MAX_TOKENS: '400' });
     expect(result.success).toBe(true);
     expect(result.success && result.data.EMBEDDING_MAX_INPUT_TOKENS).toBeUndefined();
@@ -108,6 +110,7 @@ const stubProvider = (over: Partial<EmbeddingProvider> = {}): EmbeddingProvider 
   truncatesAtTokens: 512,
   windowSource: 'known-model',
   ready: true,
+  countTokens: estimateTokens,
   warmup: async () => {},
   embed: async () => [],
   ...over,
@@ -175,7 +178,7 @@ describe('the message an operator reads', () => {
     expect(message).toContain('the first 128 tokens');
     expect(message).toContain('truncates at 512');
     expect(message).toContain('tokens 129-512 are read but were never trained for');
-    expect(message).toContain('Set CHUNK_MAX_TOKENS=96');
+    expect(message).toContain(`Set CHUNK_MAX_TOKENS=${128 - CHUNK_BUDGET_RESERVE_TOKENS}`);
   });
 
   it('says the text is discarded when the two limits coincide', () => {

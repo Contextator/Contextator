@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { eq } from 'drizzle-orm';
 
-import { loadConfig, type Config } from '../src/config.js';
+import { CHUNK_TOKENIZER_RESERVE_TOKENS, loadConfig, type Config } from '../src/config.js';
 import type { Logger } from '../src/context.js';
 import type { Db } from '../src/db/client.js';
 import { projects } from '../src/db/schema.js';
@@ -34,7 +34,8 @@ import { buildReport, formatMarkdown, formatText, parseGoldenSet, scoreRow, type
  * Two things about this file are load-bearing and easy to undo by accident.
  *
  * **The indexing loop is the indexer's, lifted.** `chunkMarkdown` → `embeddingText` → `embed` →
- * `replaceDocument`, in batches of `EMBEDDING_BATCH_SIZE`, exactly as `services/indexer.ts` does it.
+ * `replaceDocument`, in batches of `EMBEDDING_BATCH_SIZE`, exactly as `services/indexer.ts` does it —
+ * including the token counter and the reserve it hands the chunker (ADR-0036).
  * What is left out is only what a corpus already sitting in the repository does not need: the source
  * drivers, the filesystem walk and the `document_sources` rows. `embeddingText` is imported rather than
  * re-derived — a harness that embedded a differently-assembled string would produce numbers that are
@@ -218,6 +219,10 @@ async function indexCorpus(
     const { title, chunks } = chunkMarkdown(content, relativePath, {
       maxTokens: config.CHUNK_MAX_TOKENS,
       overlapTokens: config.CHUNK_OVERLAP_TOKENS,
+      // The indexer's own two arguments (ADR-0036). A harness that counted tokens differently from the
+      // product would sweep `CHUNK_MAX_TOKENS` over chunks the product never produces.
+      countTokens: (text: string) => embeddings.countTokens(text),
+      reserveTokens: CHUNK_TOKENIZER_RESERVE_TOKENS,
     });
     if (chunks.length === 0) {
       skipped.push(`${relativePath} (produced no chunks)`);

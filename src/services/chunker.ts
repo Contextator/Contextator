@@ -6,7 +6,14 @@
  * packed from paragraph and fenced-code blocks with a small overlap between chunks.
  * Fenced code is never split mid-block unless a single block is itself too large.
  *
- * Tokens are approximated as chars / 4 to avoid a tokenizer dependency.
+ * Tokens are counted by `ChunkOptions.countTokens`, which the caller injects (ADR-0036) and which
+ * defaults to `estimateTokens`' characters ÷ 4. The embedding provider supplies the model's own
+ * tokenizer; `transformers.js` encodes synchronously once the tokenizer has loaded, so this file stays
+ * a pure synchronous function and every test in `test/chunker.test.ts` can run without a model.
+ *
+ * The budget is measured against what the indexer actually embeds — `embeddingText(chunk)`, the heading
+ * breadcrumb followed by the content — not against the content alone. Each section therefore packs to
+ * `maxTokens` minus its own breadcrumb minus `reserveTokens`.
  */
 
 export interface Chunk {
@@ -19,6 +26,21 @@ export interface Chunk {
 export interface ChunkOptions {
   maxTokens: number;
   overlapTokens: number;
+  /**
+   * How a token is counted. **Synchronous and injected** (ADR-0036): the embedding provider's
+   * `countTokens`, which is the model's own tokenizer once it has loaded. Defaults to `estimateTokens`,
+   * so a caller with no provider in hand still chunks.
+   *
+   * It is called many times per document and memoised for the length of one `chunkMarkdown` call, so it
+   * must be a pure function of its argument.
+   */
+  countTokens?: (text: string) => number;
+  /**
+   * Held back from `maxTokens` on top of the breadcrumb, which is counted for itself: the tokenizer's
+   * own `<s>`/`</s>` and, from PR 1.4, the provider's `passage: ` prefix. The indexer fills it in;
+   * unset it is zero.
+   */
+  reserveTokens?: number;
 }
 
 export interface ChunkResult {
@@ -26,6 +48,10 @@ export interface ChunkResult {
   chunks: Chunk[];
 }
 
+/**
+ * The fallback count, and the one every caller used before ADR-0036. It under-counts, and by different
+ * amounts in different languages, which is why it is now a default rather than the only answer.
+ */
 export const estimateTokens = (text: string): number => Math.ceil(text.length / 4);
 
 /** Text handed to the embedding model: breadcrumb first so it always fits the model window. */
@@ -35,6 +61,39 @@ export const embeddingText = (chunk: Pick<Chunk, 'headingPath' | 'content'>): st
 const FENCE_RE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
 const HEADING_RE = /^(#{1,4})\s+(.+?)\s*#*\s*$/;
 const MIN_CHUNK_CHARS = 20;
+
+/** A breadcrumb deep enough to swallow the whole budget must still leave room for something to chunk. */
+const MIN_CONTENT_BUDGET_TOKENS = 16;
+
+/** Below this a prefix is not worth another call to the tokenizer to shrink further. */
+const MIN_CUT_CHARS = 16;
+
+type TokenCounter = (text: string) => number;
+
+/** A counter and the budget already net of this section's breadcrumb and the caller's reserve. */
+interface SectionBudget {
+  count: TokenCounter;
+  /** Tokens available for a chunk's `content`. */
+  maxTokens: number;
+  overlapTokens: number;
+}
+
+/**
+ * One `Map` per `chunkMarkdown` call. The packing loop asks about every candidate line, and the overlap
+ * path asks about the same trailing lines again for the next chunk, so a real tokenizer would otherwise
+ * encode a large document thousands of times over. Scoped to the call rather than to the module because
+ * a process-wide cache would outlive the tokenizer it was filled for.
+ */
+function memoise(count: TokenCounter): TokenCounter {
+  const cache = new Map<string, number>();
+  return (text: string): number => {
+    const hit = cache.get(text);
+    if (hit !== undefined) return hit;
+    const tokens = count(text);
+    cache.set(text, tokens);
+    return tokens;
+  };
+}
 
 interface FenceState {
   char: string;
@@ -217,26 +276,47 @@ function splitBlocks(lines: string[]): Block[] {
   return blocks;
 }
 
-function hardCut(text: string, maxTokens: number): string[] {
-  const maxChars = Math.max(maxTokens * 4, 16);
+/** Prefers a word boundary, but never gives back more than half the prefix to find one. */
+function cutPoint(text: string, chars: number): number {
+  if (chars >= text.length) return text.length;
+  const space = text.lastIndexOf(' ', chars);
+  return space < chars / 2 ? chars : space;
+}
+
+/**
+ * Last resort: one sentence, or one line of code, that is over budget by itself. The first guess at
+ * where to cut comes from this text's own characters-per-token ratio rather than from a constant —
+ * the constant is the thing ADR-0036 exists to stop trusting — and is then shrunk until the counter
+ * agrees. A prefix that is still too long at `MIN_CUT_CHARS` is emitted anyway: there is nothing
+ * smaller left to try, and a chunker that loops is worse than a chunk that is a few tokens long.
+ */
+function hardCut(text: string, maxTokens: number, count: TokenCounter): string[] {
   const pieces: string[] = [];
-  let rest = text;
-  while (rest.length > maxChars) {
-    let cut = rest.lastIndexOf(' ', maxChars);
-    if (cut < maxChars / 2) cut = maxChars;
+  let rest = text.trim();
+  while (rest.length > 0) {
+    const tokens = count(rest);
+    if (tokens <= maxTokens) {
+      pieces.push(rest);
+      break;
+    }
+    let chars = Math.max(MIN_CUT_CHARS, Math.floor((rest.length * maxTokens) / tokens));
+    let cut = cutPoint(rest, chars);
+    while (chars > MIN_CUT_CHARS && count(rest.slice(0, cut)) > maxTokens) {
+      chars = Math.max(MIN_CUT_CHARS, Math.floor(chars * 0.75));
+      cut = cutPoint(rest, chars);
+    }
     pieces.push(rest.slice(0, cut).trim());
     rest = rest.slice(cut).trim();
   }
-  if (rest) pieces.push(rest);
-  return pieces;
+  return pieces.filter((piece) => piece.length > 0);
 }
 
-function packUnits(units: string[], maxTokens: number, separator: string): string[] {
+function packUnits(units: string[], maxTokens: number, separator: string, count: TokenCounter): string[] {
   const pieces: string[] = [];
   let current: string[] = [];
   let tokens = 0;
   for (const unit of units) {
-    const t = estimateTokens(unit + separator);
+    const t = count(unit + separator);
     if (current.length && tokens + t > maxTokens) {
       pieces.push(current.join(separator));
       current = [];
@@ -249,23 +329,23 @@ function packUnits(units: string[], maxTokens: number, separator: string): strin
   return pieces;
 }
 
-function splitTextBlock(text: string, maxTokens: number): string[] {
+function splitTextBlock(text: string, maxTokens: number, count: TokenCounter): string[] {
   const units: string[] = [];
   for (const line of text.split('\n')) {
-    if (estimateTokens(line) <= maxTokens) {
+    if (count(line) <= maxTokens) {
       units.push(line);
       continue;
     }
     for (const sentence of line.split(/(?<=[.!?])\s+/)) {
-      if (estimateTokens(sentence) <= maxTokens) units.push(sentence);
-      else units.push(...hardCut(sentence, maxTokens));
+      if (count(sentence) <= maxTokens) units.push(sentence);
+      else units.push(...hardCut(sentence, maxTokens, count));
     }
   }
-  return packUnits(units, maxTokens, '\n');
+  return packUnits(units, maxTokens, '\n', count);
 }
 
 /** Splits an oversized fenced block on line boundaries; every piece is re-wrapped in the same fence. */
-function splitCodeBlock(text: string, maxTokens: number): string[] {
+function splitCodeBlock(text: string, maxTokens: number, count: TokenCounter): string[] {
   const lines = text.split('\n');
   const open = lines[0];
   const marker = FENCE_RE.exec(open)?.[1] ?? '```';
@@ -273,24 +353,24 @@ function splitCodeBlock(text: string, maxTokens: number): string[] {
   const isClosed = lines.length > 1 && FENCE_RE.test(last) && fenceTransition(last, { char: marker[0], len: marker.length }) === null;
   const close = isClosed ? last : marker;
   const body = isClosed ? lines.slice(1, -1) : lines.slice(1);
-  const budget = Math.max(maxTokens - estimateTokens(`${open}\n${close}\n`), 20);
+  const budget = Math.max(maxTokens - count(`${open}\n${close}\n`), 20);
 
   const units: string[] = [];
   for (const line of body) {
-    if (estimateTokens(line) <= budget) units.push(line);
-    else units.push(...hardCut(line, budget));
+    if (count(line) <= budget) units.push(line);
+    else units.push(...hardCut(line, budget, count));
   }
-  return packUnits(units, budget, '\n').map((piece) => `${open}\n${piece}\n${close}`);
+  return packUnits(units, budget, '\n', count).map((piece) => `${open}\n${piece}\n${close}`);
 }
 
 /** Trailing whole lines of `content` worth up to `overlapTokens`; stops at fence markers so code is never duplicated. */
-function takeTail(content: string, overlapTokens: number): string {
+function takeTail(content: string, overlapTokens: number, count: TokenCounter): string {
   const lines = content.split('\n');
   const tail: string[] = [];
   let tokens = 0;
   for (let i = lines.length - 1; i >= 0; i--) {
     if (FENCE_RE.test(lines[i])) break;
-    const t = estimateTokens(lines[i] + '\n');
+    const t = count(lines[i] + '\n');
     if (tokens + t > overlapTokens) break;
     tail.unshift(lines[i]);
     tokens += t;
@@ -298,9 +378,10 @@ function takeTail(content: string, overlapTokens: number): string {
   return tail.join('\n').trim();
 }
 
-function chunkSection(section: Section, opts: ChunkOptions): string[] {
+function chunkSection(section: Section, budget: SectionBudget): string[] {
+  const { count } = budget;
   const whole = section.lines.join('\n').trim();
-  if (estimateTokens(whole) <= opts.maxTokens) return [whole];
+  if (count(whole) <= budget.maxTokens) return [whole];
 
   const out: string[] = [];
   let current: string[] = [];
@@ -312,9 +393,9 @@ function chunkSection(section: Section, opts: ChunkOptions): string[] {
     if (current.length && tokens > seededTokens) {
       const content = current.join('\n\n').trim();
       out.push(content);
-      const tail = lastWasCode || opts.overlapTokens === 0 ? '' : takeTail(content, opts.overlapTokens);
+      const tail = lastWasCode || budget.overlapTokens === 0 ? '' : takeTail(content, budget.overlapTokens, count);
       current = tail ? [tail] : [];
-      tokens = tail ? estimateTokens(tail) : 0;
+      tokens = tail ? count(tail) : 0;
       seededTokens = tokens;
     } else {
       current = [];
@@ -324,17 +405,30 @@ function chunkSection(section: Section, opts: ChunkOptions): string[] {
   };
 
   for (const block of splitBlocks(section.lines)) {
-    const blockTokens = estimateTokens(block.text);
-    if (blockTokens > opts.maxTokens) {
+    const blockTokens = count(block.text);
+    if (blockTokens > budget.maxTokens) {
       if (current.length && tokens > seededTokens) out.push(current.join('\n\n').trim());
       current = [];
       tokens = 0;
       seededTokens = 0;
-      out.push(...(block.kind === 'code' ? splitCodeBlock(block.text, opts.maxTokens) : splitTextBlock(block.text, opts.maxTokens)));
+      out.push(
+        ...(block.kind === 'code' ? splitCodeBlock(block.text, budget.maxTokens, count) : splitTextBlock(block.text, budget.maxTokens, count)),
+      );
       lastWasCode = block.kind === 'code';
       continue;
     }
-    if (current.length && tokens + blockTokens > opts.maxTokens) flush();
+    if (current.length && tokens + blockTokens > budget.maxTokens) {
+      flush();
+      // The overlap is a courtesy and the budget is not: a block that fits on its own but not behind
+      // the tail carried over starts a chunk of its own instead. Without this the seed can push a
+      // chunk up to `overlapTokens` past the budget, which is invisible while the budget is an
+      // approximation and is exactly what ADR-0036 stops tolerating.
+      if (current.length && seededTokens + blockTokens > budget.maxTokens) {
+        current = [];
+        tokens = 0;
+        seededTokens = 0;
+      }
+    }
     current.push(block.text);
     tokens += blockTokens + 1;
     lastWasCode = block.kind === 'code';
@@ -343,7 +437,18 @@ function chunkSection(section: Section, opts: ChunkOptions): string[] {
   return out.filter((c) => c.length > 0);
 }
 
+/**
+ * What is left of `maxTokens` for a section's content once `embeddingText` has prepended this section's
+ * breadcrumb and the caller's reserve is set aside. A deep breadcrumb used to eat the margin silently.
+ */
+function contentBudget(maxTokens: number, reserveTokens: number, headingPath: string, count: TokenCounter): number {
+  const breadcrumb = headingPath ? count(`${headingPath}\n\n`) : 0;
+  return Math.max(maxTokens - reserveTokens - breadcrumb, MIN_CONTENT_BUDGET_TOKENS);
+}
+
 export function chunkMarkdown(src: string, relativePath: string, opts: ChunkOptions): ChunkResult {
+  const count = memoise(opts.countTokens ?? estimateTokens);
+  const reserveTokens = opts.reserveTokens ?? 0;
   const normalized = src.replace(/\r\n?/g, '\n');
   const { data, body: rawBody } = parseFrontmatter(normalized);
   const body = /\.mdx$/i.test(relativePath) ? stripMdx(rawBody) : rawBody;
@@ -351,7 +456,12 @@ export function chunkMarkdown(src: string, relativePath: string, opts: ChunkOpti
 
   const draft: Array<{ headingPath: string; content: string }> = [];
   for (const section of splitSections(body, title)) {
-    for (const content of chunkSection(section, opts)) draft.push({ headingPath: section.headingPath, content });
+    const budget: SectionBudget = {
+      count,
+      maxTokens: contentBudget(opts.maxTokens, reserveTokens, section.headingPath, count),
+      overlapTokens: opts.overlapTokens,
+    };
+    for (const content of chunkSection(section, budget)) draft.push({ headingPath: section.headingPath, content });
   }
 
   // Merge chunks that are too small to be meaningful on their own.
@@ -372,6 +482,6 @@ export function chunkMarkdown(src: string, relativePath: string, opts: ChunkOpti
 
   return {
     title,
-    chunks: merged.map((c, index) => ({ index, headingPath: c.headingPath, content: c.content, tokenCount: estimateTokens(c.content) })),
+    chunks: merged.map((c, index) => ({ index, headingPath: c.headingPath, content: c.content, tokenCount: count(c.content) })),
   };
 }

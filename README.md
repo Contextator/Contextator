@@ -370,16 +370,30 @@ The server also sends MCP `instructions` describing the project so agents know w
 3. Chunking is Markdown-aware: frontmatter is parsed (`title` wins), MDX `import`/`export` lines and component tags are stripped, the document is split at headings (`#`–`####`) with a breadcrumb kept per chunk, and oversized sections are packed from paragraphs and fenced code blocks (code is never split mid-block when avoidable) with a small overlap.
 4. Each chunk is embedded as `heading breadcrumb + content` and stored in `chunks` with an HNSW cosine index.
 
-**Chunk size caveat, and the warning you will see.** `CHUNK_MAX_TOKENS` defaults to 400 (tokens ≈
-characters / 4), which is larger than the default local model reads. Two different limits are involved
-and it is worth keeping them apart: `Xenova/paraphrase-multilingual-MiniLM-L12-v2` was trained at **128**
-word pieces, while its tokenizer truncates at **512**. So a 400-token chunk is not cut — it is embedded
-in full, by weights that were never trained to represent that much, and the vector that comes out looks
-exactly as confident as any other. The server works both numbers out from the model once it has loaded
-and logs an `error` line naming them and a budget that fits; `/api/health` and the project page carry
-the same thing so it is still visible tomorrow. `250` or lower suits the local models; 400+ is fine for
-OpenAI (8191-token window). Putting the breadcrumb first guarantees the most informative part is always
-inside the window, whatever the budget is.
+**How the chunk budget is spent, and why it is 112.** Tokens are counted with the embedding model's own
+tokenizer — the one the provider has already loaded — rather than approximated from the character count.
+The approximation it replaced was not merely rough, it was biased by the text: on the retrieval corpus it
+under-counted English by 17 % and Turkish by 11 %, so one setting meant two different chunk sizes in the
+two languages this product serves first.
+
+Two different model limits are involved and it is worth keeping them apart:
+`Xenova/paraphrase-multilingual-MiniLM-L12-v2` was trained at **128** word pieces, while its tokenizer
+truncates at **512**. A chunk between the two is not cut — it is embedded in full, by weights that were
+never trained to represent that much, and the vector that comes out looks exactly as confident as any
+other. At the old default of 400 that was two thirds of every chunk.
+
+`CHUNK_MAX_TOKENS` now defaults to **112**: the 128 the model reads, less the margin the budget check
+holds back. The budget is charged for the heading breadcrumb as well as the content, because the
+breadcrumb is part of what is embedded, and the overlap between chunks is dropped rather than allowed to
+push a chunk past the budget — so nothing the indexer produces is longer than the model can read. Raise
+it on OpenAI, whose window is 8191. If you run a model this build has not heard of, state its window in
+`EMBEDDING_MAX_INPUT_TOKENS`; the server works the numbers out from the model once it has loaded and
+logs an `error` line naming them and a budget that fits, which `/api/health` and the project page carry
+so it is still visible tomorrow.
+
+On the golden set in [`eval/`](eval/), that change alone moved `recall@5` from 70.8 % to 79.2 % and
+heading-level precision from 45.8 % to 75.0 %. **Changing the budget — or the model — re-chunks as well
+as re-embeds, so an existing project keeps its old chunks until it is re-indexed.**
 
 ## Configuration
 
@@ -408,7 +422,7 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `EMBEDDING_DTYPE` | `fp32` | `q8` downloads a ~4× smaller quantized model |
 | `OPENAI_API_KEY`, `OPENAI_EMBEDDING_MODEL` | – / `text-embedding-3-small` | Used when the provider is `openai` |
 | `EMBEDDING_MAX_INPUT_TOKENS` | – | What the model reads **usefully** — the window it was trained at, not where its tokenizer truncates. Left empty the server discovers it from the loaded model and warns after startup if `CHUNK_MAX_TOKENS` does not fit; set, it overrules that and a contradicting `CHUNK_MAX_TOKENS` refuses to start |
-| `CHUNK_MAX_TOKENS` / `CHUNK_OVERLAP_TOKENS` | `400` / `50` | |
+| `CHUNK_MAX_TOKENS` / `CHUNK_OVERLAP_TOKENS` | `112` / `28` | Counted with the model's own tokenizer. `112` fits the default local model's 128-token window with the breadcrumb and the reserve inside it; raise both on OpenAI (8191). Changing either re-chunks every project on its next index run |
 | `ADMIN_TOKEN` | – | **Machine access** to `/api/*` via `Authorization: Bearer …`, acting with root permissions. Browsers sign in with an account instead; treat this token like a root password |
 | `AUTH_SESSION_IDLE_MS` | `43200000` (12 h) | A dashboard session unused for this long has to sign in again. Refreshed while the dashboard is in use |
 | `AUTH_SESSION_TTL_DAYS` | `30` | Hard ceiling on a session's life, however actively it is used |
@@ -539,7 +553,7 @@ src/server.ts                 Fastify entrypoint / composition root
 src/config.ts                 zod-validated environment
 src/db/schema.ts              Drizzle schema — the source `drizzle/*.sql` is generated from, and the only description of the tables
 src/db/bootstrap.ts           startup: the extension, the migration journal, `migrate()`, the vector dimension, the HNSW index
-src/services/chunker.ts       Markdown/MDX-aware chunking with heading breadcrumbs
+src/services/chunker.ts       Markdown/MDX-aware chunking with heading breadcrumbs; pure and synchronous, the token counter injected
 src/services/fs-scan.ts       safe directory walking + path-escape checks
 src/services/sources.ts       source CRUD and the zod schema of each type's config
 src/services/sources/         one driver per type: local, git (isomorphic-git), upload, notion
@@ -690,7 +704,7 @@ text, on every pull request, against a real server.
 | Symptom | Fix |
 |---------|-----|
 | `The database was created with EMBEDDING_DIMENSIONS=… but the current config says …` | Match the value, or start once with `RESET_VECTORS=1` and re-index everything. |
-| `CHUNK_MAX_TOKENS=400 exceeds what … reads` | The shipped default, and it is the product telling the truth about itself. Set `CHUNK_MAX_TOKENS` to the value the line suggests and re-index. If you run a model this build does not know, state its window in `EMBEDDING_MAX_INPUT_TOKENS`. |
+| `CHUNK_MAX_TOKENS=… exceeds what … reads` | The budget is larger than the model reads usefully. The shipped default fits the shipped model, so this means either was changed. Set `CHUNK_MAX_TOKENS` to the value the line suggests and re-index. If you run a model this build does not know, state its window in `EMBEDDING_MAX_INPUT_TOKENS`. |
 | Dashboard shows `model loading` for a long time | First run downloads ~470 MB; check `docker compose logs -f`. Air-gapped hosts: pre-populate the `contextator-models` volume and set `EMBEDDING_OFFLINE=1`. |
 | Container keeps restarting, logs say `PostgreSQL exited during startup` | The PostgreSQL output above that line tells why: usually a data directory from another PostgreSQL major version, or a bind-mounted `CONTEXTATOR_PGDATA_PATH` with wrong permissions. |
 | `Directory is outside the allowed document roots` | Use a path under `ALLOWED_DOC_ROOTS` (`/docs/...` inside Docker). |

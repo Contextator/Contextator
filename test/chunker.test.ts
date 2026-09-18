@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { chunkMarkdown, embeddingText, estimateTokens, parseFrontmatter, stripMdx } from '../src/services/chunker.js';
 
@@ -146,5 +148,94 @@ describe('chunkMarkdown', () => {
   it('prefixes the breadcrumb in the embedded text', () => {
     expect(embeddingText({ headingPath: 'A > B', content: 'body' })).toBe('A > B\n\nbody');
     expect(embeddingText({ headingPath: '', content: 'body' })).toBe('body');
+  });
+});
+
+/**
+ * The seam of [ADR-0036](../../.ssot/ADR.md#adr-0036), asserted without a model. A counter that answers
+ * one token per character is nothing like a real tokenizer, which is the point: if the chunker were
+ * still counting characters ÷ 4 anywhere, these numbers would not move.
+ */
+describe('the injected token counter', () => {
+  const oneTokenPerCharacter = (text: string): number => text.length;
+
+  it('packs against the injected counter rather than the default estimate', () => {
+    const src = `# Sayfa\n\n${Array.from({ length: 12 }, (_, i) => `Paragraf ${i} biraz metin icerir.`).join('\n\n')}`;
+    const withDefault = chunkMarkdown(src, 'a.md', { maxTokens: 120, overlapTokens: 0 });
+    const withStub = chunkMarkdown(src, 'a.md', { maxTokens: 120, overlapTokens: 0, countTokens: oneTokenPerCharacter });
+
+    expect(withDefault.chunks).toHaveLength(1);
+    expect(withStub.chunks.length).toBeGreaterThan(1);
+    // `tokenCount` is the injected counter's answer, not the estimate's, because it is what the
+    // budget was spent in and what the database records.
+    for (const chunk of withStub.chunks) expect(chunk.tokenCount).toBe(chunk.content.length);
+  });
+
+  it('spends the breadcrumb and the reserve out of the same budget', () => {
+    const body = Array.from({ length: 40 }, (_, i) => `satir ${i}`).join('\n');
+    const src = `# Kok\n\n## Cok Uzun Bir Baslik Yolu Parcasi\n\n${body}`;
+    const { chunks } = chunkMarkdown(src, 'a.md', {
+      maxTokens: 200,
+      overlapTokens: 0,
+      countTokens: oneTokenPerCharacter,
+      reserveTokens: 10,
+    });
+    expect(chunks.length).toBeGreaterThan(1);
+    // What the indexer embeds — breadcrumb and content together — is what has to fit, and the reserve
+    // is still unspent underneath it.
+    for (const chunk of chunks) expect(oneTokenPerCharacter(embeddingText(chunk))).toBeLessThanOrEqual(200 - 10);
+  });
+
+  it('is asked about any one string at most once', () => {
+    const asked: string[] = [];
+    const src = `# Sayim\n\n${Array.from({ length: 30 }, (_, i) => `Tekrar eden bir satir ${i}.`).join('\n\n')}`;
+    chunkMarkdown(src, 'a.md', {
+      maxTokens: 60,
+      overlapTokens: 20,
+      countTokens: (text) => {
+        asked.push(text);
+        return text.length;
+      },
+    });
+    expect(asked.length).toBeGreaterThan(0);
+    expect(new Set(asked).size).toBe(asked.length);
+  });
+});
+
+/**
+ * The one test here that needs the model cache, and it is gated on it rather than downloading 465 MB
+ * into `npm test`. Only the tokenizer is loaded — a few hundred kilobytes of `tokenizer.json` — because
+ * the claim under test is about counting, not about embedding.
+ *
+ * It is the acceptance test for ADR-0036: with the shipped budget, nothing the indexer hands the model
+ * is longer than the window the model was trained at.
+ */
+const MODEL = 'Xenova/paraphrase-multilingual-MiniLM-L12-v2';
+const CACHE_DIR = path.resolve('.cache/models');
+const cached = existsSync(path.join(CACHE_DIR, MODEL, 'tokenizer.json'));
+
+describe.skipIf(!cached)('the real tokenizer, on Turkish', () => {
+  it('keeps every chunk of a Turkish page inside the window it is embedded into', async () => {
+    const { AutoTokenizer, env } = await import('@huggingface/transformers');
+    env.cacheDir = CACHE_DIR;
+    env.allowLocalModels = true;
+    env.allowRemoteModels = false;
+    const tokenizer = await AutoTokenizer.from_pretrained(MODEL);
+    const countTokens = (text: string): number => tokenizer.encode(text, { add_special_tokens: false }).length;
+
+    // The eval corpus, so the fixture and the thing `npm run eval` measures cannot drift apart.
+    const page = readFileSync(path.resolve('eval/corpus/tr/kurulum/tek-sunucu.md'), 'utf8');
+    const { chunks } = chunkMarkdown(page, 'tr/kurulum/tek-sunucu.md', {
+      maxTokens: 112,
+      overlapTokens: 24,
+      countTokens,
+      reserveTokens: 2,
+    });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      // 128 is the window of this model (ADR-0035); `+ 2` is the `<s>`/`</s>` the count leaves out.
+      expect(countTokens(embeddingText(chunk)) + 2).toBeLessThanOrEqual(128);
+    }
   });
 });

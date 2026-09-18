@@ -41,8 +41,8 @@ Changing `EMBEDDING_DIMENSIONS` after data exists requires starting once with
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CHUNK_MAX_TOKENS` | `400` | Target chunk size (tokens approximated as characters divided by four) |
-| `CHUNK_OVERLAP_TOKENS` | `50` | Overlap between consecutive chunks of one section |
+| `CHUNK_MAX_TOKENS` | `112` | Target chunk size, counted with the embedding model's own tokenizer |
+| `CHUNK_OVERLAP_TOKENS` | `28` | Overlap between consecutive chunks of one section |
 
 Chunks are split at Markdown headings first. Sections that are still too long are split at
 paragraph boundaries, and fenced code blocks are kept intact whenever possible.

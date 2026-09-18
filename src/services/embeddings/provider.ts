@@ -33,6 +33,16 @@ export interface EmbeddingProvider {
   readonly windowSource: EmbeddingWindowSource;
   /** True once the model has produced at least one embedding. */
   readonly ready: boolean;
+  /**
+   * How many tokens `text` costs this model, **not counting the special tokens** the model adds around
+   * an input — those are the chunker's `reserveTokens` (ADR-0036), and counting them here would count
+   * them twice.
+   *
+   * Exact once the tokenizer has loaded, which for the local provider is once `ready`; before that it
+   * is `estimateTokens`, because the alternative is to make the chunker asynchronous. Synchronous by
+   * contract: the chunker is a pure function and the whole point of injecting this is to keep it one.
+   */
+  countTokens(text: string): number;
   /** Loads the model (downloading it on first use) and runs one embedding. */
   warmup(): Promise<void>;
   /** Returns one L2-normalised vector per input, each of length `dimensions`. */

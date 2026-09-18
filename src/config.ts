@@ -13,14 +13,22 @@ const csv = (value: string): string[] =>
 const flag = (value: string): boolean => value === '1' || value.toLowerCase() === 'true';
 
 /**
- * Held back from `CHUNK_MAX_TOKENS` when it is checked against the model's window (ADR-0035). It covers
- * the two things the budget does not count: `embeddingText` prepends the heading breadcrumb to the
- * content the budget was measured against, and the tokenizer adds its own `<s>`/`</s>`.
+ * Held back from `CHUNK_MAX_TOKENS` when it is checked against the model's window (ADR-0035).
  *
- * It does **not** pretend to cover `estimateTokens`' characters ÷ 4, which under-counts and is biased by
- * language. Replacing that approximation with the model's real tokenizer is a separate change.
+ * Both of the things it was originally sized for are now counted rather than guessed at (ADR-0036): the
+ * chunker subtracts each section's own heading breadcrumb, and `CHUNK_TOKENIZER_RESERVE_TOKENS` below
+ * covers the tokenizer's special tokens. What is left for this margin to absorb is the tiny-chunk merge,
+ * which can append a stub to a chunk that was already at budget, and the fact that a subword tokenizer
+ * is not additive — `count(a) + count(b)` and `count(a + b)` differ by a token either way.
  */
-export const CHUNK_BUDGET_RESERVE_TOKENS = 32;
+export const CHUNK_BUDGET_RESERVE_TOKENS = 16;
+
+/**
+ * What the chunker itself sets aside, per chunk, on top of the breadcrumb it counts (ADR-0036): the
+ * `<s>`/`</s>` the tokenizer wraps every input in, which `EmbeddingProvider.countTokens` deliberately
+ * does not report. PR 1.4's `passage: ` prefix is added here when it lands.
+ */
+export const CHUNK_TOKENIZER_RESERVE_TOKENS = 2;
 
 /** `CHUNK_MAX_TOKENS`' own floor, so a suggested budget is never a value the schema would refuse. */
 export const CHUNK_MAX_TOKENS_MIN = 50;
@@ -115,9 +123,15 @@ export const EnvSchema = z
      */
     EMBEDDING_MAX_INPUT_TOKENS: z.coerce.number().int().min(64).max(32_000).optional(),
 
-    // Chunking (tokens are approximated as chars / 4)
-    CHUNK_MAX_TOKENS: z.coerce.number().int().min(CHUNK_MAX_TOKENS_MIN).max(4000).default(400),
-    CHUNK_OVERLAP_TOKENS: z.coerce.number().int().min(0).default(50),
+    // Chunking (counted with the embedding model's own tokenizer — ADR-0036)
+    /**
+     * 112 is `128 - CHUNK_BUDGET_RESERVE_TOKENS`: what the default model reads usefully, less the
+     * margin the budget check holds back. It is also what measured best of 400, 256, 112 and 96 on the
+     * golden set with that model (ADR-0036). An operator on OpenAI's 8191-token window should raise it.
+     */
+    CHUNK_MAX_TOKENS: z.coerce.number().int().min(CHUNK_MAX_TOKENS_MIN).max(4000).default(112),
+    /** A quarter of the budget, because what has to survive a chunk boundary is a sentence, and a sentence does not get shorter when the budget does. */
+    CHUNK_OVERLAP_TOKENS: z.coerce.number().int().min(0).default(28),
   })
   .superRefine((c, ctx) => {
     if (c.EMBEDDING_PROVIDER === 'openai' && !c.OPENAI_API_KEY) {
