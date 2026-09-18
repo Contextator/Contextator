@@ -615,6 +615,10 @@ same scores to six decimal places, for all sixty-four questions, in every run â€
 `recall@5` 87.5 %, `MRR` 0.8017361111111112, `heading@5` 84.4 %, mean score 0.881141835322228, 577
 chunks.
 
+A seventh run, at the commit that turned the flag into a gate, measured the same figures again â€” which
+is the claim this change has to be able to make about itself: it enforces a number, it does not move
+one.
+
 That is worth stating because it was not true three changes ago. Before the lexical tie-breaking was
 fixed, `ts_rank_cd` returned the same score for a great many chunks and the order among them was decided
 by a random uuid, so five runs of one configuration spread `recall@1` across nine points
