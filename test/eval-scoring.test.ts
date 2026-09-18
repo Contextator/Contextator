@@ -184,6 +184,7 @@ describe('the report', () => {
     chunkMaxTokens: 400,
     chunkOverlapTokens: 50,
     searchLimit: 10,
+    hnswScan: 'ef_search=100, iterative_scan=relaxed_order, max_scan_tuples=20000',
     documents: 3,
     chunks: 9,
     startedAt: '2026-09-18T03:00:00.000Z',

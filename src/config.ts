@@ -38,6 +38,22 @@ export const CHUNK_TOKENIZER_RESERVE_TOKENS = 2;
 /** `CHUNK_MAX_TOKENS`' own floor, so a suggested budget is never a value the schema would refuse. */
 export const CHUNK_MAX_TOKENS_MIN = 50;
 
+/**
+ * The most rows one search may ask the index for — the ceiling on `limit` in both callers, and the
+ * number `HNSW_EF_SEARCH` is checked against below.
+ *
+ * It lives here rather than beside `DEFAULT_SEARCH_LIMIT` in `services/search.ts` only because the
+ * `superRefine` at the bottom of this file needs it and `services/search.ts` reaches `config.ts`
+ * through `services/projects.ts`. Importing it back the other way would be a cycle.
+ *
+ * It is a *candidate* count, not a result count, and that distinction is about to matter: the hybrid
+ * retrieval of ROADMAP Item 2 — the next change to this path — asks the dense side and the lexical
+ * side for their own candidates before fusing them with RRF, and raises this to 50 per side.
+ * `HNSW_EF_SEARCH` has to stay above whatever this number becomes, so the rule below is written
+ * against the constant rather than against 20.
+ */
+export const MAX_SEARCH_CANDIDATES = 20;
+
 /** Exported for the tests: the cross-field rules are the only part of this file that has behaviour. */
 export const EnvSchema = z
   .object({
@@ -156,6 +172,35 @@ export const EnvSchema = z
     CHUNK_MAX_TOKENS: z.coerce.number().int().min(CHUNK_MAX_TOKENS_MIN).max(4000).default(96),
     /** A quarter of the budget, because what has to survive a chunk boundary is a sentence, and a sentence does not get shorter when the budget does. */
     CHUNK_OVERLAP_TOKENS: z.coerce.number().int().min(0).default(24),
+
+    // Search: how far into the HNSW index one query is allowed to look (ADR-0040). All three are set
+    // per search transaction with `set_config(..., is_local => true)`, never on the connection — the
+    // pool hands the same connection to unrelated work a moment later.
+    /**
+     * Candidates the index yields before the project and generation predicates are applied. pgvector's
+     * own default is 40, which is the *whole* answer to a top-k on a busy instance: the predicates are
+     * a post-filter, so 40 candidates drawn from every project's chunks can leave a small project with
+     * a handful of hits or none. 100 is the usual small-corpus recall setting and the number this
+     * product runs at; it is a knob because the trade is latency against recall and the right point
+     * depends on how many projects share the index.
+     */
+    HNSW_EF_SEARCH: z.coerce.number().int().min(1).max(1000).default(100),
+    /**
+     * pgvector 0.8's iterative scan: when the post-filter leaves fewer than `limit` rows, keep scanning
+     * instead of answering short. `relaxed_order` re-searches with a growing `ef_search` and is what
+     * makes a 50-chunk project answerable inside a 20 000-chunk instance; `strict_order` keeps rows in
+     * distance order at a higher cost; `off` is pgvector's default and this product's old behaviour.
+     *
+     * Under `relaxed_order` the rows do not arrive in distance order — `searchChunks` re-sorts them.
+     */
+    HNSW_ITERATIVE_SCAN: z.enum(['off', 'relaxed_order', 'strict_order']).default('relaxed_order'),
+    /**
+     * The stop condition that actually fires once iterative scan is on: how many index tuples one query
+     * may visit before it gives up and answers with what it has. pgvector's default is 20 000, and it is
+     * nameable here because the number that matters is *the instance's* row count, not a project's — a
+     * project holding 1 % of the chunks has to be scanned past to be found.
+     */
+    HNSW_MAX_SCAN_TUPLES: z.coerce.number().int().min(1).default(20_000),
   })
   .superRefine((c, ctx) => {
     if (c.EMBEDDING_PROVIDER === 'openai' && !c.OPENAI_API_KEY) {
@@ -175,6 +220,20 @@ export const EnvSchema = z
         message:
           `plus ${CHUNK_BUDGET_RESERVE_TOKENS} reserved tokens does not fit in EMBEDDING_MAX_INPUT_TOKENS=${c.EMBEDDING_MAX_INPUT_TOKENS}; ` +
           `set it to ${suggested} or lower, or raise the window if the model really reads that much`,
+      });
+    }
+    // An HNSW scan cannot return more rows than it collected candidates, so an `ef_search` below the
+    // largest `limit` a caller may ask for is short by construction — before the project and
+    // generation predicates have discarded anything at all (ADR-0040). This is the floor, not the
+    // setting: at `ef_search = MAX_SEARCH_CANDIDATES` a search of a shared instance still starves, and
+    // the default is 100 for that reason.
+    if (c.HNSW_EF_SEARCH < MAX_SEARCH_CANDIDATES) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['HNSW_EF_SEARCH'],
+        message:
+          `must be at least ${MAX_SEARCH_CANDIDATES}, the most candidates one search may ask for; ` +
+          'below it the index cannot yield a full page even before the project predicate filters one row',
       });
     }
     if (c.ALLOWED_DOC_ROOTS.length === 0) {

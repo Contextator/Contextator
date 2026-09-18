@@ -188,6 +188,12 @@ export interface RunContext {
   chunkMaxTokens: number;
   chunkOverlapTokens: number;
   searchLimit: number;
+  /**
+   * The pgvector scan settings the run searched under, rendered for the report (ADR-0040). A recall
+   * number is a number about a configuration, and `hnsw.ef_search` is now part of that configuration:
+   * two runs at different values are not comparable, and without this line nothing would say so.
+   */
+  hnswScan: string;
   documents: number;
   chunks: number;
   startedAt: string;
@@ -243,6 +249,7 @@ export function formatText(report: Report): string {
   out.push(`  CHUNK_OVERLAP_TOKENS ${c.chunkOverlapTokens}`);
   out.push(`  corpus              ${c.documents} documents, ${c.chunks} chunks`);
   out.push(`  search limit        ${c.searchLimit} (MRR is MRR@${c.searchLimit})`);
+  out.push(`  HNSW scan           ${c.hnswScan}`);
   out.push(
     `  timing              ${seconds(c.totalMs)} total — model ${seconds(c.modelLoadMs)}, index ${seconds(c.indexMs)}, search ${seconds(c.searchMs)}`,
   );
@@ -298,7 +305,7 @@ export function formatMarkdown(report: Report): string {
   out.push('## Retrieval evaluation');
   out.push('');
   out.push(
-    `\`${c.providerId}\` · \`CHUNK_MAX_TOKENS=${c.chunkMaxTokens}\` · \`CHUNK_OVERLAP_TOKENS=${c.chunkOverlapTokens}\` · ${c.documents} documents, ${c.chunks} chunks · commit \`${c.commit}\``,
+    `\`${c.providerId}\` · \`CHUNK_MAX_TOKENS=${c.chunkMaxTokens}\` · \`CHUNK_OVERLAP_TOKENS=${c.chunkOverlapTokens}\` · ${c.documents} documents, ${c.chunks} chunks · ${c.hnswScan} · commit \`${c.commit}\``,
   );
   out.push('');
   out.push('| group | n | recall@1 | recall@5 | MRR | mean score | heading@5 |');

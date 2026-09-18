@@ -13,7 +13,7 @@ import { chunkMarkdown, embeddingText } from '../src/services/chunker.js';
 import { createEmbeddingProvider, type EmbeddingProvider } from '../src/services/embeddings/index.js';
 import { readAndHash } from '../src/services/fs-scan.js';
 import { searchProject } from '../src/services/search.js';
-import { getExistingDocuments, replaceDocument, type NewChunk } from '../src/services/vector-store.js';
+import { getExistingDocuments, replaceDocument, scanFrom, type NewChunk } from '../src/services/vector-store.js';
 import {
   applySchema,
   createTestDatabase,
@@ -315,11 +315,16 @@ async function run(options: Options): Promise<void> {
       })
       .where(eq(projects.id, project.id));
 
+    const scan = scanFrom(config);
     step(`eval: asking ${golden.length} questions`);
     const searchStart = Date.now();
     const results: RowResult[] = [];
     for (const row of golden) {
-      const outcome = await searchProject({ db, embeddings }, { projectId: project.id, query: row.query, limit: SEARCH_LIMIT });
+      // The server's own scan settings, not the defaults (ADR-0040). The eval corpus is one project in
+      // an otherwise empty database, so iterative scan has nothing to do here — but a harness that
+      // measured a different `ef_search` from the one an agent searches under would be measuring
+      // something nobody runs, which is the mistake this whole file exists to avoid.
+      const outcome = await searchProject({ db, embeddings, scan }, { projectId: project.id, query: row.query, limit: SEARCH_LIMIT });
       if (outcome.status !== 'ok') {
         throw new Error(`Question ${row.id} could not be scored: searchProject answered ${outcome.status}`);
       }
@@ -341,6 +346,7 @@ async function run(options: Options): Promise<void> {
       chunkMaxTokens: config.CHUNK_MAX_TOKENS,
       chunkOverlapTokens: config.CHUNK_OVERLAP_TOKENS,
       searchLimit: SEARCH_LIMIT,
+      hnswScan: `ef_search=${scan.efSearch}, iterative_scan=${scan.iterativeScan}, max_scan_tuples=${scan.maxScanTuples}`,
       documents: indexed.documents,
       chunks: indexed.chunks,
       startedAt: startedAt.toISOString(),

@@ -2,6 +2,7 @@ import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { installAuth } from '../auth/plugin.js';
 import type { Principal } from '../auth/types.js';
+import { MAX_SEARCH_CANDIDATES } from '../config.js';
 import type { AppContext } from '../context.js';
 import { pingDb } from '../db/client.js';
 import type { ProjectRow } from '../db/schema.js';
@@ -15,6 +16,7 @@ import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { listProjectsForUser, membershipMap } from '../services/auth/memberships.js';
 import { ConflictError, NotFoundError, ValidationError, createProject, deleteProject, getProjectById, listProjects } from '../services/projects.js';
 import { countSourcesByProject, createSource, slugifySourceName } from '../services/sources.js';
+import { scanFrom } from '../services/vector-store.js';
 import { authRoutes } from './auth-routes.js';
 import { mcpRoutes } from './mcp-routes.js';
 import { memberRoutes } from './members-routes.js';
@@ -33,7 +35,7 @@ const ReindexQuery = z.object({ force: z.enum(['true', 'false', '1', '0']).optio
  *  so `limit` is coerced — `"3"` is the only way a browser can send 3. */
 const SearchQuery = z.object({
   q: z.string().min(1).max(2000),
-  limit: z.coerce.number().int().min(1).max(20).optional(),
+  limit: z.coerce.number().int().min(1).max(MAX_SEARCH_CANDIDATES).optional(),
 });
 
 /**
@@ -204,7 +206,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
   app.get('/api/projects/:id/search', async (req) => {
     const { id } = IdParams.parse(req.params);
     const { q, limit } = SearchQuery.parse(req.query);
-    const outcome = await searchProject({ db, embeddings }, { projectId: id, query: q, limit });
+    const outcome = await searchProject({ db, embeddings, scan: scanFrom(config) }, { projectId: id, query: q, limit });
     // Deleted between the policy hook resolving access and this read — the same 404 a caller who
     // may not see it would have got.
     if (outcome.status === 'project_gone') throw new NotFoundError('Project not found');

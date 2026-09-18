@@ -3,13 +3,14 @@ import path from 'node:path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
+import { MAX_SEARCH_CANDIDATES } from '../config.js';
 import type { ProjectRow } from '../db/schema.js';
 import { isInside, normalizeRelativePath } from '../services/fs-scan.js';
 import { getProjectById } from '../services/projects.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { driverFor } from '../services/sources/driver.js';
 import { getSourceById, listSources } from '../services/sources.js';
-import { getDocument, getDocumentBySuffix, listDocumentsForProject, type SearchHit } from '../services/vector-store.js';
+import { getDocument, getDocumentBySuffix, listDocumentsForProject, scanFrom, type SearchHit } from '../services/vector-store.js';
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
@@ -46,7 +47,13 @@ export function registerTools(server: McpServer, ctx: AppContext, project: Proje
         'Use read_document with a returned file path to read the whole file.',
       inputSchema: {
         query: z.string().min(1).max(2000).describe('Natural-language question or keywords'),
-        limit: z.number().int().min(1).max(20).default(DEFAULT_SEARCH_LIMIT).describe('Maximum number of excerpts to return (1-20, default 5)'),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_SEARCH_CANDIDATES)
+          .default(DEFAULT_SEARCH_LIMIT)
+          .describe(`Maximum number of excerpts to return (1-${MAX_SEARCH_CANDIDATES}, default ${DEFAULT_SEARCH_LIMIT})`),
       },
       annotations: readOnly,
     },
@@ -54,7 +61,7 @@ export function registerTools(server: McpServer, ctx: AppContext, project: Proje
       try {
         // The guards, the query embedding and the top-k query are services/search.ts; what is left
         // here is the wording, which is prompt-visible and belongs to the tool.
-        const outcome = await searchProject({ db, embeddings }, { projectId: project.id, query, limit });
+        const outcome = await searchProject({ db, embeddings, scan: scanFrom(config) }, { projectId: project.id, query, limit });
         if (outcome.status === 'project_gone') return fail(`Project "${project.name}" no longer exists.`);
         if (outcome.status === 'not_indexed') {
           return ok(`Project "${project.name}" has no indexed content yet. Trigger indexing from the Contextator dashboard and try again.`);

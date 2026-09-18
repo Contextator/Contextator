@@ -2,7 +2,7 @@ import type { Db } from '../db/client.js';
 import type { ProjectRow } from '../db/schema.js';
 import type { EmbeddingProvider } from './embeddings/provider.js';
 import { getProjectById } from './projects.js';
-import { searchChunks, type SearchHit } from './vector-store.js';
+import { DEFAULT_HNSW_SCAN, type HnswScan, searchChunks, type SearchHit } from './vector-store.js';
 
 /**
  * The one search path in the product (ROADMAP Item 3). It used to live inside the `search_docs`
@@ -20,6 +20,13 @@ export const DEFAULT_SEARCH_LIMIT = 5;
 export interface SearchDeps {
   db: Db;
   embeddings: EmbeddingProvider;
+  /**
+   * How far into the HNSW index this search may look (ADR-0040). Optional for the same reason the two
+   * fields above are structural: a caller with no configuration still gets a working search, at the
+   * schema's own defaults. The server and the evaluation harness both pass `scanFrom(config)`, so an
+   * operator who changes `HNSW_EF_SEARCH` changes what they measure and what an agent receives.
+   */
+  scan?: HnswScan;
 }
 
 export interface SearchInput {
@@ -49,7 +56,7 @@ export type SearchOutcome =
   /** Those chunks and this query are not in the same space; the next run re-embeds the project. */
   | { status: 'model_mismatch'; project: ProjectRow; indexedWith: string; serverUses: string };
 
-export async function searchProject({ db, embeddings }: SearchDeps, input: SearchInput): Promise<SearchOutcome> {
+export async function searchProject({ db, embeddings, scan }: SearchDeps, input: SearchInput): Promise<SearchOutcome> {
   // Re-read rather than trust the row the caller is holding: an MCP session can outlive a
   // re-index, a delete, or a change of embedding model, and each of the three guards below is
   // about a project that is no longer what it was when the caller picked it up.
@@ -66,6 +73,6 @@ export async function searchProject({ db, embeddings }: SearchDeps, input: Searc
   // The live generation off the row that was just re-read, passed as a value (ADR-0039). A rebuild
   // may be filling `liveGeneration + 1` at this very moment; this query cannot see it, and the moment
   // the swap commits the next call reads the new number here instead. There is no gap between the two.
-  const hits = await searchChunks(db, project.id, project.liveGeneration, vector, input.limit ?? DEFAULT_SEARCH_LIMIT);
+  const hits = await searchChunks(db, project.id, project.liveGeneration, vector, input.limit ?? DEFAULT_SEARCH_LIMIT, scan ?? DEFAULT_HNSW_SCAN);
   return { status: 'ok', project, hits };
 }

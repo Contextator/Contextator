@@ -1,4 +1,5 @@
 import { and, asc, cosineDistance, count, eq, inArray, ne, sql } from 'drizzle-orm';
+import type { Config } from '../config.js';
 import type { Db } from '../db/client.js';
 import { chunks, documents, type DocumentRow } from '../db/schema.js';
 
@@ -12,6 +13,36 @@ import { chunks, documents, type DocumentRow } from '../db/schema.js';
  * already holds the project row it re-read for its own guards, and a sub-select would put a join
  * between pgvector and the predicate the search below depends on.
  */
+
+/**
+ * The three pgvector scan settings one search runs under ([ADR-0040](../../.ssot/ADR.md#adr-0040)).
+ * A plain structure rather than a `Config`, so a caller that is not the server — the evaluation
+ * harness, a test — can say what it wants without assembling an environment.
+ */
+export interface HnswScan {
+  /** Candidates the index yields *before* the project and generation predicates post-filter them. */
+  efSearch: number;
+  /** `off` is pgvector's default: answer short rather than keep scanning. */
+  iterativeScan: 'off' | 'relaxed_order' | 'strict_order';
+  /** Index tuples one query may visit under iterative scan before it answers with what it has. */
+  maxScanTuples: number;
+}
+
+/**
+ * What a caller with no configuration in hand gets. It is the schema's own defaults, restated here
+ * only because `config.ts` describes an environment and this file must not require one; `scanFrom`
+ * below is what the server uses, and the tests assert the two agree.
+ */
+export const DEFAULT_HNSW_SCAN: HnswScan = { efSearch: 100, iterativeScan: 'relaxed_order', maxScanTuples: 20_000 };
+
+/** The configured scan, for the three callers that hold a `Config`. */
+export function scanFrom(config: Pick<Config, 'HNSW_EF_SEARCH' | 'HNSW_ITERATIVE_SCAN' | 'HNSW_MAX_SCAN_TUPLES'>): HnswScan {
+  return {
+    efSearch: config.HNSW_EF_SEARCH,
+    iterativeScan: config.HNSW_ITERATIVE_SCAN,
+    maxScanTuples: config.HNSW_MAX_SCAN_TUPLES,
+  };
+}
 
 export interface SearchHit {
   /** Cosine similarity in [-1, 1]; higher is better. */
@@ -29,24 +60,61 @@ export interface SearchHit {
  *
  * `chunks.index_generation` is denormalised from the document precisely so that this stays two plain
  * column predicates on the table the index is on — no join between the vector operator and the filter.
+ *
+ * **The transaction is the point, not a detail** ([ADR-0040](../../.ssot/ADR.md#adr-0040)). There is one
+ * global HNSW index over every project's chunks, and pgvector post-filters: the index yields roughly
+ * `ef_search` candidates by distance and only then do the two predicates above remove the ones that do
+ * not match. A small project on a busy instance can therefore be answered short, or not at all, with
+ * its own chunks sitting unreturned. The three `hnsw.*` settings that fix that are **transaction-local**
+ * — `set_config(…, is_local => true)`, which is `SET LOCAL` that takes a bind parameter — because
+ * `createDb` builds a pool and a session-level `SET` would follow the connection into whatever
+ * unrelated query borrows it next. `SET LOCAL` outside a transaction is a silent no-op, so a search
+ * that lost its `BEGIN` would keep returning plausible rows while doing none of this.
  */
-export async function searchChunks(db: Db, projectId: string, generation: number, queryEmbedding: number[], limit: number): Promise<SearchHit[]> {
+export async function searchChunks(
+  db: Db,
+  projectId: string,
+  generation: number,
+  queryEmbedding: number[],
+  limit: number,
+  scan: HnswScan = DEFAULT_HNSW_SCAN,
+): Promise<SearchHit[]> {
   const distance = cosineDistance(chunks.embedding, queryEmbedding);
   const score = sql<number>`(1 - (${distance}))::float8`;
-  return db
-    .select({
-      score,
-      file: documents.relativePath,
-      title: documents.title,
-      headingPath: chunks.headingPath,
-      content: chunks.content,
-      chunkIndex: chunks.chunkIndex,
-    })
-    .from(chunks)
-    .innerJoin(documents, eq(documents.id, chunks.documentId))
-    .where(and(eq(chunks.projectId, projectId), eq(chunks.indexGeneration, generation)))
-    .orderBy(asc(distance))
-    .limit(limit);
+
+  const hits = await db.transaction(async (tx) => {
+    // One statement, so the whole of the setup costs a single round trip. The integers travel as
+    // parameters — `set_config` takes text and pgvector parses it — rather than being interpolated,
+    // which is the reason this is not three `SET LOCAL`s.
+    await tx.execute(sql`select
+      set_config('hnsw.ef_search', ${String(scan.efSearch)}, true),
+      set_config('hnsw.iterative_scan', ${scan.iterativeScan}, true),
+      set_config('hnsw.max_scan_tuples', ${String(scan.maxScanTuples)}, true)`);
+
+    return (
+      tx
+        .select({
+          score,
+          file: documents.relativePath,
+          title: documents.title,
+          headingPath: chunks.headingPath,
+          content: chunks.content,
+          chunkIndex: chunks.chunkIndex,
+        })
+        .from(chunks)
+        .innerJoin(documents, eq(documents.id, chunks.documentId))
+        .where(and(eq(chunks.projectId, projectId), eq(chunks.indexGeneration, generation)))
+        // `ORDER BY` above no longer means what it says, and the next reader will assume it does: under
+        // `hnsw.iterative_scan = relaxed_order` pgvector returns the right *set* of rows in the wrong
+        // order, which is exactly the trade that makes `relaxed_order` cheaper than `strict_order`. The
+        // clause stays because it is what selects the rows — it is the index's search key — and the sort
+        // below is what makes the order true. At most `limit` (≤ 20) elements.
+        .orderBy(asc(distance))
+        .limit(limit)
+    );
+  });
+
+  return hits.sort((a, b) => b.score - a.score);
 }
 
 export interface DocumentSummary {

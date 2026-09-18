@@ -122,6 +122,12 @@ async function buildApi(db: Db): Promise<FastifyInstance> {
       AUTH_COOKIE_SECURE: '0',
       DATA_DIR: '/tmp/contextator-search-itest',
       EMBEDDING_DTYPE: 'fp32',
+      // The route reaches these three on every search (ADR-0040). Stated rather than left out: with
+      // them missing `scanFrom` yields `undefined` and the search fails with a 500, which is a
+      // fixture bug that would read as a route bug.
+      HNSW_EF_SEARCH: 100,
+      HNSW_ITERATIVE_SCAN: 'relaxed_order',
+      HNSW_MAX_SCAN_TUPLES: 20_000,
       SECRET_KEY: undefined,
       UPLOAD_MAX_FILE_BYTES: 1024,
       UPLOAD_MAX_FILES_PER_REQUEST: 1,
