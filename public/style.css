@@ -2200,3 +2200,38 @@ body.auth .gate-card a {
     min-width: 200px;
   }
 }
+
+/* ---------- MCP access panel ---------- */
+
+.token-row {
+  grid-template-columns: 34px minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+}
+
+.source-glyph.token {
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-size: 9.5px;
+}
+
+.token-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 14px;
+}
+
+/* The members note reads as a warning by default; once the endpoint is closed it is reassurance. */
+.members-note.ok {
+  background: var(--ok-tint);
+  color: var(--ok-text);
+}
+
+#token-secret-dialog .snippet + .field-label {
+  margin-top: 16px;
+}
+
+#token-secret-dialog .field-label {
+  display: block;
+  margin-bottom: 6px;
+}

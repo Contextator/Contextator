@@ -15,6 +15,7 @@ import { listProjectsForUser, membershipMap } from '../services/auth/memberships
 import { ConflictError, NotFoundError, ValidationError, createProject, deleteProject, getProjectById, listProjects } from '../services/projects.js';
 import { countSourcesByProject, createSource, slugifySourceName } from '../services/sources.js';
 import { authRoutes } from './auth-routes.js';
+import { mcpRoutes } from './mcp-routes.js';
 import { memberRoutes } from './members-routes.js';
 import { sourceRoutes } from './sources-routes.js';
 import { usersRoutes } from './users-routes.js';
@@ -206,5 +207,6 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
   await app.register(authRoutes, { ctx });
   await app.register(usersRoutes, { ctx });
   await app.register(memberRoutes, { ctx });
+  await app.register(mcpRoutes, { ctx });
   await app.register(sourceRoutes, { ctx });
 };

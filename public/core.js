@@ -45,6 +45,8 @@ export const state = {
   sourcesStamp: null,
   members: [], // project members of the selected project
   membersFor: null,
+  mcpTokens: [], // MCP tokens of the selected project
+  mcpTokensFor: null,
   users: [], // the account list, only while the users view is open
   usersLoaded: false,
   confirmDeleteSource: null,

@@ -51,6 +51,15 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'POST', url: '/api/projects/:id/sources/:sid/test', actor: as('member'), membership: 'viewer', allowed: false },
   { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: 'editor', allowed: true },
 
+  // MCP tokens: reading the list is a viewer's, minting and revoking an editor's, and deciding
+  // whether the endpoint is public at all is a manager's.
+  { method: 'GET', url: '/api/projects/:id/mcp-tokens', actor: as('member'), membership: 'viewer', allowed: true },
+  { method: 'POST', url: '/api/projects/:id/mcp-tokens', actor: as('member'), membership: 'viewer', allowed: false },
+  { method: 'POST', url: '/api/projects/:id/mcp-tokens', actor: as('member'), membership: 'editor', allowed: true },
+  { method: 'DELETE', url: '/api/projects/:id/mcp-tokens/:tokenId', actor: as('member'), membership: 'editor', allowed: true },
+  { method: 'PATCH', url: '/api/projects/:id/mcp-auth', actor: as('member'), membership: 'editor', allowed: false },
+  { method: 'PATCH', url: '/api/projects/:id/mcp-auth', actor: as('admin'), membership: null, allowed: true },
+
   // Membership: anyone on the project sees who else is; only root/admin change it.
   { method: 'GET', url: '/api/projects/:id/members', actor: as('member'), membership: 'viewer', allowed: true },
   { method: 'PUT', url: '/api/projects/:id/members/:userId', actor: as('member'), membership: 'editor', allowed: false },

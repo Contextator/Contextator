@@ -204,4 +204,16 @@ describe('the legal pages tell the truth about accounts', () => {
     expect(body).toContain(SESSION_COOKIE);
     expect(body).toContain('scrypt');
   });
+
+  it('describes the MCP endpoint as closable rather than unauthenticated by design', async () => {
+    const privacy = await readFile(new URL('../public/pages/privacy.html', import.meta.url), 'utf8');
+    const terms = await readFile(new URL('../public/pages/terms.html', import.meta.url), 'utf8');
+    // The old wording said the endpoint could not be protected at all. It can, per project.
+    expect(privacy).not.toContain('unauthenticated by design');
+    expect(terms).not.toContain('unauthenticated by design');
+    // What replaced it has to survive too: the tokens are stored, so the policy has to say so.
+    expect(privacy).toContain('MCP tokens');
+    expect(privacy).toContain('bearer token');
+    expect(terms).toContain('bearer token');
+  });
 });

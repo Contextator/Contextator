@@ -366,6 +366,53 @@
       </form>
     </dialog>
 
+    <dialog id="token-dialog" class="dialog">
+      <form id="token-form" method="dialog" novalidate>
+        <div class="dialog-head">
+          <h2>New MCP token</h2>
+          <p class="muted">A bearer token for this project's MCP endpoint. Whoever holds it reads this project's indexed documents, with or without a dashboard account.</p>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span class="field-label">What is it for <span class="muted">— optional</span></span>
+            <input name="name" maxlength="100" autocomplete="off" placeholder="Cursor on my laptop" />
+            <span class="field-hint">Only a label, so you can tell two tokens apart and revoke the right one.</span>
+          </label>
+          <p id="token-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-foot">
+          <button type="button" class="ghost" id="token-cancel">Cancel</button>
+          <button type="submit" class="primary" id="token-submit">Create token</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="token-secret-dialog" class="dialog dialog-wide">
+      <div class="dialog-head">
+        <h2>Your MCP token</h2>
+        <p class="muted">This is the only time it is shown — the server keeps only a hash. Paste it into your client now; if you lose it, revoke it and make another.</p>
+      </div>
+      <div class="dialog-body">
+        <div class="snippet">
+          <pre id="token-secret-value"></pre>
+          <button type="button" class="copy" id="token-secret-copy">Copy</button>
+        </div>
+        <p class="field-label">Claude Code</p>
+        <div class="snippet">
+          <pre id="token-snippet-cli"></pre>
+          <button type="button" class="copy" id="token-snippet-cli-copy">Copy</button>
+        </div>
+        <p class="field-label">Cursor — <code>mcp.json</code></p>
+        <div class="snippet">
+          <pre id="token-snippet-json"></pre>
+          <button type="button" class="copy" id="token-snippet-json-copy">Copy</button>
+        </div>
+      </div>
+      <div class="dialog-foot">
+        <button type="button" class="primary" id="token-secret-close">Done</button>
+      </div>
+    </dialog>
+
     <dialog id="password-dialog" class="dialog">
       <form id="password-form" method="dialog" novalidate>
         <div class="dialog-head">

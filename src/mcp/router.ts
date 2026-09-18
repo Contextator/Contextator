@@ -7,6 +7,8 @@ import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
 import { isOriginAllowed } from '../services/origin.js';
 import { getProjectByName } from '../services/projects.js';
+import { verifyMcpToken } from '../services/auth/mcp-tokens.js';
+import { mcpAccessDecision, readMcpBearer } from './access.js';
 import { createProjectMcpServer } from './server-factory.js';
 
 /**
@@ -28,6 +30,13 @@ interface McpRoute {
   Querystring: { sessionId?: string };
 }
 
+declare module 'fastify' {
+  interface FastifyRequest {
+    /** Resolved once in the onRequest hook, so the four handlers do not each look it up again. */
+    mcpProject: ProjectRow | null;
+  }
+}
+
 const rpcError = (code: number, message: string) => ({ jsonrpc: '2.0' as const, error: { code, message }, id: null });
 const headerValue = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
 
@@ -35,23 +44,40 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
   const { config, sessions, log } = ctx;
   const legacySsePingMs = 25_000;
 
-  // Origin validation (DNS-rebinding protection). Non-browser clients send no Origin and pass.
-  // Browser origins pass when listed in ALLOWED_ORIGINS, when they are local, or when they match the host.
+  app.decorateRequest('mcpProject', null); // primitive default: object defaults are shared between requests
+
+  /**
+   * Origin validation (DNS-rebinding protection), then the project and its MCP access rule.
+   *
+   * Doing this once, here, means every route — including the legacy `/messages` channel and session
+   * termination — is covered, and a route added later inherits it rather than having to remember.
+   * A project left `open` behaves exactly as it always has.
+   */
   app.addHook('onRequest', async (req, reply) => {
     const origin = req.headers.origin;
     if (origin && !isOriginAllowed(origin, req.host, config.ALLOWED_ORIGINS)) {
       return reply.code(403).send(rpcError(-32000, 'Forbidden origin'));
     }
+
+    const name = (req.params as { project?: string }).project ?? '';
+    const project = await getProjectByName(ctx.db, name);
+    if (!project) return reply.code(404).send(rpcError(-32001, `Unknown project "${name}"`));
+    req.mcpProject = project;
+
+    const bearer = readMcpBearer(req.headers.authorization);
+    const verdict = mcpAccessDecision(project.mcpAuth, bearer, bearer ? await verifyMcpToken(ctx.db, project.id, bearer) : false);
+    if (verdict === 'ok') return;
+
+    if (verdict === 'token_invalid') log.warn({ project: project.name }, 'mcp request with an unknown or revoked token');
+    // RFC 6750: say which scheme is expected, so a client can report something better than "401".
+    return reply
+      .code(401)
+      .header('www-authenticate', `Bearer realm="${project.name}"`)
+      .send(rpcError(-32000, verdict === 'token_missing' ? 'This project requires an MCP token' : 'Unknown or revoked MCP token'));
   });
 
-  async function requireProject(req: FastifyRequest<McpRoute>, reply: FastifyReply): Promise<ProjectRow | null> {
-    const project = await getProjectByName(ctx.db, req.params.project);
-    if (!project) {
-      await reply.code(404).send(rpcError(-32001, `Unknown project "${req.params.project}"`));
-      return null;
-    }
-    return project;
-  }
+  /** The hook has already resolved it and answered 404 if it does not exist. */
+  const requireProject = (req: FastifyRequest<McpRoute>): ProjectRow => req.mcpProject!;
 
   /** After `reply.hijack()` Fastify no longer answers for us, so transport failures are written by hand. */
   async function guarded(reply: FastifyReply, fn: () => Promise<void>): Promise<void> {
@@ -71,8 +97,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
 
   // ---- Streamable HTTP: client → server messages ----
   app.post<McpRoute>('/mcp/:project', async (req, reply) => {
-    const project = await requireProject(req, reply);
-    if (!project) return;
+    const project = requireProject(req);
 
     const sessionId = headerValue(req.headers['mcp-session-id']);
     let transport: StreamableHTTPServerTransport;
@@ -119,8 +144,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
 
   // ---- GET: Streamable HTTP server stream, or legacy SSE when no session header is present ----
   app.get<McpRoute>('/mcp/:project', async (req, reply) => {
-    const project = await requireProject(req, reply);
-    if (!project) return;
+    const project = requireProject(req);
 
     const sessionId = headerValue(req.headers['mcp-session-id']);
     if (sessionId) {
@@ -165,8 +189,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
 
   // ---- Legacy SSE: client → server messages ----
   app.post<McpRoute>('/mcp/:project/messages', async (req, reply) => {
-    const project = await requireProject(req, reply);
-    if (!project) return;
+    const project = requireProject(req);
 
     const session = req.query.sessionId ? sessions.get(req.query.sessionId, 'sse') : undefined;
     if (!session || session.projectId !== project.id) return reply.code(404).send(rpcError(-32001, 'Session not found'));
@@ -178,8 +201,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
 
   // ---- Streamable HTTP: explicit session termination ----
   app.delete<McpRoute>('/mcp/:project', async (req, reply) => {
-    const project = await requireProject(req, reply);
-    if (!project) return;
+    const project = requireProject(req);
 
     const sessionId = headerValue(req.headers['mcp-session-id']);
     const session = sessionId ? sessions.get(sessionId, 'streamable') : undefined;

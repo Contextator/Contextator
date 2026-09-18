@@ -25,6 +25,7 @@ import {
   toast,
 } from './core.js';
 import { canCreateProject, canDeleteProject, canEdit, initAuthUi, loadMe, renderUserMenu } from './auth.js';
+import { authHeaderFor, initMcpUi, loadMcpTokens, renderMcpAccess } from './mcp.js';
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
 import { initUsersUi, renderUsersView } from './users.js';
 
@@ -73,15 +74,37 @@ function runResult(run) {
 function snippetsFor(project) {
   const url = project.mcpUrl;
   const id = `${project.name}-docs`;
+  // A token is shown once, when it is minted, so the snippets here carry a placeholder instead.
+  const locked = project.mcpAuth === 'token';
+  const header = authHeaderFor(null);
+  const tokenHint = locked ? ' Replace <your token> with one from the MCP access panel above.' : '';
   return [
-    { tab: 'Claude Code', code: `claude mcp add --transport http ${id} ${url}` },
-    { tab: 'Cursor', hint: '~/.cursor/mcp.json (global) or .cursor/mcp.json in the repo', code: JSON.stringify({ mcpServers: { [id]: { url } } }, null, 2) },
+    {
+      tab: 'Claude Code',
+      hint: locked ? `This project requires a token.${tokenHint}` : undefined,
+      code: locked ? `claude mcp add --transport http ${id} ${url} \\\n  --header "${header}"` : `claude mcp add --transport http ${id} ${url}`,
+    },
+    {
+      tab: 'Cursor',
+      hint: `~/.cursor/mcp.json (global) or .cursor/mcp.json in the repo.${tokenHint}`,
+      code: JSON.stringify({ mcpServers: { [id]: locked ? { url, headers: { Authorization: 'Bearer <your token>' } } : { url } } }, null, 2),
+    },
     {
       tab: 'Claude Desktop',
-      hint: 'claude_desktop_config.json — via the mcp-remote stdio bridge',
-      code: JSON.stringify({ mcpServers: { [id]: { command: 'npx', args: ['-y', 'mcp-remote', url] } } }, null, 2),
+      hint: `claude_desktop_config.json — via the mcp-remote stdio bridge.${tokenHint}`,
+      code: JSON.stringify(
+        { mcpServers: { [id]: { command: 'npx', args: locked ? ['-y', 'mcp-remote', url, '--header', header] : ['-y', 'mcp-remote', url] } } },
+        null,
+        2,
+      ),
     },
-    { tab: 'Legacy SSE', hint: 'GET opens the SSE stream; the server answers with the messages endpoint.', code: `${url}\n→ POST ${url}/messages?sessionId=…` },
+    {
+      tab: 'Legacy SSE',
+      hint: locked
+        ? 'GET opens the SSE stream; both it and the messages channel need the Authorization header, which a browser EventSource cannot send.'
+        : 'GET opens the SSE stream; the server answers with the messages endpoint.',
+      code: `${url}\n→ POST ${url}/messages?sessionId=…`,
+    },
   ];
 }
 
@@ -138,6 +161,7 @@ function select(id) {
   void loadRuns();
   void loadSources();
   void loadMembers();
+  void loadMcpTokens();
 }
 
 /** Fetches the selected project's run history when the selection or the newest job changes. */
@@ -426,6 +450,7 @@ function renderDetail() {
 
   main.append(renderSources(p, busy));
   main.append(renderMembers(p));
+  main.append(renderMcpAccess(p));
 
   // Connect + tools
   const snippets = snippetsFor(p);
@@ -616,6 +641,7 @@ async function refresh() {
     void loadRuns();
     void loadSources();
     void loadMembers(); // no-op unless the selection moved; the dialog forces its own reload
+    void loadMcpTokens();
   }
   // The account list is not part of a project poll; refresh it only while it is on screen.
   if (state.view === 'users') void loadUsers();
@@ -1296,6 +1322,7 @@ async function boot() {
   initAuthUi();
   initUsersUi();
   initMembersUi();
+  initMcpUi();
   await loadMe();
   applyHash();
   document.body.classList.remove('booting');

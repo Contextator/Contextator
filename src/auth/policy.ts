@@ -31,6 +31,9 @@ export function requiredRole(method: string, url: string): UserRole | null {
 /** Per-project routes that need more than the default. */
 const PROJECT_ROUTE_OVERRIDES: ReadonlyArray<{ method: string; url: string; need: ProjectAccess }> = [
   { method: 'DELETE', url: '/api/projects/:id', need: 'manager' },
+  // Whether this project's documents are readable by anything that can reach the URL is the same
+  // class of decision as creating the project in the first place, which is already admin-only.
+  { method: 'PATCH', url: '/api/projects/:id/mcp-auth', need: 'manager' },
   { method: 'GET', url: '/api/projects/:id/members', need: 'viewer' },
   { method: 'PUT', url: '/api/projects/:id/members/:userId', need: 'manager' },
   { method: 'DELETE', url: '/api/projects/:id/members/:userId', need: 'manager' },
