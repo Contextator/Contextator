@@ -136,16 +136,15 @@ export const canActOnRole = (principal: Principal, targetRole: UserRole): boolea
  * permission matrix above is already built the other way round to avoid: one rule keyed on the route
  * template, applied by one hook, covering routes it was written before.
  *
- * So every unsafe method under `/api/*` is an audit event unless it is named here, with its reason.
- * Each of these changes something, and each is left out because the row would be noise or could not
- * be attributed:
+ * So every unsafe method under `/api/*` **or `/oauth/*`** is an audit event unless it is named here,
+ * with its reason. The OAuth surface is in scope and not merely adjacent to it: approving a connector
+ * is a person granting a client lasting read access to one project, which is the
+ * `PATCH /api/projects/:id/mcp-auth` class of decision and the exact moment
+ * [ADR-0054](../../.ssot/ADR.md#adr-0054)'s "a credential that names a person" is created.
  *
- * - `/api/setup` — **there is no actor yet.** It runs without a principal, and the row it could write
- *   would say "somebody holding the setup code". The account it creates is the record, and
- *   `src/server.ts` logs the moment as well.
- * - `/api/auth/login` — public, so the principal is resolved *by* it rather than before it. Sign-ins
- *   are recorded where they already were: `users.last_login_at`, `users.failed_login_count`, and a
- *   `warn` line per failure.
+ * Each route named below changes something, and each is left out because the row would be noise or
+ * could not be attributed:
+ *
  * - `.../sources/:sid/test` — a connectivity check. It reaches the network and writes nothing; it is a
  *   `POST` because it carries a credential in a body, not because it changes anything.
  * - `.../uploads/:session/files` — staging, one request per file. Nothing the project serves changes
@@ -155,14 +154,24 @@ export const canActOnRole = (principal: Principal, targetRole: UserRole): boolea
  *   `index_runs.trigger`. They are registered outside `adminRoutes`, so this hook never sees one
  *   today, and they are named anyway: the day somebody moves them under it, the rule should already
  *   say what it thinks rather than start writing rows attributed to nobody.
+ * - `/oauth/register` — RFC 7591 dynamic client registration, which is **unauthenticated by
+ *   specification and confers nothing**: the row is a name and a set of redirect URIs, and every grant
+ *   it can ever hold comes from a person approving one at `/oauth/authorize`, which *is* recorded.
+ *   There is no actor to name, and a per-host budget already bounds the traffic.
+ * - `/oauth/token` and `/oauth/revoke` — machine traffic on a grant a person already approved and this
+ *   table already records. A connector refreshes on its own schedule, so an event per exchange would
+ *   be a row every few minutes saying nothing that the approval did not already say; and the actor of
+ *   a refresh is a credential rather than the person, which is the shape this table refuses to record.
+ *   `mcp_tokens.last_used_at` is where "is this grant still in use" is answered.
  */
 export const AUDIT_EXEMPT_ROUTES: ReadonlySet<string> = new Set([
-  '/api/setup',
-  '/api/auth/login',
   '/api/projects/:id/sources/:sid/test',
   '/api/projects/:id/sources/:sid/uploads/:session/files',
   '/api/webhooks/git/:sourceId',
   '/api/webhooks/notion/:sourceId',
+  '/oauth/register',
+  '/oauth/token',
+  '/oauth/revoke',
 ]);
 
 /**
@@ -186,7 +195,56 @@ const AUDIT_DETAIL: ReadonlyArray<{ url: string; field: string; values: readonly
   { url: '/api/projects/:id/members/:userId', field: 'role', values: ['viewer', 'editor'] },
   { url: '/api/users', field: 'role', values: ['root', 'admin', 'member'] },
   { url: '/api/users/:id', field: 'role', values: ['root', 'admin', 'member'] },
+  // Whether the person approved the connector or refused it. The whole substance of the event, and
+  // the reason a refusal is recorded here where a refusal is recorded nowhere else in this table: a
+  // `deny` is the person acting, not the permission matrix declining.
+  { url: '/oauth/authorize', field: 'decision', values: ['approve', 'deny'] },
 ];
+
+/**
+ * Where the id of a **created** object is found in the response, per route.
+ *
+ * A creating route names nothing in its path — `POST /api/projects/:id/mcp-tokens` has only the
+ * project — so the rule that reads the route template finds no target and the row would say *that* a
+ * token was minted without saying *which*, which leaves "who minted this token" unanswerable and
+ * uncorrelatable with the `DELETE .../mcp-tokens/:tokenId` that names one.
+ *
+ * So the id is read back out of the response, and **only through this table**: a route not named here
+ * reads nothing, the path into the body is fixed rather than searched, and the value is kept only if
+ * it is a UUID. Those three together are what stop this from becoming a way for a response body to
+ * put text into `audit_events` — which is the property `AUDIT_DETAIL` above exists to protect.
+ */
+const AUDIT_CREATED: ReadonlyArray<{ method: string; url: string; type: string; path: readonly string[] }> = [
+  { method: 'POST', url: '/api/projects', type: 'projectId', path: ['id'] },
+  { method: 'POST', url: '/api/projects/import', type: 'projectId', path: ['projectId'] },
+  { method: 'POST', url: '/api/projects/:id/sources', type: 'sid', path: ['id'] },
+  { method: 'POST', url: '/api/projects/:id/mcp-tokens', type: 'tokenId', path: ['token', 'id'] },
+  { method: 'POST', url: '/api/users', type: 'userId', path: ['user', 'id'] },
+  // The first account. `POST /api/setup` is the one request in this product that creates its own
+  // actor, and the account it creates is both the target and the person the row names.
+  { method: 'POST', url: '/api/setup', type: 'userId', path: ['user', 'id'] },
+];
+
+/** Version 4 UUID, the only shape `target_id` accepts from a response body. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The created object's id, from a response body this route is allowed to be read from. Pure, and
+ * deliberately incapable of returning anything that is not a UUID.
+ */
+export function auditCreatedTarget(method: string, url: string, body: unknown): { type: string; id: string } | null {
+  const rule = AUDIT_CREATED.find((r) => r.method === method && r.url === url);
+  if (!rule) return null;
+  let node: unknown = body;
+  for (const key of rule.path) {
+    if (typeof node !== 'object' || node === null) return null;
+    node = (node as Record<string, unknown>)[key];
+  }
+  return typeof node === 'string' && UUID_RE.test(node) ? { type: rule.type, id: node } : null;
+}
+
+/** Whether this route's response is worth parsing at all — asked before the body is deserialised. */
+export const auditReadsResponse = (method: string, url: string): boolean => AUDIT_CREATED.some((r) => r.method === method && r.url === url);
 
 /** What the policy layer decided to record about one request; `null` when the request is not an event. */
 export interface AuditSubject {
@@ -244,7 +302,7 @@ function auditDetail(url: string, body: unknown): Record<string, string | boolea
  */
 export function auditSubject(method: string, url: string, params: RouteParams, body: unknown): AuditSubject | null {
   if (SAFE_METHODS.has(method)) return null;
-  if (!url.startsWith('/api/')) return null;
+  if (!url.startsWith('/api/') && !url.startsWith('/oauth/')) return null;
   if (AUDIT_EXEMPT_ROUTES.has(url)) return null;
   const target = auditTarget(url, params);
   const projectId = isProjectScoped(url) && typeof params.id === 'string' ? params.id : null;

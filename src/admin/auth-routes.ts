@@ -2,6 +2,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
+import type { UserRole } from '../auth/types.js';
 import { clearSessionCookie, setSessionCookie } from '../auth/cookies.js';
 import { requireSession } from '../auth/plugin.js';
 import { ConflictError } from '../services/projects.js';
@@ -47,13 +48,27 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
     if (retryAfter > 0) throw new RateLimitedError(retryAfter);
   };
 
-  const signIn = async (reply: FastifyReply, req: FastifyRequest, userId: string): Promise<void> => {
-    const { token } = await createSession(db, userId, config.AUTH_SESSION_TTL_DAYS, {
+  /**
+   * Opens the session, sets the cookie — and names the person this request turned out to be
+   * ([ADR-0055](../../.ssot/ADR.md#adr-0055)).
+   *
+   * Sign-in and first-run setup are the two requests in this product that *create* the identity they
+   * act as: `installAuth`'s identity hook ran before either had one, so `req.principal` is null and the
+   * audit hook would find nobody to name. `req.auditActor` is that answer, filled where it becomes
+   * true. It is not an audit call — the writing stays in one place — and nothing else reads it.
+   *
+   * Without this the log would hold **logouts and no sign-ins**, and the compensating record it would
+   * be pointing at, `users.last_login_at`, is one column that is overwritten every time: the last
+   * sign-in, never a history of them.
+   */
+  const signIn = async (reply: FastifyReply, req: FastifyRequest, user: { id: string; username: string; role: UserRole }): Promise<void> => {
+    const { token, sessionId } = await createSession(db, user.id, config.AUTH_SESSION_TTL_DAYS, {
       userAgent: String(req.headers['user-agent'] ?? ''),
       ip: clientIp(req),
     });
     setSessionCookie(reply, req, config, token);
     ctx.loginLimiter.reset(clientIp(req));
+    req.auditActor = { kind: 'session', role: user.role, userId: user.id, username: user.username, sessionId, mustChangePassword: false };
   };
 
   // ---------- setup ----------
@@ -88,7 +103,7 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
 
     ctx.setup.complete();
     log.warn({ username: created.username }, 'first root account created; setup is closed');
-    await signIn(reply, req, created.id);
+    await signIn(reply, req, created);
     return reply.code(201).send({ user: toUserView(created) });
   });
 
@@ -119,7 +134,7 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
     // Parameters may have been raised since this hash was made; quietly bring it up to date.
     const rehashed = needsRehash(user.passwordHash) ? await hashPassword(body.password) : undefined;
     await recordLoginSuccess(db, user.id, rehashed);
-    await signIn(reply, req, user.id);
+    await signIn(reply, req, user);
     return { user: toUserView(user), mustChangePassword: user.mustChangePassword };
   });
 

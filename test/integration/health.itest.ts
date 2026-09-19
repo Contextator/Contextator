@@ -47,6 +47,11 @@ async function buildApi(db: Db): Promise<FastifyInstance> {
       UPLOAD_MAX_FILE_BYTES: 1024,
       UPLOAD_MAX_FILES_PER_REQUEST: 1,
       UPLOAD_MAX_ARCHIVE_BYTES: 1024,
+      // The two credentials `/metrics` accepts without a database ([ADR-0055](../../.ssot/ADR.md#adr-0055)),
+      // which is the property the outage cases at the bottom of this file are about.
+      ADMIN_TOKEN: 'a-token-for-a-test',
+      METRICS_TOKEN: 'a-scrape-token-long-enough',
+      METRICS_PUBLIC: false,
     },
     db,
     log: silentLogger,
@@ -63,7 +68,7 @@ async function buildApi(db: Db): Promise<FastifyInstance> {
     // What `verifyChunkBudget` would have left behind after warmup found 400 against a 128-token
     // window — the shipped defect, which this route has to be able to carry (ADR-0035).
     chunkBudget: { checked: true, warning: { suggestedChunkMaxTokens: 96 } },
-    indexer: {},
+    indexer: { stats: () => ({ interactive: 0, scheduled: 0, running: 0 }) },
     locks: {},
     uploads: {},
     sessions: new SessionRegistry(silentLogger),
@@ -148,6 +153,39 @@ describe('once the database stops answering', () => {
     // an unhandled lookup failure would have produced, so the dashboard can read `db` off it.
     expect(res.statusCode).toBe(503);
     expect(res.json()).toMatchObject({ ok: false, db: 'down' });
+  });
+
+  /**
+   * **`/metrics` is the other route that has to survive the outage**, and the whole reason it exists is
+   * to say something while the database is gone ([ADR-0055](../../.ssot/ADR.md#adr-0055)).
+   *
+   * The three assertions are one decision seen from three sides. A scrape credential is checked
+   * without the database, so it answers. A session cookie *cannot* be — a session is a row — so the
+   * honest answer is `401`: the request continues anonymous rather than throwing, which is the thing
+   * being fixed, because `500` on the one page that was supposed to explain the outage is the worst
+   * answer of the three. And that is precisely why an operator is told to configure `METRICS_TOKEN`.
+   */
+  it('answers a scrape token while the database is gone, and says the database is gone', async () => {
+    const res = await app.inject({ method: 'GET', url: '/metrics', headers: { authorization: 'Bearer a-scrape-token-long-enough' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('contextator_db_up 0');
+    // Omitted rather than zeroed: "the pool is empty" and "the pool could not be read" are different
+    // observations, and an operator alerting on saturation has to be able to tell them apart.
+    expect(res.body).not.toContain('contextator_db_pool_connections');
+    expect(res.body).not.toContain('contextator_last_index_run_ok');
+  });
+
+  it('answers ADMIN_TOKEN too, which is checked before any cookie is looked at', async () => {
+    const res = await app.inject({ method: 'GET', url: '/metrics', headers: { authorization: 'Bearer a-token-for-a-test' } });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('contextator_db_up 0');
+  });
+
+  it('answers 401 and not 500 to the browser whose session cannot be confirmed', async () => {
+    const res = await app.inject({ method: 'GET', url: '/metrics', cookies: { [SESSION_COOKIE]: sessionToken } });
+    // Not the 500 an unhandled session lookup would have produced, and not a 200 either: without the
+    // database this request is anonymous, and anonymous is not one of the three ways into /metrics.
+    expect(res.statusCode).toBe(401);
   });
 
   it('keeps answering 500 everywhere else, rather than pretending the caller signed out', async () => {

@@ -10,6 +10,7 @@ import { pageRoutes } from './admin/pages.js';
 import { adminRoutes } from './admin/routes.js';
 import { webhookRoutes } from './admin/webhooks.js';
 // Source drivers register themselves on import.
+import './services/sources/confluence.js';
 import './services/sources/git.js';
 import './services/sources/notion.js';
 import { loadConfig, OAUTH_CLIENT_STALE_MS, OAUTH_CLIENT_UNUSED_MS, OAUTH_CREDENTIAL_SWEEP_GRACE_MS } from './config.js';

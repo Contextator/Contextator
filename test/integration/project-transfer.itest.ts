@@ -110,6 +110,7 @@ let originDataDir: string;
 let destinationDataDir: string;
 let projectId: string;
 let uploadSourceId: string;
+let specsSourceId: string;
 let archive: string;
 let extracted: string;
 
@@ -165,6 +166,24 @@ async function seedOrigin(db: Db): Promise<void> {
     })
     .returning();
   uploadSourceId = upload.id;
+
+  // **A second upload source whose content type decides which extensions it may hold**
+  // ([ADR-0057](../../.ssot/ADR.md#adr-0057)). `importTree` takes the path cleanup and the extension
+  // permission as two fields, and they used to be one: `transfer/import` passes `plain` for the
+  // cleanup on purpose — the tree in the tarball is already materialised — and reading the permission
+  // off the same field meant a restored `openapi` source arrived with none of its specifications.
+  const [specs] = await db
+    .insert(documentSources)
+    .values({
+      projectId,
+      type: 'upload',
+      name: 'specs',
+      label: 'The API specifications',
+      config: { extensions: ['md', 'yaml'] },
+      flavor: 'openapi',
+    })
+    .returning();
+  specsSourceId = specs.id;
 
   await db.insert(documentSources).values({
     projectId,
@@ -317,6 +336,13 @@ async function seedOrigin(db: Db): Promise<void> {
   await fs.writeFile(path.join(current, 'notes.exe'), 'not a document');
   await fs.mkdir(path.join(current, '.obsidian'), { recursive: true });
   await fs.writeFile(path.join(current, '.obsidian', 'workspace.md'), '# a dot directory');
+
+  const specsCurrent = sourceCurrentDir(originDataDir, projectId, specsSourceId);
+  await fs.mkdir(specsCurrent, { recursive: true });
+  await fs.writeFile(path.join(specsCurrent, 'petstore.yaml'), 'openapi: 3.0.3\ninfo: {title: Petstore, version: "1"}\n');
+  await fs.writeFile(path.join(specsCurrent, 'README.md'), '# The specifications\n');
+  // Still refused: the content type widens what may be carried, it does not remove the filter.
+  await fs.writeFile(path.join(specsCurrent, 'notes.exe'), 'not a document');
 }
 
 /** Searches one database, at one generation, for the four questions, in one array. */
@@ -344,10 +370,11 @@ describe('exporting a project', () => {
     expect(manifest.project.exportedGeneration).toBe(ORIGIN_LIVE);
     expect(manifest.counts.documents).toBe(3);
     expect(manifest.counts.chunks).toBe(5);
-    expect(manifest.counts.sources).toBe(3);
-    // Three of the five files on disk are documents; `.obsidian/` and the `.exe` are not the
-    // export's business either — it carries the tree and `importTree` is what filters it back in.
-    expect(manifest.counts.uploadFiles).toBe(5);
+    expect(manifest.counts.sources).toBe(4);
+    // Three of the first source's five files on disk are documents and two of the second's three are;
+    // `.obsidian/` and the two `.exe`s are not the export's business either — it carries the tree and
+    // `importTree` is what filters it back in.
+    expect(manifest.counts.uploadFiles).toBe(8);
     expect(manifest.excluded).toEqual({
       searchQueries: 1,
       searchQueryHits: 1,
@@ -491,7 +518,7 @@ describe('importing it into a second instance', () => {
 
   it('lands the sources with neither secret, and with nothing scheduled', async () => {
     const rows = await destination.db.select().from(documentSources).where(eq(documentSources.projectId, report.projectId));
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(4);
     for (const row of rows) {
       expect(row.secretEnc).toBeNull();
       expect(row.webhookSecret).toBeNull();
@@ -527,6 +554,20 @@ describe('importing it into a second instance', () => {
     // `notes.exe` fails the source's own extension filter and `.obsidian/` is a dot directory: both
     // are refused by `importTree`, which is the extractor this feature reuses rather than replaces.
     expect(landed.sort()).toEqual(['errors.md', 'install.md', 'nested/extra.md']);
+  });
+
+  it("carries a specification source's .yaml, which its content type is the only reason it may hold", async () => {
+    const source = (
+      await destination.db
+        .select()
+        .from(documentSources)
+        .where(and(eq(documentSources.projectId, report.projectId), eq(documentSources.name, 'specs')))
+    )[0];
+    expect(source.flavor).toBe('openapi');
+    const landed = await fs.readdir(sourceCurrentDir(destinationDataDir, report.projectId, source.id));
+    // The `.yaml` is here only because the permission is read off the source's own content type; the
+    // `.exe` is still refused, so the filter is doing its job rather than being switched off.
+    expect(landed.sort()).toEqual(['README.md', 'petstore.yaml']);
   });
 
   it('says out loud what happened to the memberships and to the tokens', () => {

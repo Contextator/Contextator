@@ -1,0 +1,45 @@
+{
+  "swagger": "2.0",
+  "info": { "title": "Billing", "version": "2.4.0" },
+  "host": "billing.example.com",
+  "basePath": "/api",
+  "schemes": ["https"],
+  "paths": {
+    "/invoices": {
+      "get": {
+        "operationId": "listInvoices",
+        "summary": "List invoices for the current account",
+        "tags": ["billing"],
+        "parameters": [
+          { "name": "since", "in": "query", "type": "string", "format": "date", "description": "Only invoices issued on or after this date." }
+        ],
+        "responses": {
+          "200": {
+            "description": "The invoices",
+            "schema": { "type": "array", "items": { "$ref": "#/definitions/Invoice" } }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createInvoice",
+        "summary": "Issue a new invoice",
+        "tags": ["billing"],
+        "parameters": [
+          { "name": "body", "in": "body", "required": true, "description": "The invoice to issue.", "schema": { "$ref": "#/definitions/Invoice" } }
+        ],
+        "responses": { "201": { "description": "The invoice that was issued", "schema": { "$ref": "#/definitions/Invoice" } } }
+      }
+    }
+  },
+  "definitions": {
+    "Invoice": {
+      "type": "object",
+      "required": ["amountCents", "currency"],
+      "properties": {
+        "id": { "type": "string" },
+        "amountCents": { "type": "integer", "format": "int64", "description": "The total, in the smallest unit of the currency." },
+        "currency": { "type": "string", "enum": ["EUR", "TRY", "USD"] }
+      }
+    }
+  }
+}

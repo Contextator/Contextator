@@ -1588,6 +1588,12 @@ button.danger.small {
   color: var(--err-text);
 }
 
+/* Indexed, but not everything in it: a scanned PDF, a file over the conversion limit (ADR-0056). */
+.source-glyph.warn {
+  background: var(--warn-tint);
+  color: var(--warn-text);
+}
+
 .source-cell {
   display: flex;
   flex-direction: column;
@@ -1612,6 +1618,11 @@ button.danger.small {
 
 .source-cell .sub.err {
   color: var(--err-text);
+}
+
+/* A source that synced but could not index every file: a complaint, not a failure. */
+.source-cell .sub.warn {
+  color: var(--warn-text);
 }
 
 .source-actions {
@@ -1689,6 +1700,12 @@ button.danger.small {
   gap: 8px;
   cursor: pointer;
   font-size: 13.5px;
+}
+
+/* An author rule for `display` beats the UA stylesheet's [hidden], so hiding one has to be said here. */
+.check-row label[hidden],
+.radio-row label[hidden] {
+  display: none;
 }
 
 .check-row input,

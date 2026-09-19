@@ -69,6 +69,24 @@ function routeTable(printed: string): Array<[string, string]> {
   return out;
 }
 
+/** The OAuth surface, on its own instance, because that is how `src/server.ts` registers it. */
+async function buildOauthApi() {
+  const app = Fastify();
+  await app.register(cookie);
+  const ctx = {
+    config: { ALLOWED_ORIGINS: [], AUTH_SESSION_IDLE_MS: 1000, MCP_OAUTH_MAX_CLIENTS: 200 },
+    db: {},
+    log: app.log,
+    // The audit hooks are installed on this instance too ([ADR-0055](../.ssot/ADR.md#adr-0055)); no
+    // test in this file sends a request that reaches them.
+    audit: new AuditWriter({} as never, app.log),
+    version: '0.0.0-test',
+  } as unknown as AppContext;
+  await app.register(oauthRoutes, { ctx });
+  await app.ready();
+  return app;
+}
+
 describe('every /api route is covered by the policy', () => {
   it('registers nothing that is neither public nor governed by a rule', async () => {
     const app = await buildApi();
@@ -174,15 +192,36 @@ describe('every state-changing /api route leaves a record', () => {
 
   it('exempts nothing that is not a route, so a stale exemption cannot outlive what it excused', async () => {
     const app = await buildApi();
-    const urls = new Set(routeTable(app.printRoutes({ commonPrefix: false })).map(([, url]) => url));
+    const admin = new Set(routeTable(app.printRoutes({ commonPrefix: false })).map(([, url]) => url));
     await app.close();
-    // The two webhook routes are registered by a different plugin and are deliberately unreachable
-    // from this instance's hooks; everything else named in the list has to exist here.
+    const oauth = await buildOauthApi();
+    const oauthUrls = new Set(routeTable(oauth.printRoutes({ commonPrefix: false })).map(([, url]) => url));
+    await oauth.close();
+    // The two webhook routes are registered by a third plugin this file does not build; everything
+    // else named in the list has to exist on one of the two surfaces the audit hooks are installed on.
     const webhooks = ['/api/webhooks/git/:sourceId', '/api/webhooks/notion/:sourceId'];
     for (const url of AUDIT_EXEMPT_ROUTES) {
       if (webhooks.includes(url)) continue;
-      expect(urls.has(url)).toBe(true);
+      expect(admin.has(url) || oauthUrls.has(url)).toBe(true);
     }
+  });
+
+  /**
+   * The OAuth surface, walked the same way. It is the second instance the audit hooks are installed
+   * on, so the same claim has to hold there: every unsafe method it registers is either an event or a
+   * named exemption. Without this the three `/oauth/*` exemptions would be words in a comment.
+   */
+  it('covers the OAuth surface by the same rule, not by falling outside it', async () => {
+    const oauth = await buildOauthApi();
+    const table = routeTable(oauth.printRoutes({ commonPrefix: false }));
+    await oauth.close();
+
+    const writes = table.filter(([method, url]) => url.startsWith('/oauth/') && !['GET', 'HEAD', 'OPTIONS'].includes(method));
+    expect(writes.length).toBeGreaterThan(2);
+    const unrecorded = writes.filter(([method, url]) => auditSubject(method, url, {}, undefined) === null).map(([, url]) => url);
+    expect(unrecorded.sort()).toEqual(['/oauth/register', '/oauth/revoke', '/oauth/token']);
+    // And the one that is recorded is the one the whole exercise is about.
+    expect(auditSubject('POST', '/oauth/authorize', {}, { decision: 'approve' })).not.toBeNull();
   });
 });
 
@@ -214,19 +253,7 @@ describe('the OAuth surface is enumerated rather than assumed', () => {
     'POST /oauth/revoke': 'the credential being revoked is the credential presented',
   };
 
-  async function buildOauth() {
-    const app = Fastify();
-    await app.register(cookie);
-    const ctx = {
-      config: { ALLOWED_ORIGINS: [], AUTH_SESSION_IDLE_MS: 1000, MCP_OAUTH_MAX_CLIENTS: 200 },
-      db: {},
-      log: app.log,
-      version: '0.0.0-test',
-    } as unknown as AppContext;
-    await app.register(oauthRoutes, { ctx });
-    await app.ready();
-    return app;
-  }
+  const buildOauth = buildOauthApi;
 
   it('registers exactly the routes that have been argued for, and nothing under /api/', async () => {
     const app = await buildOauth();

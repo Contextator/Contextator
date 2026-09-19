@@ -14,18 +14,42 @@ export interface ScannedFile {
   /** posix-style path relative to the project root, e.g. `guides/install.md` */
   relativePath: string;
   absolutePath: string;
+  /**
+   * Size and modification time, taken during the walk.
+   *
+   * **The size is here so that a ceiling can be applied before the file is read**
+   * ([ADR-0056](../../.ssot/ADR.md#adr-0056)). `readAndHash` puts the whole file in the heap; a limit
+   * checked on the buffer it returns is a limit that has already been exceeded. One `stat` per file is
+   * what `directoryRevision` was paying anyway, and it now pays it once instead of twice.
+   */
+  sizeBytes: number;
+  mtimeMs: number;
 }
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'vendor', '__pycache__']);
 const MARKDOWN_EXT = /\.(md|mdx)$/i;
 
-/** File extensions a source may index (lower-case, without the dot). */
-export const SUPPORTED_EXTENSIONS = ['md', 'mdx', 'txt'] as const;
+/**
+ * File extensions a source may index (lower-case, without the dot).
+ *
+ * **Every one of them is a Markdown document by the time the chunker sees it**
+ * ([ADR-0056](../../.ssot/ADR.md#adr-0056)). The list is the registry's key set — `services/doc-types`
+ * holds one transform per entry and the compiler checks the two agree — so adding a type here without
+ * a transform for it does not compile.
+ */
+export const SUPPORTED_EXTENSIONS = ['md', 'mdx', 'txt', 'html', 'htm', 'csv', 'docx', 'pdf'] as const;
 export type SupportedExtension = (typeof SUPPORTED_EXTENSIONS)[number];
 export const DEFAULT_EXTENSIONS: SupportedExtension[] = ['md', 'mdx'];
 
-export function extensionMatcher(extensions: readonly string[]): RegExp {
-  const list = extensions.filter((e) => (SUPPORTED_EXTENSIONS as readonly string[]).includes(e));
+/**
+ * `allowed` widens the value set for a flavor whose own reader takes extensions no document type does
+ * — `.yaml` and `.json` under `openapi` ([ADR-0057](../../.ssot/ADR.md#adr-0057)). Defaulting it to
+ * `SUPPORTED_EXTENSIONS` is what keeps those extensions unreachable everywhere else: a source that
+ * stored `yaml` and then had its flavor changed back to `plain` scans no YAML, rather than scanning it
+ * and reporting a file per line that nothing can read.
+ */
+export function extensionMatcher(extensions: readonly string[], allowed: readonly string[] = SUPPORTED_EXTENSIONS): RegExp {
+  const list = extensions.filter((e) => allowed.includes(e));
   return new RegExp(`\\.(${(list.length ? list : DEFAULT_EXTENSIONS).join('|')})$`, 'i');
 }
 
@@ -75,10 +99,10 @@ export async function resolveProjectRoot(rootPath: string, allowedRoots: string[
 /** Yields document files (`.md` / `.mdx` by default) under `rootReal`, skipping dotfiles, build dirs, symlinks and ignored globs. */
 export async function* walkMarkdown(
   rootReal: string,
-  opts: { ignoreGlobs: string[]; extensions?: readonly string[] } = { ignoreGlobs: [] },
+  opts: { ignoreGlobs: string[]; extensions?: readonly string[]; allowedExtensions?: readonly string[] } = { ignoreGlobs: [] },
 ): AsyncGenerator<ScannedFile> {
   const isIgnored: (p: string) => boolean = opts.ignoreGlobs.length ? picomatch(opts.ignoreGlobs, { dot: true }) : () => false;
-  const matchesExt = opts.extensions ? extensionMatcher(opts.extensions) : MARKDOWN_EXT;
+  const matchesExt = opts.extensions ? extensionMatcher(opts.extensions, opts.allowedExtensions) : MARKDOWN_EXT;
 
   async function* walk(dirAbs: string, relParts: string[]): AsyncGenerator<ScannedFile> {
     const entries = await fs.readdir(dirAbs, { withFileTypes: true });
@@ -95,17 +119,34 @@ export async function* walkMarkdown(
       if (!entry.isFile() || !matchesExt.test(entry.name)) continue;
       const relativePath = rel.join('/');
       if (isIgnored(relativePath)) continue;
-      yield { relativePath, absolutePath: abs };
+      // A file that disappears between `readdir` and this `stat` is simply not in the scan, which is
+      // the same answer the walk would have given a moment earlier.
+      let stat: Awaited<ReturnType<typeof fs.stat>>;
+      try {
+        stat = await fs.stat(abs);
+      } catch {
+        continue;
+      }
+      yield { relativePath, absolutePath: abs, sizeBytes: stat.size, mtimeMs: stat.mtimeMs };
     }
   }
 
   yield* walk(rootReal, []);
 }
 
-export async function readAndHash(absolutePath: string): Promise<{ content: string; hash: string; sizeBytes: number }> {
+/**
+ * The file's bytes, its sha256 and its size.
+ *
+ * **Bytes and not a string, since [ADR-0056](../../.ssot/ADR.md#adr-0056).** Half the types a source
+ * may now index — `.pdf`, `.docx` — are not text at all, and `buf.toString('utf8')` on one of them is
+ * a lossy decode that the extractor then has to undo. The hash is over the raw bytes exactly as
+ * before, because that is what decides whether a file changed ([ADR-0014](../../.ssot/ADR.md#adr-0014));
+ * what those bytes *say* is `extractDocument`'s question, and it is asked after this one.
+ */
+export async function readAndHash(absolutePath: string): Promise<{ bytes: Buffer; hash: string; sizeBytes: number }> {
   const buf = await fs.readFile(absolutePath);
   return {
-    content: buf.toString('utf8'),
+    bytes: buf,
     hash: createHash('sha256').update(buf).digest('hex'),
     sizeBytes: buf.byteLength,
   };

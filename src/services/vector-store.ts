@@ -693,6 +693,26 @@ export async function listDocumentHeadings(db: Db, documentId: string): Promise<
 }
 
 /**
+ * Whether the published index holds anything at this release label — the **question the successful
+ * search path asks** ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
+ *
+ * It exists separately from `listDocumentVersions` below because the two are asked on different paths
+ * and only one of them is hot. A search that named a version that exists needs one bit and stops at the
+ * first row; the catalogue is what a *refusal* is built from, and making every successful search
+ * compute it would be paying for the error message on the path that does not produce one. There is no
+ * index on `version` and deliberately so, so that difference is a scan of one generation's documents
+ * against a scan that stops immediately.
+ */
+export async function documentVersionExists(db: Db, projectId: string, generation: number, version: string): Promise<boolean> {
+  const [row] = await db
+    .select({ one: sql<number>`1` })
+    .from(documents)
+    .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation), eq(documents.version, version)))
+    .limit(1);
+  return row !== undefined;
+}
+
+/**
  * Every release label the published index actually carries, in order, without the empty one
  * ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
  *
