@@ -19,7 +19,7 @@ import {
   type ProjectRow,
 } from '../../db/schema.js';
 import { sourceCurrentDir } from '../data-dir.js';
-import { PROBE_TOKEN_KEY } from '../sources.js';
+import { PROBE_TOKEN_KEY, type SourceType } from '../sources.js';
 import {
   DATA_PREFIX,
   DOCUMENTS_ENTRY,
@@ -222,7 +222,7 @@ export async function exportProject(
       },
       counts: { sources: sources.length, documents: written.documents, chunks: written.chunks, ...uploads },
       excluded: await excludedCounts(db, project.id),
-      sources: sources.map((s) => ({ name: s.name, type: s.type as 'local' | 'git' | 'upload' | 'notion', needs: needsFor(s) })),
+      sources: sources.map((s) => ({ name: s.name, type: s.type as SourceType, needs: needsFor(s) })),
     };
 
     await fs.writeFile(path.join(staging, MANIFEST_ENTRY), `${JSON.stringify(manifest, null, 2)}\n`);

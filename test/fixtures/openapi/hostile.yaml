@@ -1,0 +1,61 @@
+# Three ways a specification can make a renderer throw, in one file. Every one of them was a run-ending
+# exception before ADR-0057's boundary was closed; each must now be a rendered note.
+openapi: 3.0.3
+info:
+  title: Hostile
+  version: '1'
+paths:
+  /self-referential-example:
+    post:
+      operationId: cyclicExample
+      summary: An example whose anchor points at itself
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+            example: &loop
+              name: a node
+              self: *loop
+      responses:
+        '200':
+          description: ok
+  /undecodable-pointer:
+    get:
+      operationId: badPointer
+      summary: A $ref whose pointer will not percent-decode
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/100%'
+  /inherited-pointer:
+    get:
+      operationId: prototypePointer
+      summary: A $ref at a property no schema declares, but every object inherits
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/__proto__'
+  /external-pointer:
+    get:
+      operationId: externalPointer
+      summary: A $ref into another file
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: './shared/models.yaml#/components/schemas/Pet'
+components:
+  schemas:
+    Ok:
+      type: object
+      properties:
+        id: { type: string }

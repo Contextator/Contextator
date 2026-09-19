@@ -1,0 +1,198 @@
+openapi: 3.0.3
+info:
+  title: Petstore
+  version: 1.0.6
+  description: A small store that sells pets and takes orders for them.
+servers:
+  - url: https://petstore.example.com/v3
+security:
+  - api_key: []
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      summary: List every pet in the store
+      description: Returns the whole inventory, newest first.
+      tags: [pets]
+      parameters:
+        - name: limit
+          in: query
+          description: How many pets to return.
+          required: false
+          schema:
+            type: integer
+            format: int32
+        - name: status
+          in: query
+          description: Filter by availability.
+          schema:
+            type: string
+            enum: [available, pending, sold]
+      responses:
+        '200':
+          description: The inventory
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Pet'
+        '429':
+          description: Too many requests
+    post:
+      operationId: createPet
+      summary: Add a new pet to the store
+      tags: [pets]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Pet'
+      responses:
+        '201':
+          description: The pet that was created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pet'
+  /pets/{petId}:
+    parameters:
+      - name: petId
+        in: path
+        required: true
+        description: The pet's identifier.
+        schema:
+          type: integer
+          format: int64
+    get:
+      operationId: getPetById
+      summary: Find a pet by its identifier
+      tags: [pets]
+      responses:
+        '200':
+          description: The pet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pet'
+              example:
+                id: 42
+                name: Fido
+        '404':
+          description: No pet with that identifier
+    delete:
+      operationId: deletePet
+      summary: Remove a pet from the store
+      description: Deleting a pet cancels every order that has not shipped.
+      tags: [pets]
+      security: []
+      responses:
+        '204':
+          description: The pet is gone
+        '409':
+          description: The pet has shipped orders and cannot be deleted
+  /pets/{petId}/photos:
+    get:
+      operationId: listPetPhotos
+      summary: List the photographs of one pet
+      tags: [pets, media]
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: The photographs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Photo'
+  /stores/{storeId}/orders:
+    post:
+      operationId: placeOrder
+      summary: Place an order at one store
+      description: An order reserves a pet for twenty-four hours.
+      tags: [orders]
+      parameters:
+        - name: storeId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Order'
+      responses:
+        '202':
+          description: The order was accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+components:
+  securitySchemes:
+    api_key:
+      type: apiKey
+      name: X-Api-Key
+      in: header
+  schemas:
+    Category:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+    Photo:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+        caption:
+          type: string
+    Pet:
+      type: object
+      required: [name]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Assigned by the store.
+        name:
+          type: string
+          description: What the pet answers to.
+        category:
+          $ref: '#/components/schemas/Category'
+        photoUrls:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+          enum: [available, pending, sold]
+    Order:
+      type: object
+      required: [petId, quantity]
+      properties:
+        id:
+          type: string
+        petId:
+          type: integer
+          format: int64
+        quantity:
+          type: integer
+          format: int32
+        shipDate:
+          type: string
+          format: date-time

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DocumentSourceRow } from '../src/db/schema.js';
+import { SOURCE_TYPES } from '../src/services/sources.js';
 import { exportedSource, needsFor, sourceNameOf } from '../src/services/transfer/export.js';
 import {
   ImportRefusedError,
@@ -113,6 +114,59 @@ describe('what the export says a source will need on the other side', () => {
 
   it('says nothing about a source that needs nothing', () => {
     expect(needsFor(source({ type: 'git', secretEnc: null, webhookSecret: null, syncIntervalMinutes: null }))).toEqual([]);
+  });
+
+  /**
+   * A Confluence source stores an API token and has no webhook, so the *only* thing it needs on the
+   * other side is that token re-entered — and the operator has to be told, or the source lands
+   * silently credential-less and fails on its first sync with a 401 nobody was expecting.
+   *
+   * It needs no new vocabulary: `needsFor` keys `credential` off `secretEnc` rather than off the type,
+   * which is why a fifth source type joined this path by existing. The assertion is on the sentence an
+   * operator actually reads, not on the enum member, because the enum member is not what tells them
+   * anything ([ADR-0059](../.ssot/ADR.md#adr-0059)).
+   */
+  it('tells the destination operator to re-enter a Confluence source\u2019s API token', () => {
+    const confluence = source({
+      type: 'confluence',
+      name: 'wiki',
+      config: { baseUrl: 'https://acme.atlassian.net/wiki', email: 'docs@example.com', spaceKeys: ['ENG'] },
+      webhookSecret: null,
+      syncIntervalMinutes: null,
+    });
+    expect(needsFor(confluence)).toEqual(['credential']);
+
+    const readme = readmeFor(manifest({ sources: [{ name: 'wiki', type: 'confluence', needs: needsFor(confluence) }] }));
+    expect(readme).toContain('wiki (confluence): re-enter its access token before syncing');
+    expect(readme).toContain('source credentials (1 source(s) had one)');
+  });
+});
+
+/**
+ * **The manifest has to be able to name every source type the product has**, or an export of a project
+ * holding one it cannot name fails validation on import — and takes the *whole* import with it, not
+ * just that source. This is the assertion that a new source type was added to this file too.
+ */
+describe('the source types the manifest can name', () => {
+  it('names every type `SOURCE_TYPES` does, so no source type can make an export unreadable', () => {
+    for (const type of SOURCE_TYPES) {
+      const parsed = Manifest.safeParse({
+        ...manifest(),
+        counts: { sources: 1, documents: 0, chunks: 0, uploadFiles: 0, uploadBytes: 0 },
+        sources: [{ name: 'only', type, needs: [] }],
+      });
+      expect(parsed.success, `manifest rejected source type "${type}"`).toBe(true);
+    }
+  });
+
+  /**
+   * `confluence` joined the enum and `manifestVersion` did **not** move with it, which is the decision
+   * [ADR-0051](../.ssot/ADR.md#adr-0051) already made once for `mcpAuth: 'account'`: a value added to a
+   * field is not a format change, and bumping the number would make every new export unreadable by
+   * builds that could have read all of it but one enum member.
+   */
+  it('did not bump the format to add one', () => {
+    expect(MANIFEST_VERSION).toBe(1);
   });
 });
 

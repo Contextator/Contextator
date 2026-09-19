@@ -369,6 +369,12 @@ const VECTOR_INDEX = 'chunks_embedding_hnsw_idx';
 interface CandidateScope {
   version?: string;
   pathPrefix?: string;
+  /**
+   * A predicate on the **chunk itself**, which resolves to no document ids and joins nothing. It is
+   * the third way of selecting the same rows, and it is here so that "the cost belongs to narrowing"
+   * can be told apart from "the cost belongs to the semi-join `searchChunks` writes".
+   */
+  chunkIndexAtLeast?: number;
 }
 
 async function denseCandidates(
@@ -405,7 +411,10 @@ async function denseCandidates(
         ? ''
         : `AND c.document_id IN (SELECT id FROM documents
              WHERE project_id = $1::uuid AND index_generation = ${LIVE} AND ${predicates.join(' AND ')})`;
-    const text = `SELECT c.chunk_index FROM chunks c WHERE c.project_id = $1::uuid AND c.index_generation = ${LIVE} ${within}
+    // Deliberately **not** a semi-join and not a mention of `documents` anywhere: this is the control
+    // that separates the shape of the filter from the fact that it narrows.
+    const bare = scope.chunkIndexAtLeast === undefined ? '' : `AND c.chunk_index >= ${scope.chunkIndexAtLeast}`;
+    const text = `SELECT c.chunk_index FROM chunks c WHERE c.project_id = $1::uuid AND c.index_generation = ${LIVE} ${within} ${bare}
        ORDER BY c.embedding <=> $2::vector LIMIT ${limit}`;
     const plan = await client.query<{ 'QUERY PLAN': string }>(`EXPLAIN ${text}`, parameters);
     const result = await client.query<{ chunk_index: number }>(text, parameters);
@@ -777,19 +786,27 @@ describe('a fourth predicate, which narrows the pool the same way and has to be 
     // inexactness at ten candidates something `version` introduced, or what every predicate that
     // narrows the pool has always done under `relaxed_order` ([ADR-0040](../../../.ssot/ADR.md#adr-0040))?
     //
-    // Three queries over one corpus, same forced HNSW plan, same shipped settings, same ten rows
-    // eligible — reached three different ways. If the column were the cause, the first would differ
-    // from the other two.
+    // **Three** queries over one corpus, same forced HNSW plan, same shipped settings, and the same
+    // five hundred rows eligible — selected three different ways. `seedProject` splits each project
+    // down the middle of its chunk indexes, so `version = v2`, `path_prefix = handbook/small-b` and
+    // `chunk_index >= SMALL_HALF` are three spellings of one set. The third is the one that decides
+    // the question, because it resolves no document ids and never mentions `documents`: if the cost
+    // were the semi-join's, or this column's, it would be the odd one out.
     const byVersion = await denseCandidates(ids.small, K, scan(), QUERY, { version: V2 });
     const byPath = await denseCandidates(ids.small, K, scan(), QUERY, { pathPrefix: 'handbook/small-b' });
+    const byChunkIndex = await denseCandidates(ids.small, K, scan(), QUERY, { chunkIndexAtLeast: SMALL_HALF });
     const unfiltered = await denseCandidates(ids.small, K, scan());
     const exactUnfiltered = (await bruteForce(ids.small, K)).map((row) => row.chunkIndex);
 
-    // They do not differ. The version semi-join and the path-prefix semi-join return the identical
-    // ten rows, so what the scan pays for is the narrowing and not the predicate that expresses it —
-    // `path_prefix` has had this property since ADR-0042 and nothing observed it, because every case
-    // written for it runs at fifty candidates through `searchChunks`.
+    // All three went through the vector index, so none of them is agreeing with the others by having
+    // quietly been given a different plan.
+    for (const answer of [byVersion, byPath, byChunkIndex]) expect(answer.throughVectorIndex).toBe(true);
+    // They do not differ. The version semi-join, the path-prefix semi-join and the bare chunk
+    // predicate return the identical ten rows, so what the scan pays for is the narrowing and not the
+    // predicate that expresses it — `path_prefix` has had this property since ADR-0042 and nothing
+    // observed it, because every case written for it runs at fifty candidates through `searchChunks`.
     expect(byVersion.rows).toEqual(byPath.rows);
+    expect(byVersion.rows).toEqual(byChunkIndex.rows);
     // And the same scan is exact when nothing narrows it, which is what makes the line above a
     // statement about the filter's *pool* rather than about this fixture or these settings.
     expect(unfiltered.throughVectorIndex).toBe(true);

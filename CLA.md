@@ -1,4 +1,7 @@
-Status: draft — not yet in force
+Status: draft — not yet in force. It comes into force the moment `.github/workflows/cla.yml` is on `main`
+and able to record a signature, and the change that puts it there is the change that takes this line off:
+a signature collected under a document still calling itself a draft would be worth nothing.
+[`CONTRIBUTING.md`](CONTRIBUTING.md#the-licence-grant) says what comes off with it.
 
 # Contributor Licence Agreement — Contextator
 

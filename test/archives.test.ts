@@ -12,6 +12,7 @@ import {
   isPortableSegment,
   type ImportLimits,
 } from '../src/services/archives.js';
+import { SUPPORTED_EXTENSIONS } from '../src/services/fs-scan.js';
 
 const FIXTURES = path.join(__dirname, 'fixtures');
 const limits: ImportLimits = {
@@ -19,7 +20,8 @@ const limits: ImportLimits = {
   maxTotalBytes: 1024 * 1024,
   maxFileBytes: 64 * 1024,
   extensions: ['md', 'mdx', 'txt'],
-  flavor: 'plain',
+  pathFlavor: 'plain',
+  allowedExtensions: SUPPORTED_EXTENSIONS,
 };
 
 let tmp: string;
@@ -64,7 +66,7 @@ describe('entry path safety', () => {
 describe('extractArchive', () => {
   it('unpacks a zip, keeps only document files and cleans Notion names', async () => {
     const dest = path.join(tmp, 'zip-out');
-    const stats = await extractArchive(path.join(FIXTURES, 'docs.zip'), dest, { ...limits, flavor: 'notion-export' });
+    const stats = await extractArchive(path.join(FIXTURES, 'docs.zip'), dest, { ...limits, pathFlavor: 'notion-export' });
     expect(await tree(dest)).toEqual(['README.md', 'Wiki/Getting started.md', 'notes.txt']);
     expect(stats.files).toBe(3);
     expect(stats.skipped).toBeGreaterThanOrEqual(1); // image.png

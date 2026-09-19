@@ -1,9 +1,9 @@
 # Contextator
 
 **Self-hosted, multi-tenant MCP documentation server.** Give a project its document sources — mounted
-folders, git repositories, uploaded archives, a Notion workspace — and it becomes its own
-[Model Context Protocol](https://modelcontextprotocol.io) endpoint that AI agents (Cursor, Claude Code,
-Claude Desktop, …) can search semantically:
+folders, git repositories, uploaded archives, a Notion workspace, a Confluence Cloud site — and it
+becomes its own [Model Context Protocol](https://modelcontextprotocol.io) endpoint that AI agents
+(Cursor, Claude Code, Claude Desktop, …) can search semantically:
 
 ```
 http://localhost:3444/mcp/<project-name>
@@ -13,8 +13,9 @@ http://localhost:3444/mcp/<project-name>
   vector embeddings in PostgreSQL + [pgvector](https://github.com/pgvector/pgvector). A client
   connected to `/mcp/billing` never sees `/mcp/mobile`.
 - **Many sources per project.** A local directory, a git repository (or one subdirectory of it), an
-  upload of files/folders/`.zip`/`.tar.gz`/`.rar`, or a Notion workspace — combined into one searchable
-  endpoint. Every source is mounted under its own name, so documents read as `handbook/install.md`.
+  upload of files/folders/`.zip`/`.tar.gz`/`.rar`, a Notion workspace or a Confluence Cloud site —
+  combined into one searchable endpoint. Every source is mounted under its own name, so documents read
+  as `handbook/install.md`.
 - **100 % local by default.** Embeddings are generated on the CPU with
   [transformers.js](https://huggingface.co/docs/transformers.js) (`Xenova/multilingual-e5-small`, a
   retrieval model covering 100 languages incl. Turkish). Switch to OpenAI embeddings with two env vars.
@@ -28,8 +29,10 @@ http://localhost:3444/mcp/<project-name>
   access becomes the memberships you already manage. Browser-based connectors sign in through OAuth 2.1.
   See [MCP access](#mcp-access).
 - **Incremental indexing.** Files are hashed; only changed files are re-embedded, removed files are deleted.
+- **More than Markdown.** `.html`, `.docx`, `.csv` and `.pdf` are converted to Markdown as they are indexed, so an agent
+  reads a Word file or a PDF the way it reads a page of documentation. See [File types](#file-types).
 
-Stack: TypeScript · Node.js 20+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/sdk` · `@huggingface/transformers`.
+Stack: TypeScript · Node.js 22+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/sdk` · `@huggingface/transformers` · `unpdf` / `mammoth` / `turndown`.
 Ships as **one Docker container** (`contextator`) that holds both the database and the app.
 Free software under the **AGPL-3.0-or-later** ([why](#license)), with a commercial license available.
 
@@ -108,6 +111,7 @@ The name is the mount point, so it cannot change after creation; everything else
 | **Git repository** | A shallow, single-branch checkout under `DATA_DIR`. Any HTTPS git server: GitHub, GitLab, Bitbucket, Gitea/Forgejo/Codeberg. Optionally only a **subdirectory** of the repository (`docs/`). | `git fetch` of the branch tip at the start of every index run, a push webhook, or the sync interval below |
 | **Upload** | Files, whole folders (structure preserved) and archives — `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.rar` — unpacked on the server. Add to the existing files or replace them all. | Nothing to sync; the files live under `DATA_DIR` |
 | **Notion** | Every page shared with an internal integration (or the configured root pages/databases and their descendants), rendered to Markdown, nested by parent page. | The Notion API, re-rendering only pages whose `last_edited_time` changed |
+| **Confluence** | **Cloud only** (see below). Every page in the chosen spaces — or in every space the account can read — rendered from Confluence's storage format to Markdown, nested the way it is in the wiki: `<name>/<space>/<parent page>/<page>.md`. | The Confluence REST API, re-rendering only pages whose version number changed |
 
 Sources are synced at the start of every index run, one after another; a source that fails to sync is
 reported on its own row and the others still index. **Sync** on a row and **Re-index** in the header
@@ -137,6 +141,42 @@ one.
 another name: `api-v3` and `sdk-v3` are two mount points of one release, and `version: "v3"` searches
 both. Changing a source's version re-indexes it, the way changing its content type does.
 
+### Confluence: Cloud, and not Data Center
+
+The Confluence source speaks **Confluence Cloud** — the REST API under `https://<site>.atlassian.net/wiki`,
+authenticated with an Atlassian account e-mail and an [API token](https://id.atlassian.com/manage-profile/security/api-tokens).
+Put the site URL in with its `/wiki` path, the e-mail of the account the token belongs to, and the token
+itself; it is stored encrypted with `SECRET_KEY` and is never shown again or returned by the API.
+
+**Confluence Data Center and Server are not supported.** They publish a different API at a different
+base path and authenticate with a personal access token as a bearer, and a connector that half-works
+against them would be worse than one that says so: the failure would be a 404 or an empty space rather
+than a message. If that is what you run, the honest workaround today is to export the space and add it
+as an **Upload** source.
+
+Leave *Spaces* empty and the source indexes every space the account can read; name space keys — one per
+line, `ENG`, `OPS` — and it indexes exactly those. The account's own permissions are the outer boundary
+either way: this product never sees a page the account cannot.
+
+Confluence's storage format (the XHTML a page is stored as) goes through the same HTML→Markdown transform
+`.html` files do, so tables, code blocks, task lists and admonitions survive as structure. Macros are
+unwrapped: the text inside an expand or a panel is indexed, the macro's own configuration is not.
+
+**One source indexes at most 5 000 pages.** A wiki larger than that is indexed up to the ceiling and
+the run says so, in those words, on the source's row — because the alternative is a source that looks
+completely indexed while `search_docs` answers "not in the documentation" about pages that exist. Split
+a larger wiki across several sources by naming fewer spaces on each; the scheduled check below reports
+the space's real total beside the number indexed, so the two are visible together.
+
+**If one of several named spaces stops answering, nothing is deleted.** A renamed space key, or a
+permission withdrawn from the account, reads to the API as a space with no pages — not as an error —
+and the ordinary "remove what is gone" pass would then delete every document that came from it while
+the run reported success. A configured space that held documents a moment ago and offers none now fails
+the sync instead, naming the space. With *Spaces* left empty there is no list of what should be there,
+so that check cannot be made; name your spaces if you want it.
+
+There is **no Confluence webhook yet**. The sync interval below is how a Confluence source stays fresh.
+
 ### Keeping a source fresh on its own
 
 A source can carry a **sync interval** — the *Sync every* field in its dialog — and the server checks it
@@ -149,6 +189,7 @@ index run only happens when the answer moved since the last successful sync:
 |------|---------------|-----------|
 | Git | `git ls-remote` on the tracked branch — one ref advertisement, no objects | A fetch |
 | Notion | One `search`, newest edit first, one result | A page read per page, 350 ms apart |
+| Confluence | One CQL search over the same spaces the run indexes: how many pages there are, and when the newest was touched | A listing plus a body read per page |
 | Local, Upload | The file count and the newest modification time | Reading and hashing every file |
 
 A check that cannot answer — a directory that has gone, a rate-limited API, a network that is down —
@@ -172,6 +213,7 @@ A source can declare what its files really are, which applies a small transform 
 - **Plain Markdown / text** — no transform.
 - **Obsidian vault** — see below.
 - **Notion export** — the 32-hex page id Notion appends to file and folder names (`Getting started 1a2b…5c6d.md`) is stripped from paths and from the links pointing at them.
+- **OpenAPI / Swagger** — see below. The one content type that does not merely transform a file: it turns a specification into **one document per endpoint**.
 
 Upload a Notion **Export → Markdown & CSV** zip with the *Notion export* content type; use the
 **Notion** source type instead when you want the live API.
@@ -179,6 +221,34 @@ Upload a Notion **Export → Markdown & CSV** zip with the *Notion export* conte
 The content type is applied on the way into the chunker, after the file hash that decides what to
 re-embed — so changing it drops the stored hashes of that source and queues a run, otherwise the new
 transform would never reach a file whose bytes did not change.
+
+### OpenAPI and Swagger
+
+An API specification is the most useful single thing you can give an agent about an API, and the least
+useful shape to give it in: one `openapi.yaml` is one document that contains the answer to three hundred
+different questions, so it matches every query and answers none of them.
+
+With the **OpenAPI / Swagger** content type a specification is indexed as **one document per
+operation** — path, method, summary, parameters, request and response schemas and examples, each under
+its own heading so a hit carries a breadcrumb like `GET /pets/{petId} > Responses > 200`. `search_docs`
+returns the endpoint, not the file.
+
+- The source also takes `.yaml`, `.yml` and `.json`, and **only** this content type does: no extension implies a specification, so nothing else is offered them.
+- Each document is stored at `<file>/<method>-<path>` — `api/petstore.yaml/get-pets-petId`. The path is derived from the method and the URL path alone, so re-indexing the same specification lands on the same documents even if the file was reformatted.
+- Delete an operation and its document disappears on the next run; the others are untouched.
+- `$ref` is resolved within the file. A recursive schema is rendered until it points back at itself and then says so; anything deeper than eight levels says it stopped there. A reference into another file is named rather than followed.
+- Markdown beside the specifications is still Markdown: a `README.md` in the same source is one document, as always.
+- A `.yaml` that is not a specification — a Helm values file, a CI config — is reported on the source and skipped, the same way an unreadable PDF is. The run still succeeds. So is one that will not parse, and one written to make a renderer fail: a self-referential example, a `$ref` whose pointer will not decode. Nothing a specification can contain fails the run.
+- Swagger 2.0 is read as well as OpenAPI 3, `definitions`, `in: body` parameters and `host`/`basePath` included; a 3.1 path item that is itself a `$ref` is followed.
+- A specification is measured against `MAX_SPEC_FILE_BYTES` (8 MiB) before it is read — its own ceiling, well below the one for converted files, because parsing one produces an object graph around fifty-five times the size of the file, held for as long as that file is being indexed. At the default ceiling that is about **400 MB of heap** while one specification is indexed; lower it on a tight container.
+- One rendered document is capped at 2 000 lines and one specification at 5 000 operations. Neither is reachable by a real API — the largest published specifications are around a thousand operations — and both exist because the file ceiling bounds the *parse* and bounds nothing about what a file asks to be *rendered*.
+
+Two versions of the same API in one project do not collide — `v2/openapi.yaml/get-pets` and
+`v3/openapi.yaml/get-pets` are different documents — and which one an agent gets is answered by
+[the version field](#versions-two-releases-of-one-product-in-one-project): give each specification's
+source a version and `search_docs` can be asked for one of them. Every document derived from a
+specification carries its file's version, because forty operations rendered out of one file are forty
+documents of one release.
 
 ### Obsidian vaults
 
@@ -492,10 +562,89 @@ your documentation at all. What it does **not** catch is a question shaped like 
 answer is not written down — those score exactly where real questions score, and no threshold
 separates them.
 
+## File types
+
+A source indexes `.md` and `.mdx` by default and can be told to take `.txt`, `.html`/`.htm`, `.csv`, `.docx` and
+`.pdf` as well. **Everything becomes Markdown on the way in** — the chunker, the embedder and
+`read_document` see one format, and the conversion happens once, at the edge.
+
+`.yaml`, `.yml` and `.json` are the exception and are not on this list: no extension says what such a
+file *is*, so they are readable only by the [OpenAPI / Swagger](#openapi-and-swagger) content type, and
+a file it reads becomes several documents rather than one.
+
+| Type | What it becomes | Kept | Lost |
+|------|-----------------|------|------|
+| `.md`, `.mdx`, `.txt` | itself, unchanged | everything | nothing |
+| `.html`, `.htm` | Markdown via turndown + GFM | headings, lists, tables, code, links, `<title>` | scripts, stylesheets, `svg`, embedded image data (the `alt` text stays) |
+| `.docx` | Markdown via mammoth, then the same converter | Word's own heading styles, numbered and bulleted lists, tables, links | images, footnotes, comments, tracked changes |
+| `.csv` | one GFM table, `## Rows n–m` sections every 200 rows | the header above every section, quoted commas and newlines, `;`/tab/pipe delimiters | nothing of the data; cell newlines become `<br>` |
+| `.pdf` | Markdown reconstructed from glyph positions | headings by font size, paragraphs rejoined across line ends and de-hyphenated, bullet and numbered lists, column-aligned tables, two-column reading order, running heads and feet dropped | footnotes, figures, and any table whose columns are not aligned |
+
+Every failure — a parser's own exception included — leaves the conversion as a refusal that names the
+file. That is not tidiness: the indexer treats an unrecognised exception as a failed *run*, and because
+a malformed file fails the same way every time, one of them would stop the whole project from being
+re-indexed until somebody found it.
+
+**A file that cannot be converted is refused, not indexed.** A scan of paper contains pictures of words
+and no words, and there is no OCR in this product. Such a file is skipped, the reason — naming the file
+— is shown on its source in the dashboard, and the rest of the source indexes normally. The alternative
+is a document that exists, matches nothing and reads as blank, which nobody ever notices is wrong. The
+same happens to an encrypted PDF, a `.doc` renamed to `.docx`, a Word file whose content is entirely
+pictures, a damaged file of any of these types, and a page or spreadsheet that converts to no text at
+all.
+
+**A refusal never fails the run.** The source is not marked failed and the project is not marked
+failed: it synced, and everything else in it indexed. The dashboard shows the source's reason line
+whether or not the source failed, which is the only thing that makes the refusal visible rather than
+merely recorded. On an incremental run the file keeps whatever document it already had; a **rebuild**
+(`force`, or a changed embedding model) publishes the corpus as it stands, so a file that can no longer
+be converted is not in the new generation — the same rule the index applies to a source that cannot be read.
+
+**What a file may cost while it is converted.** Conversion runs in the server's own process, beside the
+dashboard and the MCP endpoint, and until now only the upload path had any size limit at all — a file
+reached through a local directory or a git checkout was parsed at whatever size it happened to be.
+Three caps bound it, and each closes something the others do not:
+
+| Setting | Default | What it stops |
+|---------|---------|---------------|
+| `MAX_CONVERTED_FILE_BYTES` | 32 MiB | one enormous document taking the process down with it. Checked against the size the **scan** recorded, before the file is read — a limit applied to the bytes already in memory is not a limit. `.md`, `.mdx` and `.txt` are decoded rather than parsed and are not capped |
+| `MAX_SPEC_FILE_BYTES` | 8 MiB | one enormous API specification taking the process down with it. Its own ceiling and not `MAX_CONVERTED_FILE_BYTES`, because a specification is parsed whole into an object graph around **fifty-five times** the size of the file — 8 MiB of YAML measured 444 MiB of objects — so the conversion ceiling would have bounded the wrong number. Checked against the scan's size, before the read. **The graph is not transient**: documents are rendered out of it one at a time, so it is resident for as long as that file is being indexed, beside a ~470 MB embedding model. Measured directly, a file at the ceiling needs about **400 MB of heap headroom** — it completes at `--max-old-space-size=384` and is OOM-killed at 320. Lower the ceiling on a container that cannot spare that; a refused file is named on its source and the run carries on |
+| render caps | 2 000 lines / doc, 5 000 operations / file | what a specification asks to be **rendered**, which the byte ceiling does not bound at all: responses × media types is a count limited only by the file size divided by about forty bytes, so one 40 KB operation can ask for a hundred thousand lines. A document past the line cap says it was cut; a file past the operation cap is refused whole, because a truncated *endpoint list* would answer "not in the documentation" for endpoints that exist |
+| `MAX_PDF_PAGES` | 2000 | a few kilobytes of PDF that *declares* a hundred thousand pages — every page is read into memory at once |
+| `MAX_DOCX_UNPACKED_BYTES` | 256 MiB | the zip bomb. A `.docx` is a zip, and the size in its directory is a number the file's author writes, so each part is inflated through a counter and discarded, with the cap as the ceiling. DEFLATE reaches about 1030:1, so nothing short of measuring it is a bound |
+
+A file over a cap is refused by name, the same way a scan is. So is a file the filesystem will not hand
+over — deleted between the scan and the read, permissions changed, or simply larger than `fs.readFile`
+will return.
+
+A converted document is stored under its original path and extension (`handbook/support-handbook.pdf`),
+and that is the path `search_docs` cites and `read_document` takes. Its **title** comes from the
+document — a `<title>`, a PDF's `Title` metadata, the first heading — and falls back to the filename.
+
+**Where a long PDF falls against `MAX_STORED_DOCUMENT_BYTES`** (1 MB of UTF-8, past which the prefix is
+stored and `content_truncated` is set). Measured on generated manuals of 80, 200, 600 and 1600 pages,
+each page a dense one — 42 lines of about 95 characters, a running head and foot, a chapter heading
+every tenth page:
+
+| Pages | Markdown | Per page | Extraction |
+|-------|----------|----------|------------|
+| 80 | 316 KiB | 4.0 KiB | 0.18 s |
+| 200 | 795 KiB | 4.0 KiB | 0.21 s |
+| 600 | 2393 KiB | 4.0 KiB | 0.61 s |
+| 1600 | 6414 KiB | 4.0 KiB | 1.73 s |
+
+So the cap bites at roughly **250 dense pages**, and a typical page is looser than these — call it 300
+to 400 pages of a real manual. Past that the document is still fully searchable, because the cut is on
+`documents.content` and not on the chunks: every page is chunked and embedded, and only the stored text
+`read_document` serves is truncated, which the tool says. Extraction costs about a millisecond a page
+and happens once, after the content hash says the file changed.
+
+What is capped on the way *in* is the file itself: `UPLOAD_MAX_FILE_BYTES`, 50 MB by default.
+
 ## How indexing works
 
-1. Every source of the project is synced in turn (git fetch, Notion pull; local and upload sources have nothing to fetch), then its directory is walked for the file types the source selected — `.md`/`.mdx` by default, optionally `.txt` (dotfiles, `node_modules`, `dist`, `build`, symlinks and `IGNORE_GLOBS` are skipped). Every path collected is prefixed with the source name, so two sources can both hold an `install.md` without colliding.
-2. The source's content type is applied (Obsidian wikilinks, Notion export ids), and every file is hashed (sha256). Unchanged files are skipped, changed/new files are re-chunked and re-embedded, files that disappeared are deleted. A **force** re-index (and one triggered by a changed embedding model) rebuilds everything, and does it *beside* the live index rather than by wiping it first: the project keeps answering `search_docs`, `list_topics` and `read_document` for the whole run, and a run that fails halfway leaves the previous index serving instead of an empty project. Every finished run (mode, counts, duration, error) is stored in `index_runs`; the last 20 per project are kept and shown in the dashboard.
+1. Every source of the project is synced in turn (git fetch, Notion pull; local and upload sources have nothing to fetch), then its directory is walked for the file types the source selected — `.md`/`.mdx` by default, optionally `.txt`, `.html`/`.htm`, `.csv`, `.docx` and `.pdf`, plus `.yaml`/`.yml`/`.json` on a source whose content type is OpenAPI (dotfiles, `node_modules`, `dist`, `build`, symlinks and `IGNORE_GLOBS` are skipped). Every path collected is prefixed with the source name, so two sources can both hold an `install.md` without colliding.
+2. Every file is hashed (sha256) over its **raw bytes**, then converted to Markdown by its type ([File types](#file-types)) and the source's content type is applied (Obsidian wikilinks, Notion export ids). Unchanged files are skipped, changed/new files are re-chunked and re-embedded, files that disappeared are deleted. A file the [OpenAPI](#openapi-and-swagger) content type expands is several documents rather than one: every one of them carries the specification's hash, so an unchanged specification re-embeds nothing, and an operation that left the file leaves the index with it. A **force** re-index (and one triggered by a changed embedding model) rebuilds everything, and does it *beside* the live index rather than by wiping it first: the project keeps answering `search_docs`, `list_topics` and `read_document` for the whole run, and a run that fails halfway leaves the previous index serving instead of an empty project. Every finished run (mode, counts, duration, error) is stored in `index_runs`; the last 20 per project are kept and shown in the dashboard.
 3. Chunking is Markdown-aware: frontmatter is parsed (`title` wins), MDX `import`/`export` lines and component tags are stripped, the document is split at headings (`#`–`####`) with a breadcrumb kept per chunk, and oversized sections are packed from paragraphs and fenced code blocks (code is never split mid-block when avoidable) with a small overlap.
 4. Each chunk is embedded as `heading breadcrumb + content` and stored in `chunks` with an HNSW cosine index. The same string is also stored as a `tsvector` with a GIN index — that is the keyword half of search, and it is written in the same statement as the row, so the two halves can never describe different text.
 
@@ -826,8 +975,16 @@ src/db/bootstrap.ts           startup: the extension, the migration journal, `mi
 src/services/chunker.ts       Markdown/MDX-aware chunking with heading breadcrumbs; pure and synchronous, the token counter injected
 src/services/fs-scan.ts       safe directory walking + path-escape checks
 src/services/sources.ts       source CRUD and the zod schema of each type's config
-src/services/sources/         one driver per type: local, git (isomorphic-git), upload, notion
-src/services/flavors.ts       content-type transforms (Obsidian wikilinks, Notion export ids)
+src/services/sources/         one driver per type: local, git (isomorphic-git), upload, notion, confluence
+src/services/sources/confluence.ts        the Confluence Cloud driver: the page tree, the incremental skip, and the probe
+src/services/sources/confluence-client.ts the REST surface it talks to, as an interface plus an HTTPS implementation, and the one place CQL is built
+src/services/sources/confluence-render.ts storage format → the plain XHTML `doc-types/html.ts` converts; it does not convert HTML itself
+src/services/flavors.ts       content-type transforms (Obsidian wikilinks, Notion export ids) and which of them expand one file into many
+src/services/openapi.ts       OpenAPI/Swagger → one Markdown document per operation: $ref resolution, cycle and depth guards, derived paths
+src/services/doc-types/       one transform per file extension, all of them producing Markdown: html, docx, csv, pdf
+src/services/doc-types/pdf.ts a PDF read as a layout — lines, columns, running heads, headings by size, tables by alignment
+scripts/build-doc-fixtures.ts the dependency-free PDF and zip writers the binary test fixtures come from
+src/types/                    ambient declarations for the two dependencies that ship none (mammoth, the turndown GFM plugin)
 src/services/archives.ts      zip / tar / tar.gz / rar extraction with path and size guards
 src/services/uploads.ts       staged upload sessions and their commit into a source
 src/services/data-dir.ts      layout of DATA_DIR, atomic directory swaps, orphan sweep
@@ -886,6 +1043,8 @@ test/*.test.ts                unit suite — pure functions, no database, no Doc
 test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
 test/integration/fixtures/    a pre-v3 `0.1` schema derived from history, and the frozen DDL ladder the migrations replaced
+test/fixtures/doc-types/      one real file per supported type, plus the malformed ones a refusal has to survive
+test/support/confluence-stub.ts a `ConfluenceClient` answering out of an array, shared by the unit and the integration suite so one page tree drives both
 eval/corpus/                  the fixture corpus the golden set asks about: 15 English and 11 Turkish pages, written for this
 eval/golden.jsonl             48 questions, one JSON object per line, each naming the file that answers it
 eval/README.md                what a good question is, how to add one, and why the failures are kept
