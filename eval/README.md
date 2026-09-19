@@ -28,7 +28,7 @@ The Phase 0 baseline, and what each Phase 1 change did to it, are in [BASELINE.m
 Given a floor, the run fails instead of merely reporting ([ADR-0044](../../.ssot/ADR.md#adr-0044)):
 
 ```bash
-npm run eval -- --min-recall5=0.855 --min-heading5=0.825   # what CI runs
+npm run eval -- --min-recall5=0.675 --min-heading5=0.650   # what CI runs
 ```
 
 Below either number the run exits `2` and prints both figures, the questions behind them and the
@@ -40,9 +40,18 @@ was and exits `0` whatever it finds, which is what sweeping a setting on a lapto
 **Two floors, because they fail differently.** `recall@5` asks whether the right page came back;
 `heading@5` asks whether the right *chunk* of it did. A chunk budget the model cannot read to the end
 of keeps the first and loses the second — measured, not supposed: `CHUNK_MAX_TOKENS=496` measures
-`recall@5` 85.9 %, over the floor, and `heading@5` 78.1 %, four questions under it. Cross-lingual
-retrieval is deliberately **not** gated: it is a known regression at 14.3 % ([ROADMAP.md](../../.ssot/ROADMAP.md)
-Item 12), and a gate that is red before anybody changes anything is a gate that gets switched off.
+`recall@5` 85.9 %, over the floor of the day, and `heading@5` 78.1 %, four questions under it.
+Cross-lingual retrieval is deliberately **not** gated: it is a known regression at 13.3 % over the thirty
+questions that now measure it ([ROADMAP.md](../../.ssot/ROADMAP.md) Item 12), and a gate that is red
+before anybody changes anything is a gate that gets switched off.
+
+**Both floors were lowered once, and the reason was arithmetic.** Item 12's first stage added twenty
+cross-lingual questions the retriever is known to fail, so the denominator went from sixty-four to
+eighty-four and every figure computed over the whole set fell with it — 87.5 % → 69.0 % and 84.4 % →
+66.7 %, with the older sixty-four scoring exactly what they scored, every question at the same rank with
+the same score to six decimal places. [BASELINE.md](BASELINE.md) carries that control table. It is the
+only kind of reason a floor may move down for, and the check on it is that the previous set's numbers
+are reproduced in the same commit.
 
 ## The one rule that makes this worth anything
 
@@ -96,7 +105,7 @@ Append one line to `golden.jsonl`:
 | `tags` | no | Free-form. Every tag gets its own row in the report, which is how "identifier queries are the weak spot" becomes visible rather than suspected. |
 | `note` | no | Why this question is here, when that is not obvious. Ignored by the scorer. |
 
-The file is line-oriented so that changing three questions of forty-eight produces a diff of three lines.
+The file is line-oriented so that changing three questions of eighty-four produces a diff of three lines.
 It is validated with zod on load: a malformed line, a duplicate id or an `expectFile` that is not in the
 corpus **fails the run**. A question set that silently shrinks is a number that silently improves.
 
@@ -194,7 +203,9 @@ going to fix:
 
 The two languages cover **different pages**, not the same pages twice. That is what a half-translated
 documentation set actually looks like, and it is what makes a cross-lingual question scoreable: there is
-one correct file, not two. Roughly one question in seven is cross-lingual.
+one correct file, not two. Between a quarter and a third of the questions are cross-lingual, fifteen in
+each direction, because a slice too small to move by less than fourteen points cannot measure a fix to
+the one defect Phase 1 left behind ([ROADMAP.md](../../.ssot/ROADMAP.md) Item 12).
 
 `docs/demo/` is deliberately not used. Five files, marketing-shaped, no reference material, and edited
 whenever the demo needs to look better — which would move `recall@5` for reasons that have nothing to do
@@ -223,12 +234,15 @@ here is not `recall@5` anywhere else, and quoting it outside this repository wou
 cannot support. What it supports is "this configuration, against the previous one, on the same
 questions".
 
-Sixty-four questions over twenty-six pages is also a small set, and a small set overfits. Taking the
+Eighty-four questions over twenty-six pages is also a small set, and a small set overfits. Taking the
 best cell of a parameter sweep on a set this size is the mirror again: a one-question difference is a
-1.6-point difference, and `BASELINE.md` has a sweep in it where the same value appears at two
-non-adjacent points and nowhere between them. A movement of
-one or two points is noise. The real fix is not more invented questions — it is feeding the set from
-queries people actually asked, which is what the query log of Phase 2 is for.
+1.2-point difference, and `BASELINE.md` has a sweep in it — taken when one question was 1.6 points —
+where the same value appears at two non-adjacent points and nowhere between them. A movement of
+one or two points is noise. The general fix is not more invented questions — it is feeding the set from
+queries people actually asked, which is what the query log of Phase 2 is for. One slice is the
+exception, and it is the exception because nothing else could resolve it: the cross-lingual questions
+were deliberately grown from seven to thirty so that a change to them is a measurement rather than a
+rounding.
 
 `EVAL_TEXT_SEARCH_CONFIG=english npm run eval` runs the lexical half of retrieval in another PostgreSQL
 text search configuration — the corpus indexed with it and the questions parsed with it, because running

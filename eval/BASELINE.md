@@ -591,6 +591,13 @@ so the only difference between these runs is what is selected out of what the se
 [ADR-0044](../../.ssot/ADR.md#adr-0044), [ROADMAP.md](../../.ssot/ROADMAP.md) Item 3's last bullet.
 Nothing here changes retrieval. What changes is that a run can fail.
 
+> **Both floors below have since moved, and the last section of this file is why.** ROADMAP.md Item 12
+> grew the cross-lingual slice from ten questions to thirty, which took the set from sixty-four to
+> eighty-four and every whole-set percentage down with it. The numbers in this section are still the
+> right numbers *for sixty-four questions* and the sixty-four still measure them exactly; the numbers CI
+> enforces are 67.5 % and 65.0 %. Everything this section argues about *why* two floors and *why* one
+> question of tolerance is unchanged and is not restated there.
+
 | | |
 |---|---|
 | Measured at | `7bc4f51`, the last commit of Phase 1's implementation |
@@ -815,3 +822,171 @@ The negative questions are in `negative.jsonl` and the rule for writing one is i
 [README.md](README.md). They gate nothing, and a run that added one to `golden.jsonl` instead would
 move `recall@5`, `heading@5` and both floors in `.github/workflows/ci.yml` — which is why they are two
 files and why a unit test asserts the denominators do not move.
+
+---
+
+# The cross-lingual slice, enlarged — and the floors it moves
+
+[ROADMAP.md](../../.ssot/ROADMAP.md) Item 12, stage 1. **Nothing here changes retrieval.** What changes
+is the denominator: twenty cross-lingual questions are added to `golden.jsonl`, which takes the slice
+from ten to thirty and the set from sixty-four to eighty-four, and every percentage in this file that is
+computed over the whole set moves with it.
+
+| | |
+|---|---|
+| Measured at | this commit, over the corpus and configuration of the run above, unchanged |
+| Date | 2026-09-19 |
+| Provider | `local:Xenova/multilingual-e5-small:fp32:"query: "+"passage: "` |
+| `CHUNK_MAX_TOKENS` / `CHUNK_OVERLAP_TOKENS` | 96 / 24 |
+| Corpus | 26 documents, 577 chunks — **not touched** |
+| Questions | 84 (41 `en`, 43 `tr`); 30 cross-lingual, 15 in each direction |
+| Search | `ef_search=100, iterative_scan=relaxed_order, max_scan_tuples=20000`, `to_tsvector('simple', …)`, `max_per_document=2, neighbor_context=1, score_floor=0.82` |
+
+## The old sixty-four still score exactly what they scored
+
+This is the control, and it is the first thing to check, because a question set that grows at the same
+time as anything else measures neither.
+
+| the 64 questions that predate this change | before | after |
+|---|--:|--:|
+| `recall@1` | 75.0 % (48) | 75.0 % (48) |
+| `recall@5` | 87.5 % (56) | 87.5 % (56) |
+| `MRR` | 0.8017361111111112 | 0.8017361111111112 |
+| `heading@5` | 84.4 % (54) | 84.4 % (54) |
+
+Not only the aggregates: **every one of the sixty-four keeps the same rank, the same heading rank and
+the same ten hits with the same scores to six decimal places.** Twenty more questions are twenty more
+queries against the same index; they cannot move each other, and they did not.
+
+The enlarged set is deterministic on the same terms. Two runs, each starting its own pgvector container
+and carving its own database out of it, produce identical hit lists for all eighty-four questions at
+full precision — which is the property the whole argument for enlarging the slice rests on
+([ADR-0044](../../.ssot/ADR.md#adr-0044)).
+
+## What the whole set measures now
+
+| group | n | recall@1 | recall@5 | MRR | heading@5 |
+|---|--:|--:|--:|--:|--:|
+| **overall** | 84 | 59.5 % | **69.0 %** (58) | 0.638 | **66.7 %** (56) |
+| lang `en` | 41 | 58.5 % | 68.3 % | 0.632 | 63.4 % |
+| lang `tr` | 43 | 60.5 % | 69.8 % | 0.643 | 69.8 % |
+| the 64 that predate this change | 64 | 75.0 % | 87.5 % | 0.802 | 84.4 % |
+| the 20 written for it | 20 | 10.0 % | 10.0 % | 0.113 | 10.0 % |
+
+Eighteen points of `recall@5` and eighteen of `heading@5` are gone from the headline, and none of it is
+a regression. It is twenty questions the retriever cannot answer, added on purpose, to a set of
+sixty-four it mostly can.
+
+## The floors, re-derived
+
+Eighty-four questions quantise every metric at 1.1905 points. The rule is
+[ADR-0044](../../.ssot/ADR.md#adr-0044)'s and it does not change — one question of tolerance, the figure
+less one question, rounded down to the nearest half point:
+
+| metric | measured | less one question | floor | previous floor |
+|---|--:|--:|--:|--:|
+| `recall@5` | 69.0 % (58 of 84) | 67.857 % | **67.5 %** | 85.5 % |
+| `heading@5` | 66.7 % (56 of 84) | 65.476 % | **65.0 %** | 82.5 % |
+
+```bash
+npm run eval -- --min-recall5=0.675 --min-heading5=0.650   # what CI runs
+```
+
+**The floors fell eighteen points and retrieval did not move at all.** That is why ROADMAP.md Item 12
+names this as the one Phase 2 change that legitimately moves them, and why the two numbers in
+`.github/workflows/ci.yml` and the two in this table are in the same commit as the questions. A reader
+who sees only the workflow diff should be able to arrive here and find the old sixty-four unchanged to
+six decimal places; the control table above is what makes a moved floor auditable rather than merely
+asserted.
+
+## What thirty questions say that seven could not
+
+| slice | n | recall@1 | recall@5 | heading@5 |
+|---|--:|--:|--:|--:|
+| `cross-lingual`, all | 30 | 10.0 % | **13.3 %** (4) | 13.3 % |
+| `xl-tr-en` — Turkish question, English page | 15 | 6.7 % | **13.3 %** (2) | 13.3 % |
+| `xl-en-tr` — English question, Turkish page | 15 | 13.3 % | **13.3 %** (2) | 13.3 % |
+| `cross-lingual`, the original 7 | 7 | 14.3 % | 14.3 % (1) | 14.3 % |
+| `cross-lingual`, the 20 added here | 20 | 10.0 % | 10.0 % (2) | 10.0 % |
+
+Four findings, and two of them are about claims this repository has been carrying since Phase 1.
+
+**The direction asymmetry is not real.** The Phase 0 baseline recorded that "all three of its total
+failures are Turkish questions whose answer is an English page; the reverse direction answers two of
+three at rank 1", and that asymmetry has been repeated since. At fifteen questions per direction the two
+directions measure **13.3 % each**, and the gap in `recall@1` — 6.7 % against 13.3 % — is one question.
+Three questions were never enough to see a direction; the asymmetry was a property of which three.
+
+**Every miss returns a page in the language of the question.** Of the thirty cross-lingual questions,
+**twenty-seven have a rank-1 hit in the question's own language**, and the three exceptions are exactly
+the three that are answered correctly at rank 1. This is the sharpest statement of
+[ADR-0037](../../.ssot/ADR.md#adr-0037)'s finding the harness has produced: the encoder is not failing to
+understand the question, it is ranking the language of the question above the answer to it. It is a
+property of the encoder and not of the chunking, and the enlarged slice confirms rather than weakens
+that reading — the corpus and the chunk budget did not change here, and the twenty new questions land in
+the same place as the old ten.
+
+**The lexical half fixes cross-lingual identifier retrieval and nothing else — and now with no
+counterexample.** Split the thirty by whether the question itself is identifier-shaped:
+
+| | n | recall@5 |
+|---|--:|--:|
+| carries an identifier | 9 | 44.4 % (4) |
+| natural language | 21 | **0 %** (0) |
+
+**Not one natural-language cross-lingual question is answered inside the top five, and not one is
+answered inside the top ten either.** [ADR-0041](../../.ssot/ADR.md#adr-0041) said the lexical half
+recovers cross-lingual identifier retrieval "and nothing else" on the evidence of one question; twenty-one
+questions now say it with nothing arguing the other way.
+
+The five identifier-shaped questions that still miss refine it, and the refinement is the useful part:
+the lexical half crosses the language boundary **only when the identifier it matches occurs on one page
+and that page is in the other language**. `x-en-tr-15` names `HLY-5030`, which is written on the Turkish
+startup page *and* in the English error table — the dense side prefers the English one, and a chunk
+found by the lexical retriever alone cannot displace it under RRF. `x-tr-en-01` and `x-en-tr-05` carry no
+literal token across at all; they are tagged `identifier` because the *answer* is one, which is a
+different thing and was worth finding out.
+
+**And the cleanest single number in the run is the matched pairs.** Nineteen of the thirty cross-lingual
+questions point at a file and a heading that a question in the *page's own* language also points at —
+same page, same section, same fact, and only the language of the asking differs.
+
+| the same heading, asked… | n | in the top five | rank 1 | not in the top ten |
+|---|--:|--:|--:|--:|
+| …in the page's own language | 19 | **19** | 15 | 0 |
+| …in the other language | 19 | 3 | 2 | **15** |
+
+Nineteen for nineteen against three for nineteen, with the question's content held constant. Whatever is
+wrong here, it is not that the cross-lingual questions are harder questions.
+
+## How these twenty were written
+
+Under `README.md`'s rule, and it is worth saying exactly how, because the rule is the only thing that
+makes this section worth reading. Every one of the twenty was written from a corpus page before any
+search was run: the page was read, a question it answers was written down, and the file and heading were
+recorded from the page rather than from a result list. Eighteen of the twenty fail. None was softened,
+reworded or deleted after seeing it miss.
+
+Two properties were chosen rather than fallen into:
+
+- **Fifteen in each direction**, because the direction claim above could not be tested otherwise.
+- **Twelve of the twenty target a heading against which a same-language question already exists**, which
+  is what the matched-pair table above is made of. The set already used this device — `en-backup-01` and
+  `x-tr-en-03` are such a pair, and so are `en-env-02` and `x-tr-en-01` — and it is the cleanest
+  instrument available for this particular defect, because it removes "that question was harder" as an
+  explanation. The pairing was a consequence of writing from the corpus rather than a plan: the same
+  passages are the ones worth asking about in either language.
+
+The direction tags `xl-tr-en` and `xl-en-tr` were also added to the ten cross-lingual questions that
+predate this change. That is a tag on an existing row and nothing else — no question's text, file or
+heading moved, which is why the sixty-four reproduce exactly.
+
+## Reproducing it
+
+```bash
+npm run eval -- --min-recall5=0.675 --min-heading5=0.650   # exits 0 at 69.0 / 66.7
+npm run eval -- --min-recall5=0.855                        # exits 2: the old floor against the new set
+```
+
+The second line is the one to run before reading anything above. It fails, and it should: the floor it
+names was argued against sixty-four questions and there are eighty-four now.
