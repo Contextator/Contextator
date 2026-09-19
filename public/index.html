@@ -252,6 +252,12 @@
             </div>
           </div>
 
+          <label class="field">
+            <span class="field-label">Version <span class="muted">— optional</span></span>
+            <input name="version" placeholder="v3" maxlength="64" autocomplete="off" spellcheck="false" />
+            <span class="field-hint">Stamped on every document this source indexes, so an agent can ask <code>search_docs</code> for one release instead of getting two mixed together. Free text, matched exactly, and several sources may share one version — <code>api-v3</code> and <code>sdk-v3</code> are one release. Changing it re-indexes this source.</span>
+          </label>
+
           <div class="field-row">
             <label class="field">
               <span class="field-label">Sync every</span>

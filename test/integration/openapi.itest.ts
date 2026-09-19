@@ -8,7 +8,14 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
+import cookie from '@fastify/cookie';
+import Fastify, { type FastifyInstance } from 'fastify';
+
+import { adminRoutes } from '../../src/admin/routes.js';
 import { loadConfig } from '../../src/config.js';
+import type { AppContext } from '../../src/context.js';
+import { SetupGate } from '../../src/services/auth/setup.js';
+import { SlidingWindow } from '../../src/services/rate-limit.js';
 import type { Db } from '../../src/db/client.js';
 import { documentSources, documents, projects, type ProjectRow } from '../../src/db/schema.js';
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
@@ -36,6 +43,8 @@ const baseUrl = inject('postgresBaseUrl');
 const DIMS = TEST_EMBEDDING_DIMENSIONS;
 const MODEL_ID = 'local:stub-bag-of-words:fp32';
 const FIXTURES = path.join(__dirname, '..', 'fixtures', 'openapi');
+/** The credential the source-editing route is driven with; nothing else in this file authenticates. */
+const ADMIN_TOKEN = 'a-token-for-a-test';
 
 /** The six operations of `petstore.yaml` and the two of `legacy-swagger.json`, plus the README. */
 const PETSTORE_OPERATIONS = 6;
@@ -461,3 +470,136 @@ function pathItems(rest: string): { items: string[]; tail: string } {
   if (current.length) items.push(`${current.join('\n')}\n`);
   return { items, tail: lines.slice(i).join('\n') };
 }
+
+/**
+ * **Where [ADR-0057](../../.ssot/ADR.md#adr-0057)'s document-level hash skip meets
+ * [ADR-0058](../../.ssot/ADR.md#adr-0058)'s version stamp**, which is the one place the two can
+ * disagree and the reason this block exists rather than being assumed.
+ *
+ * A specification is parsed on every run and the skipping moved down to the individual document: a
+ * derived document whose stored hash still equals its file's is not rewritten. A version, meanwhile,
+ * is stamped *by* `replaceDocument` — so a run that skips a document does not restamp it. Change a
+ * source's version and nothing about the file's bytes moves, so on its own the skip would leave every
+ * one of a specification's forty documents on the old release, silently and for ever.
+ *
+ * What stops it is the same mechanism a changed content type uses: the edit drops that source's stored
+ * hashes, and the run the edit queues therefore rewrites all of them. **That is a rule that lives in
+ * the PATCH route rather than in the indexer**, so this drives the route — not `updateSource`, which
+ * is only half of it — and asserts the property at the far end: after the edit, *every* derived
+ * document carries the new label.
+ */
+describe('a source whose version changes', () => {
+  /** What the PATCH route asked to be re-indexed; a real `Indexer` here would race `reindex()`. */
+  const enqueued: string[] = [];
+
+  async function adminApp(): Promise<FastifyInstance> {
+    const app = Fastify({ logger: false });
+    await app.register(cookie);
+    const ctx = {
+      config: loadConfig({
+        DATABASE_URL: fx.database.url,
+        ALLOWED_DOC_ROOTS: path.dirname(fx.root),
+        DATA_DIR: path.join(fx.root, '.data'),
+        SECRET_KEY: '0'.repeat(64),
+        ADMIN_TOKEN,
+      }),
+      db: fx.database.db,
+      log: silentLogger,
+      embeddings,
+      // Recorded rather than run: the assertion below is that the route *asks* for a run (FR-437),
+      // and the run itself is driven explicitly afterwards so the two cannot interleave.
+      indexer: {
+        enqueue: (id: string) => {
+          enqueued.push(id);
+          return {};
+        },
+        isBusy: () => false,
+        getJob: () => null,
+        queueInfo: () => undefined,
+      },
+      locks: new KeyedMutex(),
+      uploads: {},
+      sessions: {},
+      setup: new SetupGate(),
+      loginLimiter: new SlidingWindow(10, 1000),
+      version: '0.0.0-test',
+      startedAt: Date.now(),
+    } as unknown as AppContext;
+    await app.register(adminRoutes, { ctx });
+    await app.ready();
+    return app;
+  }
+
+  /** Every document of the specification source, with the label it is carrying now. */
+  async function versions(): Promise<Map<string, string>> {
+    const rows = await fx.database.db
+      .select({ relativePath: documents.relativePath, version: documents.version })
+      .from(documents)
+      .where(eq(documents.sourceId, fx.sourceId));
+    return new Map(rows.map((r) => [r.relativePath, r.version]));
+  }
+
+  /** The source's config as it stands, so a patch extends it rather than replacing it. */
+  async function setVersion(version: string): Promise<void> {
+    const app = await adminApp();
+    try {
+      const [row] = await fx.database.db.select().from(documentSources).where(eq(documentSources.id, fx.sourceId));
+      const response = await app.inject({
+        method: 'PATCH',
+        url: `/api/projects/${fx.project.id}/sources/${fx.sourceId}`,
+        headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+        payload: { config: { ...(row.config as Record<string, unknown>), version } },
+      });
+      expect(response.statusCode).toBe(200);
+    } finally {
+      await app.close();
+    }
+  }
+
+  it('stamps every document a specification expands into, not just the file', async () => {
+    enqueued.length = 0;
+    await setVersion('v2');
+    // The route asked for a run rather than leaving the source silently stale (FR-437).
+    expect(enqueued).toEqual([fx.project.id]);
+    await reindex();
+
+    const stamped = await versions();
+    // Not vacuous: the whole corpus is here, and the count is the one the first case in this file
+    // pins. An assertion over an empty map would pass against a filter that stamped nothing.
+    expect(stamped.size).toBe(DOCUMENTS);
+    expect([...stamped.values()].every((v) => v === 'v2')).toBe(true);
+    // Named individually for the six that are one file's expansion, because they are the ones the
+    // document-level skip decides about one at a time.
+    for (const operation of ['get-pets', 'post-pets', 'get-pets-petId', 'delete-pets-petId']) {
+      expect(stamped.get(`api/petstore.yaml/${operation}`)).toBe('v2');
+    }
+  });
+
+  it('moves all of them to the new release when the label changes and nothing else does', async () => {
+    // **The case the two mechanisms could have failed together.** The specification's bytes are
+    // untouched, so every derived document's stored hash still matches the file — which is exactly
+    // the state the document-level skip exists to short-circuit. If the edit did not drop the hashes,
+    // all of these would still read `v2` and no run would ever move them.
+    const before = await versions();
+    expect([...before.values()].every((v) => v === 'v2')).toBe(true);
+
+    enqueued.length = 0;
+    await setVersion('v3');
+    expect(enqueued).toEqual([fx.project.id]);
+    await reindex();
+
+    const after = await versions();
+    expect(after.size).toBe(DOCUMENTS);
+    const stale = [...after.entries()].filter(([, version]) => version !== 'v3');
+    expect(stale, `these documents kept the old label: ${stale.map(([p, v]) => `${p}=${v}`).join(', ')}`).toEqual([]);
+  });
+
+  it('leaves them alone on a run that changes nothing, which is what the skip is for', async () => {
+    // The other half, so the case above cannot be passing because the label is rewritten on every run
+    // regardless: with no edit, the specification is skipped document by document and the labels stand.
+    await reindex();
+    const after = await versions();
+    expect(after.size).toBe(DOCUMENTS);
+    expect([...after.values()].every((v) => v === 'v3')).toBe(true);
+  });
+});

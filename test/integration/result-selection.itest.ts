@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { documentSources, projects } from '../../src/db/schema.js';
-import { type NewChunk, replaceDocument, searchChunks, type SearchHit } from '../../src/services/vector-store.js';
+import { listDocumentVersions, type NewChunk, replaceDocument, searchChunks, type SearchHit } from '../../src/services/vector-store.js';
 import { applySchema, createTestDatabase, dropTestDatabase, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 
 /**
@@ -97,6 +97,7 @@ async function seed(relativePath: string, sourceId: string, count: number, body:
       indexGeneration: LIVE,
       content: null,
       contentTruncated: false,
+      version: '',
     },
     rows,
   );
@@ -306,5 +307,178 @@ describe('neighbour context', () => {
     expect(first?.contextAfter).toContain('Backup 1:');
     expect(first?.contextAfter).toContain('Backup 2:');
     expect(first?.contextBefore).toBeNull();
+  });
+});
+
+/**
+ * **The version filter** ([ADR-0058](../../../.ssot/ADR.md#adr-0058)), on a fixture of its own,
+ * because the corpus above is arithmetic the cap cases depend on and three more documents in it would
+ * be measuring something else.
+ *
+ * The shape is the problem the filter exists for: one product, documented twice, indexed into one
+ * project. `api-v2` and `api-v3` are the two releases of the same reference page — and `sdk-v2` is
+ * beside them, carrying the *same* version as `api-v2`, because that is what makes this not simply
+ * the source filter under another name. A release is several mount points; `source` cannot express it.
+ *
+ * **Two questions, and the difference between them is the whole design of the fixture.**
+ * `rotation` is in the breadcrumb of all twelve chunks, which is past ADR-0041's document-frequency
+ * threshold, so the lexical half never sees it and that question is answered by the dense half alone.
+ * `credential` is in six, so it survives, and both halves answer. Asking the filter under each is what
+ * makes "it reached **both** candidate lists" an observation rather than a hope: with the predicate
+ * pushed into only one of them, the other half goes on fetching the wrong release and fusion — a FULL
+ * OUTER JOIN — puts it on the page.
+ *
+ * The premises are asserted first, in their own case, for the reason the tie check in `beforeAll`
+ * above is: a fixture where the wrong release is not retrievable by the half being tested would make
+ * every case here pass against a filter that reaches nothing.
+ */
+const V2_API = 'api-v2/reference/rotate.md';
+const V2_SDK = 'sdk-v2/reference/rotate.md';
+const V3_API = 'api-v3/reference/rotate.md';
+
+/** Answered by the dense half alone: it is in every chunk, so the lexical half drops it. */
+const DENSE_QUESTION = 'rotation';
+/** Answered by both: it is in six of twelve chunks, under the threshold. */
+const BOTH_QUESTION = 'credential';
+
+describe('the version filter', () => {
+  let versionedProjectId: string;
+  let apiV3SourceId: string;
+
+  /** Four chunks, of which the first two carry `credential`; every one carries `rotation` in its breadcrumb. */
+  const bodies = (spacing: number): string[] =>
+    Array.from({ length: 4 }, (_, i) =>
+      i < 2
+        ? `Step ${i}: the credential is replaced from the console${' plainly'.repeat(spacing + i)}.`
+        : `Step ${i}: the replicas pick the new one up${' plainly'.repeat(spacing + i)}.`,
+    );
+
+  const searchVersions = (request: Partial<Parameters<typeof searchChunks>[1]>, queryText = BOTH_QUESTION): Promise<SearchHit[]> =>
+    searchChunks(database.db, {
+      projectId: versionedProjectId,
+      generation: LIVE,
+      queryEmbedding: stubVector(queryText),
+      queryText,
+      limit: 20,
+      selection: { maxPerDocument: 20, neighborContext: 0 },
+      ...request,
+    });
+
+  beforeAll(async () => {
+    const [project] = await database.db.insert(projects).values({ name: 'versions' }).returning({ id: projects.id });
+    versionedProjectId = project.id;
+
+    const write = async (name: string, version: string, relativePath: string, spacing: number): Promise<string> => {
+      const [source] = await database.db
+        .insert(documentSources)
+        // The version lives in the source's config exactly as it does in production; the column below
+        // is what an index run stamps from it, and this fixture writes both so the two cannot drift.
+        .values({ projectId: versionedProjectId, type: 'local', name, config: { extensions: ['md'], version } })
+        .returning({ id: documentSources.id });
+      await replaceDocument(
+        database.db,
+        {
+          projectId: versionedProjectId,
+          sourceId: source.id,
+          relativePath,
+          title: relativePath,
+          contentHash: `hash-${relativePath}`,
+          sizeBytes: 1024,
+          indexGeneration: LIVE,
+          content: null,
+          contentTruncated: false,
+          version,
+        },
+        bodies(spacing).map((content, chunkIndex) => {
+          const headingPath = `Rotation > Step ${chunkIndex}`;
+          return { chunkIndex, headingPath, content, tokenCount: 20, embedding: stubVector(`${headingPath} ${content}`) };
+        }),
+      );
+      return source.id;
+    };
+
+    // Distinct repetition counts, so no two chunks of this corpus share an embedding — the property
+    // `beforeAll` above spells out at length, and the reason these three near-identical pages are not
+    // one vector three times over.
+    await write('api-v2', 'v2', V2_API, 1);
+    await write('sdk-v2', 'v2', V2_SDK, 5);
+    apiV3SourceId = await write('api-v3', 'v3', V3_API, 9);
+  });
+
+  it('has a corpus where the wrong release is reachable by each half separately, which is the premise', async () => {
+    // Without this every case below passes against a filter that reaches nothing, because a v2
+    // document the half under test never retrieved could not have leaked through it either.
+    const both = await searchVersions({}, BOTH_QUESTION);
+    const dense = await searchVersions({}, DENSE_QUESTION);
+
+    // `credential` is on both lists, and the v2 pages are on both of them.
+    for (const file of [V2_API, V2_SDK]) {
+      const hits = both.filter((hit) => hit.file === file);
+      expect(
+        hits.some((hit) => hit.lexicalRank !== null),
+        `${file} is not on the lexical list for "${BOTH_QUESTION}"`,
+      ).toBe(true);
+      expect(
+        hits.some((hit) => hit.denseRank !== null),
+        `${file} is not on the dense list for "${BOTH_QUESTION}"`,
+      ).toBe(true);
+    }
+    // `rotation` is in all twelve chunks, so the lexical half drops it entirely and the v2 pages are
+    // reachable only densely. That is what makes the dense case below a test of the dense CTE.
+    for (const hit of dense) expect(hit.lexicalRank).toBeNull();
+    for (const file of [V2_API, V2_SDK]) {
+      expect(
+        dense.some((hit) => hit.file === file && hit.denseRank !== null),
+        `${file} is not on the dense list for "${DENSE_QUESTION}"`,
+      ).toBe(true);
+    }
+  });
+
+  it('sees every version when nobody asked for one, which is what an upgrade keeps', async () => {
+    const hits = await searchVersions({}, BOTH_QUESTION);
+    expect(new Set(files(hits))).toEqual(new Set([V2_API, V2_SDK, V3_API]));
+  });
+
+  it('returns only the release asked for, on a question both halves answer', async () => {
+    const hits = await searchVersions({ version: 'v3' }, BOTH_QUESTION);
+
+    expect(hits.length).toBeGreaterThan(0);
+    expect(new Set(files(hits))).toEqual(new Set([V3_API]));
+    // Both halves, asserted rather than assumed — the source filter's case one describe up makes the
+    // same claim, and here the leak it guards against is a *different release of the same page*.
+    expect(hits.some((hit) => hit.lexicalRank !== null)).toBe(true);
+    expect(hits.some((hit) => hit.denseRank !== null)).toBe(true);
+  });
+
+  it('returns only the release asked for, on a question the lexical half cannot answer at all', async () => {
+    // The other half of the same claim. Here the lexical list is empty by construction, so a page of
+    // anything but v3 could only have come through the dense candidate CTE.
+    const hits = await searchVersions({ version: 'v3' }, DENSE_QUESTION);
+
+    expect(hits.length).toBeGreaterThan(0);
+    expect(new Set(files(hits))).toEqual(new Set([V3_API]));
+    for (const hit of hits) expect(hit.lexicalRank).toBeNull();
+  });
+
+  it('is not the source filter under another name: one version spans two sources', async () => {
+    // The case that would still pass if `version` were resolved to a source id, and the reason it is
+    // a column on the document instead.
+    const hits = await searchVersions({ version: 'v2' }, BOTH_QUESTION);
+
+    expect(new Set(files(hits))).toEqual(new Set([V2_API, V2_SDK]));
+  });
+
+  it('combines with the source filter rather than replacing it', async () => {
+    const hits = await searchVersions({ version: 'v2', sourceId: apiV3SourceId }, BOTH_QUESTION);
+    expect(hits).toHaveLength(0);
+  });
+
+  it('lists the versions the published index carries, which is what an unknown one is answered with', async () => {
+    // Read off the documents and not off the sources, so the answer describes the index being
+    // searched rather than what the next run would stamp. Alphabetical, and deliberately not a
+    // timeline: nothing here knows which release came later.
+    expect(await listDocumentVersions(database.db, versionedProjectId, LIVE)).toEqual(['v2', 'v3']);
+    // The corpus above is unversioned, and an empty label is not a version — it is the absence of one.
+    expect(await listDocumentVersions(database.db, projectId, LIVE)).toEqual([]);
   });
 });

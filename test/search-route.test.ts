@@ -98,6 +98,22 @@ describe('the search route validates its query string', () => {
     expect((await search(`?q=${'x'.repeat(2001)}`)).statusCode).toBe(400);
   });
 
+  it('refuses a version longer than a label can be, rather than sending it to a LIKE-free equals', async () => {
+    // 64 characters, the same ceiling the source config and the `search_docs` argument carry
+    // ([ADR-0058](../../.ssot/ADR.md#adr-0058)). The bound is here because this is the only thing
+    // between a query string and a predicate, exactly as it is for `q` and `limit`.
+    expect((await search(`?q=rotate+the+key&version=${'v'.repeat(65)}`)).statusCode).toBe(400);
+  });
+
+  it('drops an empty version rather than refusing it, because a form submits every field it has', async () => {
+    // 409 and not 400: an empty filter is no filter, so the request reaches the handler and is
+    // answered by the stub project's own guard — which is what "the default falls to today's
+    // behaviour" means at this layer.
+    const res = await search('?q=rotate+the+key&version=&source=&path_prefix=');
+    expect(res.statusCode).toBe(409);
+    expect(res.body.error).toBe('not_indexed');
+  });
+
   it('accepts both ends of the range and the absent limit, which then reach the handler', async () => {
     // 409, not 200: the stub project exists and has no chunks. Reaching that guard at all is the
     // assertion — a rejected bound would have answered 400 well before it.

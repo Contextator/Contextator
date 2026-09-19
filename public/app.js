@@ -1143,6 +1143,7 @@ function fillSourceForm(s) {
   srcForm.elements.label.value = s.label || '';
   srcForm.elements.flavor.value = s.flavor || 'plain';
   syncFlavorFields();
+  srcForm.elements.version.value = c.version || '';
   setSyncIntervalField(s.syncIntervalMinutes);
   $('#src-next-sync').textContent = syncScheduleLabel(s);
   for (const box of srcForm.querySelectorAll('input[name="ext"]')) box.checked = (c.extensions || []).includes(box.value);
@@ -1301,6 +1302,11 @@ function configForKind(kind) {
   // `language` is deliberately absent: the form no longer offers it (ADR-0041's consequence — setting it
   // makes a source worse until the query side varies), and the PATCH merges over the stored config, so
   // leaving the key out preserves whatever an operator set through the API.
+  //
+  // `version` is the other way round and always sent, empty string included (ADR-0058): the form does
+  // offer it, and because the PATCH merges, a cleared field that was simply omitted would leave the
+  // old label on the source with nothing on screen to say so. The server normalises `''` to unset.
+  const common = { extensions, version: srcForm.elements.version.value.trim() };
   if (type === 'local') {
     const rest = $('#src-path')
       .value.trim()
@@ -1308,7 +1314,7 @@ function configForKind(kind) {
     const root = srcSelectedRoot();
     const path = root ? `${root}/${rest}` : rest;
     if (!path) throw new Error('A directory is required');
-    return { path, extensions };
+    return { path, ...common };
   }
   if (type === 'git') {
     const url = srcForm.elements.url.value.trim();
@@ -1318,14 +1324,14 @@ function configForKind(kind) {
       branch: srcForm.elements.branch.value.trim() || 'main',
       subdir: srcForm.elements.subdir.value.trim().replace(/^[\\/]+|[\\/]+$/g, ''),
       username: srcForm.elements.username.value.trim(),
-      extensions,
+      ...common,
     };
   }
   if (type === 'notion') {
     const ids = parseNotionIds(srcForm.elements.rootIds.value);
-    return { rootIds: ids, extensions };
+    return { rootIds: ids, ...common };
   }
-  return { extensions };
+  return { ...common };
 }
 
 const clearSecretRow = (type) => $(type === 'git' ? '#git-clear-secret-row' : '#notion-clear-secret-row');

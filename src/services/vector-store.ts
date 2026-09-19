@@ -149,6 +149,15 @@ export interface SearchRequest {
    * wildcard and an operator who typed it meant the character.
    */
   pathPrefix?: string;
+  /**
+   * Only documents carrying this release label ([ADR-0058](../../.ssot/ADR.md#adr-0058)). Matched for
+   * **equality** against `documents.version` — there is no ordering, no range and no "latest", because
+   * the label is whatever a documentation team writes and no parser is right about all of them.
+   *
+   * Unset is the search this product has always run: the third filter, like the two above it, is a
+   * predicate the statement grows rather than one it evaluates to true.
+   */
+  version?: string;
   scan?: HnswScan;
   /** The per-document cap and the neighbour context. Unset is `DEFAULT_RESULT_SELECTION`. */
   selection?: ResultSelection;
@@ -234,7 +243,7 @@ interface HybridRow extends Record<string, unknown> {
  * index run's writes. `SET LOCAL` outside a transaction is a silent no-op.
  */
 export async function searchChunks(db: Db, request: SearchRequest): Promise<SearchHit[]> {
-  const { projectId, generation, queryEmbedding, queryText, limit, sourceId, pathPrefix, rerank } = request;
+  const { projectId, generation, queryEmbedding, queryText, limit, sourceId, pathPrefix, version, rerank } = request;
   const scan = request.scan ?? DEFAULT_HNSW_SCAN;
   const selection = request.selection ?? DEFAULT_RESULT_SELECTION;
   const textSearchConfig = request.textSearchConfig ?? QUERY_TEXT_SEARCH_CONFIG;
@@ -243,22 +252,29 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
   // sometimes true: an unfiltered search must keep exactly the plan ADR-0040 and ADR-0041 measured,
   // and `and c.document_id in (select …)` over an unrestricted sub-select would not be free to the
   // planner even though it excludes nothing.
-  const filtered = sourceId !== undefined || pathPrefix !== undefined;
+  const filtered = sourceId !== undefined || pathPrefix !== undefined || version !== undefined;
   const documentScope = filtered
     ? sql`
       filtered_documents as materialized (
         -- The filters, resolved to document ids **once**, so each candidate CTE below carries one
-        -- hash semi-join rather than its own copy of two predicates. Served by
+        -- hash semi-join rather than its own copy of three predicates. Served by
         -- documents_project_generation_idx.
         select id from documents
         where project_id = ${projectId} and index_generation = ${generation}
           ${sourceId === undefined ? sql`` : sql`and source_id = ${sourceId}`}
           ${pathPrefix === undefined ? sql`` : sql`and relative_path like ${`${escapeLikePattern(pathPrefix)}%`} escape '\\'`}
+          -- Equality, and no ordering (ADR-0058). A version is a label rather than a number, and the
+          -- column is NOT NULL with the empty string standing for "unversioned" — so this is a plain
+          -- equals with no third state for a predicate to remember.
+          ${version === undefined ? sql`` : sql`and version = ${version}`}
       ),`
     : sql``;
-  // The third and fourth predicates ADR-0040 said were coming. Both halves get them, because a filter
-  // that applied to one of them would silently mean "this source, or anything the other retriever
-  // liked".
+  // The third, fourth and fifth predicates — the two ADR-0040 said were coming, and ADR-0058's after
+  // them. **Both halves get all of them, and that is the whole of why they are resolved to one CTE
+  // above rather than written into each candidate list.** A filter that reached one of the two would
+  // silently mean "this version, or anything the other retriever liked" — and because fusion is a
+  // FULL OUTER JOIN, a document the unfiltered half returned is not merely ranked low, it is on the
+  // page.
   const withinScope = filtered ? sql`and c.document_id in (select id from filtered_documents)` : sql``;
 
   // Neighbour expansion, and it is deliberately outside the fused statement's own candidate CTEs: a
@@ -676,6 +692,48 @@ export async function listDocumentHeadings(db: Db, documentId: string): Promise<
   return rows.map((r) => r.headingPath).filter((h) => h !== '');
 }
 
+/**
+ * Whether the published index holds anything at this release label — the **question the successful
+ * search path asks** ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
+ *
+ * It exists separately from `listDocumentVersions` below because the two are asked on different paths
+ * and only one of them is hot. A search that named a version that exists needs one bit and stops at the
+ * first row; the catalogue is what a *refusal* is built from, and making every successful search
+ * compute it would be paying for the error message on the path that does not produce one. There is no
+ * index on `version` and deliberately so, so that difference is a scan of one generation's documents
+ * against a scan that stops immediately.
+ */
+export async function documentVersionExists(db: Db, projectId: string, generation: number, version: string): Promise<boolean> {
+  const [row] = await db
+    .select({ one: sql<number>`1` })
+    .from(documents)
+    .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation), eq(documents.version, version)))
+    .limit(1);
+  return row !== undefined;
+}
+
+/**
+ * Every release label the published index actually carries, in order, without the empty one
+ * ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
+ *
+ * **Read off the documents rather than off the sources**, which is the whole point of the answer it
+ * produces: a source's `config.version` is what the *next* run will stamp, and an agent asking about a
+ * version that does not exist has to be told what is in the index it is searching now — not what will
+ * be there after somebody re-indexes.
+ *
+ * Alphabetical, and deliberately not "newest first": nothing here knows which of `2024.1` and `next`
+ * came later, and a list ordered as if it did would be the same lie as a `latest` filter. It is a
+ * catalogue, not a timeline.
+ */
+export async function listDocumentVersions(db: Db, projectId: string, generation: number): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ version: documents.version })
+    .from(documents)
+    .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation), ne(documents.version, '')))
+    .orderBy(asc(documents.version));
+  return rows.map((row) => row.version);
+}
+
 export async function getDocument(db: Db, projectId: string, generation: number, relativePath: string): Promise<DocumentRow | undefined> {
   const [row] = await db
     .select()
@@ -736,6 +794,16 @@ export interface DocumentInput {
   content: string | null;
   /** Set by `storedDocumentContent`; a caller does not decide this for itself. */
   contentTruncated: boolean;
+  /**
+   * The release label this document is indexed under ([ADR-0058](../../.ssot/ADR.md#adr-0058)) — the
+   * owning source's `config.version`, or `''` for a source that carries none.
+   *
+   * Required rather than optional, for `content`'s reason: a caller that could leave it out is a
+   * caller that writes documents which are invisible to every `version` filter on the instance, and
+   * the compiler is the only thing that would ever notice. A test and the evaluation harness say `''`
+   * deliberately, which is what "unversioned" is.
+   */
+  version: string;
 }
 
 /**
@@ -811,6 +879,10 @@ export async function replaceDocument(
           // revision of a document `search_docs` has already re-indexed (ADR-0043).
           content: doc.content,
           contentTruncated: doc.contentTruncated,
+          // In the `SET` for the same reason, one entry along: a source whose version an operator
+          // changed re-indexes into the generation that is already live, so a row that is updated
+          // rather than inserted has to take the new label ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
+          version: doc.version,
         },
       })
       .returning({ id: documents.id });

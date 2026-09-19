@@ -148,7 +148,14 @@ function chunksOf(source: string, relativePath: string): { title: string; rows: 
   };
 }
 
-async function seed(db: Db, projectId: string, sourceId: string, relativePath: string, body: string, opts: { store: boolean }): Promise<void> {
+async function seed(
+  db: Db,
+  projectId: string,
+  sourceId: string,
+  relativePath: string,
+  body: string,
+  opts: { store: boolean; version?: string },
+): Promise<void> {
   const { title, rows } = chunksOf(body, relativePath);
   await replaceDocument(
     db,
@@ -160,6 +167,9 @@ async function seed(db: Db, projectId: string, sourceId: string, relativePath: s
       contentHash: `hash-${relativePath}`,
       sizeBytes: Buffer.byteLength(body),
       indexGeneration: LIVE,
+      // Unversioned unless a case says otherwise, which is what the handbook project above is: the
+      // shape of every installation that upgraded and set nothing ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
+      version: opts.version ?? '',
       // `store: false` is a document written before ADR-0043 — the state every existing installation
       // is in until its next index run, and the only thing the filesystem fallback exists for.
       ...(opts.store ? storedDocumentContent(body, 1024 * 1024) : { content: null, contentTruncated: false }),
@@ -169,17 +179,17 @@ async function seed(db: Db, projectId: string, sourceId: string, relativePath: s
 }
 
 /** A client and a server joined by an in-memory transport pair, closed by the caller. */
-async function connect(): Promise<Client> {
+async function connect(project: ProjectRow = fx.project): Promise<Client> {
   const server = new McpServer({ name: 'contextator-test', version: '0.0.0' });
-  registerTools(server, fx.ctx, fx.project);
+  registerTools(server, fx.ctx, project);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'itest', version: '0.0.0' });
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   return client;
 }
 
-async function call(name: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }> {
-  const client = await connect();
+async function call(name: string, args: Record<string, unknown>, project?: ProjectRow): Promise<{ text: string; isError: boolean }> {
+  const client = await connect(project);
   try {
     const result = await client.callTool({ name, arguments: args });
     const content = (result.content as Array<{ type: string; text?: string }> | undefined) ?? [];
@@ -427,5 +437,91 @@ describe('the stored text', () => {
     const [row] = await fx.database.db.select().from(documents).where(eq(documents.relativePath, 'handbook/guide.md'));
     expect(row.content).toBe(GUIDE);
     expect(row.contentTruncated).toBe(false);
+  });
+});
+
+/**
+ * The `version` argument, through the client and over the same transport as everything else in this
+ * file ([ADR-0058](../../.ssot/ADR.md#adr-0058)). It is a **tool contract** — a new optional argument,
+ * a refusal with a list in it, and a line `list_topics` grows only when there is something to say —
+ * so it is asserted where an agent would meet it rather than at the service that implements it.
+ *
+ * Its own project, because the handbook above is the other half of the claim: an installation that
+ * upgraded and set no version anywhere must see no new line and no new behaviour at all.
+ */
+const RELEASES = 'reference/rotate.md';
+/** Close enough to the passage to clear `SEARCH_SCORE_FLOOR`, so these cases measure the filter and not the floor. */
+const ROTATION_QUESTION = 'rotating the signing key needs a restart of the dispatcher';
+
+describe('the version argument', () => {
+  let versioned: ProjectRow;
+
+  beforeAll(async () => {
+    const [project] = await fx.database.db
+      .insert(projects)
+      .values({ name: 'two-releases', embeddingModel: MODEL_ID, documentCount: 2, chunkCount: 2 })
+      .returning();
+    versioned = project;
+    for (const version of ['v2', 'v3']) {
+      const [source] = await fx.database.db
+        .insert(documentSources)
+        .values({ projectId: project.id, type: 'local', name: `api-${version}`, config: { path: fx.root, extensions: ['md'], version } })
+        .returning();
+      await seed(
+        fx.database.db,
+        project.id,
+        source.id,
+        `api-${version}/${RELEASES}`,
+        // The **same page**, twice, which is the situation: two releases of one document, told apart by
+        // the column and by the mount prefix and by nothing in the text an embedding could see.
+        `# Key rotation\n\n${ROTATION_QUESTION[0].toUpperCase()}${ROTATION_QUESTION.slice(1)}.\n`,
+        { store: true, version },
+      );
+    }
+  });
+
+  it('lists the releases an agent may ask for, so they are not discovered by guessing one wrong', async () => {
+    const answer = await call('list_topics', {}, versioned);
+    expect(answer.isError).toBe(false);
+    expect(answer.text).toContain('Versions (pass one to search_docs as version): v2, v3');
+  });
+
+  it('says nothing about versions on a project that carries none, which is every upgraded installation', async () => {
+    const answer = await call('list_topics', { limit: 5 });
+    expect(answer.isError).toBe(false);
+    expect(answer.text).not.toContain('Versions');
+  });
+
+  it('returns one release when asked for it, and both when not', async () => {
+    const both = await call('search_docs', { query: ROTATION_QUESTION, limit: 10 }, versioned);
+    expect(both.isError).toBe(false);
+    expect(both.text).toContain(`api-v2/${RELEASES}`);
+    expect(both.text).toContain(`api-v3/${RELEASES}`);
+
+    const one = await call('search_docs', { query: ROTATION_QUESTION, limit: 10, version: 'v3' }, versioned);
+    expect(one.isError).toBe(false);
+    expect(one.text).toContain(`api-v3/${RELEASES}`);
+    expect(one.text).not.toContain(`api-v2/${RELEASES}`);
+  });
+
+  it('answers a version it does not have with the ones it does, which is also its answer to "latest"', async () => {
+    const answer = await call('search_docs', { query: ROTATION_QUESTION, version: 'latest' }, versioned);
+    expect(answer.isError).toBe(true);
+    expect(answer.text).toContain('no documents at version "latest"');
+    expect(answer.text).toContain('Its versions are: v2, v3.');
+  });
+
+  it('tells an agent on an unversioned project that the filter is not the way to narrow it', async () => {
+    const answer = await call('search_docs', { query: 'install the package', version: 'v1' });
+    expect(answer.isError).toBe(true);
+    expect(answer.text).toContain('None of its documents carry a version');
+  });
+
+  it('refuses an empty version at the tool boundary rather than reading it as no filter', async () => {
+    // `min(1)` on the argument: an agent that means "every version" omits it, and a client sending an
+    // empty string is sending something it did not mean. The dashboard's query string is the one place
+    // an empty value is read as absent, because a form submits every field it has.
+    const answer = await call('search_docs', { query: ROTATION_QUESTION, version: '' }, versioned);
+    expect(answer.isError).toBe(true);
   });
 });

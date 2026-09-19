@@ -341,6 +341,26 @@ export const documents = pgTable(
     content: text('content'),
     /** True when `content` holds only the first `MAX_STORED_DOCUMENT_BYTES` of the document. */
     contentTruncated: boolean('content_truncated').notNull().default(false),
+    /**
+     * Which release of the documentation this document is ([ADR-0058](../../.ssot/ADR.md#adr-0058)) —
+     * the source's `config.version`, stamped here when the document was indexed.
+     *
+     * **It is an opaque label and never an ordering.** `v3`, `2024.1`, `next` and `legacy` are all
+     * things a documentation team writes, and no parser is right about all four; the filter is
+     * equality and there is deliberately no "latest". Empty string is "unversioned", which is what
+     * every document written before this column existed holds and what a source with no version set
+     * writes — so an absent filter is the search this product has always run.
+     *
+     * **Not `index_generation`, and the two must not be confused** ([ADR-0039](../../.ssot/ADR.md#adr-0039)).
+     * A generation is instance-local bookkeeping: it changes on every rebuild, means nothing outside
+     * this database, and is never a thing an agent names. A version is the content's own label, chosen
+     * by an operator, stable across rebuilds, and the only one of the two an agent ever sees.
+     *
+     * Denormalised off `document_sources.config` on purpose: the filter is resolved against
+     * `documents` inside the search statement, and a join to the source table there would put a
+     * second relation between pgvector and the predicate the two candidate lists depend on.
+     */
+    version: text('version').notNull().default(''),
     indexedAt: timestamp('indexed_at', { withTimezone: true }).notNull().defaultNow(),
     /**
      * The generation this row belongs to. Equal to the project's `live_generation` for everything a
@@ -514,6 +534,13 @@ export const searchQueries = pgTable(
     filterSource: text('filter_source'),
     /** The `path_prefix` filter, normalised as the search normalised it; NULL when there was none. */
     filterPathPrefix: text('filter_path_prefix'),
+    /**
+     * The `version` filter ([ADR-0058](../../.ssot/ADR.md#adr-0058)); NULL when the search was over
+     * every version. Beside the other two rather than left out: the three together are what decides
+     * which corpus a question was asked of, and a log that recorded two of them would describe a
+     * search nobody ran.
+     */
+    filterVersion: text('filter_version'),
     /** How many excerpts came back — 0 is a real and interesting answer. */
     hitCount: integer('hit_count').notNull().default(0),
     /** The best cosine similarity of the answer, or NULL when nothing came back at all. */

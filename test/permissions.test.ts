@@ -58,6 +58,16 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-verification', actor: as('member'), membership: 'editor', allowed: true },
   { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-verification', actor: as('member'), membership: 'viewer', allowed: false },
 
+  // The operator's search panel, which since [ADR-0058](../.ssot/ADR.md#adr-0058) takes a third
+  // filter. A filter narrows what a search returns and can never widen it, so the route's rule does
+  // not move — and that is the claim these rows carry: reading a project's documentation stays a
+  // read, and somebody with no membership still cannot make it.
+  { method: 'GET', url: '/api/projects/:id/search', actor: as('member'), membership: 'viewer', allowed: true },
+  { method: 'GET', url: '/api/projects/:id/search', actor: as('member'), membership: 'editor', allowed: true },
+  { method: 'GET', url: '/api/projects/:id/search', actor: as('member'), membership: null, allowed: false },
+  { method: 'GET', url: '/api/projects/:id/search', actor: as('admin'), membership: null, allowed: true },
+  { method: 'GET', url: '/api/projects/:id/search', actor: token, membership: null, allowed: true },
+
   // MCP tokens: reading the list is a viewer's, minting and revoking an editor's, and deciding
   // whether the endpoint is public at all is a manager's.
   { method: 'GET', url: '/api/projects/:id/mcp-tokens', actor: as('member'), membership: 'viewer', allowed: true },

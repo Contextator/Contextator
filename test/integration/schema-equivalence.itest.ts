@@ -67,9 +67,15 @@ const opened: TestDatabase[] = [];
  * of the widening — a future migration that narrowed this constraint would now pass unread — and it is
  * bounded by the whole projection being compared as text in the test above, where a narrowing would
  * show up as a difference between a database carried forward and one created today.
+ * `0009_document_versions` ([ADR-0058](../../.ssot/ADR.md#adr-0058)) is the last one, qualified by its
+ * table and its column position for `trigger`'s reason: `version` is an ordinary enough word that an
+ * unqualified term would wave through a future migration adding one anywhere — `oauth_clients` or
+ * `settings` being the obvious places. Its second column needs no term at all: that migration's
+ * `search_queries.filter_version` is already inside `^search_quer`, which anchors the *table* rather
+ * than the column, and is exactly the breadth that entry accepted for its own two tables.
  */
 const POST_BASELINE_MARKERS =
-  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check/;
+  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \|/;
 
 afterAll(async () => {
   for (const database of opened) await dropTestDatabase(baseUrl, database);

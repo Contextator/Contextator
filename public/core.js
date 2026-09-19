@@ -65,9 +65,13 @@ export const state = {
     projectId: null,
     query: '',
     limit: 5,
-    /** The two filters search_docs takes, so the panel asks what an agent can ask (ADR-0042). */
+    /**
+     * The filters search_docs takes, so the panel asks what an agent can ask — the first two from
+     * ADR-0042, `version` from ADR-0058.
+     */
     source: '',
     pathPrefix: '',
+    version: '',
     caret: 0,
     focused: false,
     status: 'idle', // 'idle' | 'searching' | 'done' | 'error'

@@ -115,6 +115,30 @@ Sources are synced at the start of every index run, one after another; a source 
 reported on its own row and the others still index. **Sync** on a row and **Re-index** in the header
 both queue the same run.
 
+### Versions: two releases of one product in one project
+
+A source can carry a **version** — the *Version* field in its dialog — and every document it indexes is
+stamped with it. An agent then narrows a search to one release:
+
+```
+search_docs(query: "rotate the signing key", version: "v3")
+```
+
+Omit it and the search reaches every version, which is what it did before the field existed and what a
+project with one release wants. The point is the project that has two: index v2 and v3 of a product side
+by side and an agent asked about "the timeout setting" will otherwise answer confidently out of
+whichever page ranked higher.
+
+**It is a free-text label, matched exactly, and there is no "latest".** `v3`, `2024.1`, `next` and
+`legacy` are all things a documentation team writes, and a product that claimed to order them would be
+confidently wrong about at least one — which is the failure this feature exists to stop. An agent that
+asks for a version this project does not have is told so, with the versions it *does* have, and picks
+one.
+
+**Several sources may share a version**, which is the reason this is not the `source` filter under
+another name: `api-v3` and `sdk-v3` are two mount points of one release, and `version: "v3"` searches
+both. Changing a source's version re-indexes it, the way changing its content type does.
+
 ### Keeping a source fresh on its own
 
 A source can carry a **sync interval** — the *Sync every* field in its dialog — and the server checks it
@@ -181,8 +205,11 @@ returns the endpoint, not the file.
 - One rendered document is capped at 2 000 lines and one specification at 5 000 operations. Neither is reachable by a real API — the largest published specifications are around a thousand operations — and both exist because the file ceiling bounds the *parse* and bounds nothing about what a file asks to be *rendered*.
 
 Two versions of the same API in one project do not collide — `v2/openapi.yaml/get-pets` and
-`v3/openapi.yaml/get-pets` are different documents — but nothing yet tells an agent which one to
-prefer.
+`v3/openapi.yaml/get-pets` are different documents — and which one an agent gets is answered by
+[the version field](#versions-two-releases-of-one-product-in-one-project): give each specification's
+source a version and `search_docs` can be asked for one of them. Every document derived from a
+specification carries its file's version, because forty operations rendered out of one file are forty
+documents of one release.
 
 ### Obsidian vaults
 
@@ -464,7 +491,7 @@ header already in place. See [MCP access](#mcp-access).
 
 | Tool | Arguments | What it does |
 |------|-----------|--------------|
-| `search_docs` | `query: string`, `limit?: 1-20` (default 5), `source?: string`, `path_prefix?: string` | Hybrid search over the project's chunks — meaning and exact wording at once, so `HALYARD_DISPATCH_TIMEOUT` finds its page as readily as a question does. Returns ranked excerpts with file path, heading breadcrumb (`Guide > Install > Docker`), score and the passage either side of each excerpt. `source` and `path_prefix` narrow it to one source or one directory; both are optional and omitting them searches everything, as it always did. When nothing clears the relevance floor it says *no good match* and points at `list_topics` instead of returning its least bad hit. |
+| `search_docs` | `query: string`, `limit?: 1-20` (default 5), `source?: string`, `path_prefix?: string`, `version?: string` | Hybrid search over the project's chunks — meaning and exact wording at once, so `HALYARD_DISPATCH_TIMEOUT` finds its page as readily as a question does. Returns ranked excerpts with file path, heading breadcrumb (`Guide > Install > Docker`), score and the passage either side of each excerpt. `source`, `path_prefix` and `version` narrow it to one source, one directory or one release; all three are optional and omitting them searches everything, as it always did. An unknown `source` or `version` is answered with the ones this project has, never with an empty page. When nothing clears the relevance floor it says *no good match* and points at `list_topics` instead of returning its least bad hit. |
 | `list_topics` | `cursor?: string`, `limit?: 1-1000` (default 200) | Indexed documents grouped by directory, with title and chunk count. The first path segment is the source it came from. A project larger than one page ends its answer with a `next_cursor:` to hand back, so a thousand documents can be listed to the end. |
 | `read_document` | `path: string`, `heading?: string`, `from?: int`, `to?: int`, `max_tokens?: 200-20000` (default 4000) | Markdown of one indexed file (path as shown by the other tools, e.g. `handbook/install.md`). Served from the database, so it works after the file has moved or gone. `heading` takes a breadcrumb straight out of a search result and returns that section and the subsections under it; `from`/`to` take a chunk range. Output is capped at `max_tokens`, counted with the embedding model's own tokenizer, and says where it cut and how to ask for the rest. |
 
@@ -673,7 +700,7 @@ quotes the identifier it is looking for will cross the language boundary, and on
 concept will not.
 
 **What to do instead of waiting for a fix.** Keep each language in its own source and let an agent scope
-its search with `source` or `path_prefix` — `search_docs` takes both. Two sources that each answer well
+its search with `source` or `path_prefix` — `search_docs` takes both, and `version` beside them. Two sources that each answer well
 are worth more than one collection that answers either language badly, and an agent told which source to
 ask is not relying on the encoder to bridge anything.
 
@@ -783,7 +810,7 @@ no ambient credential.
 | `POST /api/projects/:id/reindex?force=true` | Queue (incremental or full) re-index → `202 { job }` |
 | `GET /api/projects/:id/status` | Project row + live job |
 | `GET /api/projects/:id/runs` | The project's last 20 index runs (mode, counts, duration, error), newest first |
-| `GET /api/projects/:id/search?q=…&limit=…&source=…&path_prefix=…` | The same search the project's `search_docs` tool runs, as JSON: `{ query, limit, source, pathPrefix, belowFloor, scoreFloor, hits: [{ score, fusedScore, denseRank, lexicalRank, path, title, headingPath, chunkIndex, content, contextBefore, contextAfter }] }`. `score` is the cosine similarity and is shown rather than ranked on; `fusedScore` is what ordered the list, and the two ranks say which half of search found the excerpt (`null` for the half that did not). `belowFloor` is whether an agent would have been told *no good match* — the hits come back either way, so the dashboard can show what was withheld. `limit` is 1–20 (default 5); `source` and `path_prefix` are optional. `400 invalid_request` for a source this project does not have (the message names the ones it does), `409 not_indexed` when the project has no chunks, `409 model_mismatch` when they were embedded with another model |
+| `GET /api/projects/:id/search?q=…&limit=…&source=…&path_prefix=…&version=…` | The same search the project's `search_docs` tool runs, as JSON: `{ query, limit, source, pathPrefix, version, belowFloor, scoreFloor, hits: [{ score, fusedScore, denseRank, lexicalRank, path, title, headingPath, chunkIndex, content, contextBefore, contextAfter }] }`. `score` is the cosine similarity and is shown rather than ranked on; `fusedScore` is what ordered the list, and the two ranks say which half of search found the excerpt (`null` for the half that did not). `belowFloor` is whether an agent would have been told *no good match* — the hits come back either way, so the dashboard can show what was withheld. `limit` is 1–20 (default 5); `source`, `path_prefix` and `version` are optional. `400 invalid_request` for a source or a version this project does not have (the message names the ones it does), `409 not_indexed` when the project has no chunks, `409 model_mismatch` when they were embedded with another model |
 | `DELETE /api/projects/:id` | Delete project, its chunks and open MCP sessions (`409` while indexing) |
 | `GET /api/projects/:id/sources` | The project's sources (type, name, config, status, document count). Secrets are never returned — only `hasSecret` |
 | `POST /api/projects/:id/sources` `{ type, name, label?, flavor?, config?, secret?, syncIntervalMinutes?, index? }` | Add a source. `type` is `local`, `git`, `upload` or `notion`; `config` is type-specific (`path` / `url`+`branch`+`subdir` / `rootIds`). `syncIntervalMinutes` is 5–43200 or `null`; omitted takes the instance default |

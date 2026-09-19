@@ -63,6 +63,8 @@ export interface QueryLogEntry {
   limit: number;
   source?: string;
   pathPrefix?: string;
+  /** The `version` filter, resolved as the search resolved it ([ADR-0058](../../.ssot/ADR.md#adr-0058)). */
+  version?: string;
   hits: QueryLogHit[];
   belowFloor: boolean;
   durationMs: number;
@@ -123,6 +125,7 @@ export function buildQueryLogRows(
       resultLimit: entry.limit,
       filterSource: entry.source ?? null,
       filterPathPrefix: entry.pathPrefix ?? null,
+      filterVersion: entry.version ?? null,
       hitCount: entry.hits.length,
       // NULL and not 0 when nothing came back: 0 is a similarity a hit could genuinely have, and an
       // average over a column where "no answer" reads as 0 is an average of two different things.

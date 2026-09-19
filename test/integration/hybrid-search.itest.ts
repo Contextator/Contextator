@@ -181,6 +181,7 @@ beforeAll(async () => {
       indexGeneration: LIVE,
       content: null,
       contentTruncated: false,
+      version: '',
     },
     filler,
   );
@@ -196,6 +197,7 @@ beforeAll(async () => {
       indexGeneration: LIVE,
       content: null,
       contentTruncated: false,
+      version: '',
     },
     [chunk(0, 'Error codes > 4xxx', ANSWER)],
   );
@@ -410,6 +412,7 @@ async function seedTiedCorpus(name: string): Promise<string> {
         indexGeneration: LIVE,
         content: null,
         contentTruncated: false,
+        version: '',
       },
       bodies.map((content, chunkIndex) => ({
         chunkIndex,

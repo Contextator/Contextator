@@ -309,6 +309,7 @@ async function seedProject(
         // filesystem that a restored instance does not have.
         content: `# ${name} page ${d}\n\n${body.join('\n\n')}`,
         contentTruncated: false,
+        version: '',
       },
       newChunks,
     );

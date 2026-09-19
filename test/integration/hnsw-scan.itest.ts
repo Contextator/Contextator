@@ -48,6 +48,13 @@ const LIVE = 0;
 /** What a caller asks for. Every assertion below is about whether it gets that many, and which. */
 const K = 10;
 
+/** The two releases every project below is split into; part `a` is the first, part `b` the second. */
+const V1 = 'v1';
+const V2 = 'v2';
+
+/** Where `small` is cut in two, and therefore the lowest chunk index that belongs to `V2`. */
+const SMALL_HALF = 500;
+
 /**
  * Retrieval, not selection. Every assertion in this file is about which rows come back and in what
  * order, over a fixture that is one document per project — so ADR-0042's per-document cap, which is
@@ -226,6 +233,11 @@ async function seedProject(spec: Spec, index: number): Promise<void> {
         chunkCount: part === 'a' ? half : spec.chunks - half,
         indexGeneration: LIVE,
         indexedAt: new Date(),
+        // The two halves are two releases ([ADR-0058](../../../.ssot/ADR.md#adr-0058)), which costs
+        // this fixture nothing and buys the fourth predicate a corpus: a `version` filter here
+        // rejects exactly the rows `path_prefix` rejects, so the two are measured against the same
+        // 50 % of a project that is itself 4.75 % of the instance.
+        version: part === 'a' ? V1 : V2,
       })),
     )
     .returning({ id: documents.id });
@@ -275,6 +287,7 @@ async function bruteForce(
   limit: number,
   query: number[] = QUERY,
   pathPrefix: string | null = null,
+  version: string | null = null,
 ): Promise<Array<{ chunkIndex: number; score: number }>> {
   const client = await database.pool.connect();
   try {
@@ -288,8 +301,9 @@ async function bruteForce(
        FROM chunks c JOIN documents d ON d.id = c.document_id
        WHERE c.project_id = $1::uuid AND c.index_generation = ${LIVE}
          AND ($4::text IS NULL OR d.relative_path LIKE $4 || '%')
+         AND ($5::text IS NULL OR d.version = $5)
        ORDER BY c.embedding <=> $2::vector LIMIT $3`,
-      [projectId, vectorLiteral(query), limit, pathPrefix],
+      [projectId, vectorLiteral(query), limit, pathPrefix, version],
     );
     await client.query('COMMIT');
     return result.rows.map((r) => ({ chunkIndex: r.chunk_index, score: r.score }));
@@ -352,11 +366,23 @@ const VECTOR_INDEX = 'chunks_embedding_hnsw_idx';
  * `chunks_embedding_hnsw_idx`, and therefore were post-filtered" is observed on every run rather than
  * inferred from a similar query run nearby at different settings.
  */
+interface CandidateScope {
+  version?: string;
+  pathPrefix?: string;
+  /**
+   * A predicate on the **chunk itself**, which resolves to no document ids and joins nothing. It is
+   * the third way of selecting the same rows, and it is here so that "the cost belongs to narrowing"
+   * can be told apart from "the cost belongs to the semi-join `searchChunks` writes".
+   */
+  chunkIndexAtLeast?: number;
+}
+
 async function denseCandidates(
   projectId: string,
   limit: number,
   settings: HnswScan,
   query: number[] = QUERY,
+  scope: CandidateScope = {},
 ): Promise<{ rows: number[]; throughVectorIndex: boolean }> {
   const client = await database.pool.connect();
   try {
@@ -365,9 +391,31 @@ async function denseCandidates(
     await client.query('SELECT set_config($1, $2, true)', ['hnsw.ef_search', String(settings.efSearch)]);
     await client.query('SELECT set_config($1, $2, true)', ['hnsw.iterative_scan', settings.iterativeScan]);
     await client.query('SELECT set_config($1, $2, true)', ['hnsw.max_scan_tuples', String(settings.maxScanTuples)]);
-    const text = `SELECT c.chunk_index FROM chunks c WHERE c.project_id = $1::uuid AND c.index_generation = ${LIVE}
+    // The filters as `searchChunks` writes them — one semi-join against the document ids they resolve
+    // to, not a join to `documents` in the ordered query ([ADR-0042](../../../.ssot/ADR.md#adr-0042),
+    // [ADR-0058](../../../.ssot/ADR.md#adr-0058)). Written here rather than reached through
+    // `searchChunks` for this helper's existing reason: the candidate count has to be a variable, and
+    // going through the product would fix it at fifty.
+    const parameters: unknown[] = [projectId, vectorLiteral(query)];
+    const predicates: string[] = [];
+    if (scope.version !== undefined) {
+      parameters.push(scope.version);
+      predicates.push(`version = $${parameters.length}`);
+    }
+    if (scope.pathPrefix !== undefined) {
+      parameters.push(scope.pathPrefix);
+      predicates.push(`relative_path LIKE $${parameters.length} || '%'`);
+    }
+    const within =
+      predicates.length === 0
+        ? ''
+        : `AND c.document_id IN (SELECT id FROM documents
+             WHERE project_id = $1::uuid AND index_generation = ${LIVE} AND ${predicates.join(' AND ')})`;
+    // Deliberately **not** a semi-join and not a mention of `documents` anywhere: this is the control
+    // that separates the shape of the filter from the fact that it narrows.
+    const bare = scope.chunkIndexAtLeast === undefined ? '' : `AND c.chunk_index >= ${scope.chunkIndexAtLeast}`;
+    const text = `SELECT c.chunk_index FROM chunks c WHERE c.project_id = $1::uuid AND c.index_generation = ${LIVE} ${within} ${bare}
        ORDER BY c.embedding <=> $2::vector LIMIT ${limit}`;
-    const parameters = [projectId, vectorLiteral(query)];
     const plan = await client.query<{ 'QUERY PLAN': string }>(`EXPLAIN ${text}`, parameters);
     const result = await client.query<{ chunk_index: number }>(text, parameters);
     await client.query('COMMIT');
@@ -648,6 +696,150 @@ describe('a third predicate, which is what ADR-0040 said this file would have to
     expect(await usesVectorIndex(ids.beta, { limit: DENSE_CANDIDATES })).toBe(true);
     expect(hits).toHaveLength(K);
     expect(hits.map((h) => h.chunkIndex)).toEqual(exact.map((e) => e.chunkIndex));
+  });
+});
+
+describe('a fourth predicate, which narrows the pool the same way and has to be measured too', () => {
+  // ADR-0058 adds a filter, and every filter this product grows is a post-filter over HNSW candidates
+  // — the thing ADR-0040 measured and the thing the `path_prefix` cases above exist for. It is asked
+  // of the same crowded corpus, at the shipped settings, and against the same brute-force scan, so
+  // "the version filter still returns a full page" is a measurement rather than an expectation.
+  //
+  // **On `beta`, because that is the project the planner still reaches through the vector index.** At
+  // the fifty candidates the fused search asks for, `small` is read by `chunks_project_idx` and
+  // sorted exactly (the case above ADR-0041 found), so a filtered claim about it would be a claim
+  // about a plan that does no post-filtering at all. Asserted here rather than assumed, in the same
+  // transaction shape the `path_prefix` case uses.
+
+  it('answers the project that goes through the index exactly, under a filter that rejects half of it', async () => {
+    expect(await usesVectorIndex(ids.beta, { limit: DENSE_CANDIDATES })).toBe(true);
+
+    const hits = await searchChunks(database.db, {
+      projectId: ids.beta,
+      generation: LIVE,
+      queryEmbedding: QUERY,
+      queryText: QUERY_TEXT,
+      limit: K,
+      version: V2,
+      scan: scan(),
+      selection: WHOLE_PAGE,
+    });
+    const exact = await bruteForce(ids.beta, K, QUERY, null, V2);
+
+    // A full page — not a short one, which is what a post-filter that has run out of candidates
+    // returns and what nothing but this assertion would tell them apart — every row inside the
+    // filter, and the same rows an index-free scan of that release returns.
+    expect(exact).toHaveLength(K);
+    expect(hits).toHaveLength(K);
+    expect(hits.map((h) => h.chunkIndex)).toEqual(exact.map((e) => e.chunkIndex));
+    expect(hits.every((h) => h.file === 'handbook/beta-b.md')).toBe(true);
+  });
+
+  it('is the same pool as the path prefix that selects the same rows, so the two filters cost the same', async () => {
+    // The two predicates select identical sets here by construction, so a difference between these
+    // two pages would mean one of them is reaching the index differently — which is the failure a
+    // new filter can introduce and the one a per-filter assertion would never see.
+    const of = (request: { pathPrefix?: string; version?: string }) =>
+      searchChunks(database.db, {
+        projectId: ids.beta,
+        generation: LIVE,
+        queryEmbedding: QUERY,
+        queryText: QUERY_TEXT,
+        limit: K,
+        scan: scan(),
+        selection: WHOLE_PAGE,
+        ...request,
+      });
+
+    const byVersion = await of({ version: V2 });
+    const byPath = await of({ pathPrefix: 'handbook/beta-b' });
+    expect(byVersion.map((h) => h.chunkIndex)).toEqual(byPath.map((h) => h.chunkIndex));
+  });
+
+  it('returns a full page under the predicate through a plan that is forced to be the HNSW scan', async () => {
+    // **Forced, and read back, rather than hoped for.** The two cases above go through
+    // `searchChunks`, which is fifty candidates and a planner decision; this is the same predicate at
+    // ten, with the alternatives taken away and the plan asserted — so "k hits came back under the
+    // filter" is a statement about the post-filter and not about a sequential scan that happened to
+    // be cheaper.
+    //
+    // **The claim is the count and the membership, not the exact ten**, and the difference is
+    // measured rather than conceded: at ten candidates under this predicate the forced scan returns a
+    // full page whose rows are all inside the filter, and one of them is not among the ten nearest.
+    // `relaxed_order` is allowed to do that — it is the trade that makes it cheaper than
+    // `strict_order` — and a `LIMIT` that stops as soon as ten rows have survived a narrowing
+    // predicate is where it shows. **Whose cost that is, is the case below**; exactness is claimed
+    // where the product actually asks, which is fifty candidates.
+    const filtered = await denseCandidates(ids.small, K, scan(), QUERY, { version: V2 });
+
+    expect(filtered.throughVectorIndex).toBe(true);
+    // Not short. Short is the ADR-0040 defect, and it is what the case below shows this same query
+    // doing the moment the iterative scan is switched off.
+    expect(filtered.rows).toHaveLength(K);
+    // Every row is the second release: `seedProject` splits each project down the middle of its chunk
+    // indexes, so part `b` — and therefore `v2` — is exactly the upper half.
+    expect(filtered.rows.every((chunkIndex) => chunkIndex >= SMALL_HALF)).toBe(true);
+  });
+
+  it('costs that exactness to narrowing rather than to this column, and gets it back at the candidate count the product asks for', async () => {
+    // **The question the case above raises and this one answers with a measurement**: is the
+    // inexactness at ten candidates something `version` introduced, or what every predicate that
+    // narrows the pool has always done under `relaxed_order` ([ADR-0040](../../../.ssot/ADR.md#adr-0040))?
+    //
+    // **Three** queries over one corpus, same forced HNSW plan, same shipped settings, and the same
+    // five hundred rows eligible — selected three different ways. `seedProject` splits each project
+    // down the middle of its chunk indexes, so `version = v2`, `path_prefix = handbook/small-b` and
+    // `chunk_index >= SMALL_HALF` are three spellings of one set. The third is the one that decides
+    // the question, because it resolves no document ids and never mentions `documents`: if the cost
+    // were the semi-join's, or this column's, it would be the odd one out.
+    const byVersion = await denseCandidates(ids.small, K, scan(), QUERY, { version: V2 });
+    const byPath = await denseCandidates(ids.small, K, scan(), QUERY, { pathPrefix: 'handbook/small-b' });
+    const byChunkIndex = await denseCandidates(ids.small, K, scan(), QUERY, { chunkIndexAtLeast: SMALL_HALF });
+    const unfiltered = await denseCandidates(ids.small, K, scan());
+    const exactUnfiltered = (await bruteForce(ids.small, K)).map((row) => row.chunkIndex);
+
+    // All three went through the vector index, so none of them is agreeing with the others by having
+    // quietly been given a different plan.
+    for (const answer of [byVersion, byPath, byChunkIndex]) expect(answer.throughVectorIndex).toBe(true);
+    // They do not differ. The version semi-join, the path-prefix semi-join and the bare chunk
+    // predicate return the identical ten rows, so what the scan pays for is the narrowing and not the
+    // predicate that expresses it — `path_prefix` has had this property since ADR-0042 and nothing
+    // observed it, because every case written for it runs at fifty candidates through `searchChunks`.
+    expect(byVersion.rows).toEqual(byPath.rows);
+    expect(byVersion.rows).toEqual(byChunkIndex.rows);
+    // And the same scan is exact when nothing narrows it, which is what makes the line above a
+    // statement about the filter's *pool* rather than about this fixture or these settings.
+    expect(unfiltered.throughVectorIndex).toBe(true);
+    expect([...unfiltered.rows].sort((a, b) => a - b)).toEqual([...exactUnfiltered].sort((a, b) => a - b));
+    expect(byVersion.rows).not.toEqual(unfiltered.rows);
+
+    // **At fifty — the number `DENSE_CANDIDATES` fixes and the only one the product ever issues — the
+    // filtered scan is exact again.** So the effect is real, it is a property of ADR-0040's scan
+    // parameters at a small candidate count, and it does not reach the shipped configuration.
+    const fifty = await denseCandidates(ids.small, DENSE_CANDIDATES, scan(), QUERY, { version: V2 });
+    const exactFifty = (await bruteForce(ids.small, DENSE_CANDIDATES, QUERY, null, V2)).map((row) => row.chunkIndex);
+    expect(fifty.throughVectorIndex).toBe(true);
+    expect([...fifty.rows].sort((a, b) => a - b)).toEqual([...exactFifty].sort((a, b) => a - b));
+  });
+
+  it('starves under that same predicate with the iterative scan off, which is what makes the case above a measurement', async () => {
+    // The contrast, and the reason none of this is vacuous: same project, same forced HNSW scan, same
+    // filter, only the scan settings differ. A plan that read the project's own rows and sorted them
+    // would answer both modes in full and could not produce this — so the difference is evidence that
+    // what is being measured is a post-filter over index candidates. Over five directions and **every
+    // one of them**, for the reason `PROBE_QUERIES` gives.
+    //
+    // The predicate makes this strictly worse than the unfiltered starvation above, which is the
+    // whole reason a new filter has to be measured here: a hundred candidates already did not contain
+    // this project's rows, and now half of the ones they did contain are rejected as well.
+    const short: string[] = [];
+    for (const [i, query] of PROBE_QUERIES.entries()) {
+      const off = await denseCandidates(ids.small, K, scan({ iterativeScan: 'off' }), query, { version: V2 });
+      expect(off.throughVectorIndex).toBe(true);
+      if (off.rows.length < K) short.push(`#${i} returned ${off.rows.length} of ${K}`);
+    }
+    expect(short).toHaveLength(PROBE_QUERIES.length);
+    console.log(`hnsw-scan: iterative_scan=off answered short under the version filter for ${short.join(', ')}`);
   });
 });
 

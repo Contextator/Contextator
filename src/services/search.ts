@@ -8,7 +8,7 @@ import { belowRelevanceFloor } from './relevance.js';
 import { getSourceByName, listSources } from './sources.js';
 import type { TextSearchConfig } from './text-search.js';
 import type { Reranker } from './reranker.js';
-import { type HnswScan, type ResultSelection, searchChunks, type SearchHit } from './vector-store.js';
+import { documentVersionExists, type HnswScan, listDocumentVersions, type ResultSelection, searchChunks, type SearchHit } from './vector-store.js';
 
 /**
  * The one search path in the product (ROADMAP Item 3) — hybrid since
@@ -84,6 +84,12 @@ export interface SearchInput {
   source?: string;
   /** A path prefix, normalised and pattern-escaped below. */
   pathPrefix?: string;
+  /**
+   * A release label, as `documents.version` carries it ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
+   * Matched for equality; there is no ordering and no "latest". Trimmed and resolved below, so that a
+   * version this index does not carry is answered with the ones it does.
+   */
+  version?: string;
 }
 
 /**
@@ -110,6 +116,13 @@ export type SearchOutcome =
   | { status: 'unknown_source'; project: ProjectRow; requested: string; available: string[] }
   /** `path_prefix` was not a relative path — absolute, or climbing out with `..`. */
   | { status: 'invalid_path_prefix'; project: ProjectRow; requested: string }
+  /**
+   * The `version` filter named a label nothing in the published index carries; `available` is what it
+   * does carry ([ADR-0058](../../.ssot/ADR.md#adr-0058)). `unknown_source`'s shape, and for its
+   * reason: an empty page is indistinguishable from a corpus with nothing to say, and the list is
+   * also the only honest answer to the question "which is the latest" — the agent reads it and picks.
+   */
+  | { status: 'unknown_version'; project: ProjectRow; requested: string; available: string[] }
   /** Deleted between the caller acquiring its project and asking this question. */
   | { status: 'project_gone' }
   /** The project exists and has no chunks. Searching it would honestly return nothing at all. */
@@ -147,6 +160,25 @@ export async function searchProject(
     sourceId = source.id;
   }
 
+  // The third filter, resolved here for the two above it's reason and with one difference worth
+  // stating: it is checked against the **documents of the live generation** rather than against a
+  // configuration table, because a source's `config.version` is what the next run will stamp and this
+  // question is about the index being searched now (ADR-0058).
+  let version: string | undefined;
+  if (input.version !== undefined) {
+    const requested = input.version.trim();
+    // **The existence check first, and the catalogue only when it fails.** The list is what the
+    // *refusal* is built from; asking for it on every search would make a successful one pay for an
+    // error message it does not produce. `version` carries no index, deliberately (ADR-0058), so the
+    // difference is a scan that stops at the first matching document against one that reads every
+    // document of the generation to fold them.
+    if (!(await documentVersionExists(db, project.id, project.liveGeneration, requested))) {
+      const available = await listDocumentVersions(db, project.id, project.liveGeneration);
+      return { status: 'unknown_version', project, requested: input.version, available };
+    }
+    version = requested;
+  }
+
   let pathPrefix: string | undefined;
   if (input.pathPrefix !== undefined) {
     // `read_document`'s normaliser, deliberately: a path an agent got out of one tool has to be
@@ -175,6 +207,7 @@ export async function searchProject(
     limit: input.limit ?? DEFAULT_SEARCH_LIMIT,
     sourceId,
     pathPrefix,
+    version,
     scan,
     selection,
     textSearchConfig,
@@ -204,6 +237,10 @@ export async function searchProject(
       // The normalised prefix rather than what was typed, so that two spellings of one filter are one
       // filter in the log, as they are in the query.
       pathPrefix,
+      // The resolved label rather than what was typed, for the same reason — and it is only ever
+      // recorded when it named a version this index carries, because an unknown one never reached
+      // the search at all (ADR-0058).
+      version,
       hits: hits.map((hit) => ({
         relativePath: hit.file,
         headingPath: hit.headingPath,

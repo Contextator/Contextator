@@ -111,6 +111,7 @@ describe('replaceDocument when an insert slice fails', () => {
       indexGeneration: LIVE,
       content: null,
       contentTruncated: false,
+      version: '',
     };
     const documentId = await replaceDocument(database.db, original, buildChunks('original'));
 
@@ -187,6 +188,7 @@ describe('searchChunks across two projects', () => {
       indexGeneration: LIVE,
       content: null,
       contentTruncated: false,
+      version: '',
     };
     const sharedChunk = (chunkIndex: number, embedding: number[]): NewChunk => ({
       chunkIndex,

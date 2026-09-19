@@ -1,0 +1,34 @@
+-- Document versioning (ADR-0058): the release label a source stamps on every document it indexes, so
+-- a project holding v2 and v3 of one product can be asked for one of them instead of answering with
+-- both mixed together.
+--
+-- **Two columns, both defaulted, and that is the whole upgrade.** `''` is "unversioned" and is what
+-- every `documents` row written before this column existed holds. A search with no `version` argument
+-- filters on nothing, so an installation that upgrades and sets no version on any source retrieves
+-- exactly what it retrieved before — the shape FR-263's two filters already have.
+--
+-- `documents.version DEFAULT ''` rather than NULL is deliberate. NULL would make "documents with no
+-- version" a third state every predicate has to remember (`version = $1 OR version IS NULL` is the
+-- mistake that follows), and it would make the column's own emptiness unexpressible. The label is a
+-- string; "no label" is the empty one. `search_queries.filter_version` **is** nullable, and for the
+-- opposite reason: it sits beside `filter_source` and `filter_path_prefix`, where NULL already means
+-- "this search carried no such filter", and a search over every version carried none.
+--
+-- **`documents.version` is not `index_generation`** (ADR-0039). The generation beside it is
+-- instance-local bookkeeping that changes on every rebuild and means nothing outside this database;
+-- this is content the operator named, and it survives one. No index is added: the filter is resolved
+-- against `documents` scoped by `documents_project_generation_idx`, whose row count is documents
+-- rather than chunks, and a second index on a column most installations leave empty would cost every
+-- write to buy nothing.
+--
+-- **Rolling back is dropping the two, and nothing else:**
+--
+--   ALTER TABLE documents DROP COLUMN version;
+--   ALTER TABLE search_queries DROP COLUMN filter_version;
+--
+-- No row is rewritten by this migration and none would be by that one. A previous build selects
+-- neither column, so it serves the same corpus unfiltered and records the same log rows — which is
+-- what it did before.
+
+ALTER TABLE "documents" ADD COLUMN "version" text DEFAULT '' NOT NULL;--> statement-breakpoint
+ALTER TABLE "search_queries" ADD COLUMN "filter_version" text;

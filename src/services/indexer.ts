@@ -14,7 +14,7 @@ import type { KeyedMutex } from './locks.js';
 import { checkSpecSize, readOpenApi, type DerivedDocument } from './openapi.js';
 import { getProjectById } from './projects.js';
 import { driverFor } from './sources/driver.js';
-import { listSources, recountSources, setSourceStatus } from './sources.js';
+import { listSources, recountSources, setSourceStatus, sourceVersion } from './sources.js';
 import { textSearchConfigFor, type TextSearchConfig } from './text-search.js';
 import {
   deleteDocuments,
@@ -125,6 +125,13 @@ interface SourceFile {
    * `replaceDocument` is given one document at a time.
    */
   textSearchConfig: TextSearchConfig;
+  /**
+   * The release label this file's document is stamped with — its source's `config.version`, `''` when
+   * the source carries none ([ADR-0058](../../.ssot/ADR.md#adr-0058)). Carried on the file for
+   * `textSearchConfig`'s reason, one field up: a run holds files from several sources and each of them
+   * may be a different release of the same product, which is the situation this exists for.
+   */
+  version: string;
 }
 
 /**
@@ -293,6 +300,7 @@ export class Indexer {
     const flavor = source.flavor as Flavor;
     const extensions = (source.config as { extensions?: string[] }).extensions;
     const textSearchConfig = textSearchConfigFor((source.config as { language?: unknown }).language);
+    const version = sourceVersion(source.config);
     const driver = driverFor(source, { db, log, config });
 
     let syncError: string | undefined;
@@ -320,6 +328,7 @@ export class Indexer {
           sourceId: source.id,
           flavor,
           textSearchConfig,
+          version,
         });
       }
       scanned = true;
@@ -662,6 +671,11 @@ export class Indexer {
                   contentHash: hash,
                   sizeBytes: doc.sizeBytes,
                   indexGeneration: generation,
+                  // **The label is the file's, so every document derived from it carries it**
+                  // ([ADR-0058](../../.ssot/ADR.md#adr-0058)). Forty operations rendered out of one
+                  // specification are forty documents of one release; there is no sense in which some
+                  // of them could be a different version from the file they came from.
+                  version: file.version,
                   ...storedDocumentContent(doc.markdown, config.MAX_STORED_DOCUMENT_BYTES),
                 },
                 rows,
