@@ -38,7 +38,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          # The image runs node:22-bookworm-slim; CI matches it rather than the engines floor of 20.
+          # The image runs node:22-bookworm-slim, and since ADR-0056 so does the engines floor.
           node-version: 22
           cache: npm
 

@@ -130,6 +130,9 @@ const indexerConfig = {
   DATA_DIR: '',
   SECRET_KEY: '0'.repeat(64),
   MAX_STORED_DOCUMENT_BYTES: 1024 * 1024,
+  MAX_CONVERTED_FILE_BYTES: 32 * 1024 * 1024,
+  MAX_PDF_PAGES: 2000,
+  MAX_DOCX_UNPACKED_BYTES: 256 * 1024 * 1024,
 };
 
 const FILES = ['alpha.md', 'bravo.md'];

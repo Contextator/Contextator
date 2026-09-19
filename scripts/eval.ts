@@ -11,6 +11,7 @@ import { projects, searchQueries } from '../src/db/schema.js';
 import { chunkReserveTokens } from '../src/services/chunk-budget.js';
 import { chunkMarkdown, embeddingText } from '../src/services/chunker.js';
 import { createEmbeddingProvider, type EmbeddingProvider } from '../src/services/embeddings/index.js';
+import { extractDocument } from '../src/services/doc-types/index.js';
 import { createReranker } from '../src/services/reranker.js';
 import { readAndHash } from '../src/services/fs-scan.js';
 import { belowRelevanceFloor } from '../src/services/relevance.js';
@@ -302,7 +303,14 @@ async function indexCorpus(
   const reserveTokens = chunkReserveTokens(embeddings);
 
   for (const relativePath of files) {
-    const { content, hash, sizeBytes } = await readAndHash(path.join(CORPUS_DIR, relativePath));
+    const { bytes, hash, sizeBytes } = await readAndHash(path.join(CORPUS_DIR, relativePath));
+    // The indexer's own step, and the identity for a `.md` file (ADR-0056). Calling it here rather
+    // than decoding the buffer keeps the harness on the product's single path into the chunker.
+    const content = await extractDocument(relativePath, bytes, {
+      maxFileBytes: config.MAX_CONVERTED_FILE_BYTES,
+      maxPdfPages: config.MAX_PDF_PAGES,
+      maxUnpackedBytes: config.MAX_DOCX_UNPACKED_BYTES,
+    });
     const previous = existing.get(relativePath);
     if (previous && previous.contentHash === hash) {
       skipped.push(`${relativePath} (content hash unchanged — this database was not fresh)`);

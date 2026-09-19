@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Release notes &mdash; 4.2</title>
+    <link rel="stylesheet" href="/assets/docs.css" />
+    <style>
+      body { font-family: sans-serif; }
+      .callout { border-left: 3px solid #888; }
+    </style>
+    <script>
+      window.analytics = { track: function (name) { console.log(name); } };
+    </script>
+  </head>
+  <body>
+    <nav aria-label="Breadcrumb"><a href="/docs/">Docs</a> / <a href="/docs/releases/">Releases</a></nav>
+    <main>
+      <h1>Release 4.2</h1>
+      <p>
+        This release closes the gap between what the scheduler <em>reports</em> and what it
+        <strong>does</strong>. Upgrading is safe from 4.0 and 4.1; from 3.x, read
+        <a href="/docs/releases/4.0/">the 4.0 notes</a> first.
+      </p>
+      <h2>Fixed</h2>
+      <ul>
+        <li>A queued run no longer loses its place when a second one is requested.</li>
+        <li>
+          Webhook deliveries are de-duplicated on their id, not on their
+          <code>timestamp</code>.
+        </li>
+        <li><del>Retry storms after a failed sync.</del> Still open — tracked as #4117.</li>
+      </ul>
+      <h2>Limits that moved</h2>
+      <table>
+        <thead>
+          <tr><th>Setting</th><th>Was</th><th>Now</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Queue depth</td><td>64</td><td>256</td></tr>
+          <tr><td>Delivery timeout</td><td>5&nbsp;s</td><td>30&nbsp;s</td></tr>
+          <tr><td>Retained runs</td><td>50</td><td>500</td></tr>
+        </tbody>
+      </table>
+      <h2>Upgrading</h2>
+      <p>Stop the workers, apply the migration, then start them again:</p>
+      <pre><code>systemctl stop acme-worker
+acme migrate --to 4.2
+systemctl start acme-worker</code></pre>
+      <figure>
+        <img
+          src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
+          alt="Queue depth before and after the change"
+        />
+        <figcaption>Queue depth over the first week on 4.2.</figcaption>
+      </figure>
+      <p>Questions go to <a href="mailto:support@example.com">support@example.com</a>.</p>
+    </main>
+    <footer><p>&copy; 2026 Acme. Internal documentation.</p></footer>
+  </body>
+</html>

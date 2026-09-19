@@ -5,6 +5,7 @@ import type { Db } from '../db/client.js';
 import { projects, type DocumentSourceRow } from '../db/schema.js';
 import { chunkReserveTokens } from './chunk-budget.js';
 import { chunkMarkdown, embeddingText } from './chunker.js';
+import { checkFileSize, DocumentExtractionError, extractDocument, readFailure } from './doc-types/index.js';
 import type { EmbeddingProvider } from './embeddings/provider.js';
 import { transformContent, type Flavor } from './flavors.js';
 import { readAndHash, walkMarkdown } from './fs-scan.js';
@@ -97,6 +98,9 @@ export interface IndexerDeps {
     | 'DATA_DIR'
     | 'SECRET_KEY'
     | 'MAX_STORED_DOCUMENT_BYTES'
+    | 'MAX_CONVERTED_FILE_BYTES'
+    | 'MAX_PDF_PAGES'
+    | 'MAX_DOCX_UNPACKED_BYTES'
   >;
   log: Logger;
   locks: KeyedMutex;
@@ -108,6 +112,8 @@ interface SourceFile {
   /** `<source>/<path inside the source>` */
   relativePath: string;
   absolutePath: string;
+  /** Taken by the walk, so a ceiling can be applied before the file is read (ADR-0056). */
+  sizeBytes: number;
   sourceId: string;
   flavor: Flavor;
   /**
@@ -308,6 +314,7 @@ export class Indexer {
         files.push({
           relativePath: `${source.name}/${f.relativePath}`,
           absolutePath: f.absolutePath,
+          sizeBytes: f.sizeBytes,
           sourceId: source.id,
           flavor,
           textSearchConfig,
@@ -423,9 +430,73 @@ export class Indexer {
         const reserveTokens = chunkReserveTokens(embeddings);
 
         const seen = new Set<string>();
+        /** Files this run could not turn into Markdown, per source ([ADR-0056](../../.ssot/ADR.md#adr-0056)). */
+        const rejected = new Map<string, string[]>();
+        /** How many files each source offered, so "some were refused" can be told from "all of them were". */
+        const offered = new Map<string, number>();
+        for (const f of files) offered.set(f.sourceId, (offered.get(f.sourceId) ?? 0) + 1);
+        /** Sources of which **nothing** could be indexed — a failure rather than a complaint. */
+        const unusable: string[] = [];
+        /** What one file may cost while it is being converted (ADR-0056); bound once for the run. */
+        const extractLimits = {
+          maxFileBytes: config.MAX_CONVERTED_FILE_BYTES,
+          maxPdfPages: config.MAX_PDF_PAGES,
+          maxUnpackedBytes: config.MAX_DOCX_UNPACKED_BYTES,
+        };
+        /**
+         * One file refused, recorded against its source. Returns nothing: every caller `continue`s.
+         *
+         * A file that cannot be read is not a file that vanished. On an **incremental** run it keeps
+         * whatever document it already had — `seen` still holds its path, so step 3 below will not
+         * delete it — and the reason is reported on its source rather than swallowed into an empty
+         * document.
+         *
+         * **On a rebuild it does not, and that is a decision rather than an oversight.** A rebuild
+         * writes a new generation that *is* the corpus as it stands, so a file that can no longer be
+         * converted is not in it, and the swap drops the document it used to have. Carrying it forward
+         * would mean copying its chunks and vectors into the new generation — exactly the option
+         * [ADR-0039](../../.ssot/ADR.md#adr-0039) considered and rejected for an unreadable *source*,
+         * for reasons that apply unchanged to an unreadable file: it publishes stale content under a
+         * generation number whose counters cannot describe it. What makes it acceptable rather than
+         * silent is step 3b: the reason is on the source, and the dashboard shows it whether or not
+         * the source failed.
+         */
+        const reject = (file: SourceFile, err: DocumentExtractionError): void => {
+          const list = rejected.get(file.sourceId) ?? [];
+          list.push(err.message);
+          rejected.set(file.sourceId, list);
+          job.filesSkipped++;
+          job.filesDone++;
+          log.warn({ file: file.relativePath, reason: err.message }, 'file could not be indexed');
+        };
+
         for (const file of files) {
           seen.add(file.relativePath);
-          const { content, hash, sizeBytes } = await readAndHash(file.absolutePath);
+
+          // **The ceiling is applied to the size the walk recorded, before the read.** `readAndHash`
+          // puts the whole file in the heap and sha256s it, so a limit checked on the buffer it
+          // returns is a limit that has already been exceeded — a gigabyte of PDF would be a gigabyte
+          // of resident memory before anything refused it.
+          //
+          // And the read is inside the boundary, for the reason the conversion is. The scan and the
+          // read are two moments and the directory belongs to somebody else in between: a file
+          // deleted, a permission changed, a file `fs.readFile` will not return at all. None of those
+          // is a `DocumentExtractionError`, and each of them used to fail the run rather than the file.
+          let read: Awaited<ReturnType<typeof readAndHash>>;
+          try {
+            checkFileSize(file.relativePath, file.sizeBytes, extractLimits);
+            try {
+              read = await readAndHash(file.absolutePath);
+            } catch (err) {
+              throw readFailure(err, file.relativePath);
+            }
+          } catch (err) {
+            if (!(err instanceof DocumentExtractionError)) throw err;
+            reject(file, err);
+            continue;
+          }
+
+          const { bytes, hash, sizeBytes } = read;
           const previous = existing.get(file.relativePath);
           if (previous && previous.contentHash === hash && previous.sourceId === file.sourceId) {
             job.filesSkipped++;
@@ -433,11 +504,26 @@ export class Indexer {
             continue;
           }
 
+          // Bytes → Markdown, by file type (ADR-0056). It happens **after** the hash check, so a PDF
+          // that has not changed is never parsed again, and the cost of the new types falls only on
+          // the run that first sees them.
+          // `extractDocument` is the only thing that throws here, and it only throws its own type: a
+          // parser's own exception escaping would fail the whole run and, being deterministic, keep
+          // failing it until somebody found the file.
+          let extracted: string;
+          try {
+            extracted = await extractDocument(file.relativePath, bytes, extractLimits);
+          } catch (err) {
+            if (!(err instanceof DocumentExtractionError)) throw err;
+            reject(file, err);
+            continue;
+          }
+
           // **One string, used twice, and that is the point of ADR-0043.** What is chunked and what is
           // stored are the same value — the flavor-transformed text — so `read_document` cannot come
           // to disagree with `search_docs` about what an Obsidian note says. Deriving it twice, or
           // storing `content` instead, is how that drift starts.
-          const transformed = transformContent(file.flavor, content);
+          const transformed = transformContent(file.flavor, extracted);
           const { title, chunks } = chunkMarkdown(transformed, file.relativePath, {
             maxTokens: config.CHUNK_MAX_TOKENS,
             overlapTokens: config.CHUNK_OVERLAP_TOKENS,
@@ -494,11 +580,56 @@ export class Indexer {
           log.info({ count: removed.length }, 'removed documents no longer on disk');
         }
 
+        // 3b. Report the files no extractor could read, on the source that holds them (ADR-0056).
+        //
+        // **On the source and not on the project, and not as a failed sync.** The source fetched
+        // correctly and every other file in it indexed; what happened is that three of its four
+        // hundred documents are scans of paper. Marking the run failed for that would make a red
+        // project the steady state of any corpus with one bad PDF in it, and an operator who learns to
+        // ignore the colour has lost the signal for the case that matters. `last_error` is where the
+        // dashboard shows a source's most recent complaint, so that is where the reason goes — and it
+        // is written after `collectSource` cleared it, which is the only ordering that survives.
+        for (const [sourceId, reasons] of rejected) {
+          const state = job.sources.find((s) => s.id === sourceId);
+          const total = offered.get(sourceId) ?? 0;
+          // **Some of a source's files refused is a complaint; all of them is a failure.** A folder
+          // unmounted between the scan and the read, or a checkout whose permissions changed, refuses
+          // every file one at a time and would otherwise leave a green project serving an index that
+          // no longer has a source behind it. The escalation is on the count and not on the reason,
+          // because the reasons are per file and this question is about the source.
+          const everything = total > 0 && reasons.length === total;
+          const summary = everything
+            ? `none of this source's ${total} file(s) could be indexed. ${reasons.join(' ')}`
+            : `${reasons.length} of ${total} file(s) could not be indexed. ${reasons.join(' ')}`;
+          if (state) {
+            state.note = state.note ? `${state.note}; ${summary}` : summary;
+            if (everything && state.status !== 'error') {
+              state.status = 'error';
+              state.error = summary;
+            }
+          }
+          if (everything) unusable.push(state?.name ?? sourceId);
+          const failed = state?.status === 'error';
+          const combined = failed && state?.error && state.error !== summary ? `${state.error}; ${summary}` : summary;
+          await setSourceStatus(db, sourceId, {
+            status: failed ? 'error' : 'idle',
+            lastError: combined.slice(0, 2000),
+          }).catch((err: unknown) => log.error({ err, sourceId }, 'failed to record unreadable documents on the source'));
+        }
+
         // 4. Finalize — and, on a rebuild, publish.
         job.phase = 'finalizing';
         const counts = await recountProject(db, project.id, generation);
         await recountSources(db, project.id, generation);
-        const error = failures.length ? `${job.sources.length - failures.length}/${job.sources.length} sources synced; ${failures.join('; ')}` : null;
+        const error =
+          [
+            failures.length ? `${job.sources.length - failures.length}/${job.sources.length} sources synced; ${failures.join('; ')}` : null,
+            // A source that synced and then yielded nothing is a failed run even though every step of
+            // it succeeded, and the project has to say so (ADR-0056).
+            unusable.length ? `no file of ${unusable.join(', ')} could be indexed` : null,
+          ]
+            .filter((part): part is string => part !== null)
+            .join('. ') || null;
         // **One row, one statement, and that is the entire atomicity mechanism** (ADR-0039). Under
         // read-committed a concurrent reader either sees this row before the update or after it, so it
         // reads the old generation or the new one and never a project between the two. `live_generation`
@@ -530,6 +661,8 @@ export class Indexer {
             failedSources: failures.length,
             files: job.filesTotal,
             skipped: job.filesSkipped,
+            unreadable: [...rejected.values()].reduce((n, reasons) => n + reasons.length, 0),
+            unusableSources: unusable.length,
             removed: job.filesRemoved,
             chunksWritten: job.chunksDone,
             generation,

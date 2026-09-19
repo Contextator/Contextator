@@ -238,7 +238,13 @@
                 <label><input type="checkbox" name="ext" value="md" checked /> .md</label>
                 <label><input type="checkbox" name="ext" value="mdx" checked /> .mdx</label>
                 <label><input type="checkbox" name="ext" value="txt" /> .txt</label>
+                <label><input type="checkbox" name="ext" value="html" /> .html</label>
+                <label><input type="checkbox" name="ext" value="htm" /> .htm</label>
+                <label><input type="checkbox" name="ext" value="csv" /> .csv</label>
+                <label><input type="checkbox" name="ext" value="docx" /> .docx</label>
+                <label><input type="checkbox" name="ext" value="pdf" /> .pdf</label>
               </div>
+              <span class="field-hint">Everything but Markdown is converted to Markdown when it is indexed. A PDF that is a scan of paper has no text to convert and is reported on the source instead of indexed empty.</span>
             </div>
           </div>
 
@@ -270,7 +276,7 @@
                 <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4m0 0-4 4m4-4 4 4"></path><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"></path></svg>
               </span>
               <span class="dropzone-title">Drop files, folders or archives here</span>
-              <span class="field-hint">.md, .mdx, .txt · folders keep their structure · .zip, .tar.gz and .rar are unpacked on the server</span>
+              <span class="field-hint" id="dropzone-types">folders keep their structure · .zip, .tar.gz and .rar are unpacked on the server</span>
               <span class="dropzone-actions">
                 <button type="button" class="ghost" id="pick-folder">Choose folder</button>
                 <button type="button" class="ghost" id="pick-files">Choose files</button>
