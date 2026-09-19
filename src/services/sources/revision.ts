@@ -20,11 +20,21 @@ import { walkMarkdown } from '../fs-scan.js';
  * and the scheduled run that follows the next real edit. A probe is an optimisation over a button
  * that still works.
  *
- * The ignore globs and the extension list are the indexer's own, so the token counts exactly the
- * files a run would index. Anything they exclude cannot move the token, which is the safe direction:
- * a token that ignored them would run on a change to a file the run then skips.
+ * **The globs, the extension list *and* the flavor's allowed set are the indexer's own, so the token
+ * counts exactly the files a run would index.** All three, and the third is not a detail: since
+ * [ADR-0057](../../../.ssot/ADR.md#adr-0057) a content type widens which extensions are scanned at all,
+ * and a probe that fell back to the default set would silently drop every `.yaml` an `openapi` source
+ * holds. The token would then never move for a specification anybody edited, and a source that holds
+ * *only* specifications would report `files=0;mtime=0` for ever — a scheduled run that can never
+ * notice anything, which reads exactly like a scheduler that is working.
+ *
+ * Anything the three exclude cannot move the token, which is the safe direction: a token that ignored
+ * them would run on a change to a file the run then skips.
  */
-export async function directoryRevision(root: string, opts: { ignoreGlobs: string[]; extensions?: readonly string[] }): Promise<string> {
+export async function directoryRevision(
+  root: string,
+  opts: { ignoreGlobs: string[]; extensions?: readonly string[]; allowedExtensions?: readonly string[] },
+): Promise<string> {
   let files = 0;
   let newest = 0;
   for await (const file of walkMarkdown(root, opts)) {

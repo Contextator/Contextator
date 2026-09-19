@@ -260,6 +260,7 @@
                 <option value="plain">Plain Markdown / text</option>
                 <option value="obsidian">Obsidian vault (rewrites [[wikilinks]])</option>
                 <option value="notion-export">Notion export (cleans page ids from names)</option>
+                <option value="openapi">OpenAPI / Swagger (one document per endpoint)</option>
               </select>
             </label>
             <div class="field">
@@ -273,8 +274,11 @@
                 <label><input type="checkbox" name="ext" value="csv" /> .csv</label>
                 <label><input type="checkbox" name="ext" value="docx" /> .docx</label>
                 <label><input type="checkbox" name="ext" value="pdf" /> .pdf</label>
+                <label class="flavor-only" data-flavor="openapi"><input type="checkbox" name="ext" value="yaml" /> .yaml</label>
+                <label class="flavor-only" data-flavor="openapi"><input type="checkbox" name="ext" value="yml" /> .yml</label>
+                <label class="flavor-only" data-flavor="openapi"><input type="checkbox" name="ext" value="json" /> .json</label>
               </div>
-              <span class="field-hint">Everything but Markdown is converted to Markdown when it is indexed. A PDF that is a scan of paper has no text to convert and is reported on the source instead of indexed empty.</span>
+              <span class="field-hint">Everything but Markdown is converted to Markdown when it is indexed. A PDF that is a scan of paper has no text to convert and is reported on the source instead of indexed empty. The last three are read only by the OpenAPI content type, which turns one specification into one document per endpoint; a .yaml that is not a specification is reported on the source.</span>
             </div>
           </div>
 

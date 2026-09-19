@@ -49,6 +49,7 @@
     "tsx": "^4.23.13",
     "turndown": "^7.2.4",
     "unpdf": "^1.8.1",
+    "yaml": "^2.9.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {

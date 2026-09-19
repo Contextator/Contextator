@@ -1063,6 +1063,33 @@ function splitRoot(absolute) {
   return { root: allowedRoots()[0] || '', rest: full };
 }
 
+/**
+ * Shows only the file types the selected content type can read.
+ *
+ * `.yaml`, `.yml` and `.json` belong to the OpenAPI content type alone — it is the only reader that
+ * knows what to do with a structured file — and the API refuses them on any other, so offering them
+ * everywhere would offer a save that cannot succeed. A box that goes away is also unchecked, or an
+ * operator who tried OpenAPI and changed their mind would carry an invisible `.yaml` into the save.
+ */
+function syncFlavorFields({ check = false } = {}) {
+  const flavor = srcForm.elements.flavor.value;
+  for (const box of srcForm.querySelectorAll('.flavor-only')) {
+    const mine = box.dataset.flavor.split(' ').includes(flavor);
+    box.hidden = !mine;
+    // **A type that appears unchecked is a trap.** Choosing "OpenAPI / Swagger" and then uploading a
+    // specification without noticing the new `.yaml` box would pass the source's extension filter with
+    // nothing in it: the file is dropped on the way in, quietly, and the source indexes the README it
+    // came with. So picking the content type checks what that content type is *for*. Only on a change
+    // the operator just made — loading an existing source keeps whatever it has stored.
+    for (const input of box.querySelectorAll('input')) input.checked = mine ? check || input.checked : false;
+  }
+}
+
+srcForm.elements.flavor.addEventListener('change', () => {
+  syncFlavorFields({ check: true });
+  renderQueue();
+});
+
 function setKind(kind) {
   srcUi.kind = kind;
   const meta = SOURCE_KINDS[kind];
@@ -1073,6 +1100,7 @@ function setKind(kind) {
   $('#source-subtitle').textContent = meta.subtitle;
   if (meta.flavor) srcForm.elements.flavor.value = meta.flavor;
   srcForm.elements.flavor.disabled = Boolean(meta.flavor);
+  syncFlavorFields();
   $('#upload-mode-row').hidden = !(isUploadKind(kind) && editing);
   $('#index-label').textContent = isUploadKind(kind) ? 'Index after upload' : 'Index now';
   $('#source-test').hidden = !(editing && CREDENTIALLED.has(meta.type));
@@ -1144,6 +1172,7 @@ function fillSourceForm(s) {
   srcForm.elements.label.value = s.label || '';
   srcForm.elements.flavor.value = s.flavor || 'plain';
   srcForm.elements.version.value = c.version || '';
+  syncFlavorFields();
   setSyncIntervalField(s.syncIntervalMinutes);
   $('#src-next-sync').textContent = syncScheduleLabel(s);
   for (const box of srcForm.querySelectorAll('input[name="ext"]')) box.checked = (c.extensions || []).includes(box.value);

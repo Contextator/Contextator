@@ -1,0 +1,158 @@
+openapi: 3.0.0
+info:
+  title: Recursive Shapes
+  version: '2'
+paths:
+  /trees:
+    get:
+      operationId: getTree
+      summary: A directly recursive tree
+      responses:
+        '200':
+          description: A node and its children
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Node'
+  /chains:
+    get:
+      operationId: getChain
+      summary: A chain of twelve links that closes back on itself
+      responses:
+        '200':
+          description: The first link
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/L1'
+  /aliases:
+    get:
+      operationId: getAlias
+      summary: A schema that is nothing but a reference to a schema that references it back
+      responses:
+        '200':
+          description: The alias
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alias'
+  /pairs:
+    get:
+      operationId: getPair
+      summary: Two schemas that reference each other
+      responses:
+        '200':
+          description: The left half
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Left'
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        label:
+          type: string
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/Node'
+    Left:
+      type: object
+      properties:
+        right:
+          $ref: '#/components/schemas/Right'
+    Right:
+      type: object
+      properties:
+        left:
+          $ref: '#/components/schemas/Left'
+    Alias:
+      $ref: '#/components/schemas/Mirror'
+    Mirror:
+      $ref: '#/components/schemas/Alias'
+    L1:
+      type: object
+      properties:
+        depth:
+          type: integer
+        next:
+          $ref: '#/components/schemas/L2'
+    L2:
+      type: object
+      properties:
+        depth:
+          type: integer
+        next:
+          $ref: '#/components/schemas/L3'
+    L3:
+      type: object
+      properties:
+        depth:
+          type: integer
+        next:
+          $ref: '#/components/schemas/L4'
+    L4:
+      type: object
+      properties:
+        depth:
+          type: integer
+        next:
+          $ref: '#/components/schemas/L5'
+    L5:
+      type: object
+      properties:
+        depth:
+          type: integer
+        next:
+          $ref: '#/components/schemas/L6'
+    L6:
+      type: object
+      properties:
+        depth:
+          type: integer
+        next:
+          $ref: '#/components/schemas/L7'
+    L7:
+      type: object
+      properties:
+        depth:
+          type: integer
+        next:
+          $ref: '#/components/schemas/L8'
+    L8:
+      type: object
+      properties:
+        depth:
+          type: integer
+        next:
+          $ref: '#/components/schemas/L9'
+    L9:
+      type: object
+      properties:
+        depth:
+          type: integer
+        next:
+          $ref: '#/components/schemas/L10'
+    L10:
+      type: object
+      properties:
+        depth:
+          type: integer
+        next:
+          $ref: '#/components/schemas/L11'
+    L11:
+      type: object
+      properties:
+        depth:
+          type: integer
+        next:
+          $ref: '#/components/schemas/L12'
+    L12:
+      type: object
+      properties:
+        depth:
+          type: integer
+        next:
+          $ref: '#/components/schemas/L1'

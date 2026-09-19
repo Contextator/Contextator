@@ -1,0 +1,32 @@
+# OpenAPI 3.1 lets a path item be a $ref. A specification that factors its path items out this way
+# indexed as no operations at all and was refused whole.
+openapi: 3.1.0
+info:
+  title: Factored
+  version: '1'
+paths:
+  /pets:
+    $ref: '#/components/pathItems/PetCollection'
+  /pets/{petId}:
+    $ref: '#/components/pathItems/PetItem'
+components:
+  pathItems:
+    PetCollection:
+      get:
+        operationId: listPets
+        summary: List the pets
+        responses:
+          '200':
+            description: The pets
+    PetItem:
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema: { type: string }
+      delete:
+        operationId: deletePet
+        summary: Remove one pet
+        responses:
+          '204':
+            description: Gone

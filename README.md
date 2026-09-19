@@ -200,6 +200,7 @@ A source can declare what its files really are, which applies a small transform 
 - **Plain Markdown / text** — no transform.
 - **Obsidian vault** — see below.
 - **Notion export** — the 32-hex page id Notion appends to file and folder names (`Getting started 1a2b…5c6d.md`) is stripped from paths and from the links pointing at them.
+- **OpenAPI / Swagger** — see below. The one content type that does not merely transform a file: it turns a specification into **one document per endpoint**.
 
 Upload a Notion **Export → Markdown & CSV** zip with the *Notion export* content type; use the
 **Notion** source type instead when you want the live API.
@@ -207,6 +208,31 @@ Upload a Notion **Export → Markdown & CSV** zip with the *Notion export* conte
 The content type is applied on the way into the chunker, after the file hash that decides what to
 re-embed — so changing it drops the stored hashes of that source and queues a run, otherwise the new
 transform would never reach a file whose bytes did not change.
+
+### OpenAPI and Swagger
+
+An API specification is the most useful single thing you can give an agent about an API, and the least
+useful shape to give it in: one `openapi.yaml` is one document that contains the answer to three hundred
+different questions, so it matches every query and answers none of them.
+
+With the **OpenAPI / Swagger** content type a specification is indexed as **one document per
+operation** — path, method, summary, parameters, request and response schemas and examples, each under
+its own heading so a hit carries a breadcrumb like `GET /pets/{petId} > Responses > 200`. `search_docs`
+returns the endpoint, not the file.
+
+- The source also takes `.yaml`, `.yml` and `.json`, and **only** this content type does: no extension implies a specification, so nothing else is offered them.
+- Each document is stored at `<file>/<method>-<path>` — `api/petstore.yaml/get-pets-petId`. The path is derived from the method and the URL path alone, so re-indexing the same specification lands on the same documents even if the file was reformatted.
+- Delete an operation and its document disappears on the next run; the others are untouched.
+- `$ref` is resolved within the file. A recursive schema is rendered until it points back at itself and then says so; anything deeper than eight levels says it stopped there. A reference into another file is named rather than followed.
+- Markdown beside the specifications is still Markdown: a `README.md` in the same source is one document, as always.
+- A `.yaml` that is not a specification — a Helm values file, a CI config — is reported on the source and skipped, the same way an unreadable PDF is. The run still succeeds. So is one that will not parse, and one written to make a renderer fail: a self-referential example, a `$ref` whose pointer will not decode. Nothing a specification can contain fails the run.
+- Swagger 2.0 is read as well as OpenAPI 3, `definitions`, `in: body` parameters and `host`/`basePath` included; a 3.1 path item that is itself a `$ref` is followed.
+- A specification is measured against `MAX_SPEC_FILE_BYTES` (8 MiB) before it is read — its own ceiling, well below the one for converted files, because parsing one produces an object graph around fifty-five times the size of the file, held for as long as that file is being indexed. At the default ceiling that is about **400 MB of heap** while one specification is indexed; lower it on a tight container.
+- One rendered document is capped at 2 000 lines and one specification at 5 000 operations. Neither is reachable by a real API — the largest published specifications are around a thousand operations — and both exist because the file ceiling bounds the *parse* and bounds nothing about what a file asks to be *rendered*.
+
+Two versions of the same API in one project do not collide — `v2/openapi.yaml/get-pets` and
+`v3/openapi.yaml/get-pets` are different documents — but nothing yet tells an agent which one to
+prefer.
 
 ### Obsidian vaults
 
@@ -526,6 +552,10 @@ A source indexes `.md` and `.mdx` by default and can be told to take `.txt`, `.h
 `.pdf` as well. **Everything becomes Markdown on the way in** — the chunker, the embedder and
 `read_document` see one format, and the conversion happens once, at the edge.
 
+`.yaml`, `.yml` and `.json` are the exception and are not on this list: no extension says what such a
+file *is*, so they are readable only by the [OpenAPI / Swagger](#openapi-and-swagger) content type, and
+a file it reads becomes several documents rather than one.
+
 | Type | What it becomes | Kept | Lost |
 |------|-----------------|------|------|
 | `.md`, `.mdx`, `.txt` | itself, unchanged | everything | nothing |
@@ -562,6 +592,8 @@ Three caps bound it, and each closes something the others do not:
 | Setting | Default | What it stops |
 |---------|---------|---------------|
 | `MAX_CONVERTED_FILE_BYTES` | 32 MiB | one enormous document taking the process down with it. Checked against the size the **scan** recorded, before the file is read — a limit applied to the bytes already in memory is not a limit. `.md`, `.mdx` and `.txt` are decoded rather than parsed and are not capped |
+| `MAX_SPEC_FILE_BYTES` | 8 MiB | one enormous API specification taking the process down with it. Its own ceiling and not `MAX_CONVERTED_FILE_BYTES`, because a specification is parsed whole into an object graph around **fifty-five times** the size of the file — 8 MiB of YAML measured 444 MiB of objects — so the conversion ceiling would have bounded the wrong number. Checked against the scan's size, before the read. **The graph is not transient**: documents are rendered out of it one at a time, so it is resident for as long as that file is being indexed, beside a ~470 MB embedding model. Measured directly, a file at the ceiling needs about **400 MB of heap headroom** — it completes at `--max-old-space-size=384` and is OOM-killed at 320. Lower the ceiling on a container that cannot spare that; a refused file is named on its source and the run carries on |
+| render caps | 2 000 lines / doc, 5 000 operations / file | what a specification asks to be **rendered**, which the byte ceiling does not bound at all: responses × media types is a count limited only by the file size divided by about forty bytes, so one 40 KB operation can ask for a hundred thousand lines. A document past the line cap says it was cut; a file past the operation cap is refused whole, because a truncated *endpoint list* would answer "not in the documentation" for endpoints that exist |
 | `MAX_PDF_PAGES` | 2000 | a few kilobytes of PDF that *declares* a hundred thousand pages — every page is read into memory at once |
 | `MAX_DOCX_UNPACKED_BYTES` | 256 MiB | the zip bomb. A `.docx` is a zip, and the size in its directory is a number the file's author writes, so each part is inflated through a counter and discarded, with the cap as the ceiling. DEFLATE reaches about 1030:1, so nothing short of measuring it is a bound |
 
@@ -595,8 +627,8 @@ What is capped on the way *in* is the file itself: `UPLOAD_MAX_FILE_BYTES`, 50 M
 
 ## How indexing works
 
-1. Every source of the project is synced in turn (git fetch, Notion pull; local and upload sources have nothing to fetch), then its directory is walked for the file types the source selected — `.md`/`.mdx` by default, optionally `.txt`, `.html`/`.htm`, `.csv`, `.docx` and `.pdf` (dotfiles, `node_modules`, `dist`, `build`, symlinks and `IGNORE_GLOBS` are skipped). Every path collected is prefixed with the source name, so two sources can both hold an `install.md` without colliding.
-2. Every file is hashed (sha256) over its **raw bytes**, then converted to Markdown by its type ([File types](#file-types)) and the source's content type is applied (Obsidian wikilinks, Notion export ids). Unchanged files are skipped, changed/new files are re-chunked and re-embedded, files that disappeared are deleted. A **force** re-index (and one triggered by a changed embedding model) rebuilds everything, and does it *beside* the live index rather than by wiping it first: the project keeps answering `search_docs`, `list_topics` and `read_document` for the whole run, and a run that fails halfway leaves the previous index serving instead of an empty project. Every finished run (mode, counts, duration, error) is stored in `index_runs`; the last 20 per project are kept and shown in the dashboard.
+1. Every source of the project is synced in turn (git fetch, Notion pull; local and upload sources have nothing to fetch), then its directory is walked for the file types the source selected — `.md`/`.mdx` by default, optionally `.txt`, `.html`/`.htm`, `.csv`, `.docx` and `.pdf`, plus `.yaml`/`.yml`/`.json` on a source whose content type is OpenAPI (dotfiles, `node_modules`, `dist`, `build`, symlinks and `IGNORE_GLOBS` are skipped). Every path collected is prefixed with the source name, so two sources can both hold an `install.md` without colliding.
+2. Every file is hashed (sha256) over its **raw bytes**, then converted to Markdown by its type ([File types](#file-types)) and the source's content type is applied (Obsidian wikilinks, Notion export ids). Unchanged files are skipped, changed/new files are re-chunked and re-embedded, files that disappeared are deleted. A file the [OpenAPI](#openapi-and-swagger) content type expands is several documents rather than one: every one of them carries the specification's hash, so an unchanged specification re-embeds nothing, and an operation that left the file leaves the index with it. A **force** re-index (and one triggered by a changed embedding model) rebuilds everything, and does it *beside* the live index rather than by wiping it first: the project keeps answering `search_docs`, `list_topics` and `read_document` for the whole run, and a run that fails halfway leaves the previous index serving instead of an empty project. Every finished run (mode, counts, duration, error) is stored in `index_runs`; the last 20 per project are kept and shown in the dashboard.
 3. Chunking is Markdown-aware: frontmatter is parsed (`title` wins), MDX `import`/`export` lines and component tags are stripped, the document is split at headings (`#`–`####`) with a breadcrumb kept per chunk, and oversized sections are packed from paragraphs and fenced code blocks (code is never split mid-block when avoidable) with a small overlap.
 4. Each chunk is embedded as `heading breadcrumb + content` and stored in `chunks` with an HNSW cosine index. The same string is also stored as a `tsvector` with a GIN index — that is the keyword half of search, and it is written in the same statement as the row, so the two halves can never describe different text.
 
@@ -897,7 +929,8 @@ src/services/sources/         one driver per type: local, git (isomorphic-git), 
 src/services/sources/confluence.ts        the Confluence Cloud driver: the page tree, the incremental skip, and the probe
 src/services/sources/confluence-client.ts the REST surface it talks to, as an interface plus an HTTPS implementation, and the one place CQL is built
 src/services/sources/confluence-render.ts storage format → the plain XHTML `doc-types/html.ts` converts; it does not convert HTML itself
-src/services/flavors.ts       content-type transforms (Obsidian wikilinks, Notion export ids)
+src/services/flavors.ts       content-type transforms (Obsidian wikilinks, Notion export ids) and which of them expand one file into many
+src/services/openapi.ts       OpenAPI/Swagger → one Markdown document per operation: $ref resolution, cycle and depth guards, derived paths
 src/services/doc-types/       one transform per file extension, all of them producing Markdown: html, docx, csv, pdf
 src/services/doc-types/pdf.ts a PDF read as a layout — lines, columns, running heads, headings by size, tables by alignment
 scripts/build-doc-fixtures.ts the dependency-free PDF and zip writers the binary test fixtures come from

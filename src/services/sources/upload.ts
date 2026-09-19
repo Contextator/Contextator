@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import type { DocumentSourceRow } from '../../db/schema.js';
 import { sourceCurrentDir } from '../data-dir.js';
+import { allowedExtensionsFor, type Flavor } from '../flavors.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig } from '../sources.js';
 import type { DriverContext, SourceDriver, SyncResult } from './driver.js';
 import { directoryRevision } from './revision.js';
@@ -40,6 +41,12 @@ export class UploadDriver implements SourceDriver {
   async probe(): Promise<string | null> {
     const config = parseSourceConfig('upload', this.source.config);
     const root = await this.docRoot();
-    return directoryRevision(root, { ignoreGlobs: this.ctx.config.IGNORE_GLOBS, extensions: config.extensions });
+    return directoryRevision(root, {
+      ignoreGlobs: this.ctx.config.IGNORE_GLOBS,
+      extensions: config.extensions,
+      // The same widening the run's own scan does, or the token would not count the files it indexes
+      // ([ADR-0057](../../../.ssot/ADR.md#adr-0057)).
+      allowedExtensions: allowedExtensionsFor(this.source.flavor as Flavor),
+    });
   }
 }
