@@ -247,7 +247,7 @@ your GitHub username, user id, the pull request and the time. It is deliberately
 database: the record is the only evidence the licence grant ever happened, and it is not rented from
 anybody. Nothing about you is published, and nothing is collected beyond what your comment already showed.
 
-### What is in force, and what merely stops a merge
+### What binds you, and what stops the merge
 
 `CLA.md` is in force. It stopped calling itself a draft in the same change that gave the workflow a
 signatures repository and a token to reach it, because the two have to move together: a signature
@@ -255,9 +255,12 @@ collected under a document still saying "do not treat anything in this document 
 entered into" would have been worth nothing, and the window between them is closed by ordering rather
 than by hoping it is short.
 
-**Branch protection is on.** `main` requires the **Licence grant** check and `enforce_admins` is set, so
-a red one is a refusal rather than a warning, and it is a refusal for maintainers too. Signing is what
-binds you and protection is only what stops the merge — but there is no longer a gap between them.
+**Licence grant** is now a required check on `main`, administrators included. A red one is a refusal and
+not a warning: `main` takes no direct pushes and no merge past an unsigned commit, and getting round it
+means deliberately turning the protection off rather than clicking merge anyway. The two halves stay
+different things, though — signing is what binds you, and protection is only what stops the merge. A
+contribution merged without a signature would still be a contribution nobody granted a licence to, which
+is why the check exists rather than a note asking politely.
 
 If that is not something you are willing to grant, say so early. Opening an issue that describes the
 problem and lets a maintainer implement it is a perfectly good contribution and needs none of this.
