@@ -234,19 +234,19 @@ your GitHub username, user id, the pull request and the time. It is deliberately
 database: the record is the only evidence the licence grant ever happened, and it is not rented from
 anybody. Nothing about you is published, and nothing is collected beyond what your comment already showed.
 
-### Until the first line of `CLA.md` comes off
+### What is in force, and what merely stops a merge
 
-`CLA.md` still carries `Status: draft — not yet in force`, and that is accurate: a document that claims to
-bind while nothing collects signatures would be the first thing you found to be untrue about this
-repository. Three pieces come off together and in one commit — that first line, the draft paragraph under
-the title, and the opening of section 3 — and they come off in the same change that puts the workflow on
-`main`, because the workflow can record a signature from its very first run. A signature taken while the
-document says "do not treat anything in this document as an agreement you have entered into" would be
-worth nothing, and that window is closed by ordering rather than by hoping it is short. Making the check
-required to merge follows immediately after; it is what stops a merge, not what makes the grant binding.
+`CLA.md` is in force. It stopped calling itself a draft in the same change that gave the workflow a
+signatures repository and a token to reach it, because the two have to move together: a signature
+collected under a document still saying "do not treat anything in this document as an agreement you have
+entered into" would have been worth nothing, and the window between them is closed by ordering rather
+than by hoping it is short.
 
-Until then, treat the flow above as what will be asked of you, and a maintainer asking in the thread as
-what binds.
+What is not yet in place is **branch protection** — the setting that makes a red **Licence grant** a
+refusal rather than a warning. Until it is, the check still runs and still names anybody who has not
+signed, but a maintainer could merge past it. That is a gap in enforcement and not in the grant: signing
+is what binds you, and protection is only what stops the merge. It is the next thing to switch on, and
+this paragraph goes when it does.
 
 If that is not something you are willing to grant, say so early. Opening an issue that describes the
 problem and lets a maintainer implement it is a perfectly good contribution and needs none of this.

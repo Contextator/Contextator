@@ -1,16 +1,4 @@
-Status: draft — not yet in force. It comes into force the moment `.github/workflows/cla.yml` is on `main`
-and able to record a signature, and the change that puts it there is the change that takes this line off:
-a signature collected under a document still calling itself a draft would be worth nothing.
-[`CONTRIBUTING.md`](CONTRIBUTING.md#the-licence-grant) says what comes off with it.
-
 # Contributor Licence Agreement — Contextator
-
-**This document is a draft.** Nothing here is in force, nobody has signed it, and no mechanism exists yet
-to collect a signature. It is published so that a contributor can read the condition before writing code
-rather than discover it at the end of a pull request. When a signature mechanism exists, the line at the
-top of this file comes off and this paragraph goes with it.
-
----
 
 ## Why this exists
 
@@ -95,12 +83,21 @@ saying so in writing to the Holder.
 
 ## 3. How the grant is recorded
 
-**While this document is a draft**, there is no form, no bot and no signatures repository. A maintainer
-asks in the pull request, and the answer in that thread is the record.
+You sign by leaving this sentence, on its own, as a comment on your pull request:
 
-When a signature mechanism is in place, this section will describe it and the draft marking at the top of
-this file will be removed. Until then, do not treat anything in this document as an agreement you have
-entered into.
+> I have read the CLA Document and I hereby sign the CLA
+
+A GitHub Action reads the comment, appends you to `signatures/v1/cla.json` in
+`Contextator/cla-signatures`, and turns the **Licence grant** check on your pull request green. The
+signature is recorded against the account that left the comment, and it counts only for the accounts that
+actually authored the commits — nobody can sign on somebody else's behalf. You sign once; later pull
+requests are already covered.
+
+If the check stays red after you have signed, comment `recheck` and the Action will look again. It reads
+one comment at a time, so put the sentence in a comment of its own rather than inside a longer reply.
+
+The record lives in a repository this organisation owns rather than in a service somebody else runs,
+because the argument in *Why this exists* rests on it. Nobody is exempt, maintainers included.
 
 ---
 

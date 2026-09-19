@@ -1109,7 +1109,7 @@ eval/README.md                what a good question is, how to add one, and why t
 eval/BASELINE.md              the last recorded run of the default configuration
 drizzle/                      generated migrations (`npm run db:generate`), applied at startup and shipped in the image
 CONTRIBUTING.md               how to run it, the four checks, the pairs kept in sync, and the licence grant
-CLA.md                        the contributor licence grant — a draft, not yet in force
+CLA.md                        the contributor licence grant, in force; signed on a pull request
 SECURITY.md                   how to report a vulnerability, and what is documented behaviour rather than one
 CODE_OF_CONDUCT.md            Contributor Covenant 2.1
 LICENSE                       AGPL-3.0-or-later, verbatim; copied into the image and served at /license.txt
@@ -1239,7 +1239,7 @@ text, on every pull request, against a real server.
 [`CONTRIBUTING.md`](CONTRIBUTING.md) is the whole of how this project is worked on: getting it running, the
 four checks a change has to pass, the three places where one statement is kept in two files, and the commit
 register. Read it before the first pull request — it also explains the licence grant an outside
-contribution is asked for ([`CLA.md`](CLA.md), currently a draft), which exists because the commercial
+contribution is asked for ([`CLA.md`](CLA.md), signed on the pull request), which exists because the commercial
 option below depends on the copyright being held in full.
 
 **Found a security problem? Do not open an issue.** [`SECURITY.md`](SECURITY.md) says where it goes
