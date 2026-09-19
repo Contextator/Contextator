@@ -36,7 +36,11 @@ import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_E
 
 const baseUrl = inject('postgresBaseUrl');
 const DIMS = TEST_EMBEDDING_DIMENSIONS;
-const TOKEN = 'secret_tMrlL1qK5vuQAh1b6cZGhFChZTSYJlce98V0pYn7yBl';
+// Shaped so no secret scanner can mistake it for the real thing: Notion's integration tokens are
+// `secret_` and then forty-three letters and digits, and a string of that shape in a public
+// repository blocks a push and is flagged in every fork for ever. The hyphens are what keep this
+// out of that pattern; any string works as an HMAC key, so do not "tidy" them away.
+const TOKEN = 'secret_not-a-real-token-only-an-hmac-key-for-tests';
 const MIN_INTERVAL_MINUTES = 5;
 
 /** Stands in for the queue: the two questions a webhook or a tick ever asks it, and nothing else. */

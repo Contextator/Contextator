@@ -13,7 +13,11 @@ import type { DocumentSourceRow } from '../src/db/schema.js';
  * a token of this file's own choosing — which is exactly what the product will be handed.
  */
 
-const token = 'secret_tMrlL1qK5vuQAh1b6cZGhFChZTSYJlce98V0pYn7yBl';
+// Shaped so no secret scanner can mistake it for the real thing: Notion's integration tokens are
+// `secret_` and then forty-three letters and digits, and a string of that shape in a public
+// repository blocks a push and is flagged in every fork for ever. The hyphens are what keep this
+// out of that pattern; any string works as an HMAC key, so do not "tidy" them away.
+const token = 'secret_not-a-real-token-only-an-hmac-key-for-tests';
 const body = Buffer.from(JSON.stringify({ type: 'page.content_updated', entity: { id: 'p1', type: 'page' } }));
 const sign = (raw: Buffer, key = token) => `sha256=${createHmac('sha256', key).update(raw).digest('hex')}`;
 
