@@ -23,8 +23,10 @@ http://localhost:3444/mcp/<project-name>
 - **Accounts and roles.** People sign in with their own account. `root` and `admin` manage everything and everyone; a
   `member` sees only the projects it is assigned to, as a read-only `viewer` or an `editor` that adds sources, uploads
   files and re-indexes. `ADMIN_TOKEN` stays for scripts and CI. See [Accounts and permissions](#accounts-and-permissions).
-- **A door on each MCP endpoint.** A project's endpoint is open by default, as it has always been; require a bearer
-  token on it per project when you want it closed. See [MCP access](#mcp-access).
+- **A door on each MCP endpoint, with three settings.** A project's endpoint is open by default, as it has always
+  been. Require a bearer token on it to close it to a credential you hand out, or require an **account** and its
+  access becomes the memberships you already manage. Browser-based connectors sign in through OAuth 2.1.
+  See [MCP access](#mcp-access).
 - **Incremental indexing.** Files are hashed; only changed files are re-embedded, removed files are deleted.
 
 Stack: TypeScript · Node.js 20+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/sdk` · `@huggingface/transformers`.
@@ -279,8 +281,15 @@ A project's MCP endpoint is **open** by default: anyone who can reach `http://ho
 document indexed there, with no account and no token. That is how Contextator has always behaved, and an upgrade does
 not change it for a single existing project.
 
-Per project, you can close it. **MCP access** on the project page switches it to **token required**, and from then on
-only a client presenting one of that project's tokens gets an answer:
+Per project, you can close it. **MCP access** on the project page offers three modes, and they narrow in this order:
+
+| Mode | Who gets an answer | What it is for |
+|------|--------------------|----------------|
+| **open** | Anyone who can reach the URL | The historical behaviour, and still the default. Nothing you have configured changes on an upgrade. |
+| **token required** | A client presenting one of that project's tokens | One credential per agent, revocable one at a time. The token names nobody: whoever holds it reads everything indexed in that project. |
+| **account required** | A client acting as an account that is a **member** of the project | The memberships on the project page, reaching the endpoint. An administrator reaches it because an administrator reaches every project. |
+
+Switching to **token required** means a client has to present one of that project's tokens:
 
 ```bash
 claude mcp add --transport http demo-docs http://localhost:3444/mcp/demo   --header "Authorization: Bearer ctxm_9f3a…"
@@ -305,11 +314,33 @@ endpoint was public does not outlive the moment it stopped being.
 Deciding whether a project's documents are readable by anything that can reach the URL is the same class of decision
 as creating the project in the first place, which is why it sits with `admin` rather than `editor`.
 
-**What this does not do.** The token is a bearer credential for the endpoint, not an account: it carries no identity,
-no per-document rules and no audit trail beyond "this token was last used at". A holder reads everything indexed in
-that project. And a token-protected project answers `401` where an unknown project answers `404`, so the existence of
-a project name is still discoverable by anyone who can reach the server — hiding that would mean answering `404` to a
-client with a wrong token, which is worse to debug than it is worth.
+### Account required, and connecting a browser-based client
+
+**account required** is the mode where this dashboard's memberships reach `/mcp/*`. A client has to act as somebody,
+and it then reads the project only while that account is a member of it — checked on **every request**, so removing a
+membership, disabling an account or resetting its password cuts the connection off on its next call rather than at some
+expiry. A static `ctxm_…` token names nobody, so it is refused here; that is the point of the mode rather than a
+side effect.
+
+A client gets an account-backed credential through OAuth 2.1, which is what browser-based MCP connectors already speak
+and what the MCP authorization specification defines for remote servers. You do not configure anything: point the
+connector at `http://host:3444/mcp/<project>`, and it discovers this server's authorization endpoints, registers
+itself, and sends you to a page here to sign in and approve it. What it gets back acts as *your* account.
+
+Its credential renews itself quietly and expires if the connector goes unused for a month
+(`MCP_OAUTH_ACCESS_TTL_MIN`, `MCP_OAUTH_REFRESH_TTL_DAYS`). **Changing your password disconnects every connector acting
+as you**, the same way it signs out your other browsers, and a connector that says *disconnect* gives up its whole
+grant rather than the one token it happened to hand back. `MCP_OAUTH=0` removes the whole flow, and then only static
+tokens open a closed project — which also means browser-based connectors cannot connect at all.
+
+**What this does not do.** A static token is a bearer credential for the endpoint, not an account: it carries no
+identity, no per-document rules and no audit trail beyond "this token was last used at". A holder reads everything
+indexed in that project — which is exactly what **account required** is for, and why it exists beside `token` rather
+than instead of it: every CLI client configured with a pasted header keeps working. An account-backed credential is
+narrowed by membership and by nothing finer: a `viewer` of a project reads every document in it, as they do in the
+dashboard. And a closed project answers `401` where an unknown project answers `404`, so the existence of a project
+name is still discoverable by anyone who can reach the server — hiding that would mean answering `404` to a client
+with a wrong token, which is worse to debug than it is worth.
 
 Clients that cannot set an `Authorization` header — a browser `EventSource` on the legacy SSE transport, for one —
 cannot reach a token-protected project at all. Leave those projects open, or put the whole instance behind an
@@ -771,8 +802,11 @@ src/services/notion-webhook.ts which Notion deliveries mean a run, the window a 
 src/admin/auth-routes.ts      /api/auth/* and /api/setup/*
 src/admin/users-routes.ts     /api/users/*
 src/admin/members-routes.ts   /api/projects/:id/members/*
-src/admin/mcp-routes.ts       /api/projects/:id/mcp-tokens/* and the open/token switch
+src/admin/mcp-routes.ts       /api/projects/:id/mcp-tokens/* and the open/token/account switch
 src/mcp/access.ts             the MCP endpoint's access rule, as a pure function
+src/mcp/identity.ts           turns the Authorization header into an account and its membership, for that rule to judge
+src/mcp/oauth-routes.ts       the OAuth 2.1 flow for /mcp/*: discovery, registration, the approval page, the token endpoint
+src/services/auth/oauth.ts    registered OAuth clients, the authorization codes, and the PKCE check
 src/admin/pages.ts            /about, /privacy, /cookies, /terms, /license rendered into one shell
 src/admin/auth-pages.ts       /login, /setup, /change-password and the guard on `/`
 public/                       vanilla HTML/JS dashboard (no build step)
@@ -783,7 +817,7 @@ public/members.js             a project's Members panel
 public/mcp.js                 a project's MCP access panel and its tokens
 public/search.js              a project's search box and the hits it renders, scores and all
 public/auth-page.js           /login, /setup and /change-password — imports nothing from the dashboard
-public/pages/                 body of each product/legal page + the shell they share
+public/pages/                 body of each product/legal page + the shell they share, and the OAuth approval page
 scripts/smoke-mcp.ts          end-to-end MCP client check
 scripts/reset-password.ts     last-resort password reset straight against the database; ships in the image and runs there
 scripts/eval.ts               `npm run eval` — indexes eval/corpus, asks eval/golden.jsonl, prints recall@1, recall@5, MRR
@@ -856,9 +890,13 @@ text, on every pull request, against a real server.
   bearer token; the mechanism and who may change it are in [MCP access](#mcp-access). Tokens are stored as hashes,
   shown once, scoped to one project, and revoking one closes that project's live MCP sessions rather than waiting
   for the next request.
-- A token is a credential for the endpoint, not an account: it has no identity and no per-document rules, so a holder
-  reads everything indexed in that project. A project left `open` is readable by anyone who can reach its URL,
-  whatever the dashboard roles say.
+- A static token is a credential for the endpoint, not an account: it has no identity and no per-document rules, so a
+  holder reads everything indexed in that project. A project left `open` is readable by anyone who can reach its URL,
+  whatever the dashboard roles say. A project set to **account required** is the case where they do say: a credential
+  there names an account, and that account's membership is re-checked on every request.
+- The OAuth endpoints (`/.well-known/oauth-*`, `/oauth/*`) are reachable without a credential by design — the two
+  discovery documents exist to be fetched by a client that has none, and registering a client grants nothing at all.
+  Approving one is a signed-in browser action, same-site checked like every other write in the dashboard.
 - So an instance that leaves its projects open belongs on a private network, or behind a reverse proxy that handles
   auth — the endpoint itself is the only thing a project token closes.
 - Browser `Origin` headers on `/mcp/*` are validated (DNS-rebinding protection) in both modes; CLI clients send none.
@@ -911,8 +949,12 @@ text, on every pull request, against a real server.
 | The dashboard bounces between `/` and `/login` | The cookie is not coming back. Usually `AUTH_COOKIE_SECURE=1` on a plain-HTTP origin, or a reverse proxy dropping `Set-Cookie`. Set `AUTH_COOKIE_SECURE=0` for an HTTP-only LAN install. |
 | `403 csrf_blocked` from my own script | The script is sending the session cookie from another origin. Use `Authorization: Bearer $ADMIN_TOKEN` instead; bearer requests are exempt. |
 | After upgrading, `/api/*` answers `401 setup_required` | This instance had no `ADMIN_TOKEN` and was therefore open. It is now closed: open `/setup` with the code from the log and create the first account. Projects, sources and indexes are untouched. |
-| A member reads a project in `/mcp/…` they are not a member of | Expected while that project is `open`: dashboard roles do not reach the MCP endpoint. Require a token on it under **MCP access**. |
-| An MCP client suddenly answers `401` | The project now requires a token. Mint one under **MCP access** and add `--header "Authorization: Bearer …"` (or `headers` in `mcp.json`). |
+| A member reads a project in `/mcp/…` they are not a member of | Expected while that project is `open` or `token required`: a credential that names nobody is judged by the mode and not by memberships. Switch the project to **account required** under **MCP access** and its endpoint follows the member list. |
+| An MCP client suddenly answers `401` | The project now requires a credential. Mint a token under **MCP access** and add `--header "Authorization: Bearer …"` (or `headers` in `mcp.json`) — or, if the project says **account required**, reconnect a client that can sign in, because a static token is refused there. |
+| An MCP client answers `403 … not a member of this project` | The credential is fine and the account behind it is not on the project. Add them under **Members**, or connect with an account that is one. |
+| A browser-based connector cannot connect at all | Either the project is `open`/`token required` and the connector has no header to send, or `MCP_OAUTH=0` on this instance and there is no flow for it to use. |
+| A connector says it was disconnected and has to be approved again | Expected after a password change, after its membership was removed, or after the same credential was presented twice — which this server treats as two parties holding one token and answers by taking the grant down. A connector simply left unused past `MCP_OAUTH_REFRESH_TTL_DAYS` is a different and quieter case: it is asked to authorize again and nothing is revoked. Approve it again either way. |
+| A connector reports `invalid_scope` | It asked for an OAuth scope. This server issues none — an account-backed credential reaches exactly what its account may read — so the request is refused rather than granted under a scope nobody honours. The server log names the client that asked. |
 | I lost an MCP token | It cannot be recovered — only a hash is stored. Revoke it and mint another. |
 
 ## Contributing and security

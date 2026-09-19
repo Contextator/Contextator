@@ -20,6 +20,7 @@ import {
   setPassword,
   toUserView,
 } from '../services/auth/users.js';
+import { revokeMcpCredentialsOfUser } from '../services/auth/mcp-tokens.js';
 
 const LoginBody = z.object({ username: z.string().min(1).max(64), password: z.string().min(1).max(1024) });
 const PasswordBody = z.object({ currentPassword: z.string().min(1).max(1024), newPassword: z.string().min(1).max(1024) });
@@ -176,6 +177,16 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
     await setPassword(db, user.id, body.newPassword, false);
     // Whoever else knew the old password (an administrator who set a temporary one) loses their grip.
     await revokeSessionsOfUser(db, user.id, principal.sessionId);
+    // And the same grip held through an MCP client ([ADR-0054](../../.ssot/ADR.md#adr-0054)). Sessions
+    // alone were the whole of "somebody else knows my password" until an account could also be behind
+    // a `ctxa_\u2026`; that credential outlives a sign-in by weeks and renews itself, so leaving it
+    // running would leave running the one credential of this account the password change did not
+    // reach \u2014 which is exactly the credential somebody with the old password could have taken. The
+    // connector asks its person again, which is what the browser is being told to do too.
+    const cutCredentials = await revokeMcpCredentialsOfUser(db, user.id);
+    if (cutCredentials > 0) {
+      req.log.info({ username: user.username, credentials: cutCredentials }, 'password change revoked this account\u2019s mcp credentials');
+    }
     return reply.code(204).send();
   });
 

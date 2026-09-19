@@ -77,6 +77,23 @@ export function requiredProjectAccess(method: string, url: string): ProjectAcces
 
 export const isProjectScoped = (url: string): boolean => url.startsWith('/api/projects/:id');
 
+/**
+ * What an account-backed credential must hold on a project to read it over `/mcp/*`
+ * ([ADR-0054](../../.ssot/ADR.md#adr-0054)).
+ *
+ * **It is stated here rather than derived**, and that is the point. `requiredProjectAccess` reads the
+ * method: every MCP request is a `POST`, so the default would have asked for `editor` and locked every
+ * `viewer` out of the surface that exists for reading — the derivation is right about a REST API whose
+ * method says what it does, and wrong about a JSON-RPC transport where the method says nothing. A
+ * `viewer` is the access that reads a project's documents in the dashboard, and the three MCP tools are
+ * the same reading through another door.
+ *
+ * It is a constant and not a row in `PROJECT_ROUTE_OVERRIDES` because `/mcp/:project` is not in that
+ * table's key space: those keys are `/api/*` route templates, and adding one shaped differently would
+ * make the table mean two things.
+ */
+export const MCP_READ_ACCESS: ProjectAccess = 'viewer';
+
 /** root, admin and ADMIN_TOKEN reach every project; a member reaches the ones it is listed on. */
 export function accessFromMembership(principal: Principal, membershipRole: 'viewer' | 'editor' | null): ProjectAccess {
   if (principal.kind === 'token' || principal.role === 'root' || principal.role === 'admin') return 'manager';

@@ -254,6 +254,12 @@ async function landProject(
           : `${manifest.excluded.mcpTokens} MCP token(s) stayed behind: they are bearer credentials for the other instance's ` +
             `endpoint and only their hashes were ever stored. Mint new ones here${
               manifest.project.mcpAuth === 'token' ? ', which this project needs before any agent can reach it.' : '.'
+            }${
+              // An `account` project needs memberships rather than tokens, and the line above would have
+              // pointed the operator at the wrong remedy (ADR-0054).
+              manifest.project.mcpAuth === 'account'
+                ? ' This project requires an account-backed credential, so what it actually needs here is memberships, not tokens.'
+                : ''
             }`,
     },
     sameInstance: manifest.instance.id === (await instanceId(db)),

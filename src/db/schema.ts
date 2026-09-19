@@ -83,6 +83,11 @@ export const projects = pgTable(
      * Who may talk to this project's MCP endpoint. `open` is the historical behaviour — anyone who can
      * reach the URL — and stays the default so an upgrade breaks no configured client.
      *
+     * Since [ADR-0054](../../.ssot/ADR.md#adr-0054) there is a third value, `account`: the caller has
+     * to present a credential that names a **user**, and that user's membership of this project is
+     * what decides. `token` still accepts a static `ctxm_…` bearer, which is the credential every CLI
+     * install in the field is configured with.
+     *
      * Last, after `created_at`, because v5 added it with an `ALTER TABLE … ADD COLUMN` and that is
      * where it physically sits in every database that has been through the ladder.
      */
@@ -114,12 +119,49 @@ export const projects = pgTable(
      */
     queryLogEnabled: boolean('query_log_enabled').notNull().default(true),
   },
-  (t) => [check('projects_mcp_auth_check', sql`${t.mcpAuth} in ('open', 'token')`)],
+  (t) => [check('projects_mcp_auth_check', sql`${t.mcpAuth} in ('open', 'token', 'account')`)],
 );
 
 /**
- * Bearer tokens for one project's MCP endpoint. Like sessions, only the hash is stored; the token
+ * OAuth clients this instance has met ([ADR-0054](../../.ssot/ADR.md#adr-0054)).
+ *
+ * A row is written by RFC 7591 dynamic client registration, which is how a browser-based MCP
+ * connector introduces itself: it has no way of being configured here in advance, and the MCP
+ * authorization specification names DCR as the mechanism. **The row confers nothing.** It is a name
+ * and a set of redirect URIs; every grant it can ever hold comes from a person signing in and
+ * approving it, and what that grant reaches is decided by *their* membership on every request.
+ *
+ * There is no `client_secret` column because there is no confidential client: a connector that runs
+ * in a browser cannot hold one, so every client here is public and authenticates with PKCE instead.
+ */
+export const oauthClients = pgTable(
+  'oauth_clients',
+  {
+    /** The `client_id` itself, `ctxc_` + 16 random bytes in hex. Public by definition, so it is the key. */
+    clientId: text('client_id').primaryKey(),
+    /** `client_name` from the registration request, shown on the consent page. Display only. */
+    name: text('name').notNull().default(''),
+    /**
+     * The exact redirect URIs registered, compared as whole strings on every authorize request.
+     * A prefix or wildcard match here is the classic open-redirect in this flow.
+     */
+    redirectUris: jsonb('redirect_uris').notNull().$type<string[]>(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Written at most once a minute, like a token's: what the stale-client sweep reads. */
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+  },
+  (t) => [index('oauth_clients_last_used_idx').on(t.lastUsedAt)],
+);
+
+/**
+ * Credentials for one project's MCP endpoint. Like sessions, only the hash is stored; the token
  * itself is shown once, when it is minted.
+ *
+ * Since [ADR-0054](../../.ssot/ADR.md#adr-0054) the table holds three kinds of credential rather than
+ * one, and the reason they share a table rather than getting two more is `search_queries.mcp_token_id`
+ * ([ADR-0047](../../.ssot/ADR.md#adr-0047)): the query log points here, so a search made through an
+ * OAuth session is attributable by the column that already exists instead of by a second one that
+ * would have to be added, backfilled and then read in both places by every report.
  */
 export const mcpTokens = pgTable(
   'mcp_tokens',
@@ -135,11 +177,44 @@ export const mcpTokens = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    /**
+     * `static` · `access` · `refresh` (CHECK). `static` is every row that existed before this column
+     * did and every token the dashboard's *New token* button mints; the other two are the pair an
+     * OAuth exchange issues.
+     *
+     * The default is `static` **and it is the default so the migration writes nothing**: a backfill
+     * that had to decide what each existing row is would be a backfill with an opinion.
+     */
+    kind: text('kind').notNull().default('static').$type<McpTokenKind>(),
+    /**
+     * The account this credential acts as, or NULL for one that acts as nobody
+     * ([ADR-0054](../../.ssot/ADR.md#adr-0054)).
+     *
+     * **Every existing token arrives NULL and keeps exactly the access it had**, which is what makes
+     * this migration safe to apply to an installation whose agents are configured and working. A
+     * migration that quietly attached every token to the account that happened to mint it would have
+     * changed what those tokens reach, on an upgrade nobody asked for — NFR-10's rule one door along.
+     *
+     * CASCADE and not SET NULL: a credential whose owner is deleted must stop working, not quietly
+     * become an anonymous one with the run of the project.
+     */
+    userId: uuid('user_id'),
+    /** The client an OAuth credential was issued to; NULL for a static token. */
+    clientId: text('client_id'),
+    /** When this credential stops being accepted. NULL — never — is what a static token carries. */
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
   },
   (t) => [
     foreignKey({ name: 'mcp_tokens_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
     foreignKey({ name: 'mcp_tokens_created_by_fkey', columns: [t.createdBy], foreignColumns: [users.id] }).onDelete('set null'),
+    foreignKey({ name: 'mcp_tokens_user_id_fkey', columns: [t.userId], foreignColumns: [users.id] }).onDelete('cascade'),
+    foreignKey({ name: 'mcp_tokens_client_id_fkey', columns: [t.clientId], foreignColumns: [oauthClients.clientId] }).onDelete('cascade'),
+    check('mcp_tokens_kind_check', sql`${t.kind} in ('static', 'access', 'refresh')`),
     index('mcp_tokens_project_idx').on(t.projectId),
+    // "This account's MCP credentials", which is what revoking a person's access has to be able to ask.
+    index('mcp_tokens_user_idx').on(t.userId),
+    // The expiry sweep, and nothing else: partial, so it is empty on an installation using no OAuth.
+    index('mcp_tokens_expires_idx').on(t.expiresAt).where(sql`expires_at is not null`),
   ],
 );
 
@@ -594,7 +669,14 @@ export const settings = pgTable('settings', {
 export type UserRole = 'root' | 'admin' | 'member';
 /** Who asked a logged question ([ADR-0047](../../.ssot/ADR.md#adr-0047)). */
 export type QueryActor = 'mcp' | 'dashboard';
-export type McpAuthMode = 'open' | 'token';
+/**
+ * How a project's MCP endpoint decides ([ADR-0027](../../.ssot/ADR.md#adr-0027),
+ * [ADR-0054](../../.ssot/ADR.md#adr-0054)): nothing, a bearer credential of any sort, or a credential
+ * that names an account whose membership then decides.
+ */
+export type McpAuthMode = 'open' | 'token' | 'account';
+/** Which of the three credentials an `mcp_tokens` row is ([ADR-0054](../../.ssot/ADR.md#adr-0054)). */
+export type McpTokenKind = 'static' | 'access' | 'refresh';
 export type ProjectMemberRole = 'viewer' | 'editor';
 
 export type UserRow = typeof users.$inferSelect;
@@ -602,6 +684,7 @@ export type UserSessionRow = typeof userSessions.$inferSelect;
 export type ProjectMemberRow = typeof projectMembers.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 export type McpTokenRow = typeof mcpTokens.$inferSelect;
+export type OauthClientRow = typeof oauthClients.$inferSelect;
 export type DocumentSourceRow = typeof documentSources.$inferSelect;
 export type DocumentRow = typeof documents.$inferSelect;
 export type ChunkInsert = typeof chunks.$inferInsert;
