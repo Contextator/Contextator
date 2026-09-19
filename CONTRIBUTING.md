@@ -192,9 +192,9 @@ and an entity version.
 
 ### How you sign
 
-Asking is not a maintainer remembering to; it is [`.github/workflows/cla.yml`](.github/workflows/cla.yml),
-which runs [CLA Assistant Lite](https://github.com/contributor-assistant/github-action) on every pull
-request. You do not sign anything before opening one, and there is no form to fill in anywhere else.
+Asking is not a maintainer remembering to; it is [`.github/workflows/cla.yml`](.github/workflows/cla.yml)
+and the script in [`scripts/cla/`](scripts/cla) it runs on every pull request. You do not sign anything
+before opening one, and there is no form to fill in anywhere else.
 
 1. **Open the pull request.** A check named **Licence grant** runs. If every commit author in it has
    already signed, it is green and you are done — nothing is posted and there is nothing to read.
@@ -215,6 +215,10 @@ request. You do not sign anything before opening one, and there is no form to fi
    commit written by a colleague, they comment too, from their own account, and the account has to be the
    one the commit's e-mail belongs to. Bots are exempt; they cannot agree to anything. There is no
    allowlist — maintainers sign this like everybody else.
+5. **A commit whose e-mail belongs to no GitHub account cannot be signed for at all**, by anybody. The
+   check names it and stays red, because an address that names no account is a licence nobody can grant.
+   Add the address to your account under Settings → Emails, or rewrite the commit with one that is
+   already there, and push again.
 
 You sign once. Every later pull request from the same account is green from the start. A merged pull
 request's conversation is then locked, which is tidiness rather than evidence: the record of your
