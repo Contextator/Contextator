@@ -14,12 +14,13 @@ import { chunksWithinBudget, joinChunks, truncateToTokens } from '../services/do
 import { normalizeRelativePath } from '../services/fs-scan.js';
 import { getProjectById } from '../services/projects.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
-import { listSources } from '../services/sources.js';
+import { SOURCE_VERSION_MAX_LENGTH, listSources } from '../services/sources.js';
 import {
   getDocument,
   getDocumentBySuffix,
   getDocumentChunks,
   listDocumentHeadings,
+  listDocumentVersions,
   listDocumentsForProject,
   scanFrom,
   selectionFrom,
@@ -126,7 +127,8 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
         `Hybrid search over the "${project.name}" documentation: meaning and exact wording at once, ` +
         'so an identifier — an environment variable, a header, an error code — finds its page as readily as a question does. ' +
         'Returns the most relevant excerpts with their file path, heading breadcrumb and similarity score, each shown with the ' +
-        'passage before and after it for context. Narrow it with source or path_prefix when you already know where the answer lives. ' +
+        'passage before and after it for context. Narrow it with source or path_prefix when you already know where the answer lives, ' +
+        'and with version when this project holds more than one release of the same documentation. ' +
         'When nothing is a good match it says so rather than returning the least bad thing it found. ' +
         'Use read_document with a returned file path to read the whole file, or its heading breadcrumb to read just that section.',
       inputSchema: {
@@ -150,16 +152,30 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
           .max(512)
           .optional()
           .describe('Search only documents whose path starts with this, e.g. "handbook/operations". Omit to search the whole project.'),
+        // The third, and the one whose *description* is load-bearing: an agent that believed this
+        // accepted "latest" would be told the version does not exist, which is the honest answer but
+        // a wasted call. It says what it takes, and an unknown value is answered with the list
+        // ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
+        version: z
+          .string()
+          .min(1)
+          .max(SOURCE_VERSION_MAX_LENGTH)
+          .optional()
+          .describe(
+            'Search only documents of this release, e.g. "v3". An exact label as the project set it — there is no ordering and no ' +
+              '"latest"; an unknown value is answered with the versions this project does have. Omit to search every version, which is ' +
+              'what most projects have exactly one of.',
+          ),
       },
       annotations: readOnly,
     },
-    async ({ query, limit, source, path_prefix }) => {
+    async ({ query, limit, source, path_prefix, version }) => {
       try {
         // The guards, the query embedding and the top-k query are services/search.ts; what is left
         // here is the wording, which is prompt-visible and belongs to the tool.
         const outcome = await searchProject(
           { db, embeddings, scan: scanFrom(config), selection: selectionFrom(config), scoreFloor: config.SEARCH_SCORE_FLOOR, queryLog },
-          { projectId: project.id, query, limit, source, pathPrefix: path_prefix },
+          { projectId: project.id, query, limit, source, pathPrefix: path_prefix, version },
         );
         if (outcome.status === 'project_gone') return fail(`Project "${project.name}" no longer exists.`);
         if (outcome.status === 'unknown_source') {
@@ -171,6 +187,16 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
         if (outcome.status === 'invalid_path_prefix') {
           return fail(`"${outcome.requested}" is not a usable path prefix. Use a relative path as shown by list_topics, e.g. "handbook/operations".`);
         }
+        if (outcome.status === 'unknown_version') {
+          // `unknown_source`'s answer, one filter along, and it does a second job: it is what an agent
+          // that wanted "the latest" is given instead. This product will not guess an order over
+          // labels it did not invent, so it hands over the labels (ADR-0058).
+          const known =
+            outcome.available.length > 0
+              ? `Its versions are: ${outcome.available.join(', ')}.`
+              : 'None of its documents carry a version, so searching without the filter reaches all of them.';
+          return fail(`Project "${project.name}" has no documents at version "${outcome.requested}". ${known}`);
+        }
         if (outcome.status === 'not_indexed') {
           return ok(`Project "${project.name}" has no indexed content yet. Trigger indexing from the Contextator dashboard and try again.`);
         }
@@ -180,8 +206,8 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
               'Re-index the project from the Contextator dashboard before searching.',
           );
         }
-        const scoped =
-          source || path_prefix ? ` under ${[source && `source "${source}"`, path_prefix && `"${path_prefix}"`].filter(Boolean).join(' and ')}` : '';
+        const narrowed = [source && `source "${source}"`, path_prefix && `"${path_prefix}"`, version && `version "${version}"`].filter(Boolean);
+        const scoped = narrowed.length > 0 ? ` under ${narrowed.join(' and ')}` : '';
         if (outcome.hits.length === 0) {
           return ok(`No matching documentation for "${query}"${scoped}. Try different wording or call list_topics to browse.`);
         }
@@ -277,6 +303,14 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
           const sources = await listSources(db, project.id);
           if (sources.length > 0) {
             lines.push(`Sources (the first path segment): ${sources.map((s) => `${s.name} (${s.type}${s.label ? `: ${s.label}` : ''})`).join(', ')}`);
+          }
+          // The versions this index carries, when it carries any ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
+          // Without it the only way to learn them is to guess one wrong and read the refusal, which is
+          // a call spent on discovery — and this is the answer to "which is the latest" that the
+          // product is willing to give: the list, in no order, for the agent to choose from.
+          const versions = await listDocumentVersions(db, project.id, live.liveGeneration);
+          if (versions.length > 0) {
+            lines.push(`Versions (pass one to search_docs as version): ${versions.join(', ')}. Omit it to search all of them.`);
           }
         } else {
           lines.push(`Continuing after "${after}".`);

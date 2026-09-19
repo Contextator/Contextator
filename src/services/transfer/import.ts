@@ -11,7 +11,7 @@ import { type ImportLimits, importTree, unpackTar, withScratch } from '../archiv
 import { removeProjectDir, sourceCurrentDir } from '../data-dir.js';
 import { FLAVORS, type Flavor } from '../flavors.js';
 import { createProject } from '../projects.js';
-import { SOURCE_TYPES, type SourceType, parseSourceConfig } from '../sources.js';
+import { SOURCE_TYPES, type SourceType, parseSourceConfig, sourceVersion } from '../sources.js';
 import { textSearchConfigFor } from '../text-search.js';
 import { recountProject, replaceDocument } from '../vector-store.js';
 import {
@@ -493,6 +493,12 @@ async function writeDocuments(
       );
     }
     const language = doc.sourceName ? (byName.get(doc.sourceName)?.config as { language?: unknown } | undefined)?.language : undefined;
+    // The release label the same way, and off the *imported* source rather than off the document line
+    // ([ADR-0058](../../../.ssot/ADR.md#adr-0058)). `version` is a per-source setting that travels in
+    // `sources.ndjson`, so reading it here means an export written before that column existed imports
+    // as unversioned — which is what it is — and one written after it lands already labelled, with no
+    // field on the document line for the two halves to disagree about.
+    const version = doc.sourceName ? sourceVersion(byName.get(doc.sourceName)?.config) : '';
 
     await replaceDocument(
       deps.db,
@@ -506,6 +512,7 @@ async function writeDocuments(
         indexGeneration: 0,
         content: doc.content,
         contentTruncated: doc.contentTruncated,
+        version,
       },
       doc.chunks.map((c) => ({
         chunkIndex: c.chunkIndex,

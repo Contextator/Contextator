@@ -49,6 +49,50 @@ const ProbeToken = z.string().max(500).optional();
 /** The `config` key that token lives under. One constant, so the drivers and the scheduler agree. */
 export const PROBE_TOKEN_KEY = 'syncProbeToken';
 
+/** As much of a release label as a column, a form field and a tool argument all agree to carry. */
+export const SOURCE_VERSION_MAX_LENGTH = 64;
+
+/**
+ * Which release of the documentation this source carries ([ADR-0058](../../.ssot/ADR.md#adr-0058)) —
+ * stamped onto `documents.version` by every run, and the value `search_docs`' `version` argument is
+ * matched against.
+ *
+ * **A free-form label and deliberately not a sortable thing.** `v3`, `2024.1`, `next` and `legacy` are
+ * all versions somebody writes, and a product that ordered them would be confidently wrong about at
+ * least one — which is the failure this whole feature exists to stop, reintroduced one layer down. So
+ * the filter is equality, there is no "latest", and the entry says what it refused rather than leaving
+ * it to be discovered.
+ *
+ * **Several sources may share one version**, which is the reason this is not simply the `source`
+ * filter under another name: `api-v3` and `sdk-v3` are two mount points of one release.
+ *
+ * Trimmed, and the empty string is normalised away so that the dashboard's empty field *clears* the
+ * setting — `updateSource` merges a patch over the stored config, and a key the form omitted would
+ * keep whatever was there. Exactly the rule `language` above already follows, and the same reason.
+ *
+ * It appears in all four schemas rather than in a shared base, for the reason stated above both of
+ * them: each object is also this type's documentation in
+ * [DATA-MODEL.md](../../.ssot/DATA-MODEL.md) §1.
+ */
+const Version = z
+  .string()
+  .max(SOURCE_VERSION_MAX_LENGTH)
+  .optional()
+  .transform((value) => {
+    const trimmed = value?.trim();
+    return trimmed ? trimmed : undefined;
+  });
+
+/**
+ * The version a source stamps, read off a stored `config`. One reader, because the indexer, the
+ * import and the route that decides whether an edit has to re-index all have to agree about what a
+ * missing, blank or non-string value means: unversioned, which is `''` in the column.
+ */
+export function sourceVersion(config: Record<string, unknown> | null | undefined): string {
+  const value = config?.version;
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 /**
  * Two configs compared as values rather than as text. One side of the comparison below has just come
  * out of zod (keys in schema order) and the other out of `jsonb` (keys in PostgreSQL's own order), so
@@ -70,6 +114,7 @@ export const LocalConfig = z.object({
   path: z.string().min(1).max(4096),
   extensions: Extensions.default([...DEFAULT_EXTENSIONS]),
   language: Language,
+  version: Version,
   syncProbeToken: ProbeToken,
 });
 export const GitConfig = z.object({
@@ -82,11 +127,13 @@ export const GitConfig = z.object({
   lastCommit: z.string().max(64).optional(),
   extensions: Extensions.default([...DEFAULT_EXTENSIONS]),
   language: Language,
+  version: Version,
   syncProbeToken: ProbeToken,
 });
 export const UploadConfig = z.object({
   extensions: Extensions.default(['md', 'mdx', 'txt']),
   language: Language,
+  version: Version,
   syncProbeToken: ProbeToken,
 });
 export const NotionConfig = z.object({
@@ -94,6 +141,7 @@ export const NotionConfig = z.object({
   rootIds: z.array(z.string().min(1).max(64)).max(50).default([]),
   extensions: Extensions.default(['md']),
   language: Language,
+  version: Version,
   syncProbeToken: ProbeToken,
 });
 

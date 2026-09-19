@@ -12,7 +12,7 @@ import { recordIndexRun } from './index-runs.js';
 import type { KeyedMutex } from './locks.js';
 import { getProjectById } from './projects.js';
 import { driverFor } from './sources/driver.js';
-import { listSources, recountSources, setSourceStatus } from './sources.js';
+import { listSources, recountSources, setSourceStatus, sourceVersion } from './sources.js';
 import { textSearchConfigFor, type TextSearchConfig } from './text-search.js';
 import {
   deleteDocuments,
@@ -117,6 +117,13 @@ interface SourceFile {
    * `replaceDocument` is given one document at a time.
    */
   textSearchConfig: TextSearchConfig;
+  /**
+   * The release label this file's document is stamped with — its source's `config.version`, `''` when
+   * the source carries none ([ADR-0058](../../.ssot/ADR.md#adr-0058)). Carried on the file for
+   * `textSearchConfig`'s reason, one field up: a run holds files from several sources and each of them
+   * may be a different release of the same product, which is the situation this exists for.
+   */
+  version: string;
 }
 
 /**
@@ -285,6 +292,7 @@ export class Indexer {
     const flavor = source.flavor as Flavor;
     const extensions = (source.config as { extensions?: string[] }).extensions;
     const textSearchConfig = textSearchConfigFor((source.config as { language?: unknown }).language);
+    const version = sourceVersion(source.config);
     const driver = driverFor(source, { db, log, config });
 
     let syncError: string | undefined;
@@ -311,6 +319,7 @@ export class Indexer {
           sourceId: source.id,
           flavor,
           textSearchConfig,
+          version,
         });
       }
       scanned = true;
@@ -475,6 +484,7 @@ export class Indexer {
               contentHash: hash,
               sizeBytes,
               indexGeneration: generation,
+              version: file.version,
               ...storedDocumentContent(transformed, config.MAX_STORED_DOCUMENT_BYTES),
             },
             rows,

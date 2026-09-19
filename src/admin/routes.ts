@@ -15,7 +15,7 @@ import { PasswordPolicyError } from '../services/passwords.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { listProjectsForUser, membershipMap } from '../services/auth/memberships.js';
 import { ConflictError, NotFoundError, ValidationError, createProject, deleteProject, getProjectById, listProjects } from '../services/projects.js';
-import { countSourcesByProject, createSource, slugifySourceName } from '../services/sources.js';
+import { SOURCE_VERSION_MAX_LENGTH, countSourcesByProject, createSource, slugifySourceName } from '../services/sources.js';
 import { ImportRefusedError } from '../services/transfer/manifest.js';
 import { scanFrom, selectionFrom } from '../services/vector-store.js';
 import { authRoutes } from './auth-routes.js';
@@ -50,6 +50,13 @@ const SearchQuery = z.object({
   path_prefix: z
     .string()
     .max(512)
+    .optional()
+    .transform((value) => (value === '' ? undefined : value)),
+  // The third ([ADR-0058](../../.ssot/ADR.md#adr-0058)), on the same terms: optional, and an empty one
+  // dropped rather than refused, because the panel submits every field it has.
+  version: z
+    .string()
+    .max(SOURCE_VERSION_MAX_LENGTH)
     .optional()
     .transform((value) => (value === '' ? undefined : value)),
 });
@@ -243,7 +250,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
    */
   app.get('/api/projects/:id/search', async (req) => {
     const { id } = IdParams.parse(req.params);
-    const { q, limit, source, path_prefix } = SearchQuery.parse(req.query);
+    const { q, limit, source, path_prefix, version } = SearchQuery.parse(req.query);
     const outcome = await searchProject(
       // The floor is passed here as well as to the tool, because this panel is the operator's view of
       // what the agent sees and a search that would be refused has to look refused (ADR-0042). The
@@ -259,7 +266,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         scoreFloor: config.SEARCH_SCORE_FLOOR,
         queryLog: ctx.queryLog?.for('dashboard'),
       },
-      { projectId: id, query: q, limit, source, pathPrefix: path_prefix },
+      { projectId: id, query: q, limit, source, pathPrefix: path_prefix, version },
     );
     // Deleted between the policy hook resolving access and this read — the same 404 a caller who
     // may not see it would have got.
@@ -270,6 +277,10 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     }
     if (outcome.status === 'invalid_path_prefix') {
       throw new ValidationError(`"${outcome.requested}" is not a usable path prefix; use a relative path as shown by the documents list.`);
+    }
+    if (outcome.status === 'unknown_version') {
+      const known = outcome.available.length > 0 ? `Its versions are: ${outcome.available.join(', ')}.` : 'None of its documents carry a version.';
+      throw new ValidationError(`This project has no documents at version "${outcome.requested}". ${known}`);
     }
     if (outcome.status === 'not_indexed') {
       throw new SearchUnavailableError('not_indexed', 'This project has no indexed content yet. Index it and try again.');
@@ -285,6 +296,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       limit: limit ?? DEFAULT_SEARCH_LIMIT,
       source: source ?? null,
       pathPrefix: path_prefix ?? null,
+      version: version ?? null,
       // What the agent would have been told instead of these hits, and the number that decided it
       // (ADR-0042). Additive, like the three fusion fields: a script parsing the old shape is unaffected.
       belowFloor: outcome.belowFloor,

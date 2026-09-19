@@ -134,6 +134,7 @@ async function seedProject(name: string): Promise<string> {
       contentHash: `hash-${name}`,
       sizeBytes: Buffer.byteLength(GUIDE),
       indexGeneration: LIVE,
+      version: '',
       ...storedDocumentContent(GUIDE, 1024 * 1024),
     },
     rows,

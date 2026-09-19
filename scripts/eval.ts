@@ -343,6 +343,10 @@ async function indexCorpus(
         contentHash: hash,
         sizeBytes,
         indexGeneration: generation,
+        // The corpus is one unversioned release, and stating that is what keeps the measurement
+        // comparable across ADR-0058: an unversioned document is what every `version` filter misses
+        // and what a search with no filter reaches, which is exactly the baseline configuration.
+        version: '',
         // The corpus text, stored as the indexer stores it (ADR-0043). It changes no vector and no
         // chunk, so it moves no number in this report — it is here because the harness is the
         // indexer's loop, and a loop that had stopped writing one of the columns the product writes

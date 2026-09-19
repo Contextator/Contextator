@@ -16,6 +16,7 @@ import {
   invalidateSourceDocuments,
   listSources,
   regenerateWebhookSecret,
+  sourceVersion,
   toSourceView,
   updateSource,
 } from '../services/sources.js';
@@ -100,13 +101,16 @@ export const sourceRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     if (!before) throw new NotFoundError('Source not found');
     const row = await updateSource(db, id, sid, body, serviceOpts);
 
-    // A new content type — or a new text search configuration (ADR-0041) — has to reach files whose
-    // bytes did not change, so drop their hashes first. Both are spent after the hash comparison, on
-    // the way into the chunker and into `replaceDocument`, so an unchanged file would otherwise keep
-    // the lexemes the previous language produced. Under the project lock, so an index run in flight
-    // cannot write fresh hashes over the reset.
+    // A new content type — or a new text search configuration (ADR-0041), or a new version
+    // ([ADR-0058](../../.ssot/ADR.md#adr-0058)) — has to reach files whose bytes did not change, so
+    // drop their hashes first. All three are spent after the hash comparison, on the way into the
+    // chunker and into `replaceDocument`, so an unchanged file would otherwise keep the lexemes the
+    // previous language produced and the label the previous version set — and a source relabelled
+    // `v3` would go on answering `version: "v2"` searches until something else edited it. Under the
+    // project lock, so an index run in flight cannot write fresh hashes over the reset.
     const languageChanged = (row.config as { language?: unknown }).language !== (before.config as { language?: unknown }).language;
-    if (row.flavor !== before.flavor || languageChanged) await locks.runExclusive(id, () => invalidateSourceDocuments(db, sid));
+    const versionChanged = sourceVersion(row.config) !== sourceVersion(before.config);
+    if (row.flavor !== before.flavor || languageChanged || versionChanged) await locks.runExclusive(id, () => invalidateSourceDocuments(db, sid));
     // Settings that change what the source yields (path, branch, subdir, file types, content type)
     // only take effect on a run; queue one instead of leaving the source silently stale.
     if (row.flavor !== before.flavor || JSON.stringify(row.config) !== JSON.stringify(before.config)) indexer.enqueue(id);

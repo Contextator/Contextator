@@ -11,7 +11,9 @@
 // operator should be able to see that rather than infer it from a reordering.
 //
 // ADR-0042 adds the two things that change what comes back rather than how it is ordered: the source
-// and path-prefix filters an agent can pass, and the relevance floor. The floor is shown as a notice
+// and path-prefix filters an agent can pass, and the relevance floor. ADR-0058 adds the third filter,
+// `version`, for the same reason the first two are here: an operator comparing what two releases
+// answer has to be able to ask the question the agent asks. The floor is shown as a notice
 // *above* the hits rather than instead of them — an agent would have been refused, and the operator
 // asking why needs to see what was withheld.
 //
@@ -110,6 +112,7 @@ export function renderSearch(project) {
       el('div', { class: 'search-filters' }, [
         filter('source', 'source (optional)', 'Restrict to one source', '64'),
         filter('pathPrefix', 'path prefix (optional)', 'Restrict to a path prefix', '512'),
+        filter('version', 'version (optional)', 'Restrict to one release', '64'),
       ]),
     ],
   );
@@ -149,6 +152,7 @@ function resetSearch(projectId) {
     query: '',
     source: '',
     pathPrefix: '',
+    version: '',
     caret: 0,
     focused: false,
     status: 'idle',
@@ -241,6 +245,7 @@ async function run(project) {
     const params = new URLSearchParams({ q: query, limit: String(s.limit) });
     if (s.source.trim()) params.set('source', s.source.trim());
     if (s.pathPrefix.trim()) params.set('path_prefix', s.pathPrefix.trim());
+    if (s.version.trim()) params.set('version', s.version.trim());
     const result = await api(`/api/projects/${project.id}/search?${params}`);
     if (state.selectedId !== project.id) return; // selection moved on meanwhile
     s.hits = result.hits;
