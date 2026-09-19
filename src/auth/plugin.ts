@@ -5,7 +5,7 @@ import { ForbiddenError, UnauthorizedError } from '../services/errors.js';
 import { resolveProjectAccess } from '../services/auth/memberships.js';
 import { findSessionUser, touchSession } from '../services/auth/sessions.js';
 import { checkProjectAccess, checkRequest } from './authorize.js';
-import { PUBLIC_ROUTES } from './policy.js';
+import { auditCreatedTarget, auditReadsResponse, auditSubject, METRICS_ROUTE, PUBLIC_ROUTES } from './policy.js';
 import { clearSessionCookie, readSessionCookie } from './cookies.js';
 import type { Principal } from './types.js';
 
@@ -23,7 +23,7 @@ const TOKEN_PRINCIPAL: Principal = { kind: 'token', role: 'root', userId: null, 
 const readBearer = (header: string | undefined): string => (header?.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : '');
 
 /**
- * Identity and authorization for everything under /api/*, in two hooks.
+ * Identity and authorization for everything under /api/*, in three hooks.
  *
  * Called directly on the adminRoutes instance rather than registered as a plugin: `register()`
  * encapsulates, and an encapsulated `addHook` would apply to that child alone — which holds no
@@ -33,6 +33,8 @@ const readBearer = (header: string | undefined): string => (header?.startsWith('
  */
 export function installAuth(app: FastifyInstance, ctx: AppContext): void {
   const { config, db } = ctx;
+  /** Read once: it is the one credential in this file that is compared against a single route. */
+  const scrapeToken = config.METRICS_TOKEN;
 
   app.decorateRequest('principal', null); // must be a primitive: object defaults are shared between requests
   app.decorateRequest('projectAccess', null);
@@ -55,8 +57,16 @@ export function installAuth(app: FastifyInstance, ctx: AppContext): void {
       // that carries a cookie, and it answers the anonymous shape because that is all it knows
       // (ADR-0032). Everywhere else this stays the 500 it has always been — pretending the caller
       // is anonymous there would answer 401 and send a signed-in operator back to /login.
-      if (!PUBLIC_ROUTES.has(req.routeOptions.url ?? '')) throw err;
-      req.log.warn({ err }, 'could not resolve the session cookie; answering this public route anonymously');
+      // `/metrics` joins the public routes here and **only** here ([ADR-0055](../../.ssot/ADR.md#adr-0055)).
+      // A session is a row, so an unreachable database cannot confirm one — and this endpoint exists to
+      // be readable precisely while the database is unreachable. Throwing would answer the operator's
+      // own browser `500` on the one page that was supposed to tell them what is wrong. It opens
+      // nothing: the request continues *anonymous*, and the rule below then answers `401` unless
+      // `METRICS_PUBLIC` or a `METRICS_TOKEN` bearer says otherwise — which are exactly the two
+      // credentials that can be checked without the database.
+      const routeUrl = req.routeOptions.url ?? '';
+      if (!PUBLIC_ROUTES.has(routeUrl) && routeUrl !== METRICS_ROUTE) throw err;
+      req.log.warn({ err }, 'could not resolve the session cookie; answering this route anonymously');
       return;
     }
     if (!session) {
@@ -79,8 +89,24 @@ export function installAuth(app: FastifyInstance, ctx: AppContext): void {
   app.addHook('preHandler', async (req) => {
     const url = req.routeOptions.url ?? '';
     const verdict = checkRequest(
-      { method: req.method, url, headers: req.headers, host: req.host, principal: req.principal },
-      { allowedOrigins: config.ALLOWED_ORIGINS, needsSetup: ctx.setup.needsSetup, hasAdminToken: Boolean(config.ADMIN_TOKEN) },
+      {
+        method: req.method,
+        url,
+        headers: req.headers,
+        host: req.host,
+        principal: req.principal,
+        // Computed here because the comparison has to be constant-time and the policy layer holds no
+        // secrets; `checkRequest` is handed the answer, not the credential. Only for the one route it
+        // can open — two SHA-256 digests on every request to buy nothing would be a silly price.
+        metricsTokenPresented:
+          url === METRICS_ROUTE && scrapeToken !== undefined && timingSafeCompare(readBearer(req.headers.authorization), scrapeToken),
+      },
+      {
+        allowedOrigins: config.ALLOWED_ORIGINS,
+        needsSetup: ctx.setup.needsSetup,
+        hasAdminToken: Boolean(config.ADMIN_TOKEN),
+        metricsPublic: config.METRICS_PUBLIC,
+      },
     );
     if (verdict === 'ok') return;
 
@@ -89,6 +115,76 @@ export function installAuth(app: FastifyInstance, ctx: AppContext): void {
     const access = await resolveProjectAccess(db, req.principal!, id);
     checkProjectAccess(req.method, url, access);
     req.projectAccess = access;
+  });
+
+  // 3) What did they just change? Installed here, and by `oauthRoutes` on its own instance.
+  installAuditLog(app, ctx);
+}
+
+/**
+ * The audit log's two hooks ([ADR-0055](../../.ssot/ADR.md#adr-0055)).
+ *
+ * **Here rather than in the routes**, and that is the whole of the design: a call added per handler is
+ * as complete as the handler somebody forgot to add it to, while these hooks cover every route the
+ * instance they are installed on declares — including ones written after them.
+ *
+ * Exported because there are **two** such instances. `adminRoutes` is one; `oauthRoutes` is the other,
+ * and it has to be: approving a connector is a person granting a client lasting read access to one
+ * project, which is the same class of act as switching a project's MCP mode, and those routes are
+ * registered on the root app where `installAuth`'s hooks cannot reach them. One writer, two surfaces,
+ * one rule — rather than a second mechanism for the second surface.
+ *
+ * The actor is `req.auditActor` when the handler settled the identity itself (the OAuth approval, and
+ * the two routes that create the account they then act as), and `req.principal` otherwise.
+ */
+export function installAuditLog(app: FastifyInstance, ctx: AppContext): void {
+  /**
+   * The id of a created object, read back out of the response — the one thing the route template
+   * cannot supply, because a creating route names nothing in its path.
+   *
+   * `auditReadsResponse` is asked first so that no other response is deserialised at all, and
+   * `auditCreatedTarget` can only return a UUID found at a fixed path named in the policy table. A
+   * response body can therefore contribute an id to this table and nothing else — the same closed
+   * shape `AUDIT_DETAIL` gives the request body.
+   */
+  app.addHook('onSend', async (req, reply, payload) => {
+    if (reply.statusCode >= 400 || typeof payload !== 'string') return payload;
+    const url = req.routeOptions.url ?? '';
+    if (!auditReadsResponse(req.method, url)) return payload;
+    try {
+      req.auditTarget = auditCreatedTarget(req.method, url, JSON.parse(payload));
+    } catch {
+      // A response that is not JSON is a response this table learns nothing from. Never an error: the
+      // reply is already built and an audit detail must not be able to break one.
+    }
+    return payload;
+  });
+
+  /**
+   * `onResponse`, so two things are true: the reply has already gone, so nothing is waiting on the
+   * insert, and the status is known, so a request that was refused writes nothing. Only successes are
+   * recorded — a refusal is the permission matrix working, and `4xx` on every probe would turn this
+   * table into a scan log.
+   *
+   * `ctx.audit` owns the write and what happens when it fails; this hook decides *whether* there is
+   * an event and hands over the actor.
+   */
+  app.addHook('onResponse', async (req, reply) => {
+    const principal = req.auditActor ?? req.principal ?? null;
+    if (!principal || reply.statusCode >= 400) return;
+    const subject = auditSubject(req.method, req.routeOptions.url ?? '', (req.params ?? {}) as Record<string, unknown>, req.body);
+    if (!subject) return;
+    // The response-derived target only fills a gap; a route whose path names its target keeps it.
+    const created = subject.targetId ? null : (req.auditTarget ?? null);
+    ctx.audit.record(
+      {
+        ...subject,
+        projectId: subject.projectId ?? req.auditProjectId ?? null,
+        targetType: created?.type ?? subject.targetType,
+        targetId: created?.id ?? subject.targetId,
+      },
+      { principal, ip: req.ip || null, statusCode: reply.statusCode },
+    );
   });
 }
 

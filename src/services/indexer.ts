@@ -232,6 +232,18 @@ export class Indexer {
     return { position: this.interactive.length + scheduledAt, runningProjectId: this.current };
   }
 
+  /**
+   * The queue as `/metrics` reports it ([ADR-0055](../../.ssot/ADR.md#adr-0055)): the two lanes
+   * separately, because they drain by strict priority and one number for both would show a person
+   * waiting behind fifty timers as the same situation as fifty people waiting.
+   *
+   * Read from the arrays themselves rather than kept in a counter — a counter would be a second copy
+   * of the queue's length that whoever changed the queue would have to remember to update.
+   */
+  stats(): { interactive: number; scheduled: number; running: number } {
+    return { interactive: this.interactive.length, scheduled: this.scheduled.length, running: this.current === null ? 0 : 1 };
+  }
+
   isBusy(projectId: string): boolean {
     const job = this.jobs.get(projectId);
     return Boolean(job && ACTIVE_PHASES.has(job.phase));

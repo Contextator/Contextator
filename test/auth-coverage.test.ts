@@ -3,10 +3,20 @@ import cookie from '@fastify/cookie';
 import { describe, expect, it } from 'vitest';
 import { adminRoutes } from '../src/admin/routes.js';
 import { oauthRoutes } from '../src/mcp/oauth-routes.js';
-import { PUBLIC_ROUTES, isProjectScoped, requiredProjectAccess, requiredRole } from '../src/auth/policy.js';
+import {
+  AUDIT_EXEMPT_ROUTES,
+  METRICS_ROUTE,
+  PUBLIC_ROUTES,
+  auditSubject,
+  isProjectScoped,
+  requiredProjectAccess,
+  requiredRole,
+} from '../src/auth/policy.js';
 import type { AppContext } from '../src/context.js';
 import { SetupGate } from '../src/services/auth/setup.js';
 import { SlidingWindow } from '../src/services/rate-limit.js';
+import { MetricsRegistry } from '../src/services/metrics.js';
+import { AuditWriter } from '../src/services/audit.js';
 
 /**
  * Registering routes touches neither the database nor the embedding model — only a request would.
@@ -26,6 +36,10 @@ async function buildApi() {
     sessions: {},
     setup: new SetupGate(),
     loginLimiter: new SlidingWindow(10, 1000),
+    // Hollow like everything else here: this file reads the route table back and sends no request,
+    // so neither of these is ever reached.
+    metrics: new MetricsRegistry(),
+    audit: new AuditWriter({} as never, app.log),
     version: '0.0.0-test',
     startedAt: Date.now(),
   } as unknown as AppContext;
@@ -53,6 +67,24 @@ function routeTable(printed: string): Array<[string, string]> {
     for (const method of match.groups.methods.split(',').map((m) => m.trim())) out.push([method, url]);
   }
   return out;
+}
+
+/** The OAuth surface, on its own instance, because that is how `src/server.ts` registers it. */
+async function buildOauthApi() {
+  const app = Fastify();
+  await app.register(cookie);
+  const ctx = {
+    config: { ALLOWED_ORIGINS: [], AUTH_SESSION_IDLE_MS: 1000, MCP_OAUTH_MAX_CLIENTS: 200 },
+    db: {},
+    log: app.log,
+    // The audit hooks are installed on this instance too ([ADR-0055](../.ssot/ADR.md#adr-0055)); no
+    // test in this file sends a request that reaches them.
+    audit: new AuditWriter({} as never, app.log),
+    version: '0.0.0-test',
+  } as unknown as AppContext;
+  await app.register(oauthRoutes, { ctx });
+  await app.ready();
+  return app;
 }
 
 describe('every /api route is covered by the policy', () => {
@@ -118,6 +150,79 @@ describe('every /api route is covered by the policy', () => {
     // An exception for a route that does not exist is an exception that would silently outlive it.
     for (const url of MANAGER_READS) expect(urls.has(url)).toBe(true);
   });
+
+  /**
+   * `/metrics` ([ADR-0055](../.ssot/ADR.md#adr-0055)) is registered on this instance and is the one
+   * route here that is **not** under `/api/`, so the coverage test above does not see it. Named rather
+   * than left out: it is inside the policy layer's hooks precisely so that its rule is a rule, and
+   * "the coverage check skips it" should be a sentence somebody wrote rather than a gap.
+   */
+  it('registers the metrics route inside the policy layer, where its rule can apply', async () => {
+    const app = await buildApi();
+    const urls = new Set(routeTable(app.printRoutes({ commonPrefix: false })).map(([, url]) => url));
+    await app.close();
+    expect(urls.has(METRICS_ROUTE)).toBe(true);
+    expect(METRICS_ROUTE.startsWith('/api/')).toBe(false);
+    expect(PUBLIC_ROUTES.has(METRICS_ROUTE)).toBe(false);
+  });
+});
+
+/**
+ * **The claim that auditing cannot be forgotten, checked against the routes the server really has.**
+ *
+ * `test/permissions.test.ts` asserts the rule; this asserts the rule's reach. Every unsafe method the
+ * admin API registers is walked out of Fastify's own route table and has to be either an audit event
+ * or a named exemption — so a route added next month is covered the day it is registered, and a route
+ * somebody wants left out has to be argued for in `AUDIT_EXEMPT_ROUTES` where the reason is written.
+ */
+describe('every state-changing /api route leaves a record', () => {
+  it('records each of them, or names it in the exemption list with its reason', async () => {
+    const app = await buildApi();
+    const table = routeTable(app.printRoutes({ commonPrefix: false }));
+    await app.close();
+
+    const writes = table.filter(([method, url]) => url.startsWith('/api/') && !['GET', 'HEAD', 'OPTIONS'].includes(method));
+    // Guard the parser, as the coverage test above does: a walk that produced nothing would make
+    // every claim below vacuously true.
+    expect(writes.length).toBeGreaterThan(15);
+
+    const unrecorded = writes.filter(([method, url]) => auditSubject(method, url, {}, undefined) === null);
+    expect(unrecorded.map(([, url]) => url).sort()).toEqual([...AUDIT_EXEMPT_ROUTES].filter((url) => writes.some(([, u]) => u === url)).sort());
+  });
+
+  it('exempts nothing that is not a route, so a stale exemption cannot outlive what it excused', async () => {
+    const app = await buildApi();
+    const admin = new Set(routeTable(app.printRoutes({ commonPrefix: false })).map(([, url]) => url));
+    await app.close();
+    const oauth = await buildOauthApi();
+    const oauthUrls = new Set(routeTable(oauth.printRoutes({ commonPrefix: false })).map(([, url]) => url));
+    await oauth.close();
+    // The two webhook routes are registered by a third plugin this file does not build; everything
+    // else named in the list has to exist on one of the two surfaces the audit hooks are installed on.
+    const webhooks = ['/api/webhooks/git/:sourceId', '/api/webhooks/notion/:sourceId'];
+    for (const url of AUDIT_EXEMPT_ROUTES) {
+      if (webhooks.includes(url)) continue;
+      expect(admin.has(url) || oauthUrls.has(url)).toBe(true);
+    }
+  });
+
+  /**
+   * The OAuth surface, walked the same way. It is the second instance the audit hooks are installed
+   * on, so the same claim has to hold there: every unsafe method it registers is either an event or a
+   * named exemption. Without this the three `/oauth/*` exemptions would be words in a comment.
+   */
+  it('covers the OAuth surface by the same rule, not by falling outside it', async () => {
+    const oauth = await buildOauthApi();
+    const table = routeTable(oauth.printRoutes({ commonPrefix: false }));
+    await oauth.close();
+
+    const writes = table.filter(([method, url]) => url.startsWith('/oauth/') && !['GET', 'HEAD', 'OPTIONS'].includes(method));
+    expect(writes.length).toBeGreaterThan(2);
+    const unrecorded = writes.filter(([method, url]) => auditSubject(method, url, {}, undefined) === null).map(([, url]) => url);
+    expect(unrecorded.sort()).toEqual(['/oauth/register', '/oauth/revoke', '/oauth/token']);
+    // And the one that is recorded is the one the whole exercise is about.
+    expect(auditSubject('POST', '/oauth/authorize', {}, { decision: 'approve' })).not.toBeNull();
+  });
 });
 
 /**
@@ -148,19 +253,7 @@ describe('the OAuth surface is enumerated rather than assumed', () => {
     'POST /oauth/revoke': 'the credential being revoked is the credential presented',
   };
 
-  async function buildOauth() {
-    const app = Fastify();
-    await app.register(cookie);
-    const ctx = {
-      config: { ALLOWED_ORIGINS: [], AUTH_SESSION_IDLE_MS: 1000, MCP_OAUTH_MAX_CLIENTS: 200 },
-      db: {},
-      log: app.log,
-      version: '0.0.0-test',
-    } as unknown as AppContext;
-    await app.register(oauthRoutes, { ctx });
-    await app.ready();
-    return app;
-  }
+  const buildOauth = buildOauthApi;
 
   it('registers exactly the routes that have been argued for, and nothing under /api/', async () => {
     const app = await buildOauth();

@@ -12,6 +12,7 @@ import {
 import type { DocumentRow, ProjectRow } from '../db/schema.js';
 import { chunksWithinBudget, joinChunks, truncateToTokens } from '../services/document-read.js';
 import { normalizeRelativePath } from '../services/fs-scan.js';
+import type { SearchCounter } from '../services/metrics.js';
 import { getProjectById } from '../services/projects.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { SOURCE_VERSION_MAX_LENGTH, listSources } from '../services/sources.js';
@@ -102,7 +103,14 @@ function decodeCursor(cursor: string): string | null {
  * server hands them the composition root; a test hands them four fields and a stub provider, which is
  * the difference between a tool contract that can be exercised and one that can only be deployed.
  */
-export type ToolContext = Pick<AppContext, 'db' | 'embeddings' | 'config' | 'log' | 'queryLog'>;
+export type ToolContext = Pick<AppContext, 'db' | 'embeddings' | 'config' | 'log' | 'queryLog'> & {
+  /**
+   * Where a search is counted for `/metrics` ([ADR-0055](../../.ssot/ADR.md#adr-0055)). Optional for
+   * `queryLog`'s reason: a test that hands this function four fields and a stub provider must not have
+   * to build a counter registry to get a tool answered.
+   */
+  metrics?: SearchCounter;
+};
 
 /**
  * Registers the per-project tool set on a fresh McpServer instance. Handlers never throw; failures come
@@ -171,6 +179,9 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
     },
     async ({ query, limit, source, path_prefix, version }) => {
       try {
+        // Counted before the search rather than after it, so a search that threw is still a search
+        // somebody asked for ([ADR-0055](../../.ssot/ADR.md#adr-0055)).
+        ctx.metrics?.countSearch('mcp');
         // The guards, the query embedding and the top-k query are services/search.ts; what is left
         // here is the wording, which is prompt-visible and belongs to the tool.
         const outcome = await searchProject(

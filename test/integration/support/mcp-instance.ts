@@ -10,11 +10,14 @@ import { adminRoutes } from '../../../src/admin/routes.js';
 import { oauthRoutes } from '../../../src/mcp/oauth-routes.js';
 import { mcpRoutes } from '../../../src/mcp/router.js';
 import { SessionRegistry } from '../../../src/mcp/sessions.js';
+import { KeyedMutex } from '../../../src/services/locks.js';
 import { SlidingWindow } from '../../../src/services/rate-limit.js';
 import { chunkMarkdown, embeddingText, estimateTokens } from '../../../src/services/chunker.js';
 import type { EmbeddingProvider } from '../../../src/services/embeddings/provider.js';
 import { replaceDocument, storedDocumentContent, type NewChunk } from '../../../src/services/vector-store.js';
 import { silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './postgres.js';
+import { MetricsRegistry } from '../../../src/services/metrics.js';
+import { AuditWriter } from '../../../src/services/audit.js';
 
 /**
  * A real Contextator MCP endpoint on a real port, for the two suites that have to drive a real MCP
@@ -139,18 +142,35 @@ export async function startMcpInstance(database: TestDatabase, opts: { dataDir: 
     SEARCH_SCORE_FLOOR: '0',
   });
 
+  // Built before the context so the writer can report into the registry, exactly as `src/server.ts`
+  // wires the two: `contextator_audit_events_total{outcome="failed"}` is only a real number if the
+  // thing that fails is the thing that counts.
+  const metrics = new MetricsRegistry(database.pool);
+
   const ctx = {
     config,
     db: database.db,
     log: silentLogger,
     embeddings: stubEmbeddings,
     chunkBudget: { checked: true },
-    indexer: {},
-    locks: {},
+    // The two questions the admin routes registered here actually ask of the indexer: whether a
+    // project is busy — which a source deletion refuses on — and the queue depth `/metrics` reports.
+    // Nothing in these suites indexes anything, so there is no queue to have and both are constants.
+    indexer: { isBusy: () => false, stats: () => ({ interactive: 0, scheduled: 0, running: 0 }) },
+    // Real, because a source deletion takes the project's lock and a stub would either deadlock or
+    // quietly skip the thing the lock is there for.
+    locks: new KeyedMutex(),
     uploads: {},
     sessions: new SessionRegistry(silentLogger),
     setup: { needsSetup: false },
     loginLimiter: new SlidingWindow(100, 60_000),
+    // The process counters `/metrics` reports ([ADR-0055](../../.ssot/ADR.md#adr-0055)). Real rather
+    // than stubbed — it is a handful of integers, and the pool it was handed is the one the test
+    // database opened, so the pool gauges are real too.
+    metrics,
+    // A real writer, because the policy layer's `onResponse` hook calls it on every successful write
+    // and `settled()` is what lets a test await the row instead of polling for it.
+    audit: new AuditWriter(database.db, silentLogger, (outcome) => metrics.countAudit(outcome)),
     version: '0.0.0-test',
     startedAt: Date.now(),
   } as unknown as AppContext;

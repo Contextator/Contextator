@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { installAuth } from '../auth/plugin.js';
+import { METRICS_ROUTE } from '../auth/policy.js';
 import type { Principal } from '../auth/types.js';
 import { MAX_SEARCH_LIMIT, SYNC_MAX_INTERVAL_MINUTES, SYNC_MIN_INTERVAL_MINUTES, WEBHOOK_VERIFICATION_WINDOW_MINUTES } from '../config.js';
 import type { AppContext } from '../context.js';
@@ -10,7 +11,8 @@ import { SecretDecryptError, SecretKeyMissingError } from '../services/crypto.js
 import { removeProjectDir } from '../services/data-dir.js';
 import { ForbiddenError, RateLimitedError, SearchUnavailableError, UnauthorizedError } from '../services/errors.js';
 import { PathNotAllowedError } from '../services/fs-scan.js';
-import { listIndexRuns } from '../services/index-runs.js';
+import { latestIndexRun, listIndexRuns } from '../services/index-runs.js';
+import { type MetricsSnapshot, renderPrometheus } from '../services/metrics.js';
 import { PasswordPolicyError } from '../services/passwords.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { listProjectsForUser, membershipMap } from '../services/auth/memberships.js';
@@ -223,6 +225,48 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     };
   });
 
+  /**
+   * The Prometheus exposition ([ADR-0055](../../.ssot/ADR.md#adr-0055)).
+   *
+   * Registered here rather than on the root app **so that it is inside the policy layer**: the hooks
+   * `installAuth` put on this instance are what decide who may read it, and a route registered outside
+   * them would be a route the permission matrix does not govern. Its rule is the one rule in that
+   * matrix that reads a setting — `METRICS_PUBLIC`, or a `METRICS_TOKEN` bearer — and failing both it
+   * is an ordinary authenticated route that any account reaches.
+   *
+   * It answers `200` even when the database does not, with `contextator_db_up 0` and the rows that
+   * need a database left out. A scrape that failed would produce a gap in the series the operator is
+   * trying to read at exactly the moment they need it, and "up" is what `contextator_db_up` is for.
+   */
+  app.get(METRICS_ROUTE, async (_req, reply) => {
+    const dbUp = await pingDb(db);
+    // Skipped while the database is down rather than attempted and caught: one failing statement per
+    // scrape, every fifteen seconds, is a log nobody can read past.
+    const lastRun = dbUp ? await latestIndexRun(db).catch(() => undefined) : undefined;
+    const gauges = ctx.metrics.gauges();
+    const snapshot: MetricsSnapshot = {
+      version: ctx.version,
+      uptimeSeconds: Math.round((Date.now() - ctx.startedAt) / 1000),
+      embeddingId: embeddings.id,
+      embeddingReady: embeddings.ready,
+      dbUp,
+      pool: gauges.pool,
+      queue: indexer.stats(),
+      lastIndexRun: lastRun
+        ? {
+            finishedAtSeconds: Math.round(lastRun.finishedAt.getTime() / 1000),
+            durationSeconds: lastRun.durationMs / 1000,
+            ok: lastRun.status === 'done',
+          }
+        : null,
+      searches: gauges.searches,
+      audit: gauges.audit,
+    };
+    // The content type the exposition format names. A scraper reads it either way; a person opening
+    // the URL in a browser gets text rather than a download, which is the reason to be exact.
+    return reply.header('content-type', 'text/plain; version=0.0.4; charset=utf-8').send(renderPrometheus(snapshot));
+  });
+
   app.get('/api/projects', async (req) => {
     const principal = req.principal as Principal;
     const member = principal.kind === 'session' && principal.role === 'member' ? principal.userId : null;
@@ -251,6 +295,11 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
   app.get('/api/projects/:id/search', async (req) => {
     const { id } = IdParams.parse(req.params);
     const { q, limit, source, path_prefix, version } = SearchQuery.parse(req.query);
+    // Counted here and in the MCP tool rather than inside `searchProject`, so that the one search path
+    // ([ADR-0042](../../.ssot/ADR.md#adr-0042)) keeps exactly the dependencies it has and the eval
+    // harness, which calls it directly, goes on counting nothing. `dashboard` for the reason the query
+    // log records it that way: an operator testing their own corpus is not an agent asking a question.
+    ctx.metrics.countSearch('dashboard');
     const outcome = await searchProject(
       // The floor is passed here as well as to the tool, because this panel is the operator's view of
       // what the agent sees and a search that would be refused has to look refused (ADR-0042). The

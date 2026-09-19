@@ -1,7 +1,16 @@
 import { ForbiddenError, UnauthorizedError } from '../services/errors.js';
 import { NotFoundError } from '../services/projects.js';
 import { SAFE_METHODS, isSameSiteRequest } from './csrf.js';
-import { PASSWORD_CHANGE_ALLOWED, PUBLIC_ROUTES, isProjectScoped, requiredProjectAccess, requiredRole, roleAtLeast, satisfies } from './policy.js';
+import {
+  METRICS_ROUTE,
+  PASSWORD_CHANGE_ALLOWED,
+  PUBLIC_ROUTES,
+  isProjectScoped,
+  requiredProjectAccess,
+  requiredRole,
+  roleAtLeast,
+  satisfies,
+} from './policy.js';
 import type { Principal, ProjectAccess } from './types.js';
 
 export interface RequestFacts {
@@ -13,6 +22,12 @@ export interface RequestFacts {
   principal: Principal | null;
   /** Resolved only for project-scoped routes, and only after the checks that do not need it. */
   projectAccess?: ProjectAccess;
+  /**
+   * Whether this request carried `METRICS_TOKEN` as its bearer, already compared in constant time by
+   * `src/auth/plugin.ts`. The answer travels here rather than the credential: this file holds no
+   * secrets and compares nothing, which is what lets the whole decision be a unit test.
+   */
+  metricsTokenPresented?: boolean;
 }
 
 export interface AuthorizeEnv {
@@ -20,6 +35,8 @@ export interface AuthorizeEnv {
   /** Before the first account exists, "unauthorized" is the wrong thing to say. */
   needsSetup: boolean;
   hasAdminToken: boolean;
+  /** `METRICS_PUBLIC=1` — the deployment says its network already decides who may scrape (ADR-0055). */
+  metricsPublic?: boolean;
 }
 
 /**
@@ -32,6 +49,13 @@ export interface AuthorizeEnv {
  */
 export function checkRequest(facts: RequestFacts, env: AuthorizeEnv): 'ok' | 'needs-project-access' {
   if (PUBLIC_ROUTES.has(facts.url)) return 'ok';
+
+  // `/metrics` ([ADR-0055](../../.ssot/ADR.md#adr-0055)). Two ways past the credential, both of them
+  // something an operator had to write down, and neither of them the default: the instance declaring
+  // that its network decides, or a dedicated scrape token that opens this route and nothing else.
+  // Failing both it falls through to the ordinary rules below, where any signed-in account reads it —
+  // there is no `requiredRole` row, because these numbers describe the process and not any project.
+  if (facts.url === METRICS_ROUTE && (env.metricsPublic || facts.metricsTokenPresented)) return 'ok';
 
   const principal = facts.principal;
   if (!principal) {

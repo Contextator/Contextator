@@ -17,6 +17,8 @@ import type { EmbeddingProvider } from '../../src/services/embeddings/provider.j
 import { SlidingWindow } from '../../src/services/rate-limit.js';
 import { type NewChunk, replaceDocument, searchChunks } from '../../src/services/vector-store.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
+import { MetricsRegistry } from '../../src/services/metrics.js';
+import { AuditWriter } from '../../src/services/audit.js';
 
 /**
  * `GET /api/projects/:id/search` end to end: the policy hook, the guards in services/search.ts, the
@@ -151,6 +153,12 @@ async function buildApi(db: Db): Promise<FastifyInstance> {
     sessions: new SessionRegistry(silentLogger),
     setup: new SetupGate(),
     loginLimiter: new SlidingWindow(10, 1000),
+    // The process counters `/metrics` reports ([ADR-0055](../../.ssot/ADR.md#adr-0055)). Real rather
+    // than stubbed: it is a handful of integers and the audit hook increments one on every write.
+    metrics: new MetricsRegistry(),
+    // A real writer, because the policy layer's `onResponse` hook calls it on every successful
+    // write and `settled()` is what lets a test await the row instead of polling for it.
+    audit: new AuditWriter(db, silentLogger),
     version: '0.0.0-test',
     startedAt: Date.now(),
   } as unknown as AppContext;

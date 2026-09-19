@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AUDIT_EXEMPT_ROUTES,
   MCP_READ_ACCESS,
+  METRICS_ROUTE,
   PASSWORD_CHANGE_ALLOWED,
   PUBLIC_ROUTES,
   accessFromMembership,
+  auditCreatedTarget,
+  auditReadsResponse,
+  auditSubject,
   canActOnRole,
   canManageUsers,
   isProjectScoped,
@@ -12,6 +17,7 @@ import {
   roleAtLeast,
   satisfies,
 } from '../src/auth/policy.js';
+import { checkRequest } from '../src/auth/authorize.js';
 import { mcpAccessDecision } from '../src/mcp/access.js';
 import type { McpAuthMode } from '../src/db/schema.js';
 import type { Principal, ProjectAccess } from '../src/auth/types.js';
@@ -119,6 +125,14 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'POST', url: '/api/projects/import', actor: as('admin'), membership: null, allowed: true },
   { method: 'POST', url: '/api/projects/import', actor: as('root'), membership: null, allowed: true },
   { method: 'POST', url: '/api/projects/import', actor: token, membership: null, allowed: true },
+
+  // `/metrics` ([ADR-0055](../.ssot/ADR.md#adr-0055)). It asks for no role and no membership — the
+  // numbers describe the process, not a project — so an ordinary `member` reads it. The refusal that
+  // matters is the one no row in this table can state, because it is about holding *no* credential at
+  // all; it is asserted against `checkRequest` below.
+  { method: 'GET', url: METRICS_ROUTE, actor: as('member'), membership: null, allowed: true },
+  { method: 'GET', url: METRICS_ROUTE, actor: as('admin'), membership: null, allowed: true },
+  { method: 'GET', url: METRICS_ROUTE, actor: token, membership: null, allowed: true },
 
   // Membership: anyone on the project sees who else is; only root/admin change it.
   { method: 'GET', url: '/api/projects/:id/members', actor: as('member'), membership: 'viewer', allowed: true },
@@ -328,6 +342,228 @@ describe('user management', () => {
     expect(canActOnRole(as('admin'), 'admin')).toBe(true);
     expect(canActOnRole(as('admin'), 'member')).toBe(true);
     expect(canActOnRole(token, 'root')).toBe(true);
+  });
+});
+
+/**
+ * `/metrics` ([ADR-0055](../.ssot/ADR.md#adr-0055)), which is the one route in this product whose rule
+ * reads a *setting*. The decision it encodes is that a scrape is not public by default — the exposition
+ * names the version, the model, the queue and the pool, which is a description of the instance — and
+ * that closing it must not mean handing Prometheus an `ADMIN_TOKEN` that acts with root permissions.
+ *
+ * Every row here has its twin: each way in is asserted to open it, and asserted to be *needed*, because
+ * a test that only proved the three positives would pass just as happily on a build that let everyone in.
+ */
+describe('the metrics endpoint', () => {
+  const env = { allowedOrigins: [], needsSetup: false, hasAdminToken: true };
+  const ask = (facts: { principal?: Principal | null; metricsTokenPresented?: boolean }, metricsPublic = false) =>
+    checkRequest(
+      {
+        method: 'GET',
+        url: METRICS_ROUTE,
+        headers: {},
+        host: 'localhost',
+        principal: facts.principal ?? null,
+        metricsTokenPresented: facts.metricsTokenPresented,
+      },
+      { ...env, metricsPublic },
+    );
+
+  it('refuses a caller holding nothing, which is the whole reason it is not in PUBLIC_ROUTES', () => {
+    expect(PUBLIC_ROUTES.has(METRICS_ROUTE)).toBe(false);
+    expect(() => ask({})).toThrow();
+  });
+
+  it('answers a scrape token, and only while one is configured', () => {
+    expect(ask({ metricsTokenPresented: true })).toBe('ok');
+    // The flag is computed from `METRICS_TOKEN` in src/auth/plugin.ts, so `false` here is both "no
+    // token configured" and "the wrong one was presented". Both are the same refusal.
+    expect(() => ask({ metricsTokenPresented: false })).toThrow();
+  });
+
+  it('answers anybody once METRICS_PUBLIC is on, and nobody until it is', () => {
+    expect(ask({}, true)).toBe('ok');
+    expect(() => ask({}, false)).toThrow();
+  });
+
+  it('answers an ordinary signed-in account with neither of those, and asks for no role', () => {
+    expect(ask({ principal: as('member') })).toBe('ok');
+    expect(ask({ principal: token })).toBe('ok');
+    expect(requiredRole('GET', METRICS_ROUTE)).toBeNull();
+    // Not project-scoped, so no membership is ever resolved for it.
+    expect(isProjectScoped(METRICS_ROUTE)).toBe(false);
+  });
+});
+
+/**
+ * The audit log's rule ([ADR-0055](../.ssot/ADR.md#adr-0055)), which is **the permission table's shape
+ * turned round**: auditing is the default and the exemptions are the list, so a route added next month
+ * is recorded without anybody remembering to record it.
+ *
+ * The assertions that carry the decision are the ones about routes that do *not* exist. A table of
+ * audited routes would pass a test listing the routes it contains; this one is asserted against a path
+ * nobody has registered, because that is the property being claimed.
+ */
+describe('what the audit log records', () => {
+  const subject = (method: string, url: string, params: Record<string, unknown> = {}, body?: unknown) => auditSubject(method, url, params, body);
+
+  it('records an unsafe method on a route nobody has written yet, and no safe one', () => {
+    expect(subject('POST', '/api/projects/:id/something-nobody-has-built')?.action).toBe('POST /api/projects/:id/something-nobody-has-built');
+    expect(subject('DELETE', '/api/projects/:id/something-nobody-has-built')).not.toBeNull();
+    // A read changes nothing, so there is nothing to attribute. This is what keeps the table from
+    // becoming a traffic log — and `GET /api/projects/:id/export` is the case that proves it matters,
+    // since that one is a `manager`'s and still records nothing here.
+    expect(subject('GET', '/api/projects/:id/export')).toBeNull();
+    expect(subject('HEAD', '/api/projects/:id')).toBeNull();
+  });
+
+  it('leaves alone what is not the admin API at all', () => {
+    expect(subject('POST', '/mcp/:project')).toBeNull();
+    expect(subject('POST', '/oauth/token')).toBeNull();
+  });
+
+  it('exempts exactly seven routes, and each of them for a reason written beside it', () => {
+    expect([...AUDIT_EXEMPT_ROUTES].sort()).toEqual([
+      '/api/projects/:id/sources/:sid/test',
+      '/api/projects/:id/sources/:sid/uploads/:session/files',
+      '/api/webhooks/git/:sourceId',
+      '/api/webhooks/notion/:sourceId',
+      '/oauth/register',
+      '/oauth/revoke',
+      '/oauth/token',
+    ]);
+    for (const url of AUDIT_EXEMPT_ROUTES) expect(subject('POST', url)).toBeNull();
+    // And the one they are exempted *against*: the commit is what changes the project, and it is
+    // recorded, which is the reason recording each staged file would be noise rather than evidence.
+    expect(subject('POST', '/api/projects/:id/sources/:sid/uploads/:session/commit')).not.toBeNull();
+  });
+
+  /**
+   * **The OAuth surface is inside the rule, not beside it.** Approving a connector is a person granting
+   * a client lasting read access to one project — the `PATCH /api/projects/:id/mcp-auth` class of act,
+   * and the moment [ADR-0054](../.ssot/ADR.md#adr-0054)'s "credential that names a person" is created.
+   * The three that are not recorded are named in the exemption list above with their reasons, which is
+   * the difference between an exemption and a gap.
+   */
+  it('records the approval of a connector, and says why the rest of the flow is not recorded', () => {
+    const approval = subject('POST', '/oauth/authorize', {}, { decision: 'approve' });
+    expect(approval?.action).toBe('POST /oauth/authorize');
+    // The substance: which way the person decided. The only closed-set field on this route.
+    expect(approval?.detail).toEqual({ decision: 'approve' });
+    expect(subject('POST', '/oauth/authorize', {}, { decision: 'deny' })?.detail).toEqual({ decision: 'deny' });
+    // A value outside the set — including the redirect URI and the state the body also carries.
+    expect(subject('POST', '/oauth/authorize', {}, { decision: 'maybe', redirect_uri: 'https://c.example/cb' })?.detail).toEqual({});
+    // Reading the approval page changes nothing, so it is not an event.
+    expect(subject('GET', '/oauth/authorize')).toBeNull();
+    // And the three machine endpoints are silent *by name*, not by falling outside the rule.
+    for (const url of ['/oauth/register', '/oauth/token', '/oauth/revoke']) {
+      expect(AUDIT_EXEMPT_ROUTES.has(url)).toBe(true);
+      expect(subject('POST', url)).toBeNull();
+    }
+  });
+
+  /**
+   * **Sign-in and first-run setup are recorded**, and that took removing them from the exemption list
+   * rather than adding a call: both create the identity they act as, so the handler names the actor it
+   * turned into and the one writer stays one writer. Without them the table would hold logouts and no
+   * sign-ins, and the record it would have been deferring to — `users.last_login_at` — is one column
+   * overwritten on every sign-in rather than a history of them.
+   */
+  it('records a sign-in and the creation of the first account', () => {
+    expect(subject('POST', '/api/auth/login')?.action).toBe('POST /api/auth/login');
+    expect(subject('POST', '/api/setup')?.action).toBe('POST /api/setup');
+    expect(AUDIT_EXEMPT_ROUTES.has('/api/auth/login')).toBe(false);
+    expect(AUDIT_EXEMPT_ROUTES.has('/api/setup')).toBe(false);
+    // Neither may record anything of what was posted — both bodies carry a password.
+    expect(subject('POST', '/api/auth/login', {}, { username: 'dana', password: 'a-real-password' })?.detail).toEqual({});
+    expect(subject('POST', '/api/setup', {}, { code: 'SETUP-CODE', password: 'a-real-password' })?.detail).toEqual({});
+  });
+
+  /**
+   * **A creating route names nothing in its path**, so the id of what it created is read back out of
+   * the response — through a table of fixed paths, and only when the value found there is a UUID.
+   * Those two together are why a response body can contribute an id to `audit_events` and nothing else.
+   */
+  it('takes the created id from the response, and only a UUID at a declared path', () => {
+    const id = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
+    expect(auditCreatedTarget('POST', '/api/projects/:id/mcp-tokens', { token: { id }, secret: 'ctxm_the-secret' })).toEqual({
+      type: 'tokenId',
+      id,
+    });
+    expect(auditCreatedTarget('POST', '/api/users', { user: { id }, temporaryPassword: 'a-temporary-password' })).toEqual({ type: 'userId', id });
+    expect(auditCreatedTarget('POST', '/api/projects', { id, name: 'handbook' })).toEqual({ type: 'projectId', id });
+    expect(auditCreatedTarget('POST', '/api/projects/:id/sources', { id, name: 'handbook' })).toEqual({ type: 'sid', id });
+    expect(auditCreatedTarget('POST', '/api/projects/import', { projectId: id })).toEqual({ type: 'projectId', id });
+    expect(auditCreatedTarget('POST', '/api/setup', { user: { id } })).toEqual({ type: 'userId', id });
+
+    // A route nobody declared reads nothing, whatever its response holds.
+    expect(auditCreatedTarget('POST', '/api/projects/:id/reindex', { id })).toBeNull();
+    // The declared path and nothing else: the same value one key over is not found.
+    expect(auditCreatedTarget('POST', '/api/users', { id })).toBeNull();
+    // And it has to be a UUID, which is what stops a name or a secret from landing in `target_id`.
+    expect(auditCreatedTarget('POST', '/api/projects', { id: 'handbook' })).toBeNull();
+    expect(auditCreatedTarget('POST', '/api/projects/:id/mcp-tokens', { token: { id: 'ctxm_a-minted-secret' } })).toBeNull();
+    expect(auditCreatedTarget('POST', '/api/projects', null)).toBeNull();
+  });
+
+  it('asks to read a response only for the routes that create something', () => {
+    expect(auditReadsResponse('POST', '/api/projects/:id/mcp-tokens')).toBe(true);
+    // Every other response is never deserialised at all, which is both the cost argument and the
+    // reason nothing else can be extracted from one.
+    expect(auditReadsResponse('POST', '/api/projects/:id/reindex')).toBe(false);
+    expect(auditReadsResponse('GET', '/api/projects')).toBe(false);
+    expect(auditReadsResponse('DELETE', '/api/projects/:id/sources/:sid')).toBe(false);
+  });
+
+  it('names the project from the path and the target from the route template, not from the body', () => {
+    const event = subject('DELETE', '/api/projects/:id/sources/:sid', { id: 'p-1', sid: 's-9' });
+    expect(event).toEqual({ action: 'DELETE /api/projects/:id/sources/:sid', projectId: 'p-1', targetType: 'sid', targetId: 's-9', detail: {} });
+    // An instance route has no project, and its own `:id` is the target rather than a project id.
+    expect(subject('DELETE', '/api/users/:id', { id: 'u-3' })).toEqual({
+      action: 'DELETE /api/users/:id',
+      projectId: null,
+      targetType: 'id',
+      targetId: 'u-3',
+      detail: {},
+    });
+  });
+
+  /**
+   * **The assertion the privacy page rests on.** `search_queries` holds what people typed; this table
+   * holds what an operator did, and the separation is only real if no request body can put text in it.
+   * The allowlist is the mechanism, so it is tested as one: a named field with a value outside its set
+   * is dropped, and a field nobody named is dropped whatever it holds.
+   */
+  it('cannot be made to store user content, whatever the body says', () => {
+    const body = {
+      mode: 'account',
+      query: 'how do I rotate the signing key',
+      secret: 'ctxm_lookslikeacredential',
+      note: 'a paragraph somebody typed',
+    };
+    expect(subject('PATCH', '/api/projects/:id/mcp-auth', { id: 'p-1' }, body)?.detail).toEqual({ mode: 'account' });
+    // A value outside the closed set is not a value this table can hold, even under a named field.
+    expect(subject('PATCH', '/api/projects/:id/mcp-auth', { id: 'p-1' }, { mode: 'something-new' })?.detail).toEqual({});
+    // And a route that names no fields at all records none, whatever it was sent.
+    expect(subject('POST', '/api/projects/:id/reindex', { id: 'p-1' }, body)?.detail).toEqual({});
+    expect(subject('POST', '/api/auth/password', {}, { password: 'a-real-password' })?.detail).toEqual({});
+  });
+
+  it('keeps the boolean of the query-log switch a boolean, and the roles a closed set', () => {
+    expect(subject('PATCH', '/api/projects/:id/query-log', { id: 'p-1' }, { enabled: false })?.detail).toEqual({ enabled: false });
+    expect(subject('PUT', '/api/projects/:id/members/:userId', { id: 'p-1', userId: 'u-2' }, { role: 'editor' })?.detail).toEqual({ role: 'editor' });
+    // `manager` is a `ProjectAccess`, not a membership role, and must not be recordable as one.
+    expect(subject('PUT', '/api/projects/:id/members/:userId', { id: 'p-1', userId: 'u-2' }, { role: 'manager' })?.detail).toEqual({});
+  });
+
+  it('records the three acts the log exists for, each with the project it happened on', () => {
+    for (const [method, url] of [
+      ['DELETE', '/api/projects/:id/sources/:sid'],
+      ['POST', '/api/projects/:id/mcp-tokens'],
+      ['PATCH', '/api/projects/:id/mcp-auth'],
+    ] as const) {
+      expect(subject(method, url, { id: 'p-1', sid: 's-9' })?.projectId).toBe('p-1');
+    }
   });
 });
 

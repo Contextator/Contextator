@@ -72,6 +72,35 @@ vulnerabilities, and a report about one of them will be closed with a link back 
   Anyone who can add a source can already point the server at a host; that is what the `editor` rule
   and the deployment assumption are for. A way to make the server contact an address **without** an
   editor's source would be a vulnerability.
+- **`/metrics` needs a credential, and `METRICS_PUBLIC=1` removes it.** The default is closed on purpose:
+  the exposition names this instance's version, its embedding model, how many projects are queued and how
+  deep its database pool is, which is a description of the machine to anyone who can reach the port. It
+  answers a signed-in account of any role, `ADMIN_TOKEN`, or a `METRICS_TOKEN` bearer — a dedicated scrape
+  credential that reaches this one path and nothing else, so scraping never means handing Prometheus a
+  token with root permissions. Opening it with `METRICS_PUBLIC=1` for a private network or behind a proxy
+  that already guards the path is a deployment's decision to make; a way to read `/metrics` **without**
+  one of those four is a vulnerability. No metric names a project, a document or a query.
+- **`/metrics` is not rate-limited and `METRICS_TOKEN` has no lockout**, exactly as `/mcp/*` and
+  `ADMIN_TOKEN` are not. `min(16)` on that setting is a length floor and not an entropy requirement, so
+  generate it the way you would any other secret (`openssl rand -hex 32`); what bounds guessing is the
+  credential's own entropy and the network boundary, and the comparison is constant-time. With
+  `METRICS_PUBLIC=1` each anonymous scrape additionally costs two database round trips, which is a thing
+  to know before exposing the port rather than a defect in the endpoint.
+- **A request that changed something and then answered `5xx` leaves no audit row.** The row is written
+  only for a response under 400, because the alternative — recording a request whose outcome the server
+  itself could not determine — would put "this may or may not have happened" in a table whose value is
+  that it is not that. No handler in this API currently commits and can then fail (the one that looked
+  like it, `DELETE /api/projects/:id`, closes MCP sessions through a registry that swallows and logs per
+  session), so the gap is a property of the design rather than a live case. A handler that does become
+  shaped that way is a bug to fix in the handler.
+- **The IP recorded beside an audit event is not evidence of who acted.** Every state-changing admin
+  request that succeeds is recorded in `audit_events` with the account that made it, and `actor_ip`
+  is stored next to that account. Fastify runs with `trustProxy: true`, so the value is the left-most
+  `X-Forwarded-For` — **which the client writes whenever the server is reachable directly**, exactly as
+  the sign-in rate limit's key is (see the threat table in `.ssot/SECURITY.md`, T7). The actor is the
+  account the policy layer resolved from a session cookie or a bearer credential; the address is a hint
+  beside it. Pinning `trustProxy` to the proxy in front of this instance is not something this product
+  currently exposes, and that is a known limit rather than scheduled work.
 - **`/mcp/*` is not rate-limited**, and `ADMIN_TOKEN` has no lockout. Both rely on the entropy of the
   credential and on the network boundary. Sign-in to the dashboard *is* limited, per account and per IP.
 - **`ADMIN_TOKEN` acts with root permissions and bypasses every membership.** That is what it is for —
@@ -86,4 +115,6 @@ vulnerabilities, and a report about one of them will be closed with a link back 
 
 Everything else — path escapes, archive extraction escaping its directory, a credential recoverable from a
 database dump, cross-project leakage, a route that skips the policy table, a webhook accepted without a
-valid signature, a session that outlives its revocation — is a vulnerability. Report it.
+valid signature, a session that outlives its revocation, a state-changing admin request that **succeeds**
+and leaves no audit row or leaves one naming the wrong account, user content reaching a column of
+`audit_events` — is a vulnerability. Report it.
