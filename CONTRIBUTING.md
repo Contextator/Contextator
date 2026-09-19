@@ -200,21 +200,25 @@ request. You do not sign anything before opening one, and there is no form to fi
    already signed, it is green and you are done — nothing is posted and there is nothing to read.
 2. **If somebody has not**, the workflow leaves a comment on the pull request naming them and linking
    [`CLA.md`](CLA.md). The check is red, and a red one cannot be merged.
-3. **Read `CLA.md`, then post this as a pull request comment**, by itself and spelled exactly:
+3. **Read `CLA.md`, then post this as a pull request comment**, on one line and nothing else in it:
 
    ```
    I have read the CLA Document and I hereby sign the CLA
    ```
 
    The comment *is* the signature — the workflow reads it, records it, and re-runs the pull request's own
-   check, which then goes green. It takes a minute or so. Commenting `recheck` runs it again if something
-   looks stuck.
+   check, which then goes green. It takes a minute or so. Capitalisation does not matter and a full stop
+   at the end is fine; a sentence buried in a longer, multi-line comment is not read. **If nothing
+   happens within a couple of minutes, comment `recheck`** — that is the recovery path for a signature
+   the workflow did not pick up, and for a check left stale by anything else.
 4. **Every commit author signs**, not just whoever opened the pull request. If your branch carries a
-   commit written by a colleague, they comment too, from their own account. Bots are exempt; they cannot
-   agree to anything.
+   commit written by a colleague, they comment too, from their own account, and the account has to be the
+   one the commit's e-mail belongs to. Bots are exempt; they cannot agree to anything. There is no
+   allowlist — maintainers sign this like everybody else.
 
-You sign once. Every later pull request from the same account is green from the start, and the
-conversation is locked after a merge so the comment that recorded the signature stays where it is.
+You sign once. Every later pull request from the same account is green from the start. A merged pull
+request's conversation is then locked, which is tidiness rather than evidence: the record of your
+signature is the entry in the JSON file below, not the comment.
 
 ### What you are agreeing to, in one paragraph
 
@@ -234,10 +238,15 @@ anybody. Nothing about you is published, and nothing is collected beyond what yo
 
 `CLA.md` still carries `Status: draft — not yet in force`, and that is accurate: a document that claims to
 bind while nothing collects signatures would be the first thing you found to be untrue about this
-repository. The line comes off, together with the draft paragraph under the title and section 3, on the
-day the workflow above is running on `main` with **Licence grant** required to merge — not before, and not
-as a separate gesture afterwards. Until then, treat the flow above as what will be asked of you and a
-maintainer asking in the thread as what binds.
+repository. Three pieces come off together and in one commit — that first line, the draft paragraph under
+the title, and the opening of section 3 — and they come off in the same change that puts the workflow on
+`main`, because the workflow can record a signature from its very first run. A signature taken while the
+document says "do not treat anything in this document as an agreement you have entered into" would be
+worth nothing, and that window is closed by ordering rather than by hoping it is short. Making the check
+required to merge follows immediately after; it is what stops a merge, not what makes the grant binding.
+
+Until then, treat the flow above as what will be asked of you, and a maintainer asking in the thread as
+what binds.
 
 If that is not something you are willing to grant, say so early. Opening an issue that describes the
 problem and lets a maintainer implement it is a perfectly good contribution and needs none of this.
