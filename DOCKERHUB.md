@@ -118,5 +118,7 @@ license.
 - Something not starting, not indexing, or not answering the way you expect:
   [wiki/Troubleshooting](https://github.com/Contextator/Contextator/wiki/Troubleshooting) and
   [wiki/FAQ](https://github.com/Contextator/Contextator/wiki/FAQ).
+- What shipped in this tag and every one before it:
+  [CHANGELOG.md](https://github.com/Contextator/Contextator/blob/main/CHANGELOG.md).
 - Full README, source, issues and discussions:
   [github.com/Contextator/Contextator](https://github.com/Contextator/Contextator).
