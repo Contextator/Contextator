@@ -62,6 +62,19 @@ each non-obvious setting has the reason next to it — please read the comment b
 **`npm test` needs no Docker.** That is deliberate and worth keeping: the inner loop stays fast, so it
 stays run.
 
+**Three of its tests need the embedding model**, and skip with a note until you have it: the tokenizer
+counted against Turkish text, and the two sides of one sentence encoded through the prefixes of
+ADR-0038. If you have already started the server once you have the model; otherwise
+
+```bash
+npm run warm-model       # ~490 MB into .cache/models, once, then never again
+```
+
+downloads it through the server's own warm-up path and checks that the files those tests look for are
+where they look. CI does not skip them — the `check` job caches the same directory and populates it on a
+miss, and an absent cache fails the job rather than quietly reporting three fewer assertions than the
+suite claims.
+
 **`npm run test:integration` does need a container runtime.** It starts `pgvector/pgvector:pg16` itself
 through testcontainers, gives every test file its own database and throws the container away afterwards —
 `docker-compose.dev.yml` is not involved and nothing has to be started by hand. The first run pulls a

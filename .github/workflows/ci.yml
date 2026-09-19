@@ -25,8 +25,14 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Mirrors the Dockerfile. onnxruntime-node's postinstall fetches optional GPU binaries that
-      # nothing here uses; without this the install pulls a CUDA runtime to run unit tests.
+      # nothing here uses; without this the install pulls a CUDA runtime to run unit tests. The CPU
+      # binaries ship in the package, which is what lets the step below load a model at all.
       ONNXRUNTIME_NODE_INSTALL: skip
+      # Pinned to the defaults in `src/config.ts` rather than left implicit, for the same reason the
+      # `eval` job pins them: they are what the cache key below is derived from, so a changed model or
+      # a faster dtype is a different download and must not be a cache hit.
+      EMBEDDING_MODEL: Xenova/multilingual-e5-small
+      EMBEDDING_DTYPE: fp32
     steps:
       - uses: actions/checkout@v7
 
@@ -52,6 +58,37 @@ jobs:
       # Both tsconfigs: the one that builds dist/, and the one that covers test/ and scripts/.
       - run: npm run typecheck
 
+      # Three tests in the unit suite load the real model: the tokenizer against Turkish text
+      # (`test/chunker.test.ts`) and both sides of one sentence through the prefixes of ADR-0038
+      # (`test/embedding-prefixes.test.ts`). They were gated on this directory and this job never had
+      # it, so for the whole of their existence they skipped here and the suite reported green — the
+      # tokenizer test is the only check in the repository that the chunk budget holds on Turkish, and
+      # the prefix tests are the only proof that the two sides of ADR-0038 encode differently, which is
+      # a silent five-to-ten point recall loss when it breaks.
+      #
+      # Same key shape as the `eval` job, and deliberately not keyed on package-lock.json: the contents
+      # of this directory do not depend on the lockfile, and keying it there would throw away the
+      # download on every dependency bump. The model and the dtype change rarely, so the cost below is
+      # paid on the first run after either moves and not otherwise.
+      - name: Cache the embedding model
+        id: models
+        uses: actions/cache@v4
+        with:
+          path: .cache/models
+          key: "models-${{ env.EMBEDDING_MODEL }}-${{ env.EMBEDDING_DTYPE }}"
+
+      # Only on a miss, because this is the job every pull request runs and the download is ~450 MB of
+      # `onnx/model.onnx` plus a few hundred kilobytes of tokenizer — two to three minutes. It is the
+      # server's own warm-up path (`createEmbeddingProvider` then `warmup()`), and it asserts that the
+      # two files the tests gate on exist before it exits 0, so a warm-up that produced some other
+      # cache layout fails here instead of turning back into three silent skips below.
+      - name: Warm the embedding model
+        if: steps.models.outputs.cache-hit != 'true'
+        run: npm run warm-model
+
+      # `CI` is set by Actions, and `test/support/model-cache.ts` reads it: the model tests do not skip
+      # here. If the cache step above is ever removed or the download fails, those tests fail the job
+      # loudly rather than reporting green with three fewer assertions than they claim.
       - run: npm test
 
   integration:

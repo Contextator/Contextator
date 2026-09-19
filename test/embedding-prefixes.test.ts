@@ -1,6 +1,4 @@
-import { existsSync } from 'node:fs';
-import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { CHUNK_TOKENIZER_RESERVE_TOKENS, type Config } from '../src/config.js';
 import type { Logger } from '../src/context.js';
 import { chunkReserveTokens } from '../src/services/chunk-budget.js';
@@ -10,6 +8,7 @@ import { LocalEmbeddingProvider } from '../src/services/embeddings/local.js';
 import { OpenAIEmbeddingProvider } from '../src/services/embeddings/openai.js';
 import { NO_PREFIX_SENTINEL, prefixesForModel, prefixIdSegment, resolvePrefixes } from '../src/services/embeddings/prefixes.js';
 import type { EmbeddingProvider } from '../src/services/embeddings/provider.js';
+import { MODEL_CACHE_DIR, modelCacheGate } from './support/model-cache.js';
 
 /** ADR-0038: which prefixes a model gets, who may change them, and what that does to `provider.id`. */
 
@@ -29,7 +28,7 @@ const localProvider = (model: string, prefixes: ReturnType<typeof resolvePrefixe
   new LocalEmbeddingProvider({
     model,
     dimensions: 384,
-    cacheDir: path.resolve('.cache/models'),
+    cacheDir: MODEL_CACHE_DIR,
     dtype: 'fp32',
     offline: true,
     prefixes,
@@ -140,13 +139,18 @@ describe('what the passage prefix costs the chunk budget', () => {
  * The cheapest proof that the wiring is real rather than merely well-typed: a query and a passage of the
  * same text have to be two different vectors when prefixes are configured, and the same one when they
  * are not. It needs the model itself and not only its tokenizer, so it is gated on the cache exactly as
- * the tokenizer test in `chunker.test.ts` is, rather than downloading 470 MB into `npm test`.
+ * the tokenizer test in `chunker.test.ts` is, rather than downloading the model inside `npm test`.
+ *
+ * The gate is a convenience for a contributor who has not warmed the cache, and stops applying under
+ * CI, where the `check` job populates it — so an absent model there fails the job instead of quietly
+ * skipping the only check ADR-0038's mechanism has (see `support/model-cache.ts`).
  */
 const MODEL = 'Xenova/multilingual-e5-small';
-const CACHE_DIR = path.resolve('.cache/models');
-const cached = existsSync(path.join(CACHE_DIR, MODEL, 'onnx', 'model.onnx'));
+const modelCache = modelCacheGate(MODEL, 'onnx', 'model.onnx');
 
-describe.skipIf(!cached)('the real model, both sides of the same sentence', () => {
+describe.skipIf(modelCache.skip)('the real model, both sides of the same sentence', () => {
+  beforeAll(() => modelCache.assertPresent());
+
   const TEXT = 'Webhook imzası nasıl doğrulanır?';
 
   it('encodes a query and a passage differently when the model has prefixes', async () => {

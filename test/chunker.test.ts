@@ -1,7 +1,8 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { chunkMarkdown, embeddingText, estimateTokens, parseFrontmatter, stripMdx } from '../src/services/chunker.js';
+import { MODEL_CACHE_DIR, modelCacheGate } from './support/model-cache.js';
 
 const opts = { maxTokens: 100, overlapTokens: 15 };
 
@@ -203,9 +204,11 @@ describe('the injected token counter', () => {
 });
 
 /**
- * The one test here that needs the model cache, and it is gated on it rather than downloading 470 MB
- * into `npm test`. Only the tokenizer is loaded — a few hundred kilobytes of `tokenizer.json` — because
- * the claim under test is about counting, not about embedding.
+ * The one test here that needs the model cache. Only the tokenizer is loaded — a few hundred kilobytes
+ * of `tokenizer.json` — because the claim under test is about counting, not about embedding.
+ *
+ * It is gated on the cache rather than downloading it inside `npm test`, which is a convenience for a
+ * contributor and not a licence to go unrun: CI warms the cache and the gate does not apply there.
  *
  * It is the acceptance test for ADR-0036 and ADR-0037: with the shipped budget and the shipped model,
  * nothing the indexer hands the model is longer than the window the model was trained at.
@@ -218,13 +221,16 @@ describe('the injected token counter', () => {
 const MODEL = 'Xenova/multilingual-e5-small';
 const MODEL_WINDOW_TOKENS = 512;
 const BUDGET_TOKENS = 96;
-const CACHE_DIR = path.resolve('.cache/models');
-const cached = existsSync(path.join(CACHE_DIR, MODEL, 'tokenizer.json'));
+// Skipped for a developer who has never warmed the cache, and never skipped under CI, where the
+// `check` job populates it and an absent cache has to be a red build (see `support/model-cache.ts`).
+const tokenizerCache = modelCacheGate(MODEL, 'tokenizer.json');
 
-describe.skipIf(!cached)('the real tokenizer, on Turkish', () => {
+describe.skipIf(tokenizerCache.skip)('the real tokenizer, on Turkish', () => {
+  beforeAll(() => tokenizerCache.assertPresent());
+
   it('keeps every chunk of a Turkish page inside the budget, and the budget inside the window', async () => {
     const { AutoTokenizer, env } = await import('@huggingface/transformers');
-    env.cacheDir = CACHE_DIR;
+    env.cacheDir = MODEL_CACHE_DIR;
     env.allowLocalModels = true;
     env.allowRemoteModels = false;
     const tokenizer = await AutoTokenizer.from_pretrained(MODEL);
