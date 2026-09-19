@@ -190,10 +190,54 @@ So **before an outside contribution is merged, its author is asked to grant a li
 [`CLA.md`](CLA.md) — a copyright licence and a patent grant to the copyright holder, in both an individual
 and an entity version.
 
-It is honestly marked: `CLA.md` is a **draft that is not yet in force**, and nothing automated collects a
-signature today. There is no bot, no status check and no signatures repository yet; clearing a
-contribution is a maintainer doing it by hand in the pull request thread. Read `CLA.md` before you invest
-real time in a change, so that the condition is not a surprise at the end.
+### How you sign
+
+Asking is not a maintainer remembering to; it is [`.github/workflows/cla.yml`](.github/workflows/cla.yml),
+which runs [CLA Assistant Lite](https://github.com/contributor-assistant/github-action) on every pull
+request. You do not sign anything before opening one, and there is no form to fill in anywhere else.
+
+1. **Open the pull request.** A check named **Licence grant** runs. If every commit author in it has
+   already signed, it is green and you are done — nothing is posted and there is nothing to read.
+2. **If somebody has not**, the workflow leaves a comment on the pull request naming them and linking
+   [`CLA.md`](CLA.md). The check is red, and a red one cannot be merged.
+3. **Read `CLA.md`, then post this as a pull request comment**, by itself and spelled exactly:
+
+   ```
+   I have read the CLA Document and I hereby sign the CLA
+   ```
+
+   The comment *is* the signature — the workflow reads it, records it, and re-runs the pull request's own
+   check, which then goes green. It takes a minute or so. Commenting `recheck` runs it again if something
+   looks stuck.
+4. **Every commit author signs**, not just whoever opened the pull request. If your branch carries a
+   commit written by a colleague, they comment too, from their own account. Bots are exempt; they cannot
+   agree to anything.
+
+You sign once. Every later pull request from the same account is green from the start, and the
+conversation is locked after a merge so the comment that recorded the signature stays where it is.
+
+### What you are agreeing to, in one paragraph
+
+That the work is yours to give; that the copyright holder may licence it under any terms, the commercial
+ones included; and a patent grant limited to what your own contribution infringes. **You keep your
+copyright** and every right to use your work elsewhere, and what you contribute stays under the AGPL for
+everyone regardless. `CLA.md` is the text and this sentence is not it — read the file before you comment.
+
+### Where the signature is kept
+
+In `Contextator/cla-signatures`, a private repository this organisation owns, as a JSON file recording
+your GitHub username, user id, the pull request and the time. It is deliberately not a hosted service's
+database: the record is the only evidence the licence grant ever happened, and it is not rented from
+anybody. Nothing about you is published, and nothing is collected beyond what your comment already showed.
+
+### Until the first line of `CLA.md` comes off
+
+`CLA.md` still carries `Status: draft — not yet in force`, and that is accurate: a document that claims to
+bind while nothing collects signatures would be the first thing you found to be untrue about this
+repository. The line comes off, together with the draft paragraph under the title and section 3, on the
+day the workflow above is running on `main` with **Licence grant** required to merge — not before, and not
+as a separate gesture afterwards. Until then, treat the flow above as what will be asked of you and a
+maintainer asking in the thread as what binds.
 
 If that is not something you are willing to grant, say so early. Opening an issue that describes the
 problem and lets a maintainer implement it is a perfectly good contribution and needs none of this.

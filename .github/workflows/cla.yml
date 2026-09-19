@@ -1,0 +1,100 @@
+# The door on the licence grant. ADR-0025 put a commercial licence beside AGPL-3.0-or-later, and that
+# offer holds only while the copyright is held in full: one outside contribution merged without a grant
+# removes the ability to licence that code commercially, permanently, and reverting the commit does not
+# undo it. ADR-0030 wrote the condition down and left the enforcing to a machine that did not exist. This
+# is that machine.
+#
+# It is CLA Assistant *Lite* — a GitHub Action, not the hosted GitHub App. The difference is where the
+# signature lives: the Action writes it as JSON into a repository this organisation owns, and the hosted
+# service keeps it in a database somebody else runs. ADR-0025's whole argument rests on that record, so it
+# is not rented.
+#
+# The signature is a pull request comment. The Action reads the comment, appends the signatory to the JSON
+# file, and re-runs the pull request's own workflow run so that the check on the pull request goes green —
+# which is why the job needs `actions: write` and why the `issue_comment` trigger is here at all.
+name: CLA
+
+on:
+  # Both triggers are load-bearing and neither is enough alone. `pull_request_target` runs the check
+  # against the base repository (a fork's `GITHUB_TOKEN` could not write a comment or re-run anything),
+  # and `issue_comment` is how a signature arrives. `closed` is not an oversight: it is when the Action
+  # locks the conversation, so a signature cannot be edited away after the merge it paid for.
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  contents: read
+
+# Two signature comments in the same pull request would otherwise race for the same JSON file and one
+# would land on a stale blob SHA. Serialise per pull request, and never cancel: a cancelled run is a
+# signature that was posted and not recorded.
+concurrency:
+  group: "cla-${{ github.event.issue.number || github.event.pull_request.number }}"
+  cancel-in-progress: false
+
+jobs:
+  # This job's name is what appears in the pull request's checks and what `main`'s branch protection has
+  # to list as a required status check. Renaming it silently un-protects the branch.
+  cla:
+    name: Licence grant
+    runs-on: ubuntu-latest
+    permissions:
+      # Re-running the pull request's workflow run after a signature lands — the step that turns the
+      # check green without asking the contributor to push an empty commit.
+      actions: write
+      # `read`, not `write`: the signatures are in a different repository, reached with the token below.
+      # Nothing here writes to this repository.
+      contents: read
+      # Posting the "please sign" comment, reading the thread the signature arrives in, and locking the
+      # conversation after the merge.
+      pull-requests: write
+      statuses: write
+    steps:
+      # `pull_request_target` checks out nothing and runs no code from the fork; the Action is the only
+      # thing that executes. Keep it that way — a checkout of `github.event.pull_request.head.sha` in this
+      # workflow would hand a stranger the write-scoped token above.
+      - name: Check the licence grant
+        # An `issue_comment` fires on issues too, and on every comment in a pull request. Narrow it to the
+        # two sentences that mean something, on a thread that is actually a pull request, so that an
+        # ordinary review comment does not spend a run.
+        # Every continuation line below sits at the same indentation on purpose: YAML folds those into
+        # spaces, and an extra indent would keep the newline and hand the expression parser a broken line.
+        if: >-
+          github.event_name == 'pull_request_target' ||
+          (github.event.issue.pull_request != null &&
+          (github.event.comment.body == 'recheck' ||
+          github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+        # Pinned to the commit `v2.6.1` points at, not to the tag and not to `v2`. A tag is a name its
+        # owner can move; this is the gate on the project's licensing position, and it is not delegated to
+        # a third party's next commit. Read the diff before moving this line.
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          # A classic PAT with `repo` scope, held by an organisation owner. The Action insists on this
+          # variable name; the secret it is read from is ours to name. It is required only because the
+          # signatures live in a second repository — see `remote-repository-name` below.
+          PERSONAL_ACCESS_TOKEN: "${{ secrets.CLA_SIGNATURES_TOKEN }}"
+        with:
+          # The record, and the reason this mechanism was chosen over the hosted one. `Contextator/
+          # cla-signatures` is private, owned by this organisation, and the Action creates the file on the
+          # first signature — creating it by hand makes the run fail.
+          remote-organization-name: Contextator
+          remote-repository-name: cla-signatures
+          path-to-signatures: signatures/v1/cla.json
+          # The Action commits straight to this branch, so it must stay unprotected — which is the second
+          # reason the signatures are not in this repository: `main` here is about to require a check that
+          # a bot commit could never satisfy.
+          branch: main
+          # What the contributor is agreeing to. An absolute link, because the comment the Action posts is
+          # read on github.com and a relative path would resolve against the fork.
+          path-to-document: https://github.com/Contextator/Contextator/blob/main/CLA.md
+          # Bots cannot agree to anything. Maintainers acting for the copyright holder do not need to
+          # grant it a licence it already has — add their GitHub handles here, comma-separated.
+          allowlist: bot*,dependabot[bot],github-actions[bot]
+          # A signature is evidence. Locking the thread after the merge is what stops it being deleted
+          # later by the person who left it.
+          lock-pullrequest-aftermerge: true
+          signed-commit-message: "$contributorName signed the CLA in $owner/$repo#$pullRequestNo"
+          create-file-commit-message: "Start the signature record for Contextator"

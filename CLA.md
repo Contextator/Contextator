@@ -1,4 +1,6 @@
-Status: draft — not yet in force
+Status: draft — not yet in force. It comes into force on the day the CLA check in
+`.github/workflows/cla.yml` runs on `main` and is required to merge, and this line comes off in that same
+change. [`CONTRIBUTING.md`](CONTRIBUTING.md#the-licence-grant) names what is still outstanding until then.
 
 # Contributor Licence Agreement — Contextator
 
