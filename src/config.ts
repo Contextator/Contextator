@@ -160,6 +160,32 @@ export const WEBHOOK_VERIFICATION_WINDOW_MINUTES = 15;
 export const OAUTH_CREDENTIAL_SWEEP_GRACE_MS = 7 * 24 * 60 * 60_000;
 export const OAUTH_CLIENT_STALE_MS = 30 * 24 * 60 * 60_000;
 
+/**
+ * The short window: a client that registered and **never came back**, dropped after a day.
+ *
+ * It is separate from the thirty days above because the two describe different things. A connector
+ * somebody actually used and then left alone is theirs and deserves the long rope; a row written by an
+ * unauthenticated `POST` that never reached the consent page is one nobody will ever recognise, and it
+ * is the only kind a flood can produce. Holding those for a month would turn `MCP_OAUTH_MAX_CLIENTS`
+ * into a month-long lockout of every honest connector — which is what a ceiling with no floor under it
+ * does, and is a denial of service rather than a defence against one.
+ */
+export const OAUTH_CLIENT_UNUSED_MS = 24 * 60 * 60_000;
+
+/**
+ * How many clients one host may register, and over how long
+ * ([ADR-0054](../.ssot/ADR.md#adr-0054)). The same `SlidingWindow` the sign-in route uses, and for the
+ * same reason: `MCP_OAUTH_MAX_CLIENTS` bounds the *table*, and nothing bounded the **rate** at which a
+ * single host could walk it to its ceiling.
+ *
+ * Ten an hour is far more than any host legitimately needs — a connector registers once, ever, and a
+ * developer retrying a broken flow does it a handful of times — and it turns filling two hundred rows
+ * from one script into twenty hours of sustained traffic from twenty hosts, against a sweep that drops
+ * the unused ones every day.
+ */
+export const OAUTH_REGISTER_MAX_PER_HOST = 10;
+export const OAUTH_REGISTER_WINDOW_MS = 60 * 60_000;
+
 /** Exported for the tests: the cross-field rules are the only part of this file that has behaviour. */
 export const EnvSchema = z
   .object({

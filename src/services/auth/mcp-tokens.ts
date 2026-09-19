@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { and, asc, eq, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, lt, not, or, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { mcpTokens, projects, type McpAuthMode, type McpTokenKind, type McpTokenRow } from '../../db/schema.js';
 import { NotFoundError } from '../projects.js';
@@ -121,32 +121,105 @@ export async function revokeMcpToken(db: Db, projectId: string, tokenId: string)
   if (result.length === 0) throw new NotFoundError('Token not found');
 }
 
-/** Marks one row revoked by id, with no project scope. Used by the refresh rotation. */
-export async function revokeMcpTokenById(db: Db, tokenId: string): Promise<void> {
-  await db
+/**
+ * Marks one row revoked by id, and says whether **this** call is the one that did it.
+ *
+ * **The boolean is the whole point and is load-bearing** for the refresh rotation
+ * ([ADR-0054](../../../.ssot/ADR.md#adr-0054)): `revoked_at IS NULL` is in the `WHERE`, so two
+ * concurrent exchanges of the same refresh token race on one row and exactly one of them comes back
+ * `true`. The loser learns that the credential it verified a moment ago has already been spent, which
+ * is indistinguishable from a stolen copy being redeemed — and is treated as one. A version that threw
+ * the row count away issued two valid families and told nobody.
+ */
+export async function revokeMcpTokenById(db: Db, tokenId: string): Promise<boolean> {
+  const revoked = await db
     .update(mcpTokens)
     .set({ revokedAt: new Date() })
-    .where(and(eq(mcpTokens.id, tokenId), isNull(mcpTokens.revokedAt)));
+    .where(and(eq(mcpTokens.id, tokenId), isNull(mcpTokens.revokedAt)))
+    .returning({ id: mcpTokens.id });
+  return revoked.length > 0;
+}
+
+/** The three columns that identify one grant: this client, acting as this account, on this project. */
+export interface McpGrant {
+  clientId: string;
+  userId: string;
+  projectId: string;
 }
 
 /**
- * Revokes the OAuth credential a client presents at `/oauth/revoke` (RFC 7009), found by its hash
- * across every project — the caller has no way to say which project it is for, and does not need to,
- * because the hash is unique and names exactly one row.
+ * Revokes **every live OAuth credential of one grant** — the access tokens and the refresh tokens
+ * alike ([ADR-0054](../../../.ssot/ADR.md#adr-0054)).
+ *
+ * It is the unit three different things operate on, and each of them is wrong at any smaller
+ * granularity. A client that says *disconnect* (RFC 7009) means the grant and not the one string it
+ * happened to hand back, or it holds a refresh token that mints a new pair seconds later. A refresh
+ * token presented twice is OAuth 2.1's reuse signal, and §4.3.1's answer is to revoke the descendants
+ * rather than the one row. And a person who takes an approval back expects it gone.
+ *
+ * Static tokens are untouched: they belong to no grant and to no client.
+ */
+export async function revokeMcpCredentialsOfGrant(db: Db, grant: McpGrant): Promise<number> {
+  const revoked = await db
+    .update(mcpTokens)
+    .set({ revokedAt: new Date() })
+    .where(
+      and(
+        eq(mcpTokens.clientId, grant.clientId),
+        eq(mcpTokens.userId, grant.userId),
+        eq(mcpTokens.projectId, grant.projectId),
+        isNull(mcpTokens.revokedAt),
+      ),
+    )
+    .returning({ id: mcpTokens.id });
+  return revoked.length;
+}
+
+/**
+ * Revokes every OAuth credential of one account, across every project and every client.
+ *
+ * **This is what a password change has to reach**, and until it existed it did not: changing a
+ * password ends every other *session* of the account (FR-148), which is the whole of what "somebody
+ * else knows my password" used to be able to affect. An account-backed MCP credential is that account's
+ * access by another door, it lives far longer than a sign-in, and a refresh token renews itself — so a
+ * password change that left it running would leave running the one credential of that account the
+ * change did not reach, which is exactly the credential somebody with the old password could have taken.
+ *
+ * `mcp_tokens_user_idx` is the index this reads through, and this is its first caller.
+ */
+export async function revokeMcpCredentialsOfUser(db: Db, userId: string): Promise<number> {
+  const revoked = await db
+    .update(mcpTokens)
+    .set({ revokedAt: new Date() })
+    .where(and(eq(mcpTokens.userId, userId), sql`${mcpTokens.kind} <> 'static'`, isNull(mcpTokens.revokedAt)))
+    .returning({ id: mcpTokens.id });
+  return revoked.length;
+}
+
+/**
+ * Revokes the **grant** behind the credential a client presents at `/oauth/revoke` (RFC 7009), found
+ * by its hash across every project — the caller has no way to say which project it is for, and does
+ * not need to, because the hash is unique and names exactly one row.
+ *
+ * **The grant and not the row**, which is RFC 7009 §2.1: a client handing back an access token means
+ * *disconnect*, and revoking only the string it handed over leaves it holding a refresh token that
+ * mints a fresh pair seconds later. The credential is found whatever state it is in, so a client that
+ * hands back an already-expired token still gets its grant taken down.
  *
  * **A `static` token is deliberately not revocable this way.** It belongs to the operator who minted
  * it, and whoever merely *holds* it must not be able to cut off every other client configured with it;
  * the dashboard is where that decision is made. Answering `200` regardless is RFC 7009 §2.2 and is
  * what keeps this endpoint from being an oracle for guessing tokens.
  */
-export async function revokeMcpCredentialByToken(db: Db, raw: string): Promise<boolean> {
-  if (!raw.startsWith(PREFIXES.access) && !raw.startsWith(PREFIXES.refresh)) return false;
-  const revoked = await db
-    .update(mcpTokens)
-    .set({ revokedAt: new Date() })
-    .where(and(eq(mcpTokens.tokenHash, hashMcpToken(raw)), sql`${mcpTokens.kind} <> 'static'`, isNull(mcpTokens.revokedAt)))
-    .returning({ id: mcpTokens.id });
-  return revoked.length > 0;
+export async function revokeMcpCredentialByToken(db: Db, raw: string): Promise<number> {
+  if (!raw.startsWith(PREFIXES.access) && !raw.startsWith(PREFIXES.refresh)) return 0;
+  const [row] = await db
+    .select({ clientId: mcpTokens.clientId, userId: mcpTokens.userId, projectId: mcpTokens.projectId })
+    .from(mcpTokens)
+    .where(and(eq(mcpTokens.tokenHash, hashMcpToken(raw)), sql`${mcpTokens.kind} <> 'static'`))
+    .limit(1);
+  if (!row?.clientId || !row.userId) return 0;
+  return revokeMcpCredentialsOfGrant(db, { clientId: row.clientId, userId: row.userId, projectId: row.projectId });
 }
 
 /**
@@ -206,23 +279,64 @@ export async function verifyMcpToken(db: Db, projectId: string, raw: string): Pr
 }
 
 /**
- * The other half of the same lookup, for the token endpoint: a `refresh` credential and nothing else.
- * It is a separate function rather than a flag because the two callers must not be able to drift into
- * accepting each other's credential.
+ * Serialises the exchanges of **one** refresh token ([ADR-0054](../../../.ssot/ADR.md#adr-0054)).
+ *
+ * The rotation is a read (is this live?), a write (claim it) and two inserts (the new pair), and the
+ * row-count gate on the claim is what keeps two concurrent exchanges from both succeeding. It is not
+ * enough on its own: the loser revokes the grant as it knew it a moment ago, and the winner can commit
+ * its **new** pair after that — so the reuse is detected and the credentials it was supposed to take
+ * down outlive the detection. Under this lock the loser cannot read the row until the winner's whole
+ * transaction has committed, so what it revokes includes what the winner just minted.
+ *
+ * Keyed on the token's own hash rather than on the grant, because the token is the contended thing and
+ * it is known before any lookup. Two different grants never wait for each other.
  */
-export async function verifyRefreshToken(db: Db, raw: string): Promise<{ id: string; projectId: string; userId: string; clientId: string } | null> {
+const REFRESH_LOCK_CLASS = 7213003; // after the bootstrap's 7213001 and registration's 7213002
+
+export async function withRefreshRotationLock<T>(db: Db, raw: string, run: (tx: Db) => Promise<T>): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${REFRESH_LOCK_CLASS}, hashtext(${hashMcpToken(raw)}))`);
+    return run(tx as unknown as Db);
+  });
+}
+
+/** A refresh credential resolved to its own row and to the grant it belongs to. */
+export interface RefreshGrant extends McpGrant {
+  id: string;
+}
+
+/**
+ * The other half of the same lookup, for the token endpoint: a **live** `refresh` credential and
+ * nothing else. It is a separate function rather than a flag because the two callers must not be able
+ * to drift into accepting each other's credential.
+ */
+export async function verifyRefreshToken(db: Db, raw: string): Promise<RefreshGrant | null> {
+  return findRefreshToken(db, raw, 'live');
+}
+
+/**
+ * The same row when it is **not** live — already revoked, or expired. This is the reuse signal.
+ *
+ * OAuth 2.1 §4.3.1 asks an authorization server that rotates refresh tokens to detect one being
+ * presented twice and to revoke the descendants of that grant, and this is the lookup that makes the
+ * detection possible: a spent refresh token and a refresh token that never existed are the same
+ * `invalid_grant` to the client, and two very different events to the server. Without it the theft
+ * case runs silently — the thief redeems first, the owner's client redeems next, is told only to
+ * re-authorize, does so, and the thief's family lives on beside the new one.
+ */
+export async function findSpentRefreshToken(db: Db, raw: string): Promise<RefreshGrant | null> {
+  return findRefreshToken(db, raw, 'spent');
+}
+
+async function findRefreshToken(db: Db, raw: string, state: 'live' | 'spent'): Promise<RefreshGrant | null> {
   if (!raw.startsWith(PREFIXES.refresh)) return null;
+  // One predicate, used as itself or negated, so "live" and "spent" cannot drift apart into two
+  // definitions that between them accept or reject a row twice.
+  const live = sql`(${mcpTokens.revokedAt} is null and (${mcpTokens.expiresAt} is null or ${mcpTokens.expiresAt} > now()))`;
   const rows = await db
     .select({ id: mcpTokens.id, projectId: mcpTokens.projectId, userId: mcpTokens.userId, clientId: mcpTokens.clientId })
     .from(mcpTokens)
-    .where(
-      and(
-        eq(mcpTokens.tokenHash, hashMcpToken(raw)),
-        eq(mcpTokens.kind, 'refresh'),
-        isNull(mcpTokens.revokedAt),
-        or(isNull(mcpTokens.expiresAt), sql`${mcpTokens.expiresAt} > now()`),
-      ),
-    )
+    .where(and(eq(mcpTokens.tokenHash, hashMcpToken(raw)), eq(mcpTokens.kind, 'refresh'), state === 'live' ? live : not(live)))
     .limit(1);
   const row = rows[0];
   if (!row?.userId || !row.clientId) return null;

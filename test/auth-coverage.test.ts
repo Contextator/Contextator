@@ -128,12 +128,20 @@ describe('every /api route is covered by the policy', () => {
  * out loud what authenticates it.
  */
 describe('the OAuth surface is enumerated rather than assumed', () => {
-  /** Every route the plugin may register, and what actually stands in front of each. */
+  /**
+   * Every route the plugin may register, and what stands in front of each.
+   *
+   * **The values are prose and nothing compares them** — only the key set is asserted below. That is
+   * said out loud because the first cut of this file left "capped by `MCP_OAUTH_MAX_CLIENTS`" sitting
+   * in one of these strings, which reads like a claim and is a comment: deleting the cap would have
+   * turned nothing red. The cap, the sweep and the rate limit are checked where they can actually be
+   * exercised, in `test/integration/mcp-oauth.itest.ts`.
+   */
   const EXPECTED: Record<string, string> = {
     'GET /.well-known/oauth-protected-resource': 'public by RFC 9728 — a client with no credential has to be able to read it',
     'GET /.well-known/oauth-protected-resource/mcp/:project': 'public by RFC 9728, and deliberately answers without a database lookup',
     'GET /.well-known/oauth-authorization-server': 'public by RFC 8414 — it says only where this instance\u2019s endpoints are',
-    'POST /oauth/register': 'unauthenticated by RFC 7591, grants nothing, and capped by MCP_OAUTH_MAX_CLIENTS',
+    'POST /oauth/register': 'unauthenticated by RFC 7591, grants nothing; the cap and the per-host budget are tested in the integration suite',
     'GET /oauth/authorize': 'the dashboard session cookie; an anonymous browser is redirected to /login',
     'POST /oauth/authorize': 'the dashboard session cookie, plus the same same-site check every cookie-authenticated write gets',
     'POST /oauth/token': 'the authorization code and its PKCE verifier, or a refresh token',

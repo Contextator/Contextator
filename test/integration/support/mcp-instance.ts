@@ -6,9 +6,11 @@ import { loadConfig } from '../../../src/config.js';
 import type { AppContext } from '../../../src/context.js';
 import type { Db } from '../../../src/db/client.js';
 import { documentSources, projects, type ProjectRow } from '../../../src/db/schema.js';
+import { adminRoutes } from '../../../src/admin/routes.js';
 import { oauthRoutes } from '../../../src/mcp/oauth-routes.js';
 import { mcpRoutes } from '../../../src/mcp/router.js';
 import { SessionRegistry } from '../../../src/mcp/sessions.js';
+import { SlidingWindow } from '../../../src/services/rate-limit.js';
 import { chunkMarkdown, embeddingText, estimateTokens } from '../../../src/services/chunker.js';
 import type { EmbeddingProvider } from '../../../src/services/embeddings/provider.js';
 import { replaceDocument, storedDocumentContent, type NewChunk } from '../../../src/services/vector-store.js';
@@ -115,7 +117,10 @@ export interface LiveInstance {
  * before Fastify will listen, and the port is not known until it has.
  */
 export async function startMcpInstance(database: TestDatabase, opts: { dataDir: string; docRoot: string }): Promise<LiveInstance> {
-  const app = Fastify({ logger: false, forceCloseConnections: true });
+  // `trustProxy` as the real server has it (`src/server.ts`), which is also what lets a suite present
+  // itself as several hosts: the per-host budget on `/oauth/register` is a product behaviour, and a
+  // test file that registered thirty clients from one address would be hitting it on purpose.
+  const app = Fastify({ logger: false, forceCloseConnections: true, trustProxy: true });
   await app.register(cookie);
 
   const config = loadConfig({
@@ -143,12 +148,17 @@ export async function startMcpInstance(database: TestDatabase, opts: { dataDir: 
     locks: {},
     uploads: {},
     sessions: new SessionRegistry(silentLogger),
-    setup: {},
-    loginLimiter: {},
+    setup: { needsSetup: false },
+    loginLimiter: new SlidingWindow(100, 60_000),
     version: '0.0.0-test',
     startedAt: Date.now(),
   } as unknown as AppContext;
 
+  // The admin API too, so a suite can drive the routes that *change* who may reach an endpoint —
+  // a password change, a membership — through the real route rather than by calling the service the
+  // route calls. Registering it touches neither the indexer nor the embedding model; only a request
+  // to one of those routes would, and no suite here sends one.
+  await app.register(adminRoutes, { ctx });
   await app.register(oauthRoutes, { ctx });
   await app.register(mcpRoutes, { ctx });
   await app.listen({ port: 0, host: '127.0.0.1' });

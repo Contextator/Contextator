@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { oauthClients, type OauthClientRow } from '../../db/schema.js';
 
@@ -36,6 +36,17 @@ export interface RegisterClientInput {
 }
 
 /**
+ * Serialises registrations so the ceiling is a ceiling ([ADR-0054](../../../.ssot/ADR.md#adr-0054)).
+ *
+ * Counting and then inserting is two statements, and under READ COMMITTED two concurrent
+ * registrations both read `199` and both insert. The window is small and the endpoint is
+ * unauthenticated, which is exactly the combination somebody would widen on purpose, so the count and
+ * the insert happen inside one transaction behind an advisory lock. Registration is rare — a connector
+ * does it once, ever — so the contention this creates is a queue of one.
+ */
+const REGISTER_LOCK_KEY = 7213002; // one past the bootstrap's, which is 7213001
+
+/**
  * RFC 7591 dynamic client registration, which is how a browser-based MCP connector introduces itself:
  * it cannot be configured here in advance and the MCP authorization specification names DCR as the
  * mechanism.
@@ -44,20 +55,28 @@ export interface RegisterClientInput {
  * signing in and approving this client for one project, and what that grant then reaches is decided by
  * *their* membership on every request. What the cap defends is the table, not the access: an
  * unauthenticated `INSERT` with no ceiling is a disk-filling endpoint whatever it grants.
+ *
+ * **The cap is a ceiling and not a wall**, and that distinction is what `sweepStaleOauthClients`
+ * below is for: a client that registered and never came back is dropped after
+ * `OAUTH_CLIENT_UNUSED_MS`, so filling the table takes sustained traffic rather than one burst, and a
+ * legitimate connector registering tomorrow is not locked out by what somebody did today.
  */
 export async function registerOauthClient(db: Db, input: RegisterClientInput): Promise<OauthClientRow> {
-  const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(oauthClients);
-  if (count >= input.maxClients) {
-    throw new ClientLimitError(
-      `This instance is holding its maximum of ${input.maxClients} registered OAuth clients. ` +
-        'Unused ones are swept automatically; raise MCP_OAUTH_MAX_CLIENTS if this instance genuinely has that many.',
-    );
-  }
-  const [row] = await db
-    .insert(oauthClients)
-    .values({ clientId: newClientId(), name: input.name.slice(0, 200), redirectUris: input.redirectUris })
-    .returning();
-  return row;
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${REGISTER_LOCK_KEY})`);
+    const [{ count }] = await tx.select({ count: sql<number>`count(*)::int` }).from(oauthClients);
+    if (count >= input.maxClients) {
+      throw new ClientLimitError(
+        `This instance is holding its maximum of ${input.maxClients} registered OAuth clients. ` +
+          'Ones that registered and never connected are dropped within a day; raise MCP_OAUTH_MAX_CLIENTS if this instance genuinely has that many.',
+      );
+    }
+    const [row] = await tx
+      .insert(oauthClients)
+      .values({ clientId: newClientId(), name: input.name.slice(0, 200), redirectUris: input.redirectUris })
+      .returning();
+    return row;
+  });
 }
 
 export async function getOauthClient(db: Db, clientId: string): Promise<OauthClientRow | undefined> {
@@ -80,20 +99,29 @@ export function touchOauthClient(db: Db, clientId: string): void {
 }
 
 /**
- * Drops clients that registered, were never used, and have been sitting there longer than `maxAgeMs`.
+ * Drops registered clients nothing is using, on **two** windows rather than one.
  *
- * A client that holds a live credential is kept whatever its age, because `mcp_tokens.client_id`
- * CASCADEs and deleting the row would silently cut a working connector off. So the predicate is
- * "never used, or unused since before the cutoff", and a client with tokens is used by definition.
+ * - A client that registered and **never came back** is dropped after `unusedMs` — a day. It is the
+ *   short window because it is the only one a flood can produce: a row written by an unauthenticated
+ *   `POST` that never reached the consent page is a row nobody will ever recognise, and holding it for
+ *   a month would turn `MCP_OAUTH_MAX_CLIENTS` into a month-long lockout of every honest connector.
+ * - A client that **did** connect and has gone quiet is dropped after `staleMs` — a month. That one is
+ *   somebody's connector and deserves the longer rope.
+ *
+ * A client holding a live credential is kept whatever its age, because `mcp_tokens.client_id` CASCADEs
+ * and deleting the row would silently cut a working connector off.
  */
-export async function sweepStaleOauthClients(db: Db, maxAgeMs: number): Promise<number> {
-  const cutoff = new Date(Date.now() - maxAgeMs);
+export async function sweepStaleOauthClients(db: Db, windows: { unusedMs: number; staleMs: number }): Promise<number> {
+  const neverUsedCutoff = new Date(Date.now() - windows.unusedMs);
+  const idleCutoff = new Date(Date.now() - windows.staleMs);
   const deleted = await db
     .delete(oauthClients)
     .where(
       and(
-        or(isNull(oauthClients.lastUsedAt), lt(oauthClients.lastUsedAt, cutoff)),
-        lt(oauthClients.createdAt, cutoff),
+        or(
+          and(isNull(oauthClients.lastUsedAt), lt(oauthClients.createdAt, neverUsedCutoff)),
+          and(isNotNull(oauthClients.lastUsedAt), lt(oauthClients.lastUsedAt, idleCutoff)),
+        ),
         sql`not exists (select 1 from mcp_tokens t where t.client_id = ${oauthClients.clientId} and t.revoked_at is null)`,
       ),
     )

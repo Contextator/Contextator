@@ -141,7 +141,8 @@ beforeAll(async () => {
 async function registeredClient(): Promise<string> {
   const res = await fetch(`${live.origin}/oauth/register`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    // A host of its own, because `/oauth/register` carries a per-host budget and this file asks twice.
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': '10.2.0.1' },
     body: JSON.stringify({ client_name: 'A browser connector', redirect_uris: ['https://client.example/cb'] }),
   });
   const json = (await res.json()) as { client_id: string };

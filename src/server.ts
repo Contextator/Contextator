@@ -12,7 +12,7 @@ import { webhookRoutes } from './admin/webhooks.js';
 // Source drivers register themselves on import.
 import './services/sources/git.js';
 import './services/sources/notion.js';
-import { loadConfig, OAUTH_CLIENT_STALE_MS, OAUTH_CREDENTIAL_SWEEP_GRACE_MS } from './config.js';
+import { loadConfig, OAUTH_CLIENT_STALE_MS, OAUTH_CLIENT_UNUSED_MS, OAUTH_CREDENTIAL_SWEEP_GRACE_MS } from './config.js';
 import type { AppContext } from './context.js';
 import { createDb, waitForDb } from './db/client.js';
 import { bootstrapDatabase, SchemaMismatchError } from './db/bootstrap.js';
@@ -162,7 +162,7 @@ async function main(): Promise<void> {
           if (deleted > 0) log.info({ deleted }, 'swept expired mcp oauth credentials');
         })
         .catch((err: unknown) => log.warn({ err }, 'mcp credential sweep failed'));
-      void sweepStaleOauthClients(db, OAUTH_CLIENT_STALE_MS)
+      void sweepStaleOauthClients(db, { unusedMs: OAUTH_CLIENT_UNUSED_MS, staleMs: OAUTH_CLIENT_STALE_MS })
         .then((deleted) => {
           if (deleted > 0) log.info({ deleted }, 'swept oauth clients that registered and never connected');
         })

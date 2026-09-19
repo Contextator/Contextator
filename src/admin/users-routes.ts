@@ -8,6 +8,7 @@ import { NotFoundError } from '../services/projects.js';
 import { assertPasswordAcceptable, generateTempPassword } from '../services/passwords.js';
 import { countActiveSessions, revokeSessionsOfUser } from '../services/auth/sessions.js';
 import { createUser, deleteUser, getUserById, listUsers, setPassword, toUserView, updateUser } from '../services/auth/users.js';
+import { revokeMcpCredentialsOfUser } from '../services/auth/mcp-tokens.js';
 
 const IdParams = z.object({ id: z.uuid() });
 const Role = z.enum(['root', 'admin', 'member']);
@@ -128,7 +129,12 @@ export const usersRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
 
     await setPassword(db, id, password, true); // they must replace it at the next sign-in
     await revokeSessionsOfUser(db, id);
-    log.info({ username: target.username, by: principal.username }, 'password reset by an administrator');
+    // Their MCP credentials too ([ADR-0054](../../.ssot/ADR.md#adr-0054)). `mustChangePassword` already
+    // suspends one at the endpoint, but that is a gate with an off switch — the next administrator who
+    // sets a password with `mustChangePassword: false` would reopen it without meaning to. A reset is a
+    // statement about who may act as this account, and it is made here rather than inferred there.
+    const mcpCredentials = await revokeMcpCredentialsOfUser(db, id);
+    log.info({ username: target.username, by: principal.username, mcpCredentials }, 'password reset by an administrator');
     return { temporaryPassword: generated };
   });
 

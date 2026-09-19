@@ -328,7 +328,9 @@ connector at `http://host:3444/mcp/<project>`, and it discovers this server's au
 itself, and sends you to a page here to sign in and approve it. What it gets back acts as *your* account.
 
 Its credential renews itself quietly and expires if the connector goes unused for a month
-(`MCP_OAUTH_ACCESS_TTL_MIN`, `MCP_OAUTH_REFRESH_TTL_DAYS`). `MCP_OAUTH=0` removes the whole flow, and then only static
+(`MCP_OAUTH_ACCESS_TTL_MIN`, `MCP_OAUTH_REFRESH_TTL_DAYS`). **Changing your password disconnects every connector acting
+as you**, the same way it signs out your other browsers, and a connector that says *disconnect* gives up its whole
+grant rather than the one token it happened to hand back. `MCP_OAUTH=0` removes the whole flow, and then only static
 tokens open a closed project — which also means browser-based connectors cannot connect at all.
 
 **What this does not do.** A static token is a bearer credential for the endpoint, not an account: it carries no
@@ -951,6 +953,7 @@ text, on every pull request, against a real server.
 | An MCP client suddenly answers `401` | The project now requires a credential. Mint a token under **MCP access** and add `--header "Authorization: Bearer …"` (or `headers` in `mcp.json`) — or, if the project says **account required**, reconnect a client that can sign in, because a static token is refused there. |
 | An MCP client answers `403 … not a member of this project` | The credential is fine and the account behind it is not on the project. Add them under **Members**, or connect with an account that is one. |
 | A browser-based connector cannot connect at all | Either the project is `open`/`token required` and the connector has no header to send, or `MCP_OAUTH=0` on this instance and there is no flow for it to use. |
+| A connector says it was disconnected and has to be approved again | Expected after a password change, after its membership was removed, or after the same credential was seen twice — which this server treats as two parties holding one token and answers by taking the grant down. Approve it again. |
 | I lost an MCP token | It cannot be recovered — only a hash is stored. Revoke it and mint another. |
 
 ## Contributing and security
