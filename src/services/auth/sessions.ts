@@ -30,17 +30,27 @@ export interface SessionMeta {
   ip?: string;
 }
 
-export async function createSession(db: Db, userId: string, ttlDays: number, meta: SessionMeta): Promise<{ token: string; expiresAt: Date }> {
+export async function createSession(
+  db: Db,
+  userId: string,
+  ttlDays: number,
+  meta: SessionMeta,
+): Promise<{ token: string; expiresAt: Date; sessionId: string }> {
   const token = newSessionToken();
   const expiresAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
-  await db.insert(userSessions).values({
-    userId,
-    tokenHash: hashSessionToken(token),
-    expiresAt,
-    userAgent: (meta.userAgent ?? '').slice(0, 200),
-    ip: meta.ip ?? null,
-  });
-  return { token, expiresAt };
+  // The id comes back so that the caller can name the session it just opened without reading the row
+  // again — `signIn` builds the request's `Principal` from it ([ADR-0055](../../../.ssot/ADR.md#adr-0055)).
+  const [row] = await db
+    .insert(userSessions)
+    .values({
+      userId,
+      tokenHash: hashSessionToken(token),
+      expiresAt,
+      userAgent: (meta.userAgent ?? '').slice(0, 200),
+      ip: meta.ip ?? null,
+    })
+    .returning({ id: userSessions.id });
+  return { token, expiresAt, sessionId: row.id };
 }
 
 /**

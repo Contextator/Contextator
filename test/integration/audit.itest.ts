@@ -5,8 +5,18 @@ import path from 'node:path';
 import { asc, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { auditEvents, type AuditEventRow, documentSources, indexRuns, projects, type ProjectRow, type UserRow } from '../../src/db/schema.js';
+import {
+  auditEvents,
+  type AuditEventRow,
+  documentSources,
+  indexRuns,
+  mcpTokens,
+  projects,
+  type ProjectRow,
+  type UserRow,
+} from '../../src/db/schema.js';
 import { sweepAuditLog } from '../../src/services/audit.js';
+import { registerOauthClient } from '../../src/services/auth/oauth.js';
 import { createUser } from '../../src/services/auth/users.js';
 import { applySchema, createTestDatabase, dropTestDatabase, type TestDatabase } from './support/postgres.js';
 import { seedProject, startMcpInstance, type LiveInstance } from './support/mcp-instance.js';
@@ -95,6 +105,8 @@ beforeAll(async () => {
   expect(signIn.statusCode).toBe(200);
   cookie = signIn.cookies.map((c) => `${c.name}=${c.value}`).join('; ');
   expect(cookie).toContain('contextator_session=');
+  // The sign-in is itself an event, so the table is not empty before the first case runs.
+  await live.ctx.audit.settled();
 });
 
 afterAll(async () => {
@@ -154,11 +166,34 @@ describe('the three acts the audit log exists for', () => {
   it('records them in the order they happened, and records nothing else', async () => {
     // **The field the whole table exists for.** Before this entry, `mcp_tokens.created_by` was the
     // only record of who did anything, and the other two acts left none at all.
+    //
+    // The sign-in leads the list, and it is there because it was taken *out* of the exemptions: a log
+    // holding logouts and no sign-ins describes half a session, and `users.last_login_at` — the record
+    // that exemption deferred to — is one column overwritten every time rather than a history.
     expect((await events()).map((row) => row.action)).toEqual([
+      'POST /api/auth/login',
       'POST /api/projects/:id/mcp-tokens',
       'PATCH /api/projects/:id/mcp-auth',
       'DELETE /api/projects/:id/sources/:sid',
     ]);
+    // And the sign-in names the account it created the session for, which is the actor no hook could
+    // have resolved: `installAuth`'s identity pass ran before there was one.
+    expect(actorOf(await eventFor('POST /api/auth/login'))).toEqual({ kind: 'user', userId: admin.id, label: 'dana' });
+  });
+
+  /**
+   * **A creating route names nothing in its path**, so without reading the response back the row would
+   * say a token was minted and not which — leaving "who minted this one" unanswerable and impossible
+   * to line up against the `DELETE …/mcp-tokens/:tokenId` that does name one.
+   */
+  it('records which token was minted, not merely that one was', async () => {
+    const row = await eventFor('POST /api/projects/:id/mcp-tokens');
+    expect(row?.targetType).toBe('tokenId');
+    // The id is real: it is the row `mcp_tokens` actually holds for this project.
+    const [minted] = await database.db.select().from(mcpTokens).where(eq(mcpTokens.projectId, project.id));
+    expect(row?.targetId).toBe(minted.id);
+    // And the secret that came back in the same response is nowhere in the event.
+    expect(JSON.stringify(row)).not.toContain('ctxm_');
   });
 
   /**
@@ -243,6 +278,90 @@ describe('the three acts the audit log exists for', () => {
     expect(afterUser.actorUserId).toBeNull();
     // The name is still there, which is the whole reason it is a column and not a join.
     expect(afterUser.actorLabel).toBe('erol');
+  });
+});
+
+/**
+ * **The OAuth approval is the same class of act, on a surface the admin plugin's hooks cannot reach**
+ * ([ADR-0055](../../.ssot/ADR.md#adr-0055)). A person granting a client lasting read access to one
+ * project is `PATCH /api/projects/:id/mcp-auth` wearing different clothes, and it is the moment
+ * [ADR-0054](../../.ssot/ADR.md#adr-0054)'s credential-that-names-a-person comes into existence.
+ *
+ * So the audit hooks are installed on `oauthRoutes` as well, and this drives the real route.
+ */
+describe('approving a connector', () => {
+  const CHALLENGE = 'a'.repeat(43);
+  const REDIRECT = 'https://connector.example/callback';
+
+  /**
+   * Over a real socket, and that is not a preference: `resource` has to name an MCP endpoint of *this*
+   * instance, which the route checks against the request's own host — so a request that did not
+   * actually arrive at this port cannot carry a resource this server will accept.
+   */
+  const decide = async (decision: 'approve' | 'deny', clientId: string, site = 'same-origin') =>
+    fetch(`${live.origin}/oauth/authorize`, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: { cookie, 'sec-fetch-site': site, 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        response_type: 'code',
+        client_id: clientId,
+        redirect_uri: REDIRECT,
+        code_challenge: CHALLENGE,
+        code_challenge_method: 'S256',
+        state: 'a-state',
+        resource: `${live.origin}/mcp/${spare.name}`,
+        decision,
+      }),
+    });
+
+  it('records who approved which client, on which project, and which way they decided', async () => {
+    const client = await registerOauthClient(database.db, { name: 'A browser connector', redirectUris: [REDIRECT], maxClients: 50 });
+    const res = await decide('approve', client.clientId);
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toContain('code=');
+
+    await live.ctx.audit.settled();
+    const row = await eventFor('POST /oauth/authorize');
+    expect(row).toBeDefined();
+    expect(actorOf(row)).toEqual({ kind: 'user', userId: admin.id, label: 'dana' });
+    // The project the grant reaches, which the route template does not carry: /oauth/authorize is not
+    // project-scoped, and the row would otherwise say a grant was made and not what over.
+    expect(row?.projectId).toBe(spare.id);
+    expect(row?.detail).toEqual({ decision: 'approve' });
+    // The client id, the redirect URI and the state are all in the body and none of them is in the
+    // row: `decision` is the only field this route is allowed to record.
+    expect(JSON.stringify(row)).not.toContain(client.clientId);
+    expect(JSON.stringify(row)).not.toContain('connector.example');
+  });
+
+  it('records a refusal as the person refusing, which is the one refusal this table holds', async () => {
+    const client = await registerOauthClient(database.db, { name: 'Another connector', redirectUris: [REDIRECT], maxClients: 50 });
+    const before = (await events()).length;
+    const res = await decide('deny', client.clientId);
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toContain('error=access_denied');
+
+    await live.ctx.audit.settled();
+    const rows = await events();
+    expect(rows.length).toBe(before + 1);
+    // Every other refusal in this product is the permission matrix declining and is not recorded.
+    // This one is a person deciding, which is exactly what the table is for.
+    expect(rows.at(-1)?.detail).toEqual({ decision: 'deny' });
+  });
+
+  it('records nothing for a request that never became a decision', async () => {
+    const before = (await events()).length;
+    // An unknown client is refused in place, before the person could decide anything.
+    const unknown = await decide('approve', 'ctxc_0000000000000000');
+    expect(unknown.status).toBe(400);
+    // And an approval that did not come from this site is refused by the same-site check, which is the
+    // guard that stops a foreign page approving a connector on behalf of whoever is signed in.
+    const foreign = await decide('approve', 'ctxc_0000000000000000', 'cross-site');
+    expect(foreign.status).toBe(403);
+
+    await live.ctx.audit.settled();
+    expect((await events()).length).toBe(before);
   });
 });
 

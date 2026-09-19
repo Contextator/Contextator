@@ -20,6 +20,7 @@ import {
   verifyRefreshToken,
   withRotationTransaction,
 } from '../services/auth/mcp-tokens.js';
+import { installAuditLog } from '../auth/plugin.js';
 import { SlidingWindow } from '../services/rate-limit.js';
 import {
   AuthorizationCodeStore,
@@ -114,6 +115,11 @@ const oauthError = (error: string, description: string) => ({ error, error_descr
 
 export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
   const { config, db, log } = ctx;
+  // The audit log's hooks, on this instance too ([ADR-0055](../../.ssot/ADR.md#adr-0055)). Approving a
+  // connector is a person granting a client lasting read access to one project — the
+  // `PATCH /api/projects/:id/mcp-auth` class of decision — and these routes are registered on the root
+  // app, where the admin plugin's hooks do not reach. One writer, two surfaces.
+  installAuditLog(app, ctx);
   const codes = new AuthorizationCodeStore();
   /**
    * Per-host budget for the one unauthenticated write this plugin has
@@ -457,6 +463,19 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
 
     const checked = await validateRequest(req, reply, params);
     if (!checked.ok) return reply;
+
+    // The audit row's actor and project, set **here** rather than where the session was resolved:
+    // everything above this point is a request that was refused or redirected, and an event for one of
+    // those would say a person decided something they never got to decide.
+    req.auditActor = {
+      kind: 'session',
+      role: session.role,
+      userId: session.userId,
+      username: session.username,
+      sessionId: session.sessionId,
+      mustChangePassword: session.mustChangePassword,
+    };
+    req.auditProjectId = checked.project.id;
 
     if (params.decision === 'deny') {
       log.info({ project: checked.project.name, user: session.username }, 'an oauth authorization was refused by the person');

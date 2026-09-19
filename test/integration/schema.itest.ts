@@ -29,7 +29,7 @@ import { captureSchema, renderSchemaSnapshot, snapshotDifference } from './suppo
 const baseUrl = inject('postgresBaseUrl');
 const here = dirname(fileURLToPath(import.meta.url));
 
-/** The thirteen tables the current schema version owns, in the order PostgreSQL lists them. */
+/** The fourteen tables the current schema version owns, in the order PostgreSQL lists them. */
 const EXPECTED_TABLES = [
   // Who changed this instance, and what they changed ([ADR-0055](../../../.ssot/ADR.md#adr-0055)).
   // Deliberately **not** the query log with a column added: that one holds what people asked, under a

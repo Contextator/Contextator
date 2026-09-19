@@ -80,6 +80,19 @@ vulnerabilities, and a report about one of them will be closed with a link back 
   token with root permissions. Opening it with `METRICS_PUBLIC=1` for a private network or behind a proxy
   that already guards the path is a deployment's decision to make; a way to read `/metrics` **without**
   one of those four is a vulnerability. No metric names a project, a document or a query.
+- **`/metrics` is not rate-limited and `METRICS_TOKEN` has no lockout**, exactly as `/mcp/*` and
+  `ADMIN_TOKEN` are not. `min(16)` on that setting is a length floor and not an entropy requirement, so
+  generate it the way you would any other secret (`openssl rand -hex 32`); what bounds guessing is the
+  credential's own entropy and the network boundary, and the comparison is constant-time. With
+  `METRICS_PUBLIC=1` each anonymous scrape additionally costs two database round trips, which is a thing
+  to know before exposing the port rather than a defect in the endpoint.
+- **A request that changed something and then answered `5xx` leaves no audit row.** The row is written
+  only for a response under 400, because the alternative — recording a request whose outcome the server
+  itself could not determine — would put "this may or may not have happened" in a table whose value is
+  that it is not that. No handler in this API currently commits and can then fail (the one that looked
+  like it, `DELETE /api/projects/:id`, closes MCP sessions through a registry that swallows and logs per
+  session), so the gap is a property of the design rather than a live case. A handler that does become
+  shaped that way is a bug to fix in the handler.
 - **The IP recorded beside an audit event is not evidence of who acted.** Every state-changing admin
   request that succeeds is recorded in `audit_events` with the account that made it, and `actor_ip`
   is stored next to that account. Fastify runs with `trustProxy: true`, so the value is the left-most
@@ -102,6 +115,6 @@ vulnerabilities, and a report about one of them will be closed with a link back 
 
 Everything else — path escapes, archive extraction escaping its directory, a credential recoverable from a
 database dump, cross-project leakage, a route that skips the policy table, a webhook accepted without a
-valid signature, a session that outlives its revocation, a state-changing admin request that leaves no
-audit row or leaves one naming the wrong account, user content reaching a column of `audit_events` — is a
-vulnerability. Report it.
+valid signature, a session that outlives its revocation, a state-changing admin request that **succeeds**
+and leaves no audit row or leaves one naming the wrong account, user content reaching a column of
+`audit_events` — is a vulnerability. Report it.
