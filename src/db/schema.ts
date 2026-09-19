@@ -736,10 +736,11 @@ export const auditEvents = pgTable(
     /**
      * The address the request appeared to come from — **a hint beside the actor, never the actor.**
      *
-     * `src/server.ts` runs Fastify with `trustProxy: true`, so `req.ip` is the left-most
-     * `X-Forwarded-For` value, which the client writes when the server is reachable directly. It is
-     * recorded because it is useful next to an identity that was established properly, and it is
-     * named as a known limit in `SECURITY.md` rather than presented as evidence.
+     * What `req.ip` is worth here is `TRUST_PROXY`'s answer ([ADR-0060](../../.ssot/ADR.md#adr-0060)):
+     * the socket's own peer address by default, the left-most `X-Forwarded-For` — which the client
+     * writes — on an instance set to `1`, and the forwarded address vouched for by a named proxy when
+     * it is set to one. It is recorded because it is useful next to an identity that was established
+     * properly, and it is named as a known limit in `SECURITY.md` rather than presented as evidence.
      */
     actorIp: text('actor_ip'),
     /**

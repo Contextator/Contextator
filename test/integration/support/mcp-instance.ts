@@ -3,6 +3,7 @@ import cookie from '@fastify/cookie';
 import { eq } from 'drizzle-orm';
 
 import { loadConfig } from '../../../src/config.js';
+import { httpServerOptions } from '../../../src/http.js';
 import type { AppContext } from '../../../src/context.js';
 import type { Db } from '../../../src/db/client.js';
 import { documentSources, projects, type ProjectRow } from '../../../src/db/schema.js';
@@ -121,14 +122,14 @@ export interface LiveInstance {
  * before Fastify will listen, and the port is not known until it has.
  */
 export async function startMcpInstance(database: TestDatabase, opts: { dataDir: string; docRoot: string }): Promise<LiveInstance> {
-  // `trustProxy` as the real server has it (`src/server.ts`), which is also what lets a suite present
-  // itself as several hosts: the per-host budget on `/oauth/register` is a product behaviour, and a
-  // test file that registered thirty clients from one address would be hitting it on purpose.
-  const app = Fastify({ logger: false, forceCloseConnections: true, trustProxy: true });
-  await app.register(cookie);
-
   const config = loadConfig({
     DATABASE_URL: database.url,
+    // `1`, which is **not** the product default ([ADR-0060](../../../.ssot/ADR.md#adr-0060)). It is
+    // what lets a suite present itself as several hosts over a loopback socket: the per-host budget on
+    // `/oauth/register` is a product behaviour, and a test file that registered thirty clients from one
+    // address would be hitting it on purpose. The setting is proved in both directions against the real
+    // route in `test/trust-proxy.test.ts`; this file needs the forwarded address to be read.
+    TRUST_PROXY: '1',
     ALLOWED_DOC_ROOTS: opts.docRoot,
     DATA_DIR: opts.dataDir,
     SECRET_KEY: '0'.repeat(64),
@@ -141,6 +142,13 @@ export async function startMcpInstance(database: TestDatabase, opts: { dataDir: 
     // about who may search, not about what a search returns, so the gate is off rather than tuned.
     SEARCH_SCORE_FLOOR: '0',
   });
+
+  // The product's own options ([ADR-0060](../../../.ssot/ADR.md#adr-0060)), so `trustProxy` here is
+  // whatever `TRUST_PROXY` resolved to and never a second opinion about it. This file used to carry
+  // its own `trustProxy: true`, which is what let a spoofed header pass a test while the server it was
+  // standing in for could have been configured any other way.
+  const app = Fastify({ logger: false, ...httpServerOptions(config) });
+  await app.register(cookie);
 
   // Built before the context so the writer can report into the registry, exactly as `src/server.ts`
   // wires the two: `contextator_audit_events_total{outcome="failed"}` is only a real number if the

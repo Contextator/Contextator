@@ -16,6 +16,7 @@ import './services/sources/notion.js';
 import { loadConfig, OAUTH_CLIENT_STALE_MS, OAUTH_CLIENT_UNUSED_MS, OAUTH_CREDENTIAL_SWEEP_GRACE_MS } from './config.js';
 import type { AppContext } from './context.js';
 import { createDb, waitForDb } from './db/client.js';
+import { httpServerOptions, warnAboutProxyConfiguration } from './http.js';
 import { bootstrapDatabase, SchemaMismatchError } from './db/bootstrap.js';
 import { oauthRoutes } from './mcp/oauth-routes.js';
 import { mcpRoutes } from './mcp/router.js';
@@ -50,11 +51,14 @@ async function main(): Promise<void> {
     logger: { level: config.LOG_LEVEL },
     // The dashboard polls; per-request log lines are noise unless debugging.
     logController: new LogController({ disableRequestLogging: !verbose }),
-    bodyLimit: 4 * 1024 * 1024, // matches the MCP SDK's own body limit
-    forceCloseConnections: true, // hijacked SSE sockets must not block shutdown
-    trustProxy: true,
+    ...httpServerOptions(config),
   });
   const log = app.log;
+
+  // Both directions of a wrong `TRUST_PROXY` are silent ([ADR-0060](../.ssot/ADR.md#adr-0060)), and the
+  // one that actually happens is diagnosed from traffic rather than from settings. Installed before the
+  // route plugins so the hook sees every request.
+  warnAboutProxyConfiguration(app, config, (message) => log.warn(message));
 
   const { db, pool } = createDb(config.DATABASE_URL, log);
   const embeddings = createEmbeddingProvider(config, log);

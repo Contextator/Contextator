@@ -797,18 +797,59 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `ADMIN_TOKEN` | – | **Machine access** to `/api/*` via `Authorization: Bearer …`, acting with root permissions. Browsers sign in with an account instead; treat this token like a root password |
 | `AUTH_SESSION_IDLE_MS` | `43200000` (12 h) | A dashboard session unused for this long has to sign in again. Refreshed while the dashboard is in use |
 | `AUTH_SESSION_TTL_DAYS` | `30` | Hard ceiling on a session's life, however actively it is used |
-| `AUTH_COOKIE_SECURE` | `auto` | `auto` sets `Secure` when the request arrives over HTTPS (`trustProxy` is on). Force with `1`; use `0` for a plain-HTTP LAN install, or the browser drops the cookie |
+| `AUTH_COOKIE_SECURE` | `auto` | `auto` sets `Secure` when the request arrives over HTTPS — which behind a proxy is only read when `TRUST_PROXY` says so. Force with `1`; use `0` for a plain-HTTP LAN install, or the browser drops the cookie |
 | `AUTH_LOGIN_MAX_ATTEMPTS` | `10` | Failed sign-ins per account and per IP before a lockout / `429` |
 | `AUTH_LOGIN_WINDOW_MIN` | `15` | The IP window, and the first lockout step (it doubles, capped at an hour) |
 | `PASSWORD_MIN_LENGTH` | `12` | Applies to every password, temporary ones included. No composition rules |
 | `SETUP_CODE` | – | The code `/setup` asks for once. Set it and you never have to read it out of the log; leave it empty and the server generates one and prints it at every start until the first account exists. Ignored from then on. Case, dashes and punctuation are ignored when it is checked, so give it enough letters and digits |
 | `ALLOWED_ORIGINS` | – | Extra browser origins allowed on `/mcp/*` (non-browser clients are always allowed) |
 | `PUBLIC_BASE_URL` | – | e.g. `https://docs.example.com` for the URLs shown in the dashboard |
+| `TRUST_PROXY` | `0` | **Which peers may tell this server where a request came from.** It decides `req.ip` — the key of the per-IP sign-in limit, of `/oauth/register`'s per-host budget and of the address beside an audit event — and `req.protocol`, which three places build published URLs from when `PUBLIC_BASE_URL` is unset. `0` reads the socket's own peer address and ignores `X-Forwarded-*`, which is right for the shipped `docker compose` shape: nothing is in front of it, so a caller writing those headers would otherwise choose its own rate-limit key. **Put a reverse proxy in front and you must set this** — see *Running behind a reverse proxy* below for what breaks if you do not, including MCP connectors being answered `invalid_target`. Name the **proxy**: an IP, a CIDR block, or the subnet names `loopback` / `linklocal` / `uniquelocal`, comma-separated (`TRUST_PROXY=loopback`, `TRUST_PROXY=172.18.0.0/16`). The range is matched against **every hop**, not just the peer, so a range your clients are also inside (`uniquelocal` on a LAN) protects nothing. `1` trusts whoever wrote the header and is only safe when nothing but the proxy can open a socket to this port. A hop count is **not** accepted — it is a claim the server cannot check and goes silently wrong the day a CDN appears in front of the proxy |
 | `SESSION_IDLE_TTL_MS` | `1800000` | Idle Streamable HTTP sessions are closed after 30 min |
 | `AUDIT_LOG_RETENTION_DAYS` | `365` | How long an audit event is kept. There is no switch for the log itself: every state-changing admin request that succeeds is recorded with the account that made it, written by the policy layer rather than by each route. The rows carry no question, no document and no excerpt — that is the query log, which is a separate table under a separate window |
 | `METRICS_TOKEN` | – | A bearer credential that reaches `GET /metrics` and **nothing else**, so scraping does not mean handing Prometheus an `ADMIN_TOKEN`. At least 16 characters, and generate it as you would any other secret — the length is a floor, not entropy, and this endpoint is not rate-limited. Unset, `/metrics` still answers a signed-in account or `ADMIN_TOKEN` — but only while the database is up, so an instance that wants to be readable during an outage sets this |
 | `METRICS_PUBLIC` | `0` | `1` answers `/metrics` with no credential at all. For a private network or a proxy that already guards the path; anywhere the port is reachable, leave it off — the exposition describes the instance |
 | `RESET_VECTORS` | `0` | See *Changing the embedding model* |
+
+### Running behind a reverse proxy
+
+Nothing is in front of this by default — `docker compose` publishes 3444 directly — and the defaults
+are written for that. Put nginx, Caddy, Traefik or a cloud load balancer in front and **two settings
+have to move together**:
+
+```bash
+TRUST_PROXY=172.18.0.0/16        # the proxy's address or CIDR, or `loopback` if it is on the host
+PUBLIC_BASE_URL=https://docs.example.com
+AUTH_COOKIE_SECURE=1
+```
+
+`TRUST_PROXY` is what lets this server read `X-Forwarded-For` and `X-Forwarded-Proto` from that proxy.
+Left at `0` behind one, three things break and none of them says so on its own:
+
+- **The per-IP sign-in limit becomes instance-wide.** Every request carries the proxy's address, so
+  `AUTH_LOGIN_MAX_ATTEMPTS` failures from one person answer `429` to everybody.
+- **MCP connectors stop being able to authorize.** With `PUBLIC_BASE_URL` unset, the OAuth
+  protected-resource metadata and the `WWW-Authenticate` pointer are built from `req.protocol` — which
+  reads `http` — so the document advertises `http://…` while the client sends `https://…`, and
+  `/oauth/authorize` answers `invalid_target` every time. Setting `PUBLIC_BASE_URL` fixes this half on
+  its own, which is why it is in the block above.
+- **The session cookie loses its `Secure` flag**, because `AUTH_COOKIE_SECURE=auto` follows the same
+  forwarded scheme. `AUTH_COOKIE_SECURE=1` fixes this half on its own.
+
+The server watches for the mistake rather than guessing at it: the first request that arrives carrying
+an `X-Forwarded-*` header this instance is not trusting logs one warning naming all three.
+
+**Name the proxy, not the network your clients are on.** The list is matched against *every* hop, not
+only against the peer — the server walks the chain from the socket outwards and `req.ip` is the first
+address the list does **not** cover. So `TRUST_PROXY=uniquelocal` on a LAN where the clients are also
+on `10.0.0.0/8` or `192.168.0.0/16` protects nothing: a client is walked past exactly as a proxy is,
+and `X-Forwarded-For: 203.0.113.99` puts that value into `req.ip` again. `TRUST_PROXY=1` is the same
+hazard stated plainly and is only safe when nothing but the proxy can reach the port at all.
+
+Make sure the proxy **replaces** `X-Forwarded-For` rather than appending to whatever the client sent
+(nginx: `proxy_set_header X-Forwarded-For $remote_addr;`, not `$proxy_add_x_forwarded_for`, unless
+there is a further trusted proxy in front of it). A proxy that appends hands the caller the left-most
+value, and no setting here can tell the difference.
 
 ### Changing the embedding model
 
