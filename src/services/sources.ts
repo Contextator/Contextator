@@ -4,7 +4,7 @@ import { PROJECT_NAME_RE, SYNC_MAX_INTERVAL_MINUTES, SYNC_MIN_INTERVAL_MINUTES }
 import type { Db } from '../db/client.js';
 import { documents, documentSources, type DocumentSourceRow } from '../db/schema.js';
 import { encryptSecret, randomSecret } from './crypto.js';
-import { FLAVORS, type Flavor } from './flavors.js';
+import { allowedExtensionsFor, FLAVOR_ONLY_EXTENSIONS, FLAVORS, type Flavor } from './flavors.js';
 import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './fs-scan.js';
 import { ConflictError, NotFoundError, ValidationError } from './projects.js';
 import { TEXT_SEARCH_CONFIGS } from './text-search.js';
@@ -12,7 +12,33 @@ import { TEXT_SEARCH_CONFIGS } from './text-search.js';
 export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion'] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
 
-const Extensions = z.array(z.enum(SUPPORTED_EXTENSIONS)).min(1);
+/**
+ * **The widest set any flavor allows, narrowed to the source's own flavor by `checkExtensions` below.**
+ * The enum cannot do the narrowing itself — these four schemas are per source *type*, and the flavor is
+ * a column beside the config rather than a key inside it ([ADR-0057](../../.ssot/ADR.md#adr-0057)).
+ */
+const Extensions = z.array(z.enum([...SUPPORTED_EXTENSIONS, ...FLAVOR_ONLY_EXTENSIONS])).min(1);
+
+/**
+ * Refuses an extension this flavor's readers cannot do anything with.
+ *
+ * Without it a `plain` source could store `["yaml"]`, scan nothing (the matcher filters it out and
+ * falls back to Markdown) and leave an operator staring at a file list that says `.yaml` beside an
+ * index that holds none. The rule is stated once, here, rather than being discoverable from the
+ * absence of results.
+ */
+function checkExtensions(flavor: Flavor, config: Record<string, unknown>): void {
+  const configured = config.extensions;
+  if (!Array.isArray(configured)) return;
+  const allowed = allowedExtensionsFor(flavor);
+  const rejected = configured.filter((e) => !allowed.includes(String(e)));
+  if (rejected.length > 0) {
+    throw new ValidationError(
+      `The "${flavor}" content type does not read ${rejected.map((e) => `.${String(e)}`).join(', ')}. ` +
+        `It reads ${allowed.map((e) => `.${e}`).join(', ')}.`,
+    );
+  }
+}
 
 /**
  * The PostgreSQL text search configuration this source's documents are indexed with
@@ -302,6 +328,7 @@ export async function createSource(db: Db, projectId: string, input: CreateSourc
   const flavor = input.flavor ?? 'plain';
   if (!FLAVORS.includes(flavor)) throw new ValidationError(`Unknown flavor "${String(flavor)}"`);
   const config = await validateConfig(input.type, input.config, opts);
+  checkExtensions(flavor, config);
   const secretEnc = input.secret ? encryptSecret(input.secret, opts.secretKey) : null;
   const webhookSecret = input.type === 'git' ? randomSecret() : null;
   try {
@@ -377,6 +404,33 @@ export async function updateSource(
     delete previous[PROBE_TOKEN_KEY];
     if (token !== undefined && canonicalConfig(nextConfig) === canonicalConfig(previous)) nextConfig[PROBE_TOKEN_KEY] = token;
     patch.config = nextConfig;
+  }
+  const nextFlavor = (patch.flavor as Flavor | undefined) ?? (existing.flavor as Flavor);
+  if (input.config !== undefined) {
+    // The caller stated the extensions, so a value the new content type cannot read is a mistake to
+    // name rather than one to quietly correct. Checked against the flavor this source will *have* once
+    // the patch lands — the dashboard sends both in one save, and checking the stored one would refuse
+    // the very edit that makes the extensions legal.
+    checkExtensions(nextFlavor, patch.config as Record<string, unknown>);
+  } else if (patch.flavor !== undefined) {
+    // **A patch that moves only the content type may not be refused by a setting it did not send.**
+    // Turning an `openapi` source back into a plain one would otherwise be impossible without also
+    // re-sending its extensions, because the stored `.yaml` is legal under the old flavor and not the
+    // new one. So the stored list is narrowed to what the new content type reads, which is what the
+    // operator asked for by name; only a narrowing that leaves nothing is an error, because a source
+    // that indexes no extension at all would silently index nothing.
+    const stored = existing.config.extensions;
+    if (Array.isArray(stored)) {
+      const allowed = allowedExtensionsFor(nextFlavor);
+      const kept = stored.filter((e) => allowed.includes(String(e)));
+      if (kept.length === 0) {
+        throw new ValidationError(
+          `The "${nextFlavor}" content type reads none of this source's file types (${stored.map((e) => `.${String(e)}`).join(', ')}). ` +
+            `Change the file types in the same request.`,
+        );
+      }
+      if (kept.length !== stored.length) patch.config = { ...existing.config, extensions: kept };
+    }
   }
   if (input.secret !== undefined) patch.secretEnc = input.secret ? encryptSecret(input.secret, opts.secretKey) : null;
   if (input.syncIntervalMinutes !== undefined && input.syncIntervalMinutes !== existing.syncIntervalMinutes) {

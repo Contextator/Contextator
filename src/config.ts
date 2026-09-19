@@ -326,6 +326,35 @@ export const EnvSchema = z
       .default(32 * 1024 * 1024),
 
     /**
+     * What one API specification may weigh before the indexer will parse it
+     * ([ADR-0057](../../.ssot/ADR.md#adr-0057)).
+     *
+     * **Its own ceiling, and much lower than `MAX_CONVERTED_FILE_BYTES`, because it bounds a different
+     * cost.** A converted type's output is roughly the size of its input. A specification is parsed
+     * whole into a JS object graph, and that graph measures **about fifty-five times the file** — 1 MiB
+     * of YAML became 60 MiB of objects, 2 MiB became 113 MiB, 4 MiB became 218 MiB, 8 MiB became
+     * 444 MiB. At the 32 MiB conversion ceiling that is well over a gigabyte in the process that also
+     * serves the dashboard and `/mcp`, which is not a ceiling at all.
+     *
+     * **And the graph is not transient.** The indexer renders one document at a time out of it, so it
+     * stays live for as long as that one file is being indexed — beside the embedding model, which on
+     * the default provider is another ~470 MB. Measured directly: an 8 MiB specification completes
+     * under `--max-old-space-size=384` and is OOM-killed under 320, so **a file at the ceiling wants
+     * roughly 400 MB of heap headroom while it is indexed**, and the requirement scales with the file.
+     *
+     * 8 MiB is kept as the default because it admits every specification anyone has published —
+     * Stripe's is about 6 MB, Kubernetes' about 4 — and refusing those out of the box would be a worse
+     * default than a documented memory cost. An instance whose container is tight should **lower** it:
+     * a file over it is refused by name with the reason on its source and the run carries on, which is
+     * a far better failure than the OOM kill it prevents.
+     */
+    MAX_SPEC_FILE_BYTES: z.coerce
+      .number()
+      .int()
+      .min(16 * 1024)
+      .default(8 * 1024 * 1024),
+
+    /**
      * Pages a PDF may declare before it is refused unread (ADR-0056).
      *
      * The page count is a number written in the file, and `extractTextItems` reads every page into one

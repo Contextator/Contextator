@@ -49,6 +49,27 @@ describe('the dashboard markup and its modules agree', () => {
    * This is a source-text check, like the id wiring above it, because the dashboard has no build step
    * and no DOM to assert against. It is worth having anyway: it fails the moment the branch goes back.
    */
+  /**
+   * **The trap this closes.** A content type that shows a `.yaml` checkbox but leaves it unchecked is
+   * worse than one that shows nothing: the operator picks "OpenAPI / Swagger", uploads a
+   * specification, and the source's own extension filter drops it on the way in — silently, with a
+   * green source, indexing whatever Markdown came with it. Picking the content type therefore checks
+   * what that content type is for; loading an existing source does not, or a stored configuration
+   * would be overwritten by opening its dialog ([ADR-0057](../.ssot/ADR.md#adr-0057)).
+   */
+  it("checks a content type's own file types when the operator picks it, and not when a source is loaded", async () => {
+    const js = await readFile(new URL('app.js', PUBLIC), 'utf8');
+    const html = await readFile(new URL('index.html', PUBLIC), 'utf8');
+    // The boxes exist and are declared as belonging to the content type.
+    for (const ext of ['yaml', 'yml', 'json']) {
+      expect(html).toContain(`<label class="flavor-only" data-flavor="openapi"><input type="checkbox" name="ext" value="${ext}" />`);
+    }
+    expect(js).toMatch(/srcForm\.elements\.flavor\.addEventListener\('change', \(\) => \{\s*syncFlavorFields\(\{ check: true \}\);/);
+    expect(js).toMatch(/for \(const input of box\.querySelectorAll\('input'\)\) input\.checked = mine \? check \|\| input\.checked : false;/);
+    // The two callers that must NOT check: `setKind` and `fillSourceForm`.
+    expect(js.match(/syncFlavorFields\(\);/g) ?? []).toHaveLength(2);
+  });
+
   it('shows a source its last error even when the source did not fail', async () => {
     const js = await readFile(new URL('app.js', PUBLIC), 'utf8');
     expect(js).toMatch(/const warned = !failed && Boolean\(s\.lastError\);/);

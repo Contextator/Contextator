@@ -24,7 +24,20 @@ export interface ImportLimits {
   maxTotalBytes: number;
   maxFileBytes: number;
   extensions: readonly string[];
-  flavor: Flavor;
+  /**
+   * Whose path cleanup to apply — Notion's page ids, Obsidian's nothing.
+   *
+   * **Separate from `allowedExtensions`, and the separation is the point**
+   * ([ADR-0057](../../.ssot/ADR.md#adr-0057)). These were one field until a content type started
+   * deciding which extensions exist at all, and then they meant two things at once: `transfer/import`
+   * passes `plain` here **deliberately**, because the tree inside a project tarball is the
+   * *materialised* tree whose paths a flavor has already been applied to once. Reading the extension
+   * permission off the same field made that deliberate `plain` also say "this source indexes Markdown",
+   * and a restored `openapi` source silently arrived with none of its specifications in it.
+   */
+  pathFlavor: Flavor;
+  /** Which extensions may be carried in, widened by the source's real content type (ADR-0057). */
+  allowedExtensions: readonly string[];
 }
 
 export interface ImportStats {
@@ -75,7 +88,7 @@ export async function importTree(
   stats: ImportStats = { files: 0, skipped: 0, bytes: 0 },
   depth = 0,
 ): Promise<ImportStats> {
-  const matchesExt = extensionMatcher(limits.extensions);
+  const matchesExt = extensionMatcher(limits.extensions, limits.allowedExtensions);
   const destReal = path.resolve(dest);
 
   async function walk(dirAbs: string, relParts: string[]): Promise<void> {
@@ -98,7 +111,7 @@ export async function importTree(
         stats.skipped++;
         continue;
       }
-      const rel = cleanEntryPath(relRaw, limits.flavor);
+      const rel = cleanEntryPath(relRaw, limits.pathFlavor);
       if (!rel) {
         stats.skipped++;
         continue;

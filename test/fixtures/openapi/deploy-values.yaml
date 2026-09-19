@@ -1,0 +1,8 @@
+# A Helm values file that wandered into a specification source. It parses as YAML and is not an API.
+replicaCount: 3
+image:
+  repository: example/api
+  tag: "1.4.0"
+resources:
+  limits:
+    memory: 512Mi

@@ -7,10 +7,11 @@ import { chunkReserveTokens } from './chunk-budget.js';
 import { chunkMarkdown, embeddingText } from './chunker.js';
 import { checkFileSize, DocumentExtractionError, extractDocument, readFailure } from './doc-types/index.js';
 import type { EmbeddingProvider } from './embeddings/provider.js';
-import { transformContent, type Flavor } from './flavors.js';
+import { expandsToManyDocuments, transformContent, allowedExtensionsFor, type Flavor } from './flavors.js';
 import { readAndHash, walkMarkdown } from './fs-scan.js';
 import { recordIndexRun } from './index-runs.js';
 import type { KeyedMutex } from './locks.js';
+import { checkSpecSize, readOpenApi, type DerivedDocument } from './openapi.js';
 import { getProjectById } from './projects.js';
 import { driverFor } from './sources/driver.js';
 import { listSources, recountSources, setSourceStatus } from './sources.js';
@@ -99,6 +100,7 @@ export interface IndexerDeps {
     | 'SECRET_KEY'
     | 'MAX_STORED_DOCUMENT_BYTES'
     | 'MAX_CONVERTED_FILE_BYTES'
+    | 'MAX_SPEC_FILE_BYTES'
     | 'MAX_PDF_PAGES'
     | 'MAX_DOCX_UNPACKED_BYTES'
   >;
@@ -309,7 +311,7 @@ export class Indexer {
     let scanned = false;
     try {
       const root = await driver.docRoot();
-      for await (const f of walkMarkdown(root, { ignoreGlobs: config.IGNORE_GLOBS, extensions })) {
+      for await (const f of walkMarkdown(root, { ignoreGlobs: config.IGNORE_GLOBS, extensions, allowedExtensions: allowedExtensionsFor(flavor) })) {
         // Stored paths always equal on-disk paths (flavor path cleanup happens when files are written, see uploads.ts).
         files.push({
           relativePath: `${source.name}/${f.relativePath}`,
@@ -443,13 +445,17 @@ export class Indexer {
           maxPdfPages: config.MAX_PDF_PAGES,
           maxUnpackedBytes: config.MAX_DOCX_UNPACKED_BYTES,
         };
+        /** What a specification may weigh before it is parsed ([ADR-0057](../../.ssot/ADR.md#adr-0057)). */
+        const specLimits = { maxSpecBytes: config.MAX_SPEC_FILE_BYTES };
+
         /**
          * One file refused, recorded against its source. Returns nothing: every caller `continue`s.
          *
          * A file that cannot be read is not a file that vanished. On an **incremental** run it keeps
-         * whatever document it already had — `seen` still holds its path, so step 3 below will not
+         * whatever document it already had — `spare` is added to `seen`, so step 3 below will not
          * delete it — and the reason is reported on its source rather than swallowed into an empty
-         * document.
+         * document. For a specification `spare` is every document it currently has, because there is no
+         * column joining them to it ([ADR-0057](../../.ssot/ADR.md#adr-0057)).
          *
          * **On a rebuild it does not, and that is a decision rather than an oversight.** A rebuild
          * writes a new generation that *is* the corpus as it stands, so a file that can no longer be
@@ -461,7 +467,8 @@ export class Indexer {
          * silent is step 3b: the reason is on the source, and the dashboard shows it whether or not
          * the source failed.
          */
-        const reject = (file: SourceFile, err: DocumentExtractionError): void => {
+        const reject = (file: SourceFile, err: DocumentExtractionError, spare: readonly string[]): void => {
+          for (const storedPath of spare) seen.add(storedPath);
           const list = rejected.get(file.sourceId) ?? [];
           list.push(err.message);
           rejected.set(file.sourceId, list);
@@ -470,13 +477,42 @@ export class Indexer {
           log.warn({ file: file.relativePath, reason: err.message }, 'file could not be indexed');
         };
 
+        /**
+         * Existing document paths grouped by the path they hang under, built once.
+         *
+         * **The only join between a derived document and the file it came from is its path**
+         * ([ADR-0057](../../.ssot/ADR.md#adr-0057)): every document of `api/petstore.yaml` is stored at
+         * `api/petstore.yaml/<method>-<path>`, and no column records the relation. This map is what
+         * lets a file that can no longer be read keep the documents it already has. Building it once
+         * keeps the loop linear.
+         */
+        const byContainer = new Map<string, string[]>();
+        for (const storedPath of existing.keys()) {
+          const cut = storedPath.lastIndexOf('/');
+          if (cut <= 0) continue;
+          const container = storedPath.slice(0, cut);
+          const list = byContainer.get(container);
+          if (list) list.push(storedPath);
+          else byContainer.set(container, [storedPath]);
+        }
+
+        /** Whether this stored document is the current one for a file whose raw bytes hash to `hash`. */
+        const isCurrent = (storedPath: string, hash: string, sourceId: string): boolean => {
+          const previous = existing.get(storedPath);
+          return previous !== undefined && previous.contentHash === hash && previous.sourceId === sourceId;
+        };
+
         for (const file of files) {
-          seen.add(file.relativePath);
+          const expands = expandsToManyDocuments(file.flavor, file.relativePath);
+          /** The stored paths this file's documents occupy right now — one of them, or all of an expansion. */
+          const claimed = expands ? (byContainer.get(file.relativePath) ?? []) : existing.has(file.relativePath) ? [file.relativePath] : [];
 
           // **The ceiling is applied to the size the walk recorded, before the read.** `readAndHash`
           // puts the whole file in the heap and sha256s it, so a limit checked on the buffer it
           // returns is a limit that has already been exceeded — a gigabyte of PDF would be a gigabyte
-          // of resident memory before anything refused it.
+          // of resident memory before anything refused it. A specification is measured against its own,
+          // much lower ceiling, because what a parse of one costs is not what a conversion costs
+          // ([ADR-0057](../../.ssot/ADR.md#adr-0057)).
           //
           // And the read is inside the boundary, for the reason the conversion is. The scan and the
           // read are two moments and the directory belongs to somebody else in between: a file
@@ -484,7 +520,8 @@ export class Indexer {
           // is a `DocumentExtractionError`, and each of them used to fail the run rather than the file.
           let read: Awaited<ReturnType<typeof readAndHash>>;
           try {
-            checkFileSize(file.relativePath, file.sizeBytes, extractLimits);
+            if (expands) checkSpecSize(file.relativePath, file.sizeBytes, specLimits);
+            else checkFileSize(file.relativePath, file.sizeBytes, extractLimits);
             try {
               read = await readAndHash(file.absolutePath);
             } catch (err) {
@@ -492,83 +529,165 @@ export class Indexer {
             }
           } catch (err) {
             if (!(err instanceof DocumentExtractionError)) throw err;
-            reject(file, err);
+            reject(file, err, claimed);
             continue;
           }
 
           const { bytes, hash, sizeBytes } = read;
-          const previous = existing.get(file.relativePath);
-          if (previous && previous.contentHash === hash && previous.sourceId === file.sourceId) {
+
+          /**
+           * **The hash short-circuit is for the one-file-one-document path only, and that asymmetry is
+           * the decision** (ADR-0057).
+           *
+           * For every type before this one the hash answers the whole question: the file is one
+           * document, so an unchanged file means an unchanged document, and skipping here is what keeps
+           * a `.pdf` from being re-parsed on every scheduled run.
+           *
+           * For a specification it does not. The file's bytes say what the *set* of documents should
+           * be, and the hash of the bytes cannot tell you that one of them is **missing** — a run
+           * killed part-way through a first index leaves the documents it did write carrying the
+           * current hash, and every later run would agree the file was up to date while a third of its
+           * operations had no document at all. Nothing would ever notice. So a specification is parsed
+           * every run and the skipping moves one level down, to the individual document, where the hash
+           * *can* answer it. What that costs is a YAML parse; what it buys is that the expensive half —
+           * chunking and embedding — is still skipped for every operation that has not changed.
+           */
+          if (!expands && claimed.length > 0 && isCurrent(file.relativePath, hash, file.sourceId)) {
+            seen.add(file.relativePath);
             job.filesSkipped++;
             job.filesDone++;
             continue;
           }
 
-          // Bytes → Markdown, by file type (ADR-0056). It happens **after** the hash check, so a PDF
-          // that has not changed is never parsed again, and the cost of the new types falls only on
-          // the run that first sees them.
-          // `extractDocument` is the only thing that throws here, and it only throws its own type: a
-          // parser's own exception escaping would fail the whole run and, being deterministic, keep
-          // failing it until somebody found the file.
-          let extracted: string;
+          // Bytes → Markdown, by file type (ADR-0056), or bytes → many documents, by content type
+          // (ADR-0057). Only the reading is inside this boundary: `readOpenApi` parses and validates
+          // here, and hands back a generator that renders one document at a time, so a specification
+          // with three thousand operations never holds three thousand rendered documents at once.
+          //
+          // Whatever throws here throws its own type. A parser's own exception escaping would fail the
+          // whole run and, being deterministic, keep failing it until somebody found the file.
+          let documents: Iterable<DerivedDocument>;
           try {
-            extracted = await extractDocument(file.relativePath, bytes, extractLimits);
+            documents = expands
+              ? readOpenApi(file.relativePath, bytes, specLimits).documents()
+              : // **One string, used twice, and that is the point of ADR-0043.** What is chunked and
+                // what is stored are the same value — the flavor-transformed text — so `read_document`
+                // cannot come to disagree with `search_docs` about what an Obsidian note says. Deriving
+                // it twice, or storing `content` instead, is how that drift starts.
+                [
+                  {
+                    relativePath: file.relativePath,
+                    markdown: transformContent(file.flavor, await extractDocument(file.relativePath, bytes, extractLimits)),
+                    sizeBytes,
+                  },
+                ];
           } catch (err) {
             if (!(err instanceof DocumentExtractionError)) throw err;
-            reject(file, err);
+            reject(file, err, claimed);
             continue;
           }
 
-          // **One string, used twice, and that is the point of ADR-0043.** What is chunked and what is
-          // stored are the same value — the flavor-transformed text — so `read_document` cannot come
-          // to disagree with `search_docs` about what an Obsidian note says. Deriving it twice, or
-          // storing `content` instead, is how that drift starts.
-          const transformed = transformContent(file.flavor, extracted);
-          const { title, chunks } = chunkMarkdown(transformed, file.relativePath, {
-            maxTokens: config.CHUNK_MAX_TOKENS,
-            overlapTokens: config.CHUNK_OVERLAP_TOKENS,
-            // The model's own tokenizer, exact by the time this runs — nothing is indexed before the
-            // pipeline has loaded — and the reserve for the special tokens it adds (ADR-0036) plus the
-            // provider's passage prefix, which `embedPassages` will prepend (ADR-0038).
-            countTokens,
-            reserveTokens,
-          });
+          // **One document each, whether there is one of them or forty** (ADR-0057). A derived document
+          // is written by exactly the statement an ordinary one is — `replaceDocument`'s transaction
+          // boundary is untouched (ADR-0039) — and carries the source file's hash, which is what makes
+          // the whole expansion skippable next run.
+          let produced = 0;
+          let written = 0;
+          let unchanged = 0;
+          /**
+           * **The loop is inside the boundary because the generator renders inside it.** Only a
+           * `DocumentExtractionError` is a refused file; anything else — a failed `replaceDocument`, a
+           * pool that is gone — is still a failed run, because it is not a statement about this file.
+           *
+           * **No input reaches this catch today, and that is deliberate rather than accidental — do not
+           * delete it as dead code.** `services/openapi.ts` closes every way it can throw at its own
+           * edge: `readOpenApi` validates before yielding anything, and each `renderOperation` is
+           * wrapped so that whatever comes out of it is already a `DocumentExtractionError`. Because
+           * that boundary is total, nothing a specification can contain arrives here, and no test can
+           * make it. It exists for the change that makes it reachable, which is a small one and will
+           * not look like it: a renderer that throws outside `openapi.ts`'s own wrapper, a second
+           * expanding content type whose generator does not carry one, or someone removing the
+           * catch-all there because nothing was hitting it either. Any of those and an exception from
+           * one file fails the whole run — deterministically, for every *other* file in the source,
+           * until somebody finds it by hand, which is the defect
+           * [ADR-0056](../../.ssot/ADR.md#adr-0056) built its boundary to close and
+           * [ADR-0057](../../.ssot/ADR.md#adr-0057) re-opened twice before closing it again.
+           */
+          let renderFailure: DocumentExtractionError | null = null;
+          try {
+            for (const doc of documents) {
+              produced++;
+              // The document-level half of the incremental run. For a one-document file this is only
+              // ever false — the short-circuit above already returned — so it costs nothing there and
+              // is the whole of the saving for a specification that gained one operation and kept forty.
+              if (isCurrent(doc.relativePath, hash, file.sourceId)) {
+                seen.add(doc.relativePath);
+                unchanged++;
+                continue;
+              }
+              const { title, chunks } = chunkMarkdown(doc.markdown, doc.relativePath, {
+                maxTokens: config.CHUNK_MAX_TOKENS,
+                overlapTokens: config.CHUNK_OVERLAP_TOKENS,
+                // The model's own tokenizer, exact by the time this runs — nothing is indexed before the
+                // pipeline has loaded — and the reserve for the special tokens it adds (ADR-0036) plus the
+                // provider's passage prefix, which `embedPassages` will prepend (ADR-0038).
+                countTokens,
+                reserveTokens,
+              });
 
-          if (chunks.length === 0) {
-            // Empty document: make sure no stale row lingers (`seen.delete` makes it count as removed below).
-            if (previous) await deleteDocuments(db, project.id, generation, [file.relativePath]);
-            seen.delete(file.relativePath);
-            job.filesDone++;
+              if (chunks.length === 0) {
+                // Empty document: make sure no stale row lingers. Leaving the path out of `seen` is what
+                // makes it count as removed below, which is also how an operation deleted from a
+                // specification loses its document — nothing here has to know it was ever there.
+                if (existing.has(doc.relativePath)) await deleteDocuments(db, project.id, generation, [doc.relativePath]);
+                continue;
+              }
+
+              const rows: NewChunk[] = [];
+              for (let i = 0; i < chunks.length; i += config.EMBEDDING_BATCH_SIZE) {
+                const batch = chunks.slice(i, i + config.EMBEDDING_BATCH_SIZE);
+                const vectors = await embeddings.embedPassages(batch.map(embeddingText));
+                batch.forEach((c, j) => {
+                  rows.push({ chunkIndex: c.index, headingPath: c.headingPath, content: c.content, tokenCount: c.tokenCount, embedding: vectors[j] });
+                });
+              }
+
+              await replaceDocument(
+                db,
+                {
+                  projectId: project.id,
+                  sourceId: file.sourceId,
+                  relativePath: doc.relativePath,
+                  title,
+                  contentHash: hash,
+                  sizeBytes: doc.sizeBytes,
+                  indexGeneration: generation,
+                  ...storedDocumentContent(doc.markdown, config.MAX_STORED_DOCUMENT_BYTES),
+                },
+                rows,
+                file.textSearchConfig,
+              );
+              seen.add(doc.relativePath);
+              written++;
+              job.chunksDone += rows.length;
+              log.debug({ file: doc.relativePath, chunks: rows.length }, 'document indexed');
+            }
+          } catch (err) {
+            if (!(err instanceof DocumentExtractionError)) throw err;
+            renderFailure = err;
+          }
+          if (renderFailure) {
+            // Whatever was written stands and is in `seen`; `claimed` spares the rest, so a
+            // specification that failed half-way through loses nothing it already had.
+            reject(file, renderFailure, claimed);
             continue;
           }
-
-          const rows: NewChunk[] = [];
-          for (let i = 0; i < chunks.length; i += config.EMBEDDING_BATCH_SIZE) {
-            const batch = chunks.slice(i, i + config.EMBEDDING_BATCH_SIZE);
-            const vectors = await embeddings.embedPassages(batch.map(embeddingText));
-            batch.forEach((c, j) => {
-              rows.push({ chunkIndex: c.index, headingPath: c.headingPath, content: c.content, tokenCount: c.tokenCount, embedding: vectors[j] });
-            });
-          }
-
-          await replaceDocument(
-            db,
-            {
-              projectId: project.id,
-              sourceId: file.sourceId,
-              relativePath: file.relativePath,
-              title,
-              contentHash: hash,
-              sizeBytes,
-              indexGeneration: generation,
-              ...storedDocumentContent(transformed, config.MAX_STORED_DOCUMENT_BYTES),
-            },
-            rows,
-            file.textSearchConfig,
-          );
+          // **A file every one of whose documents was already current is a skipped file** — and only
+          // then. A document that chunked to nothing was neither written nor unchanged, so a one-document
+          // file that has just been emptied no longer reports itself to the dashboard as "unchanged"
+          // through `index_runs`.
+          if (produced > 0 && written === 0 && unchanged === produced) job.filesSkipped++;
           job.filesDone++;
-          job.chunksDone += rows.length;
-          log.debug({ file: file.relativePath, chunks: rows.length }, 'document indexed');
         }
 
         // 3. Delete what disappeared, except documents of sources that could not be scanned at all.
