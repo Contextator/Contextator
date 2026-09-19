@@ -307,7 +307,8 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
           // The versions this index carries, when it carries any ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
           // Without it the only way to learn them is to guess one wrong and read the refusal, which is
           // a call spent on discovery — and this is the answer to "which is the latest" that the
-          // product is willing to give: the list, in no order, for the agent to choose from.
+          // product is willing to give: the list, alphabetical and in no chronological order at all,
+          // for the agent to choose from.
           const versions = await listDocumentVersions(db, project.id, live.liveGeneration);
           if (versions.length > 0) {
             lines.push(`Versions (pass one to search_docs as version): ${versions.join(', ')}. Omit it to search all of them.`);

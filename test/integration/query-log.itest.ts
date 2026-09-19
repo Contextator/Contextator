@@ -104,15 +104,17 @@ let database: TestDatabase;
 let db: Db;
 let projectId: string;
 let quietProjectId: string;
+/** A project whose documents carry a release label, so the third filter has something to be about. */
+let releasedProjectId: string;
 let tokenId: string;
 const config = loadConfig({ DATABASE_URL: 'postgres://unused/unused', SEARCH_SCORE_FLOOR: '0' });
 
 /** One project, one source, one document, indexed through the product's own write path. */
-async function seedProject(name: string): Promise<string> {
+async function seedProject(name: string, version = ''): Promise<string> {
   const [project] = await db.insert(projects).values({ name }).returning({ id: projects.id });
   const [source] = await db
     .insert(documentSources)
-    .values({ projectId: project.id, type: 'local', name: 'handbook', config: {} })
+    .values({ projectId: project.id, type: 'local', name: 'handbook', config: version ? { version } : {} })
     .returning({ id: documentSources.id });
 
   const relativePath = 'handbook/delivery.md';
@@ -134,7 +136,7 @@ async function seedProject(name: string): Promise<string> {
       contentHash: `hash-${name}`,
       sizeBytes: Buffer.byteLength(GUIDE),
       indexGeneration: LIVE,
-      version: '',
+      version,
       ...storedDocumentContent(GUIDE, 1024 * 1024),
     },
     rows,
@@ -178,6 +180,7 @@ beforeAll(async () => {
 
   projectId = await seedProject('handbook');
   quietProjectId = await seedProject('handbook-quiet');
+  releasedProjectId = await seedProject('handbook-v4', 'v4');
   // The project that does not want to be recorded. The switch is a column, so this is how an operator
   // setting it will look to the search path.
   await db.update(projects).set({ queryLogEnabled: false }).where(eq(projects.id, quietProjectId));
@@ -249,7 +252,61 @@ describe('a search through the MCP tool', () => {
     // The *normalised* prefix, not what was typed, so two spellings of one filter are one filter in
     // the log as they are in the query.
     expect(row?.filterPathPrefix).toBe('handbook');
+    // The third filter was not one of them, and NULL is how the row says so rather than by omission.
+    expect(row?.filterVersion).toBeNull();
     expect(row?.resultLimit).toBe(2);
+  });
+
+  it('records the version a search was scoped to, so all three filters are on the row or none is', async () => {
+    // [ADR-0058](../../.ssot/ADR.md#adr-0058)'s column, and the reason it exists rather than being
+    // left out: the three filters together are what decide *which corpus* a question was asked of, so
+    // a log that carried two of them would describe a search nobody ran — and the first thing an
+    // analysis of a bad answer needs is what the agent had already narrowed away.
+    const queryLog = new QueryLog(db, silentLogger);
+    const outcome = await searchProject(
+      { db, embeddings, queryLog: queryLog.for('mcp') },
+      // Spelled with the padding a client might send, so the *resolved* label is what lands, the way
+      // `filterPathPrefix` above is the normalised prefix rather than what was typed.
+      { projectId: releasedProjectId, query: 'DISPATCH_WORKERS in v4', limit: 2, version: '  v4  ' },
+    );
+    expect(outcome.status).toBe('ok');
+    await queryLog.flush();
+
+    const row = (await loggedQueries(releasedProjectId)).find((r) => r.query === 'DISPATCH_WORKERS in v4');
+    expect(row).toBeDefined();
+    expect(row?.filterVersion).toBe('v4');
+    expect(row?.filterSource).toBeNull();
+    expect(row?.filterPathPrefix).toBeNull();
+  });
+
+  it('leaves the version column null for a search over every version of the same project', async () => {
+    // The negative half, on the *same* project, so "it wrote v4" cannot be a property of the fixture.
+    const queryLog = new QueryLog(db, silentLogger);
+    const outcome = await searchProject(
+      { db, embeddings, queryLog: queryLog.for('mcp') },
+      { projectId: releasedProjectId, query: 'DISPATCH_WORKERS unscoped', limit: 2 },
+    );
+    expect(outcome.status).toBe('ok');
+    await queryLog.flush();
+
+    const row = (await loggedQueries(releasedProjectId)).find((r) => r.query === 'DISPATCH_WORKERS unscoped');
+    expect(row).toBeDefined();
+    expect(row?.filterVersion).toBeNull();
+  });
+
+  it('never records a version the index does not carry, because that search never ran', async () => {
+    // An unknown version is refused before anything is embedded, and the five outcomes that never
+    // reach the index are configuration states rather than questions ([ADR-0047](../../.ssot/ADR.md#adr-0047)).
+    // Without this, a refused filter would be indistinguishable from one that returned nothing.
+    const queryLog = new QueryLog(db, silentLogger);
+    const outcome = await searchProject(
+      { db, embeddings, queryLog: queryLog.for('mcp') },
+      { projectId: releasedProjectId, query: 'DISPATCH_WORKERS in v9', limit: 2, version: 'v9' },
+    );
+    expect(outcome.status).toBe('unknown_version');
+    await queryLog.flush();
+
+    expect((await loggedQueries(releasedProjectId)).find((r) => r.query === 'DISPATCH_WORKERS in v9')).toBeUndefined();
   });
 });
 

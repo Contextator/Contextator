@@ -244,8 +244,11 @@ returns the endpoint, not the file.
 - One rendered document is capped at 2 000 lines and one specification at 5 000 operations. Neither is reachable by a real API — the largest published specifications are around a thousand operations — and both exist because the file ceiling bounds the *parse* and bounds nothing about what a file asks to be *rendered*.
 
 Two versions of the same API in one project do not collide — `v2/openapi.yaml/get-pets` and
-`v3/openapi.yaml/get-pets` are different documents — but nothing yet tells an agent which one to
-prefer.
+`v3/openapi.yaml/get-pets` are different documents — and which one an agent gets is answered by
+[the version field](#versions-two-releases-of-one-product-in-one-project): give each specification's
+source a version and `search_docs` can be asked for one of them. Every document derived from a
+specification carries its file's version, because forty operations rendered out of one file are forty
+documents of one release.
 
 ### Obsidian vaults
 

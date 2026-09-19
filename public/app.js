@@ -1171,8 +1171,8 @@ function fillSourceForm(s) {
   srcForm.elements.name.value = s.name;
   srcForm.elements.label.value = s.label || '';
   srcForm.elements.flavor.value = s.flavor || 'plain';
-  srcForm.elements.version.value = c.version || '';
   syncFlavorFields();
+  srcForm.elements.version.value = c.version || '';
   setSyncIntervalField(s.syncIntervalMinutes);
   $('#src-next-sync').textContent = syncScheduleLabel(s);
   for (const box of srcForm.querySelectorAll('input[name="ext"]')) box.checked = (c.extensions || []).includes(box.value);

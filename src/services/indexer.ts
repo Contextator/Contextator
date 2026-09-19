@@ -671,10 +671,10 @@ export class Indexer {
                   contentHash: hash,
                   sizeBytes: doc.sizeBytes,
                   indexGeneration: generation,
-                  // [ADR-0058](../../.ssot/ADR.md#adr-0058), on the per-document write
-                  // [ADR-0057](../../.ssot/ADR.md#adr-0057) turned this into: a file that expands into
-                  // forty operations is forty documents of **one** release, so the label is the file's
-                  // and every document derived from it carries it.
+                  // **The label is the file's, so every document derived from it carries it**
+                  // ([ADR-0058](../../.ssot/ADR.md#adr-0058)). Forty operations rendered out of one
+                  // specification are forty documents of one release; there is no sense in which some
+                  // of them could be a different version from the file they came from.
                   version: file.version,
                   ...storedDocumentContent(doc.markdown, config.MAX_STORED_DOCUMENT_BYTES),
                 },
