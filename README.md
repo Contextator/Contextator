@@ -933,6 +933,11 @@ columns it is stored in, and every filter — who, what, which project, and a ra
 one keyset page at a time. A project that has since been deleted still has its rows: `project_id` carries no foreign
 key, so what the panel cannot do is look its *name* up, and it says so on the row rather than leaving it blank.
 
+The two columns the panel filters on — `actor_label`, because it outlives the account, and `action` — are indexed by
+migration `0011`. At 200,004 rows a selective actor filter is 0.07 ms against 9.7 ms without it, a page turn is 3 ms,
+and a first page is 19–52 ms because it also fills the filter dropdowns with three `DISTINCT` scans no index can help.
+Those are paid once per filter change and never per page turn.
+
 The panel is deliberately not reassuring about two things, because neither is true: the log is **not tamper-evident**
 — anyone with database access can remove a row and nothing here would show it ([SECURITY.md](SECURITY.md)) — and rows
 older than `AUDIT_LOG_RETENTION_DAYS` are swept on the same quarter-hourly timer as expired sessions.

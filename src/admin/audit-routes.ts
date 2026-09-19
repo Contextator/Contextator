@@ -22,17 +22,19 @@ import { ValidationError } from '../services/projects.js';
  * an operator looking for one action would be paging through the whole of it. The ordering and the
  * cursor are `(created_at DESC, id DESC)`, which is what `audit_events_created_idx` is for.
  *
- * **What is not indexed, said here rather than discovered later.** Three of the six accesses land on
- * an index the schema already has: the unfiltered page and the day range on `audit_events_created_idx`,
- * the project filter on `audit_events_project_created_idx`. Three do not. The actor filter compares
- * `actor_label`, while the index beside it is on `actor_user_id` — and it has to be the label, because
- * that is the column that survives the account being deleted, which is half of what this panel is for.
- * `action` has no index at all. And the three `DISTINCT` scans behind the filter pickers read the table.
- * Paging is unaffected — the pickers are computed once per filter run, not per page turn — so the cost
- * falls on *changing* a filter, and it is a sequential scan of an append-only table bounded by
- * `AUDIT_LOG_RETENTION_DAYS`. Measured at 690 rows it is 36 ms including all three picker scans. Adding
- * `(actor_label, created_at desc)` and `(action, created_at desc)` is a migration, and a migration
- * belongs to whoever owns this schema rather than to the panel reading it.
+ * **What each access uses, and the one thing no index can help.** Five of the six land on an index: the
+ * unfiltered page and the day range on `audit_events_created_idx`, the project filter on
+ * `audit_events_project_created_idx`, and the actor and action filters on the two `0011` added —
+ * `(actor_label, created_at desc)` and `(action, created_at desc)`. The actor one is keyed on the
+ * *label* rather than on `actor_user_id`, because the label is the column that survives the account
+ * being deleted, which is half of what this panel is for. Measured at 200,004 rows, a selective actor
+ * filter is 0.07 ms against 9.70 ms of sequential scan without it.
+ *
+ * The sixth is `facets()`. `SELECT DISTINCT` over a whole column is a full read whatever btree sits
+ * beside it — PostgreSQL has no loose index scan — so the three cost about 24 ms of wall time at that
+ * size, run concurrently. They are paid **once per filter run and never per page turn**, which is what
+ * keeps them off the path somebody is using: a first page is 19–52 ms and a page turn 3 ms. The answer
+ * if that is ever felt is a cache with a stated staleness, not an index that cannot help.
  */
 
 /** One screenful. Large enough that scrolling is the normal way to read, small enough to be one page. */
