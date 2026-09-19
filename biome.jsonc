@@ -13,12 +13,16 @@
     // Everything that is hand-written. `dist/`, `node_modules/`, `.data/` and `.cache/` are left out
     // by being absent rather than by an ignore list.
     //
-    // `test/fixtures/**` is the one exclusion, and it is not laziness: a fixture is a specimen of what
+    // `test/fixtures` is the one exclusion, and it is not laziness: a fixture is a specimen of what
     // the world sends, so the exported page with a `function` expression in its `<script>` and the
     // spreadsheet export with a stray quote are *correct as they are*. Formatting them would be
-    // formatting the input, which is the one thing a fixture must not have done to it. The generator
-    // that writes the binary fixtures is excepted back in, because that one is ordinary source.
-    "includes": ["src/**", "test/**", "!test/fixtures", "test/fixtures/**/build.ts", "scripts/**", "public/**", "*.config.ts"]
+    // formatting the input, which is the one thing a fixture must not have done to it.
+    //
+    // Nothing is excepted back in, because Biome prunes an excluded directory during the walk and a
+    // pattern naming a file underneath it never matches — `biome check` on such a file then reports
+    // "Checked 0 files", which reads exactly like success. The generator that writes the binary
+    // fixtures therefore lives in `scripts/`, where it is linted like any other source.
+    "includes": ["src/**", "test/**", "!test/fixtures", "scripts/**", "public/**", "*.config.ts"]
   },
 
   "formatter": {

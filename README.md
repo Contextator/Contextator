@@ -453,12 +453,39 @@ A source indexes `.md` and `.mdx` by default and can be told to take `.txt`, `.h
 | `.csv` | one GFM table, `## Rows n–m` sections every 200 rows | the header above every section, quoted commas and newlines, `;`/tab/pipe delimiters | nothing of the data; cell newlines become `<br>` |
 | `.pdf` | Markdown reconstructed from glyph positions | headings by font size, paragraphs rejoined across line ends and de-hyphenated, bullet and numbered lists, column-aligned tables, two-column reading order, running heads and feet dropped | footnotes, figures, and any table whose columns are not aligned |
 
-**A PDF with no text layer is refused, not indexed.** A scan of paper contains pictures of words and no
-words, and there is no OCR in this product. Such a file is skipped, the reason is written to its
-source's error line in the dashboard, and the rest of the source indexes normally — the alternative is
-a document that exists, matches nothing and reads as blank, which nobody ever notices is wrong. The
-same happens to an encrypted PDF, a `.doc` renamed to `.docx`, and a Word file whose content is
-entirely pictures.
+Every failure — a parser's own exception included — leaves the conversion as a refusal that names the
+file. That is not tidiness: the indexer treats an unrecognised exception as a failed *run*, and because
+a malformed file fails the same way every time, one of them would stop the whole project from being
+re-indexed until somebody found it.
+
+**A file that cannot be converted is refused, not indexed.** A scan of paper contains pictures of words
+and no words, and there is no OCR in this product. Such a file is skipped, the reason — naming the file
+— is shown on its source in the dashboard, and the rest of the source indexes normally. The alternative
+is a document that exists, matches nothing and reads as blank, which nobody ever notices is wrong. The
+same happens to an encrypted PDF, a `.doc` renamed to `.docx`, a Word file whose content is entirely
+pictures, a damaged file of any of these types, and a page or spreadsheet that converts to no text at
+all.
+
+**A refusal never fails the run.** The source is not marked failed and the project is not marked
+failed: it synced, and everything else in it indexed. The dashboard shows the source's reason line
+whether or not the source failed, which is the only thing that makes the refusal visible rather than
+merely recorded. On an incremental run the file keeps whatever document it already had; a **rebuild**
+(`force`, or a changed embedding model) publishes the corpus as it stands, so a file that can no longer
+be converted is not in the new generation — the same rule [ADR-0039](#) applies to a source that cannot
+be read.
+
+**What a file may cost while it is converted.** Conversion runs in the server's own process, beside the
+dashboard and the MCP endpoint, and until now only the upload path had any size limit at all — a file
+reached through a local directory or a git checkout was parsed at whatever size it happened to be.
+Three caps bound it, and each closes something the others do not:
+
+| Setting | Default | What it stops |
+|---------|---------|---------------|
+| `MAX_CONVERTED_FILE_BYTES` | 32 MiB | one enormous document taking the process down with it. `.md`, `.mdx` and `.txt` are decoded rather than parsed and are not capped |
+| `MAX_PDF_PAGES` | 2000 | a few kilobytes of PDF that *declares* a hundred thousand pages — every page is read into memory at once |
+| `MAX_DOCX_UNPACKED_BYTES` | 256 MiB | the ordinary zip bomb: a `.docx` is a zip, and its central directory is read before anything is inflated |
+
+A file over a cap is refused by name, the same way a scan is.
 
 A converted document is stored under its original path and extension (`handbook/support-handbook.pdf`),
 and that is the path `search_docs` cites and `read_document` takes. Its **title** comes from the
@@ -788,6 +815,7 @@ src/services/sources/         one driver per type: local, git (isomorphic-git), 
 src/services/flavors.ts       content-type transforms (Obsidian wikilinks, Notion export ids)
 src/services/doc-types/       one transform per file extension, all of them producing Markdown: html, docx, csv, pdf
 src/services/doc-types/pdf.ts a PDF read as a layout — lines, columns, running heads, headings by size, tables by alignment
+scripts/build-doc-fixtures.ts the dependency-free PDF and zip writers the binary test fixtures come from
 src/types/                    ambient declarations for the two dependencies that ship none (mammoth, the turndown GFM plugin)
 src/services/archives.ts      zip / tar / tar.gz / rar extraction with path and size guards
 src/services/uploads.ts       staged upload sessions and their commit into a source
@@ -842,7 +870,7 @@ test/*.test.ts                unit suite — pure functions, no database, no Doc
 test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
 test/integration/fixtures/    a pre-v3 `0.1` schema derived from history, and the frozen DDL ladder the migrations replaced
-test/fixtures/doc-types/      one real file per supported type, and `build.ts`, the dependency-free writer the binary ones come from
+test/fixtures/doc-types/      one real file per supported type, plus the malformed ones a refusal has to survive
 eval/corpus/                  the fixture corpus the golden set asks about: 15 English and 11 Turkish pages, written for this
 eval/golden.jsonl             48 questions, one JSON object per line, each naming the file that answers it
 eval/README.md                what a good question is, how to add one, and why the failures are kept

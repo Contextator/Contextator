@@ -306,7 +306,11 @@ async function indexCorpus(
     const { bytes, hash, sizeBytes } = await readAndHash(path.join(CORPUS_DIR, relativePath));
     // The indexer's own step, and the identity for a `.md` file (ADR-0056). Calling it here rather
     // than decoding the buffer keeps the harness on the product's single path into the chunker.
-    const content = await extractDocument(relativePath, bytes);
+    const content = await extractDocument(relativePath, bytes, {
+      maxFileBytes: config.MAX_CONVERTED_FILE_BYTES,
+      maxPdfPages: config.MAX_PDF_PAGES,
+      maxUnpackedBytes: config.MAX_DOCX_UNPACKED_BYTES,
+    });
     const previous = existing.get(relativePath);
     if (previous && previous.contentHash === hash) {
       skipped.push(`${relativePath} (content hash unchanged — this database was not fresh)`);

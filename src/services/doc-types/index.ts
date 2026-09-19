@@ -36,8 +36,28 @@ export class DocumentExtractionError extends Error {
   }
 }
 
-/** Takes the file's raw bytes and its stored path (for the title fallback); answers Markdown. */
-export type DocumentExtractor = (bytes: Buffer, relativePath: string) => Promise<string>;
+/** Takes the file's raw bytes, its stored path (for the title fallback) and the run's caps; answers Markdown. */
+export type DocumentExtractor = (bytes: Buffer, relativePath: string, limits: ExtractLimits) => Promise<string>;
+
+/**
+ * What one file is allowed to cost while it is being converted
+ * ([ADR-0056](../../../.ssot/ADR.md#adr-0056)).
+ *
+ * **These bound the indexer's own process, and that is why they are not the upload limits.**
+ * `UPLOAD_MAX_FILE_BYTES` governs what may be *stored*, and it only ever applied to the upload path —
+ * a file reached through a local directory or a git checkout passed no size check at all. What runs
+ * here is a parser holding a whole document in memory, in the same process as the dashboard and
+ * `/mcp`, so the ceiling that matters is the one on what may be *parsed*, and it has to apply to every
+ * source type.
+ */
+export interface ExtractLimits {
+  /** Raw bytes of a file of a converted type. `.md` and friends are not parsed and are not capped. */
+  maxFileBytes: number;
+  /** Pages a PDF may declare. A few kilobytes of PDF can claim a hundred thousand of them. */
+  maxPdfPages: number;
+  /** What a `.docx`'s central directory may claim its parts unpack to — the ordinary zip bomb. */
+  maxUnpackedBytes: number;
+}
 
 /** The extension of a stored path, lower-cased and without the dot; `''` when there is none. */
 export function extensionOf(relativePath: string): string {
@@ -109,17 +129,77 @@ const EXTRACTORS: Record<SupportedExtension, DocumentExtractor> = {
   md: text,
   mdx: text,
   txt: text,
+  // html and csv take no limits: neither unpacks anything and neither can be asked to do more work
+  // than its bytes, which `maxFileBytes` has already bounded by the time they are called.
   html: async (bytes, rel) => (await import('./html.js')).htmlToMarkdown(bytes, rel),
   htm: async (bytes, rel) => (await import('./html.js')).htmlToMarkdown(bytes, rel),
   csv: async (bytes, rel) => (await import('./csv.js')).csvToMarkdown(bytes, rel),
-  docx: async (bytes, rel) => (await import('./docx.js')).docxToMarkdown(bytes, rel),
-  pdf: async (bytes, rel) => (await import('./pdf.js')).pdfToMarkdown(bytes, rel),
+  docx: async (bytes, rel, limits) => (await import('./docx.js')).docxToMarkdown(bytes, rel, limits),
+  pdf: async (bytes, rel, limits) => (await import('./pdf.js')).pdfToMarkdown(bytes, rel, limits),
 };
 
-/** The Markdown of one indexed file. Throws `DocumentExtractionError` when the file cannot become one. */
-export async function extractDocument(relativePath: string, bytes: Buffer): Promise<string> {
+/**
+ * The types that are *converted*, as opposed to the three that are already Markdown.
+ *
+ * The distinction earns its keep twice below: only these are parsed, so only these are capped; and an
+ * empty result means something different for each side. An empty `.md` is an empty file, which is a
+ * thing people commit and which this product has always skipped quietly. An empty `.pdf` is a
+ * conversion that produced nothing from a file that plainly held something, and that is a failure.
+ */
+const CONVERTED: ReadonlySet<string> = new Set(['html', 'htm', 'csv', 'docx', 'pdf']);
+
+/** Heading lines are the title this module adds; they are not evidence that the document has content. */
+function hasBodyText(markdown: string): boolean {
+  return markdown.split('\n').some((line) => !/^#{1,6}\s/.test(line) && line.trim() !== '');
+}
+
+function bytesLabel(count: number): string {
+  return count >= 1024 * 1024 ? `${(count / (1024 * 1024)).toFixed(1)} MiB` : `${Math.ceil(count / 1024)} KiB`;
+}
+
+/**
+ * The Markdown of one indexed file.
+ *
+ * **Every failure leaves here as a `DocumentExtractionError`, and that is the point of the boundary.**
+ * Four third-party parsers run under this call, and between them they throw a catalogue nobody has
+ * enumerated: a `FormatError` from a truncated cross-reference table, a DOM exception from a page that
+ * ends mid-tag, whatever `jszip` says about a corrupt part. Any one of those escaping is not a bad
+ * document, it is a **failed run** — `indexer.ts` rethrows what it does not recognise, the project goes
+ * to `error`, and because the failure is deterministic the project cannot be indexed again until
+ * somebody finds and deletes the file. Three hundred and ninety-nine healthy documents stop being
+ * updated because of one. So the rule is that the only thing this function throws is the type the
+ * indexer knows how to report, and the message always names the file — the library's own message
+ * usually does not, and "Invalid XRef stream header" with no filename is not something an operator can
+ * act on.
+ */
+export async function extractDocument(relativePath: string, bytes: Buffer, limits: ExtractLimits): Promise<string> {
   const ext = extensionOf(relativePath);
   const extractor = (EXTRACTORS as Record<string, DocumentExtractor | undefined>)[ext];
   if (!extractor) throw new DocumentExtractionError(`"${relativePath}" has no supported file type (".${ext}")`);
-  return extractor(bytes, relativePath);
+
+  const converted = CONVERTED.has(ext);
+  if (converted && bytes.byteLength > limits.maxFileBytes) {
+    throw new DocumentExtractionError(
+      `"${relativePath}" is ${bytesLabel(bytes.byteLength)}, over the ${bytesLabel(limits.maxFileBytes)} a file of this type may be when it is converted. ` +
+        `Converting it happens in the server's own process, so the limit is there to keep one document from taking the dashboard and the MCP endpoint down with it; ` +
+        `raise MAX_CONVERTED_FILE_BYTES if this file is genuinely a document, or split it.`,
+    );
+  }
+
+  let markdown: string;
+  try {
+    markdown = await extractor(bytes, relativePath, limits);
+  } catch (err) {
+    if (err instanceof DocumentExtractionError) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    throw new DocumentExtractionError(`"${relativePath}" could not be read as a ".${ext}" file: ${message}`);
+  }
+
+  if (converted && !hasBodyText(markdown)) {
+    throw new DocumentExtractionError(
+      `"${relativePath}" converted to nothing — the file holds no text this product can index. ` +
+        `Indexing it anyway would add a document that is listed, matches nothing and reads as blank, which is the one failure nobody ever notices.`,
+    );
+  }
+  return markdown;
 }

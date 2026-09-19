@@ -2,11 +2,16 @@
  * Builds the binary fixtures `test/doc-types.test.ts` reads: a `.pdf` with a real layout, a `.pdf`
  * that is a scan, and a `.docx`.
  *
+ * **The fixtures are committed, and this script is how they were made.** It lives here rather than
+ * beside them because `test/fixtures/` is excluded from the formatter and the linter — a fixture is a
+ * specimen of what the world sends and must not be reformatted — and a generator is ordinary source
+ * that should be held to the same bar as everything else.
+ *
  * **The fixtures are committed, and this script is how they were made.** A test that asserts what a
  * PDF extractor produces is only worth reading if the PDF it reads is a real one — a stub whose text
  * was assembled in the test proves the assertion and nothing else. But a committed binary nobody can
  * regenerate is a fixture nobody can change, so the generator lives beside it. Run it with
- * `npx tsx test/fixtures/doc-types/build.ts` after editing, and commit what it writes.
+ * `npx tsx scripts/build-doc-fixtures.ts` after editing, and commit what it writes.
  *
  * Both writers are deliberately dependency-free and deliberately small: a PDF with uncompressed
  * content streams and the base-14 Helvetica, and a stored (uncompressed) zip. Everything the
@@ -19,7 +24,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
+const OUT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'test', 'fixtures', 'doc-types');
 
 // ---------------------------------------------------------------- PDF writer
 
@@ -176,6 +181,19 @@ function scannedPdf(): Buffer {
   return buildPdf([imageOnlyStream(), imageOnlyStream()], undefined);
 }
 
+/**
+ * A PDF cut in half — a partial download, a truncated copy, a file half-written by a crashed tool.
+ *
+ * It is here for the *boundary* rather than for the reader: PDF.js answers this one with an
+ * `InvalidPDFException`, which is not a type the indexer knows, and an exception of that shape
+ * escaping `extractDocument` fails the whole run rather than the file. The trailer is kept so the file
+ * still looks like a PDF to anything that only checks the ends of it.
+ */
+function damagedPdf(): Buffer {
+  const whole = handbookPdf();
+  return Buffer.concat([whole.subarray(0, 900), Buffer.from('\ntrailer\n<< /Size 10 /Root 1 0 R >>\nstartxref\n20\n%%EOF\n', 'latin1')]);
+}
+
 // ---------------------------------------------------------------- zip writer
 
 const CRC_TABLE = (() => {
@@ -262,7 +280,10 @@ function onboardingDocx(): Buffer {
   const document =
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:document ${NS}><w:body>` +
     paragraph('Heading1', 'Onboarding checklist') +
-    paragraph(null, 'A new engineer is productive on the day their access works, and not before. This note is the list somebody walks through with them.') +
+    paragraph(
+      null,
+      'A new engineer is productive on the day their access works, and not before. This note is the list somebody walks through with them.',
+    ) +
     paragraph('Heading2', 'First morning') +
     bullet('Sign the handbook acknowledgement.') +
     bullet('Collect the laptop and the hardware key.') +
@@ -315,15 +336,26 @@ function onboardingDocx(): Buffer {
   ]);
 }
 
+/**
+ * A zip of notes that somebody renamed to `.docx`. It passes the `PK` check — it is a real zip — and
+ * mammoth then throws a plain `Error` at it, which is the second path `extractDocument`'s boundary has
+ * to turn into something the indexer can report against one file instead of against the run.
+ */
+function renamedZipDocx(): Buffer {
+  return buildZip([{ name: 'readme.txt', data: 'Notes about the onboarding process. This archive was renamed, not exported.\n' }]);
+}
+
 async function main(): Promise<void> {
   const files: Array<[string, Buffer]> = [
     ['support-handbook.pdf', handbookPdf()],
     ['two-column-brief.pdf', twoColumnPdf()],
     ['scanned-invoice.pdf', scannedPdf()],
+    ['damaged-report.pdf', damagedPdf()],
     ['onboarding-checklist.docx', onboardingDocx()],
+    ['notes-renamed.docx', renamedZipDocx()],
   ];
   for (const [name, data] of files) {
-    await fs.writeFile(path.join(HERE, name), data);
+    await fs.writeFile(path.join(OUT, name), data);
     process.stdout.write(`${name} — ${data.byteLength} bytes, sha256 ${createHash('sha256').update(data).digest('hex').slice(0, 16)}\n`);
   }
 }

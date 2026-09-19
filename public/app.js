@@ -660,6 +660,11 @@ function renderSources(project, busy) {
   const rows = sources.map((s) => {
     const confirming = state.confirmDeleteSource === s.id;
     const failed = s.status === 'error';
+    // A source can carry a complaint without having failed: since ADR-0056 a file the indexer could
+    // not convert — a scanned PDF, a file over the conversion limit — writes its reason here while the
+    // source itself synced perfectly and everything else in it indexed. Showing `lastError` only when
+    // `status === 'error'` hid exactly that case, which made the refusal a silent failure of its own.
+    const warned = !failed && Boolean(s.lastError);
     const actions = [
       mayEdit && (s.type === 'git' || s.type === 'notion')
         ? el('button', {
@@ -697,7 +702,7 @@ function renderSources(project, busy) {
         : null,
     ];
     return el('div', { class: 'source-row' }, [
-      el('span', { class: `source-glyph ${failed ? 'error' : s.type}`, text: SOURCE_GLYPH[s.type] ?? '?' }),
+      el('span', { class: `source-glyph ${failed ? 'error' : warned ? 'warn' : s.type}`, text: SOURCE_GLYPH[s.type] ?? '?' }),
       el('span', { class: 'source-cell' }, [
         el('code', { text: s.name }),
         el('span', { class: 'sub', text: s.label || SOURCE_TITLE[s.type] || s.type }),
@@ -705,9 +710,9 @@ function renderSources(project, busy) {
       el('span', { class: 'source-cell' }, [
         el('code', { text: sourceOrigin(s), title: sourceOrigin(s) }),
         el('span', {
-          class: `sub${failed ? ' err' : ''}`,
-          text: failed ? shortError(s.lastError, 80) : sourceDetail(s),
-          title: failed ? s.lastError || '' : '',
+          class: `sub${failed ? ' err' : warned ? ' warn' : ''}`,
+          text: failed || warned ? shortError(s.lastError, 80) : sourceDetail(s),
+          title: failed || warned ? s.lastError || '' : '',
         }),
       ]),
       el('span', { class: 'sub', text: s.flavor === 'plain' ? '—' : s.flavor, title: 'Content type' }),
@@ -1347,7 +1352,24 @@ async function entriesFromDataTransfer(dt) {
   return out;
 }
 
+/**
+ * The dropzone says which extensions *this source* takes, read off the File types checkboxes above it.
+ *
+ * It used to be a fixed list in the markup, and a fixed list is wrong whichever list it is: a new
+ * upload source defaults to `.md` and `.mdx`, so an operator who read "…, .docx, .pdf" and dropped a
+ * PDF was told "unsupported file type" by the line directly under the sentence that invited it.
+ */
+function renderDropzoneTypes() {
+  const types = extensionsFromForm();
+  const hint = $('#dropzone-types');
+  if (!hint) return;
+  hint.textContent =
+    (types.length ? `${types.map((e) => `.${e}`).join(', ')} · ` : 'tick a file type above · ') +
+    'folders keep their structure · .zip, .tar.gz and .rar are unpacked on the server';
+}
+
 function renderQueue(note) {
+  renderDropzoneTypes();
   const queued = srcUi.queue.filter((i) => i.status === 'queued').length;
   const settled = srcUi.queue.filter((i) => i.status === 'ok' || i.status === 'skip').length;
   const skipped = srcUi.queue.filter((i) => i.status === 'skip').length;

@@ -39,6 +39,33 @@ describe('the dashboard markup and its modules agree', () => {
     for (const id of ['token-snippet-cli', 'token-snippet-cli-copy', 'token-snippet-json', 'token-snippet-json-copy']) expect(ids).toContain(id);
   });
 
+  /**
+   * A source can carry a complaint without having failed ([ADR-0056](../.ssot/ADR.md#adr-0056)): a
+   * scanned PDF, or a file over the conversion limit, writes its reason to `last_error` while the
+   * source itself synced and everything else in it indexed. The panel used to render `lastError` only
+   * when `status === 'error'`, so that reason reached the column and never reached a person — which
+   * made the refusal a silent failure of exactly the kind the entry exists to prevent.
+   *
+   * This is a source-text check, like the id wiring above it, because the dashboard has no build step
+   * and no DOM to assert against. It is worth having anyway: it fails the moment the branch goes back.
+   */
+  it('shows a source its last error even when the source did not fail', async () => {
+    const js = await readFile(new URL('app.js', PUBLIC), 'utf8');
+    expect(js).toMatch(/const warned = !failed && Boolean\(s\.lastError\);/);
+    // Both the glyph and the detail line have to react to it, or the reason is only in a tooltip.
+    expect(js).toMatch(/failed \? 'error' : warned \? 'warn' : s\.type/);
+    expect(js).toMatch(/text: failed \|\| warned \? shortError\(s\.lastError, 80\) : sourceDetail\(s\)/);
+  });
+
+  it('lets the dropzone name the file types this source actually takes', async () => {
+    const js = await readFile(new URL('app.js', PUBLIC), 'utf8');
+    const html = await readFile(new URL('index.html', PUBLIC), 'utf8');
+    // The list is rendered from the checkboxes, not written into the markup: a new upload source
+    // defaults to .md and .mdx, and a fixed list under the dropzone contradicted that.
+    expect(js).toContain('function renderDropzoneTypes()');
+    expect(html).not.toMatch(/\.md, \.mdx, \.txt, \.html/);
+  });
+
   it('keeps the auth pages free of dashboard ids, since they load a different script', async () => {
     const authPage = await readFile(new URL('auth-page.js', PUBLIC), 'utf8');
     const bodies = await Promise.all(['login', 'setup', 'change-password'].map((slug) => readFile(new URL(`pages/${slug}.html`, PUBLIC), 'utf8')));

@@ -126,7 +126,7 @@ beforeAll(async () => {
       projectId: project.id,
       type: 'local',
       name: 'handbook',
-      config: { path: root, extensions: ['md', 'html', 'csv', 'docx', 'pdf'] },
+      config: { path: root, extensions: ['md', 'txt', 'html', 'htm', 'csv', 'docx', 'pdf'] },
     })
     .returning();
 
@@ -142,6 +142,9 @@ beforeAll(async () => {
       DATA_DIR: path.join(root, '.data'),
       SECRET_KEY: '0'.repeat(64),
       MAX_STORED_DOCUMENT_BYTES: 1024 * 1024,
+      MAX_CONVERTED_FILE_BYTES: 32 * 1024 * 1024,
+      MAX_PDF_PAGES: 2000,
+      MAX_DOCX_UNPACKED_BYTES: 256 * 1024 * 1024,
     },
     log: silentLogger,
     locks: new KeyedMutex(),
@@ -178,6 +181,8 @@ describe('a project of mixed file types', () => {
       .from(documents)
       .where(eq(documents.projectId, fx.project.id));
     expect(rows.map((r) => r.relativePath).sort()).toEqual([
+      'handbook/changelog.htm',
+      'handbook/escalation-policy.txt',
       'handbook/onboarding-checklist.docx',
       'handbook/release-notes.html',
       'handbook/service-owners.csv',
@@ -224,17 +229,35 @@ describe('a project of mixed file types', () => {
     expect(html.text).not.toContain('window.analytics');
   });
 
-  it('writes the reason a scan was refused onto the source, and indexes nothing for it', async () => {
+  it('writes every refusal onto the source, and indexes nothing for any of them', async () => {
     const [source] = await fx.database.db.select().from(documentSources).where(eq(documentSources.id, fx.sourceId));
-    expect(source.lastError).toMatch(/1 file\(s\) could not be indexed/);
+    expect(source.lastError).toMatch(/3 file\(s\) could not be indexed/);
     expect(source.lastError).toContain('scanned-invoice.pdf');
     expect(source.lastError).toMatch(/no text layer/);
     expect(source.lastError).toMatch(/character recognition is out of scope/);
+    // The two malformed files are reported the same way, each named — and the run still finished.
+    expect(source.lastError).toContain('damaged-report.pdf');
+    expect(source.lastError).toContain('notes-renamed.docx');
     // A refusal is not a failed sync: the source is still usable and the run still succeeded.
     expect(source.status).toBe('idle');
 
-    const answer = await call('read_document', { path: 'handbook/scanned-invoice.pdf' });
-    expect(answer.isError).toBe(true);
+    for (const path of ['handbook/scanned-invoice.pdf', 'handbook/damaged-report.pdf', 'handbook/notes-renamed.docx']) {
+      expect((await call('read_document', { path })).isError).toBe(true);
+    }
+  });
+
+  /**
+   * **The blocker this file exists for.** Before `extractDocument` grew its boundary, the damaged PDF
+   * and the renamed zip each threw a library exception straight past the indexer's `instanceof` check
+   * and into the catch outside the file loop. That marked the project `error`, and because both
+   * failures are deterministic it would have done so on every run after this one — so the other seven
+   * documents would never be updated again until somebody found the two files by hand.
+   */
+  it('finished the run and left the project healthy, with three unreadable files in it', async () => {
+    const project = await getProjectById(fx.database.db, fx.project.id);
+    expect(project?.status).toBe('idle');
+    expect(project?.lastError).toBeNull();
+    expect(project?.documentCount).toBe(7);
   });
 
   it('skips every file on a second run, because the hash is still over the raw bytes', async () => {
@@ -250,14 +273,17 @@ describe('a project of mixed file types', () => {
         DATA_DIR: path.join(fx.root, '.data'),
         SECRET_KEY: '0'.repeat(64),
         MAX_STORED_DOCUMENT_BYTES: 1024 * 1024,
+        MAX_CONVERTED_FILE_BYTES: 32 * 1024 * 1024,
+        MAX_PDF_PAGES: 2000,
+        MAX_DOCX_UNPACKED_BYTES: 256 * 1024 * 1024,
       },
       log: silentLogger,
       locks: new KeyedMutex(),
     });
     const job = await settle(fx.database.db, indexer.enqueue(fx.project.id));
     expect(job.phase).toBe('done');
-    // Five unchanged documents plus the scan, which is skipped by being refused again.
-    expect(job.filesSkipped).toBe(6);
+    // Seven unchanged documents plus the three that are refused again.
+    expect(job.filesSkipped).toBe(10);
     expect(job.chunksDone).toBe(0);
     expect(job.filesRemoved).toBe(0);
   }, 120_000);

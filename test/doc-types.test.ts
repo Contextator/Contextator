@@ -3,14 +3,26 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { chunkMarkdown } from '../src/services/chunker.js';
 import { csvToMarkdown, parseDelimited, sniffDelimiter } from '../src/services/doc-types/csv.js';
+import { declaredUnpackedBytes } from '../src/services/doc-types/docx.js';
 import { htmlToMarkdown, promoteBlankTableHeader } from '../src/services/doc-types/html.js';
-import { DocumentExtractionError, extensionOf, extractDocument, titleFromPath, withTitle } from '../src/services/doc-types/index.js';
+import {
+  DocumentExtractionError,
+  type ExtractLimits,
+  extensionOf,
+  extractDocument,
+  titleFromPath,
+  withTitle,
+} from '../src/services/doc-types/index.js';
 import { transformContent } from '../src/services/flavors.js';
 import { SUPPORTED_EXTENSIONS, extensionMatcher } from '../src/services/fs-scan.js';
 import { storedDocumentContent } from '../src/services/vector-store.js';
 
 const FIXTURES = path.join(__dirname, 'fixtures', 'doc-types');
 const bytesOf = (name: string): Buffer => readFileSync(path.join(FIXTURES, name));
+
+/** The product's defaults, so nothing here passes because it was given a limit the server would not. */
+const LIMITS: ExtractLimits = { maxFileBytes: 32 * 1024 * 1024, maxPdfPages: 2000, maxUnpackedBytes: 256 * 1024 * 1024 };
+const extract = (name: string, bytes: Buffer, limits: ExtractLimits = LIMITS): Promise<string> => extractDocument(name, bytes, limits);
 
 /**
  * **What `read_document` would hand an agent**, and the reason this helper exists rather than a bare
@@ -23,7 +35,7 @@ const bytesOf = (name: string): Buffer => readFileSync(path.join(FIXTURES, name)
  * asserted an intermediate string could pass while the thing a person reads was wrong.
  */
 async function readable(name: string): Promise<string> {
-  const markdown = await extractDocument(name, bytesOf(name));
+  const markdown = await extract(name, bytesOf(name));
   const stored = storedDocumentContent(transformContent('plain', markdown), 1024 * 1024);
   expect(stored.contentTruncated).toBe(false);
   return stored.content;
@@ -40,13 +52,13 @@ describe('the document type registry', () => {
     // Every listed extension has to reach *a* transform. What that transform then says about an empty
     // buffer is its own business — several refuse it, which is the point of them.
     for (const ext of SUPPORTED_EXTENSIONS) {
-      await extractDocument(`a.${ext}`, Buffer.from('')).catch((err: unknown) => {
+      await extract(`a.${ext}`, Buffer.from('')).catch((err: unknown) => {
         expect(err).toBeInstanceOf(DocumentExtractionError);
         expect((err as Error).message).not.toMatch(/no supported file type/);
       });
     }
-    await expect(extractDocument('notes.rtf', Buffer.from('x'))).rejects.toBeInstanceOf(DocumentExtractionError);
-    await expect(extractDocument('Makefile', Buffer.from('x'))).rejects.toThrow(/no supported file type/);
+    await expect(extract('notes.rtf', Buffer.from('x'))).rejects.toBeInstanceOf(DocumentExtractionError);
+    await expect(extract('Makefile', Buffer.from('x'))).rejects.toThrow(/no supported file type/);
   });
 
   it('accepts the new extensions in the scanner filter, and still rejects what is not on the list', () => {
@@ -57,7 +69,7 @@ describe('the document type registry', () => {
 
   it('leaves Markdown exactly as it was, byte for byte', async () => {
     const source = '---\ntitle: Kept\n---\n\n# Kept\n\n﻿text with a bom in the middle\n';
-    expect(await extractDocument('notes.md', Buffer.from(source, 'utf8'))).toBe(source);
+    expect(await extract('notes.md', Buffer.from(source, 'utf8'))).toBe(source);
   });
 
   it('names a document the format knows nothing about after its file', () => {
@@ -185,7 +197,7 @@ describe('.docx', () => {
 
   it('refuses a file that is not a Word 2007+ document, and says which format it is not', async () => {
     const renamed = Buffer.from('\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1 old binary word file', 'latin1');
-    await expect(extractDocument('legacy.docx', renamed)).rejects.toThrow(/not a Word 2007\+ document/);
+    await expect(extract('legacy.docx', renamed)).rejects.toThrow(/not a Word 2007\+ document/);
   });
 });
 
@@ -319,14 +331,138 @@ describe('.pdf', () => {
   });
 
   it('refuses a PDF with no text layer by name, instead of indexing an empty document', async () => {
-    const promise = extractDocument('scanned-invoice.pdf', bytesOf('scanned-invoice.pdf'));
+    const promise = extract('scanned-invoice.pdf', bytesOf('scanned-invoice.pdf'));
     await expect(promise).rejects.toBeInstanceOf(DocumentExtractionError);
     await expect(promise).rejects.toThrow(/no text layer/);
     await expect(promise).rejects.toThrow(/character recognition is out of scope/);
   });
 
   it('refuses a file that is not a PDF at all', async () => {
-    await expect(extractDocument('broken.pdf', Buffer.from('not a pdf, just some bytes'))).rejects.toBeInstanceOf(DocumentExtractionError);
+    await expect(extract('broken.pdf', Buffer.from('not a pdf, just some bytes'))).rejects.toBeInstanceOf(DocumentExtractionError);
+  });
+});
+
+describe('the boundary every failure leaves through', () => {
+  /**
+   * **This is the difference between a bad document and a failed run.** `indexer.ts` rethrows
+   * anything that is not a `DocumentExtractionError`, and a rethrow from inside the file loop marks
+   * the project `error`, writes the library's own message — which names no file — to `last_error`, and
+   * then, because the failure is deterministic, does it again on every run until somebody finds the
+   * file by hand. The other three hundred and ninety-nine documents stop being updated meanwhile.
+   *
+   * Both fixtures below throw a type the indexer does not know: PDF.js an `InvalidPDFException`, and
+   * mammoth a plain `Error`. Neither transform catches it. The boundary is the only thing between
+   * them and a broken project.
+   */
+  it('turns a damaged PDF into a named refusal rather than a thrown library exception', async () => {
+    const promise = extract('damaged-report.pdf', bytesOf('damaged-report.pdf'));
+    await expect(promise).rejects.toBeInstanceOf(DocumentExtractionError);
+    await expect(promise).rejects.toThrow(/"damaged-report\.pdf" could not be read as a "\.pdf" file/);
+  });
+
+  it('turns a zip renamed to .docx into a named refusal', async () => {
+    const promise = extract('notes-renamed.docx', bytesOf('notes-renamed.docx'));
+    await expect(promise).rejects.toBeInstanceOf(DocumentExtractionError);
+    await expect(promise).rejects.toThrow(/"notes-renamed\.docx" could not be read as a "\.docx" file/);
+  });
+
+  it('names the file in every refusal, because the library never does', async () => {
+    for (const name of ['damaged-report.pdf', 'notes-renamed.docx', 'scanned-invoice.pdf']) {
+      await expect(extract(name, bytesOf(name))).rejects.toThrow(new RegExp(name.replace('.', '\\.')));
+    }
+  });
+});
+
+describe('a conversion that produced nothing', () => {
+  /**
+   * `.pdf` and `.docx` had their own empty check and `.csv` and `.html` did not, which made the worst
+   * outcome in [ADR-0056](../.ssot/ADR.md#adr-0056) reachable through the two easiest types: a
+   * document that exists, is listed, matches nothing and reads as blank. `chunkMarkdown` does not
+   * catch it either — the `# Heading` this module adds is itself one chunk, so the indexer's
+   * `chunks.length === 0` branch never fires.
+   */
+  it('refuses a CSV that is nothing but blank lines', async () => {
+    await expect(extract('quarterly-report.csv', Buffer.from('\n\n \n', 'utf8'))).rejects.toThrow(/converted to nothing/);
+  });
+
+  it('refuses an HTML page whose only content was removed as machinery', async () => {
+    const page = Buffer.from('<html><head><title>Dashboard</title><style>b{}</style></head><body><script>run()</script></body></html>', 'utf8');
+    await expect(extract('dashboard.html', page)).rejects.toThrow(/converted to nothing/);
+  });
+
+  it('still accepts a CSV of nothing but a header, which is a list of column names', async () => {
+    const markdown = await extract('columns.csv', Buffer.from('Service,Owner\n', 'utf8'));
+    expect(markdown).toBe(['# Columns', '', '| Service | Owner |', '| --- | --- |'].join('\n'));
+  });
+
+  it('leaves an empty .md alone, because an empty file is not a failed conversion', async () => {
+    expect(await extract('stub.md', Buffer.from('', 'utf8'))).toBe('');
+    expect(await extract('stub.txt', Buffer.from('   \n', 'utf8'))).toBe('   \n');
+  });
+});
+
+describe('what one file may cost', () => {
+  /**
+   * `UPLOAD_MAX_FILE_BYTES` only ever applied to the upload path, so a file reached through a local
+   * directory or a git checkout was parsed at whatever size it happened to be — in the server's own
+   * process, beside the dashboard and `/mcp`. These three caps are what bound that, and each one
+   * closes a hole the other two do not: bytes, declared pages, and declared unpacked size.
+   */
+  it('refuses a converted file over the byte ceiling, before parsing it', async () => {
+    const tiny = { ...LIMITS, maxFileBytes: 512 };
+    await expect(extract('support-handbook.pdf', bytesOf('support-handbook.pdf'), tiny)).rejects.toThrow(/over the .* a file of this type may be/);
+    // The three types that are decoded rather than parsed are not capped, and are not affected.
+    await expect(extract('notes.md', Buffer.alloc(4096, 0x61), tiny)).resolves.toHaveLength(4096);
+  });
+
+  it('refuses a PDF that declares more pages than the limit, before reading any of them', async () => {
+    const twoPages = { ...LIMITS, maxPdfPages: 2 };
+    await expect(extract('support-handbook.pdf', bytesOf('support-handbook.pdf'), twoPages)).rejects.toThrow(/declares 3 pages, over the limit of 2/);
+  });
+
+  it('reads what a .docx says its parts unpack to, and refuses one that claims too much', async () => {
+    const real = declaredUnpackedBytes(bytesOf('onboarding-checklist.docx'));
+    expect(real).toBeGreaterThan(0);
+    expect(real).toBeLessThan(64 * 1024);
+    await expect(extract('onboarding-checklist.docx', bytesOf('onboarding-checklist.docx'), { ...LIMITS, maxUnpackedBytes: 1024 })).rejects.toThrow(
+      /claim to unpack to/,
+    );
+    // Nothing is inflated to find that out: the answer comes off the central directory.
+    expect(declaredUnpackedBytes(Buffer.from('not a zip at all'))).toBeNull();
+  });
+
+  it('treats a ZIP64 archive as too large rather than as readable', () => {
+    const bomb = Buffer.from(bytesOf('onboarding-checklist.docx'));
+    // The first central-directory record's uncompressed size, set to ZIP64's "look elsewhere" marker.
+    const at = bomb.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    bomb.writeUInt32LE(0xffffffff, at + 24);
+    expect(declaredUnpackedBytes(bomb)).toBe(Number.POSITIVE_INFINITY);
+  });
+});
+
+describe('.txt and .htm', () => {
+  it('passes a .txt through byte for byte, tabs, trailing newline and all', async () => {
+    const bytes = bytesOf('escalation-policy.txt');
+    expect(await extract('escalation-policy.txt', bytes)).toBe(bytes.toString('utf8'));
+  });
+
+  it('converts a .htm exactly as it converts a .html, and titles it from <title>', async () => {
+    expect(await readable('changelog.htm')).toBe(
+      [
+        '# Changelog',
+        '',
+        '## 4.1.3',
+        '',
+        'Corrected the retry counter, which reset on every SIGHUP.',
+        '',
+        '-   Queue depth is reported per lane.',
+        '-   The spool directory is created with mode 0700.',
+        '',
+        '## 4.1.2',
+        '',
+        'Security release — see [the advisory](/security/).',
+      ].join('\n'),
+    );
   });
 });
 
@@ -344,13 +480,13 @@ describe('what the chunker is handed', () => {
       ['release-notes.html', 'Release 4.2'],
     ];
     for (const [name, title] of cases) {
-      const markdown = await extractDocument(name, bytesOf(name));
+      const markdown = await extract(name, bytesOf(name));
       expect(chunkMarkdown(markdown, `handbook/${name}`, { maxTokens: 120, overlapTokens: 20 }).title).toBe(title);
     }
   });
 
   it('produces chunks whose breadcrumbs follow the converted headings', async () => {
-    const markdown = await extractDocument('support-handbook.pdf', bytesOf('support-handbook.pdf'));
+    const markdown = await extract('support-handbook.pdf', bytesOf('support-handbook.pdf'));
     const { chunks } = chunkMarkdown(markdown, 'handbook/support-handbook.pdf', { maxTokens: 120, overlapTokens: 20 });
     expect(new Set(chunks.map((c) => c.headingPath))).toEqual(
       new Set([

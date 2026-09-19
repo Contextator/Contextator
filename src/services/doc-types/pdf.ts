@@ -26,7 +26,7 @@
  */
 
 import type { StructuredTextItem } from 'unpdf';
-import { DocumentExtractionError, titleFromPath, withTitle } from './index.js';
+import { DocumentExtractionError, type ExtractLimits, titleFromPath, withTitle } from './index.js';
 
 /** Baselines within this fraction of the font size are the same line. */
 const LINE_TOLERANCE = 0.35;
@@ -452,18 +452,20 @@ function assemble(lines: Line[]): string {
   return out.join('\n\n');
 }
 
-function openFailure(err: unknown, relativePath: string): DocumentExtractionError {
+/**
+ * A password is the one open failure worth its own sentence, because the operator can act on it and
+ * PDF.js's own message ("No password given") does not say which file. Everything else is left to
+ * `extractDocument`, which names the file and the type once for all four parsers.
+ */
+function openFailure(err: unknown, relativePath: string): unknown {
   const name = (err as { name?: string })?.name ?? '';
-  if (name === 'PasswordException') {
-    return new DocumentExtractionError(
-      `"${relativePath}" is password-protected. Remove the password from the copy in the source; the indexer cannot be given one.`,
-    );
-  }
-  const message = err instanceof Error ? err.message : String(err);
-  return new DocumentExtractionError(`"${relativePath}" could not be opened as a PDF: ${message}`);
+  if (name !== 'PasswordException') return err;
+  return new DocumentExtractionError(
+    `"${relativePath}" is password-protected. Remove the password from the copy in the source; the indexer cannot be given one.`,
+  );
 }
 
-export async function pdfToMarkdown(bytes: Buffer, relativePath: string): Promise<string> {
+export async function pdfToMarkdown(bytes: Buffer, relativePath: string, limits: ExtractLimits): Promise<string> {
   const { extractTextItems, getDocumentProxy, getMeta } = await import('unpdf');
 
   let doc: Awaited<ReturnType<typeof getDocumentProxy>>;
@@ -477,6 +479,15 @@ export async function pdfToMarkdown(bytes: Buffer, relativePath: string): Promis
   }
 
   try {
+    // **Before `extractTextItems`, which reads every page of the document into one array.** The page
+    // count is a number in the file and costs nothing to disbelieve: a few kilobytes of PDF can
+    // declare a hundred thousand pages, and the raw-bytes cap says nothing about that at all.
+    if (doc.numPages > limits.maxPdfPages) {
+      throw new DocumentExtractionError(
+        `"${relativePath}" declares ${doc.numPages} pages, over the limit of ${limits.maxPdfPages}. Every page is read into memory at once, ` +
+          `so the count is capped rather than trusted; raise MAX_PDF_PAGES if a document this long is one you mean to index.`,
+      );
+    }
     const { totalPages, items } = await extractTextItems(doc);
     const heights: number[] = [];
     const pages: Line[][] = [];

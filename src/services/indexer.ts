@@ -98,6 +98,9 @@ export interface IndexerDeps {
     | 'DATA_DIR'
     | 'SECRET_KEY'
     | 'MAX_STORED_DOCUMENT_BYTES'
+    | 'MAX_CONVERTED_FILE_BYTES'
+    | 'MAX_PDF_PAGES'
+    | 'MAX_DOCX_UNPACKED_BYTES'
   >;
   log: Logger;
   locks: KeyedMutex;
@@ -426,6 +429,12 @@ export class Indexer {
         const seen = new Set<string>();
         /** Files this run could not turn into Markdown, per source ([ADR-0056](../../.ssot/ADR.md#adr-0056)). */
         const rejected = new Map<string, string[]>();
+        /** What one file may cost while it is being converted (ADR-0056); bound once for the run. */
+        const extractLimits = {
+          maxFileBytes: config.MAX_CONVERTED_FILE_BYTES,
+          maxPdfPages: config.MAX_PDF_PAGES,
+          maxUnpackedBytes: config.MAX_DOCX_UNPACKED_BYTES,
+        };
         for (const file of files) {
           seen.add(file.relativePath);
           const { bytes, hash, sizeBytes } = await readAndHash(file.absolutePath);
@@ -441,11 +450,26 @@ export class Indexer {
           // the run that first sees them.
           let extracted: string;
           try {
-            extracted = await extractDocument(file.relativePath, bytes);
+            extracted = await extractDocument(file.relativePath, bytes, extractLimits);
           } catch (err) {
-            // A file that cannot be read is not a file that vanished. It keeps whatever document it
-            // already had — `seen` still holds its path, so step 3 will not delete it — and the reason
-            // is reported on its source rather than swallowed into an empty document.
+            // A file that cannot be read is not a file that vanished. On an **incremental** run it
+            // keeps whatever document it already had — `seen` still holds its path, so step 3 below
+            // will not delete it — and the reason is reported on its source rather than swallowed
+            // into an empty document.
+            //
+            // **On a rebuild it does not, and that is a decision rather than an oversight.** A
+            // rebuild writes a new generation that *is* the corpus as it stands, so a file that can
+            // no longer be converted is not in it, and the swap drops the document it used to have.
+            // Carrying it forward would mean copying its chunks and vectors into the new generation
+            // — which is exactly the option [ADR-0039](../../.ssot/ADR.md#adr-0039) considered and
+            // rejected for an unreadable *source*, for reasons that apply unchanged to an unreadable
+            // file: it publishes stale content under a generation number whose counters cannot
+            // describe it. What makes this acceptable rather than silent is the line below: the
+            // reason is on the source, and the dashboard shows it whether or not the source failed.
+            //
+            // `extractDocument` is the only thing that throws here, and it only throws its own type
+            // — a parser's own exception escaping would fail the whole run and, being deterministic,
+            // keep failing it until somebody found the file.
             if (!(err instanceof DocumentExtractionError)) throw err;
             const list = rejected.get(file.sourceId) ?? [];
             list.push(err.message);
