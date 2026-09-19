@@ -79,8 +79,10 @@
 <ul>
   <li>
     <strong>Who can read it.</strong> Anyone who can read the project: <code>root</code>, <code>admin</code>, and any
-    <code>member</code> added to it, as a viewer or an editor. Agents cannot read it — there is no MCP tool that returns it,
-    and one agent can never see another's questions.
+    <code>member</code> added to it, as a viewer or an editor. Since 2026-09-19 they read it on the project's own page in
+    the dashboard, and can download the questions as a file; before that it took database access, which changed who found
+    it convenient rather than who was allowed. Agents cannot read it — there is no MCP tool that returns it, and one agent
+    can never see another's questions.
   </li>
   <li>
     <strong>How long it is kept.</strong> <code>SEARCH_QUERY_LOG_RETENTION_DAYS</code>, 30 days by default. Older rows are

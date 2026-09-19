@@ -20,6 +20,7 @@ import { scanFrom, selectionFrom } from '../services/vector-store.js';
 import { authRoutes } from './auth-routes.js';
 import { mcpRoutes } from './mcp-routes.js';
 import { memberRoutes } from './members-routes.js';
+import { queriesRoutes } from './queries-routes.js';
 import { sourceRoutes } from './sources-routes.js';
 import { usersRoutes } from './users-routes.js';
 
@@ -367,5 +368,6 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
   await app.register(usersRoutes, { ctx });
   await app.register(memberRoutes, { ctx });
   await app.register(mcpRoutes, { ctx });
+  await app.register(queriesRoutes, { ctx });
   await app.register(sourceRoutes, { ctx });
 };

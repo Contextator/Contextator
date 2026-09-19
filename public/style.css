@@ -2410,3 +2410,117 @@ body.auth .gate-card a {
   display: block;
   margin-bottom: 6px;
 }
+
+/* ---------- the query log panel (queries.js, ADR-0050) ---------- */
+
+.queries-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+/* An anchor, not a button: the export is a download the browser does with the session cookie. */
+.button-like {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 11px;
+  border: 1px solid var(--neutral-tint);
+  border-radius: 7px;
+  text-decoration: none;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.button-like:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.queries-config {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--neutral-tint);
+}
+
+.queries-config .field-hint.warn {
+  color: var(--warn-text);
+}
+
+.queries-table {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.query-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 70px 80px 90px;
+  gap: 12px;
+  align-items: start;
+  font-size: 13.5px;
+}
+
+.query-grid.doc {
+  grid-template-columns: minmax(0, 1fr) 100px 110px;
+}
+
+.query-grid.vol {
+  grid-template-columns: 100px minmax(0, 1fr) 80px 90px;
+  align-items: center;
+}
+
+.query-grid.head {
+  font-size: 13px;
+  color: var(--muted);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--neutral-tint);
+}
+
+.query-grid .right {
+  text-align: right;
+}
+
+.query-grid .mono {
+  font-family: var(--font-mono);
+}
+
+.query-grid .warn {
+  color: var(--warn-text);
+}
+
+.query-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.query-text {
+  word-break: break-word;
+}
+
+.query-cell .sub {
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.vol-bar {
+  display: block;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--neutral-tint);
+  overflow: hidden;
+}
+
+.vol-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}

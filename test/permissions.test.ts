@@ -74,6 +74,19 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'DELETE', url: '/api/projects/:id/query-log', actor: as('member'), membership: 'editor', allowed: false },
   { method: 'DELETE', url: '/api/projects/:id/query-log', actor: as('admin'), membership: null, allowed: true },
 
+  // The panel and the export ([ADR-0050](../.ssot/ADR.md#adr-0050)). Both are reads of the same rows
+  // FR-309 already decided, so both are a `viewer`'s and neither needs a row of its own — but a rule
+  // that is only ever a default is a rule nothing would notice losing, so every actor is stated.
+  { method: 'GET', url: '/api/projects/:id/queries/summary', actor: as('member'), membership: 'viewer', allowed: true },
+  { method: 'GET', url: '/api/projects/:id/queries/summary', actor: as('member'), membership: 'editor', allowed: true },
+  { method: 'GET', url: '/api/projects/:id/queries/summary', actor: as('member'), membership: null, allowed: false },
+  { method: 'GET', url: '/api/projects/:id/queries/summary', actor: as('admin'), membership: null, allowed: true },
+  { method: 'GET', url: '/api/projects/:id/queries/summary', actor: token, membership: null, allowed: true },
+  // The export is the same rows in a file. A viewer who can read them on the page can save them.
+  { method: 'GET', url: '/api/projects/:id/queries/export', actor: as('member'), membership: 'viewer', allowed: true },
+  { method: 'GET', url: '/api/projects/:id/queries/export', actor: as('member'), membership: null, allowed: false },
+  { method: 'GET', url: '/api/projects/:id/queries/export', actor: as('admin'), membership: null, allowed: true },
+
   // Membership: anyone on the project sees who else is; only root/admin change it.
   { method: 'GET', url: '/api/projects/:id/members', actor: as('member'), membership: 'viewer', allowed: true },
   { method: 'PUT', url: '/api/projects/:id/members/:userId', actor: as('member'), membership: 'editor', allowed: false },
@@ -115,11 +128,26 @@ describe('the permission matrix', () => {
  * matrix above is the decision; these two assertions are what make it one, because a rule that only
  * applies to a route nobody has registered is a rule that could have said anything.
  */
-describe('the query log, before it has a route', () => {
+describe('the query log and the panel over it', () => {
   it('asks for a viewer to read and a manager to switch or purge', () => {
     expect(requiredProjectAccess('GET', '/api/projects/:id/query-log')).toBe('viewer');
     expect(requiredProjectAccess('PATCH', '/api/projects/:id/query-log')).toBe('manager');
     expect(requiredProjectAccess('DELETE', '/api/projects/:id/query-log')).toBe('manager');
+  });
+
+  /**
+   * The panel's two routes ([ADR-0050](../.ssot/ADR.md#adr-0050)) are reads and take the `GET`
+   * default. That is the decision and not an oversight, so it is asserted where somebody adding a row
+   * to `PROJECT_ROUTE_OVERRIDES` will see it — and the export is asserted to be no more privileged
+   * than the panel, because a file of the same rows is the same disclosure.
+   */
+  it('reads the panel and the export at the same access as the log itself', () => {
+    expect(requiredProjectAccess('GET', '/api/projects/:id/queries/summary')).toBe('viewer');
+    expect(requiredProjectAccess('GET', '/api/projects/:id/queries/export')).toBe('viewer');
+    expect(requiredProjectAccess('GET', '/api/projects/:id/queries/export')).toBe(requiredProjectAccess('GET', '/api/projects/:id/query-log'));
+    // And they are project-scoped, which is what makes the membership check run at all.
+    expect(isProjectScoped('/api/projects/:id/queries/summary')).toBe(true);
+    expect(isProjectScoped('/api/projects/:id/queries/export')).toBe(true);
   });
 
   it('puts the switch in the same class as deciding whether the MCP endpoint is public at all', () => {

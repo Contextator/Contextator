@@ -27,6 +27,7 @@ import {
 import { canCreateProject, canDeleteProject, canEdit, initAuthUi, loadMe, renderUserMenu } from './auth.js';
 import { authHeaderFor, initMcpUi, loadMcpTokens, renderMcpAccess } from './mcp.js';
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
+import { loadQuerySummary, renderQueries } from './queries.js';
 import { captureSearchFocus, renderSearch } from './search.js';
 import { initUsersUi, renderUsersView } from './users.js';
 
@@ -177,6 +178,7 @@ function select(id) {
   void loadSources();
   void loadMembers();
   void loadMcpTokens();
+  void loadQuerySummary();
 }
 
 /** Fetches the selected project's run history when the selection or the newest job changes. */
@@ -546,6 +548,10 @@ function renderDetail() {
 
   // Next to the counts it is read against: the stats say how much is indexed, this says what comes back.
   main.append(renderSearch(p));
+  // Under the panel that asks one question, the panel that reads back every question the agents asked
+  // ([ADR-0050](../.ssot/ADR.md#adr-0050)): one is what this corpus answers now, the other what it has
+  // been failing to answer for a week.
+  main.append(renderQueries(p));
   main.append(renderSources(p, busy));
   main.append(renderMembers(p));
   main.append(renderMcpAccess(p));
@@ -816,6 +822,10 @@ async function refresh() {
     void loadSources();
     void loadMembers(); // no-op unless the selection moved; the dialog forces its own reload
     void loadMcpTokens();
+    // Also a no-op unless the selection, the window, the actor or the configuration moved: four
+    // aggregate queries every two seconds against the table the searches are writing into is not a
+    // panel, it is a load generator. The panel carries its own Refresh.
+    void loadQuerySummary();
   }
   // The account list is not part of a project poll; refresh it only while it is on screen.
   if (state.view === 'users') void loadUsers();

@@ -78,6 +78,27 @@ export const state = {
     belowFloor: false,
     scoreFloor: 0,
   },
+  /**
+   * The query-log panel (queries.js), whole, and here for the same reason state.search is: app.js
+   * rebuilds #detail on every poll, so a chosen tab, a window length or a picked retrieval
+   * configuration held in the DOM would be thrown away a second or two later — while somebody is
+   * reading the table it belongs to.
+   */
+  queries: {
+    projectId: null,
+    tab: 'questions', // 'questions' | 'documents' | 'chunks' | 'volume'
+    days: 7,
+    actor: 'mcp',
+    /** `<model>@<generation>`, or null for whichever configuration the server picked. */
+    configKey: null,
+    /** The request the data in hand answers; a change of any part of it is what refetches. */
+    loadedKey: null,
+    loadedAt: null,
+    status: 'idle', // 'idle' | 'loading' | 'done' | 'error'
+    error: '',
+    data: null,
+    confirmPurge: false,
+  },
   confirmDelete: null,
   confirmTimer: null,
   timer: null,
