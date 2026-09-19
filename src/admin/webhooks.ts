@@ -43,7 +43,9 @@ export const webhookRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
     if (branches.length > 0 && !branches.includes(branch)) {
       return reply.code(202).send({ queued: false, reason: `push to ${branches.join(', ')} ignored; source tracks ${branch}` });
     }
-    const job = indexer.enqueue(source.projectId);
+    // The interactive lane: a push is somebody waiting, and it must not queue behind the timer's
+    // backlog ([ADR-0048](../../.ssot/ADR.md#adr-0048)).
+    const job = indexer.enqueue(source.projectId, { trigger: 'webhook' });
     log.info({ sourceId: source.id, provider, branches }, 'webhook accepted; re-index queued');
     return reply.code(202).send({ queued: true, job: { phase: job.phase, queuedAt: job.queuedAt } });
   });

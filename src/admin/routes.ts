@@ -2,7 +2,7 @@ import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { installAuth } from '../auth/plugin.js';
 import type { Principal } from '../auth/types.js';
-import { MAX_SEARCH_LIMIT } from '../config.js';
+import { MAX_SEARCH_LIMIT, SYNC_MAX_INTERVAL_MINUTES, SYNC_MIN_INTERVAL_MINUTES } from '../config.js';
 import type { AppContext } from '../context.js';
 import { pingDb } from '../db/client.js';
 import type { ProjectRow } from '../db/schema.js';
@@ -180,6 +180,16 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         maxFilesPerRequest: config.UPLOAD_MAX_FILES_PER_REQUEST,
         maxArchiveBytes: config.UPLOAD_MAX_ARCHIVE_BYTES,
       },
+      /**
+       * What the source dialog preselects for a **new** source, and the band the API will accept
+       * ([ADR-0048](../../.ssot/ADR.md#adr-0048)). `null` when the instance creates new sources
+       * unscheduled (`SYNC_DEFAULT_INTERVAL_MINUTES=0`), which is also what the form then shows.
+       */
+      sync: {
+        defaultIntervalMinutes: config.SYNC_DEFAULT_INTERVAL_MINUTES || null,
+        minIntervalMinutes: SYNC_MIN_INTERVAL_MINUTES,
+        maxIntervalMinutes: SYNC_MAX_INTERVAL_MINUTES,
+      },
     };
     if (principal.role === 'member') return detail;
 
@@ -305,7 +315,15 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       await createSource(
         db,
         project.id,
-        { type: 'local', name, label: 'Local directory', config: { path: body.rootPath } },
+        {
+          type: 'local',
+          name,
+          label: 'Local directory',
+          config: { path: body.rootPath },
+          // The same default the source route applies, so a project created the legacy way is not a
+          // project whose only source is quietly unscheduled ([ADR-0048](../../.ssot/ADR.md#adr-0048)).
+          syncIntervalMinutes: config.SYNC_DEFAULT_INTERVAL_MINUTES || null,
+        },
         { allowedRoots: config.ALLOWED_DOC_ROOTS, secretKey: config.SECRET_KEY },
       );
       if (body.index) indexer.enqueue(project.id);

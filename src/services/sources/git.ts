@@ -7,7 +7,7 @@ import { decryptSecret } from '../crypto.js';
 import { sourceRepoDir } from '../data-dir.js';
 import { isInside } from '../fs-scan.js';
 import { PathNotAllowedError } from '../fs-scan.js';
-import { parseSourceConfig, type GitConfig } from '../sources.js';
+import { PROBE_TOKEN_KEY, parseSourceConfig, type GitConfig } from '../sources.js';
 import { registerDriver, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
 import { credentialsFor, detectProvider, sanitizeGitUrl } from './git-auth.js';
 
@@ -103,7 +103,26 @@ export class GitDriver implements SourceDriver {
       note = `cloned at ${head.slice(0, 7)}`;
     }
     await this.docRoot(); // validates the subdirectory exists in this checkout
-    return { configPatch: { lastCommit: head }, note };
+    // The head this run checked out **is** the token `probe()` will answer with next time, so git is
+    // the one driver whose sync pays nothing at all for scheduling ([ADR-0048](../../../.ssot/ADR.md#adr-0048)).
+    // It is written under both keys rather than the scheduler being taught to read `lastCommit`: one
+    // of them is the driver's own state and the other is the scheduler's contract, and collapsing the
+    // two would make a future change to either a change to both.
+    return { configPatch: { lastCommit: head, [PROBE_TOKEN_KEY]: head }, note };
+  }
+
+  /**
+   * The branch tip as the remote advertises it — `git ls-remote`, which is what
+   * `git.listServerRefs` is: one HTTPS request for the ref advertisement and no objects at all,
+   * against a fetch that transfers a commit's worth of tree.
+   *
+   * `null` when the branch is not there, so the run happens and reports the real error rather than
+   * the source going quiet because the branch was renamed.
+   */
+  async probe(): Promise<string | null> {
+    const { url, onAuth, onAuthFailure } = this.authOptions();
+    const refs = await git.listServerRefs({ http, url, prefix: `refs/heads/${this.cfg.branch}`, onAuth, onAuthFailure });
+    return refs.find((r) => r.ref === `refs/heads/${this.cfg.branch}`)?.oid ?? null;
   }
 
   async docRoot(): Promise<string> {

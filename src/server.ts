@@ -25,6 +25,7 @@ import { Indexer } from './services/indexer.js';
 import { KeyedMutex } from './services/locks.js';
 import { listProjects } from './services/projects.js';
 import { QueryLog, sweepQueryLog } from './services/query-log.js';
+import { startSyncScheduler } from './services/scheduler.js';
 import { floorModelWarning } from './services/relevance.js';
 import { countUsers } from './services/auth/users.js';
 import { startSessionReaper } from './services/auth/sessions.js';
@@ -99,9 +100,11 @@ async function main(): Promise<void> {
   await app.register(mcpRoutes, { ctx });
 
   let stopSessionReaper: (() => void) | undefined;
+  let stopSyncScheduler: (() => void) | undefined;
   app.addHook('onClose', async () => {
     sessions.stopReaper();
     stopSessionReaper?.();
+    stopSyncScheduler?.();
     await sessions.closeAll();
     // Before the pool, and awaited: what is buffered is a handful of rows and a shutdown that drops
     // them would lose exactly the queries of the minute somebody restarted the container.
@@ -205,6 +208,16 @@ async function main(): Promise<void> {
     .catch((err: unknown) => log.error({ err }, 'embedding model failed to load; indexing and search will fail until it is available'));
 
   sessions.startReaper(config.SESSION_IDLE_TTL_MS);
+
+  // The one timer that reaches outside the machine ([ADR-0048](../.ssot/ADR.md#adr-0048)), and the
+  // reason it is started last: it wants the drivers registered (the imports at the top of this file)
+  // and the schema settled, and it must not fire before the orphan sweep above has decided which
+  // source directories still belong to anything.
+  //
+  // It is not conditional on a setting. On an upgraded installation every source carries
+  // `sync_interval_minutes = NULL`, so the tick is one indexed query that matches nothing, once a
+  // minute, and NFR-10 holds by the data rather than by a flag somebody has to find.
+  stopSyncScheduler = startSyncScheduler({ db, indexer, log, config });
 
   await app.listen({ port: config.PORT, host: config.HOST });
   log.info({ dashboard: `http://localhost:${config.PORT}/`, mcp: `http://localhost:${config.PORT}/mcp/<project>` }, 'Contextator is up');

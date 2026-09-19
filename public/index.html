@@ -228,6 +228,28 @@
             </div>
           </div>
 
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">Sync every</span>
+              <select name="syncInterval" id="src-sync-interval">
+                <option value="">Never — only when asked</option>
+                <option value="5">5 minutes</option>
+                <option value="15">15 minutes</option>
+                <option value="30">30 minutes</option>
+                <option value="60">Hour</option>
+                <option value="360">6 hours</option>
+                <option value="720">12 hours</option>
+                <option value="1440">Day</option>
+                <option value="10080">Week</option>
+              </select>
+              <span class="field-hint" id="src-sync-hint">The server checks whether the source changed and indexes only if it did. Spread with a random offset, so sources added together do not all wake at once.</span>
+            </label>
+            <div class="field">
+              <span class="field-label">Next check</span>
+              <p class="field-hint" id="src-next-sync">—</p>
+            </div>
+          </div>
+
           <div class="kind-only" data-kind="upload obsidian">
             <div id="dropzone" class="dropzone" tabindex="0">
               <span class="dropzone-icon" aria-hidden="true">

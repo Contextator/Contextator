@@ -113,6 +113,20 @@ export const READ_DOCUMENT_MIN_MAX_TOKENS = 200;
 export const LIST_TOPICS_DEFAULT_LIMIT = 200;
 export const LIST_TOPICS_MAX_LIMIT = 1_000;
 
+/**
+ * The band a per-source sync interval may be set to ([ADR-0048](../.ssot/ADR.md#adr-0048)), in
+ * minutes. Constants rather than settings, for `read_document`'s reason: they are the *API's*
+ * contract, stated in `API.md` and enforced by the route's schema on every instance.
+ *
+ * Five minutes at the bottom because below it the probe stops being cheap relative to the thing it is
+ * protecting — twelve `git ls-remote`s an hour per repository is a number a git host will notice —
+ * and because a source that genuinely needs to be fresher than five minutes wants the push webhook it
+ * already has. Thirty days at the top so that "off" stays expressible only as NULL, and a very long
+ * interval cannot be mistaken for one.
+ */
+export const SYNC_MIN_INTERVAL_MINUTES = 5;
+export const SYNC_MAX_INTERVAL_MINUTES = 30 * 24 * 60;
+
 /** Exported for the tests: the cross-field rules are the only part of this file that has behaviour. */
 export const EnvSchema = z
   .object({
@@ -352,6 +366,34 @@ export const EnvSchema = z
      * is promising on their behalf.
      */
     SEARCH_QUERY_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
+
+    // Scheduled sync (ADR-0048). The per-source interval is a column and not a setting, for the reason
+    // the query log's per-project switch is one: it travels with a `pg_dump`. These two are the
+    // instance's policy about sources it has not met yet, and about how hard one tick may push.
+    /**
+     * The interval a **newly created** source is given, in minutes. `0` creates every new source with
+     * scheduling off, which is how an instance opts out of the whole feature.
+     *
+     * It does not reach a source that already exists — not on upgrade, and not when this value
+     * changes. [ADR-0048](../.ssot/ADR.md#adr-0048)'s migration leaves every existing source at NULL
+     * so that an upgrade cannot start making outbound calls nobody asked for (NFR-10), and a setting
+     * that retroactively switched them on would be the same mistake taken one release later.
+     *
+     * An hour, because the two things this exists for are a mounted folder somebody edits and a Notion
+     * workspace somebody writes in, and neither is worth a minute of latency on a `git ls-remote`
+     * against every repository on the instance. The probe is cheap; it is not free.
+     */
+    SYNC_DEFAULT_INTERVAL_MINUTES: z.coerce.number().int().min(0).max(SYNC_MAX_INTERVAL_MINUTES).default(60),
+    /**
+     * How many due sources one scheduler tick may probe. The rest keep their turn — they are still
+     * due, they are ordered oldest-first, and the next tick a minute later takes the next ten.
+     *
+     * Ten a minute is six hundred an hour, which is more sources than an instance with a one-hour
+     * default interval can have due in an hour. It is a ceiling on the *burst* a synchronised herd
+     * could produce, not a throughput budget, and the jitter in `next_sync_at` is what makes the herd
+     * unlikely in the first place.
+     */
+    SYNC_PROBES_PER_TICK: z.coerce.number().int().min(1).max(1000).default(10),
   })
   .superRefine((c, ctx) => {
     if (c.EMBEDDING_PROVIDER === 'openai' && !c.OPENAI_API_KEY) {
@@ -386,6 +428,15 @@ export const EnvSchema = z
         message:
           `must be at least ${DENSE_CANDIDATES}, the number of dense candidates one search asks for before fusion; ` +
           'below it the index cannot yield a full candidate list even before the project predicate filters one row',
+      });
+    }
+    // `0` is "create new sources with scheduling off"; anything else has to be a value the API would
+    // also accept, or the dashboard could not display — let alone save — a source the server minted.
+    if (c.SYNC_DEFAULT_INTERVAL_MINUTES !== 0 && c.SYNC_DEFAULT_INTERVAL_MINUTES < SYNC_MIN_INTERVAL_MINUTES) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['SYNC_DEFAULT_INTERVAL_MINUTES'],
+        message: `must be 0 (new sources are not scheduled) or at least ${SYNC_MIN_INTERVAL_MINUTES}, the floor the API enforces on a per-source interval`,
       });
     }
     if (c.ALLOWED_DOC_ROOTS.length === 0) {

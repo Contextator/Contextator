@@ -5,7 +5,7 @@ import type { DocumentSourceRow } from '../../db/schema.js';
 import { decryptSecret, SecretKeyMissingError } from '../crypto.js';
 import { sourceCurrentDir } from '../data-dir.js';
 import { ValidationError } from '../projects.js';
-import { parseSourceConfig, type NotionConfig } from '../sources.js';
+import { PROBE_TOKEN_KEY, parseSourceConfig, type NotionConfig } from '../sources.js';
 import { registerDriver, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
 import { frontmatter, pageFileStem, pageTitle, renderBlocks, type NotionBlock } from './notion-render.js';
 
@@ -284,7 +284,52 @@ export class NotionDriver implements SourceDriver {
     await walk(root, []);
 
     const note = `${pages.size} pages, ${written} rendered, ${removed} removed`;
-    return { note: this.partialFailures.length ? `${note} (skipped: ${this.partialFailures.join('; ')})` : note };
+    // One more request, at the end of a sync that just made hundreds, and it buys every *future* run
+    // of this source the chance to cost one request in total ([ADR-0048](../../../.ssot/ADR.md#adr-0048)).
+    // Deliberately `probe()` and not `max(page.lastEdited)` computed from the map above: with
+    // `rootIds` set, that map is one subtree and the probe reads the whole workspace, so the two
+    // numbers are different and comparing them would report "changed" on every single tick.
+    const token = await this.probe().catch((err: unknown) => {
+      this.ctx.log.warn(
+        { err, source: this.source.name },
+        'notion revision probe failed after a successful sync; the next scheduled run will not be skipped',
+      );
+      return null;
+    });
+    return {
+      note: this.partialFailures.length ? `${note} (skipped: ${this.partialFailures.join('; ')})` : note,
+      ...(token === null ? {} : { configPatch: { [PROBE_TOKEN_KEY]: token } }),
+    };
+  }
+
+  /**
+   * One `search`, sorted by `last_edited_time` descending, one result: the moment the workspace was
+   * last written to. Against a sync that reads every page at `MIN_INTERVAL_MS` apart — three minutes
+   * of API calls for a 500-page workspace, every run, forever — that is the whole argument for
+   * probing at all.
+   *
+   * **It sees edits, not un-shares.** A page removed from the integration's access without anybody
+   * editing anything leaves the newest edit time exactly where it was, so its Markdown file survives
+   * in `current/` until the next real edit triggers a run that notices it is gone. Rendering that as
+   * "possibly stale" rather than as a wrong answer is the same trade the whole probe is: the
+   * alternative is pulling the workspace hourly to find out.
+   *
+   * The timestamp alone, and not the page id beside it: two pages sharing a `last_edited_time` could
+   * order either way between two calls, and a token that flickered would schedule a full pull every
+   * hour — which is exactly the cost this exists to avoid. A *deleted* newest page is still seen,
+   * because the timestamp then moves backwards to whatever is now on top.
+   */
+  async probe(): Promise<string | null> {
+    const client = this.client();
+    const res = (await this.throttle(() =>
+      client.search({
+        filter: { property: 'object', value: 'page' },
+        sort: { direction: 'descending', timestamp: 'last_edited_time' },
+        page_size: 1,
+      }),
+    )) as { results: AnyRecord[] };
+    const newest = res.results[0]?.last_edited_time;
+    return typeof newest === 'string' ? `edited=${newest}` : 'edited=none';
   }
 }
 

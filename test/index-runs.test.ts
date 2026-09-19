@@ -4,6 +4,7 @@ import { buildRunRecord } from '../src/services/index-runs.js';
 const base = {
   projectId: '11111111-1111-4111-8111-111111111111',
   force: false,
+  trigger: 'manual' as const,
   phase: 'done' as const,
   filesTotal: 128,
   filesSkipped: 126,
@@ -40,6 +41,14 @@ describe('buildRunRecord', () => {
     expect(buildRunRecord({ ...base, force: true, generation: 4 }).generation).toBe(4);
     // Generation 0 is a real generation, and `?? null` rather than `|| null` is what keeps it one.
     expect(buildRunRecord({ ...base, force: true, generation: 0 }).generation).toBe(0);
+  });
+
+  it('records what asked for the run, and never leaves the column for the code to fill in', () => {
+    // NULL in `index_runs.trigger` means "recorded before ADR-0048 added the column" and nothing
+    // else, so every value this function can produce has to be one of the three.
+    expect(buildRunRecord(base).trigger).toBe('manual');
+    expect(buildRunRecord({ ...base, trigger: 'webhook' }).trigger).toBe('webhook');
+    expect(buildRunRecord({ ...base, trigger: 'scheduled' }).trigger).toBe('scheduled');
   });
 
   it('never produces negative counts or durations', () => {

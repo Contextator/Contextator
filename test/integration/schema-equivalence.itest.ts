@@ -46,12 +46,16 @@ const opened: TestDatabase[] = [];
  * ([ADR-0043](../../.ssot/ADR.md#adr-0043)) is the next two, and the `documents` qualifier on the
  * first of them is not decoration — `chunks.content` is a baseline column, and a term that matched it
  * too would wave through a future migration that re-typed the text every search result is cut from.
- * `0005_query_log` ([ADR-0047](../../.ssot/ADR.md#adr-0047)) is the last two: one column on `projects`
+ * `0005_query_log` ([ADR-0047](../../.ssot/ADR.md#adr-0047)) is the next two: one column on `projects`
  * and two whole tables, which are anchored at the start of the line so that the term names *the tables*
- * rather than any future column whose name happens to contain them.
+ * rather than any future column whose name happens to contain them. `0006_scheduled_sync`
+ * ([ADR-0048](../../.ssot/ADR.md#adr-0048)) is the last five: two columns and a partial index on
+ * `document_sources`, and a column plus its check constraint on `index_runs` — `trigger` qualified by
+ * its table and its column position, because the word is also PostgreSQL's own and an unqualified term
+ * would wave through a future migration that added one.
  */
 const POST_BASELINE_MARKERS =
-  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer/;
+  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check/;
 
 afterAll(async () => {
   for (const database of opened) await dropTestDatabase(baseUrl, database);

@@ -747,15 +747,38 @@ function sourceOrigin(s) {
   return `${s.name}/`;
 }
 
-/** The second line: branch/subdir for git, extensions otherwise. */
+/** A minute count as an operator would say it: "30 min", "6 h", "2 d". */
+function everyLabel(minutes) {
+  if (minutes % 1440 === 0) return `${minutes / 1440} d`;
+  if (minutes % 60 === 0) return `${minutes / 60} h`;
+  return `${minutes} min`;
+}
+
+/**
+ * The scheduled-sync state of a source in one phrase ([ADR-0048](../.ssot/ADR.md#adr-0048)).
+ *
+ * `relativeTime` is deliberately not reused: `next_sync_at` is in the *future*, and that helper
+ * renders a future instant as "-42 min ago".
+ */
+function syncScheduleLabel(s) {
+  if (s.syncIntervalMinutes === null || s.syncIntervalMinutes === undefined) return 'manual only';
+  const every = `every ${everyLabel(s.syncIntervalMinutes)}`;
+  if (!s.nextSyncAt) return `${every} \u00b7 due at the next tick`;
+  const minutes = Math.round((new Date(s.nextSyncAt).getTime() - Date.now()) / 60_000);
+  if (minutes <= 0) return `${every} \u00b7 due now`;
+  return `${every} \u00b7 next in ${minutes < 60 ? `${minutes} min` : `${Math.round(minutes / 60)} h`}`;
+}
+
+/** The second line: branch/subdir for git, extensions otherwise, plus the schedule. */
 function sourceDetail(s) {
   const c = s.config || {};
   const ext = (c.extensions || []).map((e) => `.${e}`).join(' ');
+  const schedule = s.syncIntervalMinutes ? ` \u00b7 every ${everyLabel(s.syncIntervalMinutes)}` : '';
   if (s.type === 'git') {
     const at = c.lastCommit ? ` @ ${String(c.lastCommit).slice(0, 7)}` : '';
-    return `${c.branch || 'main'}${c.subdir ? `/${c.subdir}` : ''}${at}${ext ? ` \u00b7 ${ext}` : ''}`;
+    return `${c.branch || 'main'}${c.subdir ? `/${c.subdir}` : ''}${at}${ext ? ` \u00b7 ${ext}` : ''}${schedule}`;
   }
-  return ext || '—';
+  return `${ext || '—'}${schedule}`;
 }
 
 // ---------- actions ----------
@@ -1045,6 +1068,10 @@ function openSourceDialog(project, source) {
   for (const tab of srcTabs) tab.disabled = Boolean(source) || srcUi.readOnly;
   srcForm.elements.name.disabled = Boolean(source);
   srcForm.elements.index.checked = true;
+  // A new source starts on the instance's default rather than on "never": the point of the feature is
+  // that adding a source is enough. An existing one is filled from its own row, below.
+  setSyncIntervalField(source ? null : (state.health?.sync?.defaultIntervalMinutes ?? null));
+  $('#src-next-sync').textContent = '—';
   if (source) fillSourceForm(source);
   setKind(source ? kindOfSource(source) : 'local');
   if (srcUi.readOnly) {
@@ -1068,6 +1095,8 @@ function fillSourceForm(s) {
   srcForm.elements.name.value = s.name;
   srcForm.elements.label.value = s.label || '';
   srcForm.elements.flavor.value = s.flavor || 'plain';
+  setSyncIntervalField(s.syncIntervalMinutes);
+  $('#src-next-sync').textContent = syncScheduleLabel(s);
   for (const box of srcForm.querySelectorAll('input[name="ext"]')) box.checked = (c.extensions || []).includes(box.value);
   if (s.type === 'local') {
     const { root, rest } = splitRoot(c.path);
@@ -1137,6 +1166,31 @@ function renderWebhook(project, source) {
 }
 
 const extensionsFromForm = () => [...srcForm.querySelectorAll('input[name="ext"]:checked')].map((b) => b.value);
+
+/**
+ * The scheduled sync interval, as the API takes it: minutes, or `null` for "never".
+ *
+ * The select offers a fixed ladder rather than a number box, because the server enforces a band
+ * (5 minutes to 30 days) and a free-text field is a way to discover that band by being refused.
+ */
+const syncIntervalFromForm = () => {
+  const raw = srcForm.elements.syncInterval.value;
+  return raw === '' ? null : Number(raw);
+};
+
+/**
+ * An interval the ladder does not offer — set through the API, or the instance default — is added to
+ * it rather than silently rounded to a neighbour, which would change it the moment somebody saved an
+ * unrelated field.
+ */
+function setSyncIntervalField(minutes) {
+  const select = $('#src-sync-interval');
+  const value = minutes === null || minutes === undefined ? '' : String(minutes);
+  if (value !== '' && ![...select.options].some((o) => o.value === value)) {
+    select.append(el('option', { value, text: `${minutes} minutes` }));
+  }
+  select.value = value;
+}
 
 const NOTION_ID_RE = /[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}/i;
 
@@ -1405,7 +1459,7 @@ srcForm.addEventListener('submit', async (event) => {
     if (editing) {
       source = await api(`/api/projects/${project.id}/sources/${editing.id}`, {
         method: 'PATCH',
-        body: { label, flavor, config, ...secretPatch },
+        body: { label, flavor, config, syncIntervalMinutes: syncIntervalFromForm(), ...secretPatch },
       });
     } else {
       const name = srcForm.elements.name.value.trim();
@@ -1420,6 +1474,7 @@ srcForm.addEventListener('submit', async (event) => {
           label,
           flavor,
           config,
+          syncIntervalMinutes: syncIntervalFromForm(),
           ...(typeof secretPatch.secret === 'string' ? secretPatch : {}), // a new source has nothing to clear
           // An upload commits (and indexes) right after creation; don't queue a run over an empty source.
           index: pending === 0 && srcForm.elements.index.checked,

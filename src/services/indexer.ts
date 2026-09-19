@@ -26,6 +26,24 @@ import {
 
 export type JobPhase = 'queued' | 'syncing' | 'scanning' | 'embedding' | 'finalizing' | 'done' | 'error';
 
+/**
+ * What asked for a run, and — because the two are the same question — which of the queue's two lanes
+ * it waits in ([ADR-0048](../../.ssot/ADR.md#adr-0048)).
+ *
+ * `manual` and `webhook` are **interactive**: somebody or something is waiting for the answer. A
+ * person pressed a button, edited a source, committed an upload, or pushed to a branch and expects
+ * the index to follow within the minute. `scheduled` is not: nothing is waiting, and a scheduled run
+ * that starts twenty minutes late is a run that started.
+ */
+export type IndexTrigger = 'manual' | 'webhook' | 'scheduled';
+
+export interface EnqueueOptions {
+  /** A rebuild: write a new generation beside the live one ([ADR-0039](../../.ssot/ADR.md#adr-0039)). */
+  force?: boolean;
+  /** Defaults to `manual`, which is what every caller that does not say is. */
+  trigger?: IndexTrigger;
+}
+
 export interface JobSourceState {
   id: string;
   name: string;
@@ -38,6 +56,8 @@ export interface JobSourceState {
 export interface JobState {
   projectId: string;
   force: boolean;
+  /** What asked for this run; also the lane it queued in. Promoted when a person overtakes a timer. */
+  trigger: IndexTrigger;
   phase: JobPhase;
   /**
    * The generation a **rebuild** writes into, set once the run knows it is one; `undefined` for an
@@ -113,22 +133,53 @@ interface SourceFile {
  */
 export class Indexer {
   private readonly jobs = new Map<string, JobState>();
-  private readonly queue: string[] = [];
+  /**
+   * **Two lanes, not two queues with a scheduler between them** ([ADR-0048](../../.ssot/ADR.md#adr-0048)).
+   *
+   * The serial queue's failure mode under a timer is not length — `enqueue` already collapses to one
+   * job per project, so the queue can never be longer than the number of projects — it is *ordering*.
+   * A person pressing "Re-index" behind fifty scheduled runs waits for fifty runs, and that is the
+   * whole of what makes a scheduler feel like a regression.
+   *
+   * So the drain is `interactive` first, `scheduled` only when `interactive` is empty. It is strict
+   * priority and not a weighted share, because there is no starvation to weigh against: interactive
+   * work arrives when a human does something, and scheduled work that waits an hour is scheduled work
+   * that ran. The pathological case — a person re-indexing continuously for hours — is a person who
+   * is, by construction, keeping the index fresher than the timer would have.
+   */
+  private readonly interactive: string[] = [];
+  private readonly scheduled: string[] = [];
   private running = false;
   /** Project whose job is being processed right now. */
   private current: string | null = null;
 
   constructor(private readonly deps: IndexerDeps) {}
 
-  enqueue(projectId: string, opts: { force?: boolean } = {}): JobState {
+  enqueue(projectId: string, opts: EnqueueOptions = {}): JobState {
+    const trigger = opts.trigger ?? 'manual';
     const existing = this.jobs.get(projectId);
     if (existing && ACTIVE_PHASES.has(existing.phase)) {
       if (opts.force && existing.phase === 'queued') existing.force = true;
+      // **Promotion, and it is the reason collapsing is safe.** Without it the collapse would be a
+      // trap: a scheduled run queued a minute ago behind forty others would swallow the button press
+      // that was supposed to overtake them and return a job that still waits in the slow lane. A
+      // queued scheduled job therefore moves lanes when a person or a push asks for the same project.
+      // One direction only — nothing ever demotes an interactive job — and only while it is `queued`,
+      // because a job that has started is already at the front of everything.
+      if (existing.phase === 'queued' && trigger !== 'scheduled' && existing.trigger === 'scheduled') {
+        const at = this.scheduled.indexOf(projectId);
+        if (at !== -1) {
+          this.scheduled.splice(at, 1);
+          this.interactive.push(projectId);
+        }
+        existing.trigger = trigger;
+      }
       return existing;
     }
     const job: JobState = {
       projectId,
       force: Boolean(opts.force),
+      trigger,
       phase: 'queued',
       filesTotal: 0,
       filesDone: 0,
@@ -139,20 +190,31 @@ export class Indexer {
       queuedAt: new Date().toISOString(),
     };
     this.jobs.set(projectId, job);
-    this.queue.push(projectId);
+    this.laneFor(trigger).push(projectId);
     void this.runLoop();
     return job;
+  }
+
+  private laneFor(trigger: IndexTrigger): string[] {
+    return trigger === 'scheduled' ? this.scheduled : this.interactive;
   }
 
   getJob(projectId: string): JobState | undefined {
     return this.jobs.get(projectId);
   }
 
-  /** Only meaningful while the project's job is `queued`; `undefined` otherwise. */
+  /**
+   * Only meaningful while the project's job is `queued`; `undefined` otherwise.
+   *
+   * The position is over both lanes as the drain will actually take them, so the dashboard's "3 jobs
+   * ahead of you" stays a count of jobs that really do run first.
+   */
   queueInfo(projectId: string): QueueInfo | undefined {
-    const position = this.queue.indexOf(projectId);
-    if (position === -1) return undefined;
-    return { position, runningProjectId: this.current };
+    const interactiveAt = this.interactive.indexOf(projectId);
+    if (interactiveAt !== -1) return { position: interactiveAt, runningProjectId: this.current };
+    const scheduledAt = this.scheduled.indexOf(projectId);
+    if (scheduledAt === -1) return undefined;
+    return { position: this.interactive.length + scheduledAt, runningProjectId: this.current };
   }
 
   isBusy(projectId: string): boolean {
@@ -168,8 +230,11 @@ export class Indexer {
     if (this.running) return;
     this.running = true;
     try {
-      while (this.queue.length > 0) {
-        const projectId = this.queue.shift()!;
+      for (;;) {
+        // Re-read both lanes on every iteration rather than snapshotting: a promotion can move a
+        // project between them while the run before it is still going.
+        const projectId = this.interactive.shift() ?? this.scheduled.shift();
+        if (projectId === undefined) break;
         const job = this.jobs.get(projectId);
         if (!job) continue;
         this.current = projectId;

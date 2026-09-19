@@ -10,11 +10,11 @@ import { UploadDriver } from './upload.js';
 export interface DriverContext {
   db: Db;
   log: Logger;
-  config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY'>;
+  config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'IGNORE_GLOBS'>;
 }
 
 export interface SyncResult {
-  /** Driver-owned config keys to persist (e.g. git `lastCommit`). */
+  /** Driver-owned config keys to persist (e.g. git `lastCommit`, and `syncProbeToken`). */
   configPatch?: Record<string, unknown>;
   /** Human-readable note for the run log (e.g. "already up to date"). */
   note?: string;
@@ -29,6 +29,25 @@ export interface SourceDriver {
   docRoot(): Promise<string>;
   /** Optional connectivity check for the dashboard's "Test" button. */
   test?(): Promise<string>;
+  /**
+   * A **cheap** revision token for the source as it stands right now, compared by the scheduler
+   * against the one the last successful sync stored ([ADR-0048](../../../.ssot/ADR.md#adr-0048)).
+   * Equal means the run would find nothing and is not queued.
+   *
+   * Three rules hold this together, and each of them is load-bearing:
+   *
+   * 1. **`null`, a throw, or no `probe` at all means "run it".** Never "skip it". A probe is an
+   *    optimisation, and an optimisation that can silently stop a source syncing is a bug that looks
+   *    like a working product for weeks. Every uncertainty resolves toward the run.
+   * 2. **Cheap is measured against `sync()`, not against zero.** `git ls-remote` beside a fetch, one
+   *    `search` beside hundreds of throttled page reads, a `stat` walk beside reading and hashing
+   *    every byte. A probe that costs most of the run it avoids is the proposal this entry rejected.
+   * 3. **The token a sync stores is produced by this same method**, returned in the sync's
+   *    `configPatch` under `PROBE_TOKEN_KEY` (`services/sources.ts`). Both sides of the comparison are therefore the same
+   *    function of the same source, which is the only reason "equal" can be trusted — a token derived
+   *    one way on the way in and another on the way out drifts on the first edge case.
+   */
+  probe?(): Promise<string | null>;
 }
 
 type DriverFactory = (source: DocumentSourceRow, ctx: DriverContext) => SourceDriver;

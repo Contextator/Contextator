@@ -43,6 +43,13 @@
       "when": 1789766908971,
       "tag": "0005_query_log",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789787912940,
+      "tag": "0006_scheduled_sync",
+      "breakpoints": true
     }
   ]
 }

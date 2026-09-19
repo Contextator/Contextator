@@ -200,7 +200,8 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     // `0002_hybrid_search` ([ADR-0041](../../../.ssot/ADR.md#adr-0041)) and `0003_chunk_neighbours`
     // ([ADR-0042](../../../.ssot/ADR.md#adr-0042)) and `0004_document_content`
     // ([ADR-0043](../../../.ssot/ADR.md#adr-0043)) and `0005_query_log`
-    // ([ADR-0047](../../../.ssot/ADR.md#adr-0047)). So the claim is no
+    // ([ADR-0047](../../../.ssot/ADR.md#adr-0047)) and `0006_scheduled_sync`
+    // ([ADR-0048](../../../.ssot/ADR.md#adr-0048)). So the claim is no
     // longer "nothing changed": it is that nothing changed *except* what those migrations say they
     // change, and the lines that moved are checked by name rather than counted.
     await applySchema(database);
@@ -209,7 +210,7 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     expect(
       changed.filter(
         (line) =>
-          !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer/.test(
+          !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check/.test(
             line,
           ),
       ),

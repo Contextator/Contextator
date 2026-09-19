@@ -1,6 +1,7 @@
 import { and, desc, eq, notInArray } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { indexRuns, type IndexRunInsert, type IndexRunRow } from '../db/schema.js';
+import type { IndexTrigger } from './indexer.js';
 
 /** How many finished runs are kept per project; older ones are pruned after each insert. */
 export const RUN_HISTORY_LIMIT = 20;
@@ -9,6 +10,8 @@ export const RUN_HISTORY_LIMIT = 20;
 export interface FinishedJobSummary {
   projectId: string;
   force: boolean;
+  /** What asked for the run ([ADR-0048](../../.ssot/ADR.md#adr-0048)). */
+  trigger: IndexTrigger;
   phase: 'done' | 'error';
   /** The generation a rebuild wrote into; absent for an incremental run ([ADR-0039](../../.ssot/ADR.md#adr-0039)). */
   generation?: number;
@@ -41,6 +44,9 @@ export function buildRunRecord(job: FinishedJobSummary): IndexRunInsert {
     // does not identify one. A rebuild does: with this column, "which run produced the index being
     // served" is `index_runs.generation = projects.live_generation` and nothing else.
     generation: job.generation ?? null,
+    // Never NULL from here on. NULL in this column means "recorded before the column existed", the
+    // same contract `generation` above carries, so the code must not be able to produce one.
+    trigger: job.trigger,
     error: job.phase === 'error' ? (job.error ?? 'unknown error').slice(0, 2000) : null,
   };
 }

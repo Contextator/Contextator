@@ -169,12 +169,38 @@ export const documentSources = pgTable(
     lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
     lastError: text('last_error'),
     documentCount: integer('document_count').notNull().default(0),
+    /**
+     * How often the scheduler considers this source, in minutes — **NULL means never**
+     * ([ADR-0048](../../.ssot/ADR.md#adr-0048)).
+     *
+     * A column and not a `config` key, unlike the probe token beside it, because the question the
+     * scheduler asks every minute is "which sources are due", and that has to be a `WHERE` rather than
+     * a read of every source's jsonb. Every source that existed before this column was added carries
+     * NULL, so an upgrade starts no outbound traffic nobody asked for (NFR-10); a newly created source
+     * is given `SYNC_DEFAULT_INTERVAL_MINUTES`.
+     */
+    syncIntervalMinutes: integer('sync_interval_minutes'),
+    /**
+     * When the scheduler should next consider this source. NULL means "as soon as it is looked at",
+     * which is what a source whose interval was just switched on would hold for a moment.
+     *
+     * **The jitter lives in the value, not in the tick.** It is first written as
+     * `now() + random() × interval`, so a hundred sources created by one script are spread uniformly
+     * across one interval and *stay* spread; afterwards it advances by a whole interval from the
+     * moment the source was considered. It advances whether or not anything was enqueued, which is the
+     * entire reason a run that outlives its own interval cannot turn the tick into a probe loop.
+     */
+    nextSyncAt: timestamp('next_sync_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     foreignKey({ name: 'document_sources_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
     unique('document_sources_project_name_uq').on(t.projectId, t.name),
     index('document_sources_project_idx').on(t.projectId),
+    // The scheduler's own query, and the only one it runs per tick: the sources that are switched on
+    // and due, oldest first. Partial on `sync_interval_minutes IS NOT NULL` because an instance that
+    // schedules nothing — every source of an upgraded installation — then carries an empty index.
+    index('document_sources_due_idx').on(t.nextSyncAt.asc().nullsFirst()).where(sql`sync_interval_minutes is not null`),
   ],
 );
 
@@ -309,6 +335,17 @@ export const indexRuns = pgTable(
      * With it, "which run produced the index being served" is a join and not an investigation.
      */
     generation: integer('generation'),
+    /**
+     * What asked for this run: `manual` (a person, a route, a source that was just edited), `webhook`
+     * (a push from a git provider) or `scheduled` (the timer of
+     * [ADR-0048](../../.ssot/ADR.md#adr-0048)). NULL for every run recorded before that entry, exactly
+     * as `generation` above is NULL for every run recorded before [ADR-0039](../../.ssot/ADR.md#adr-0039).
+     *
+     * It is also the lane the run was queued in: `scheduled` drains only when nothing interactive is
+     * waiting, so "did a person wait behind the timer" is answerable from this column and
+     * `started_at` rather than from the application log.
+     */
+    trigger: text('trigger'),
   },
   (t) => [
     foreignKey({ name: 'index_runs_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
@@ -317,6 +354,8 @@ export const indexRuns = pgTable(
     // drizzle-kit writes `DESC NULLS LAST` unless it is said. Without it a fresh install would get an
     // index one word different from the one every existing database has.
     index('index_runs_project_idx').on(t.projectId, t.startedAt.desc().nullsFirst()),
+    // NULL passes an `IN` check, which is what lets the rows recorded before the column existed stay.
+    check('index_runs_trigger_check', sql`${t.trigger} in ('manual', 'webhook', 'scheduled')`),
   ],
 );
 

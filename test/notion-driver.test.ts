@@ -72,7 +72,16 @@ class StubNotion {
     },
   };
 
-  search = async (args: { start_cursor?: string }) => {
+  search = async (args: { start_cursor?: string; page_size?: number; sort?: { direction: string; timestamp: string } }) => {
+    // The revision probe of [ADR-0048](../.ssot/ADR.md#adr-0048) is the same endpoint asked a
+    // different question: newest first, one result. Answered here the way the API answers it, and
+    // labelled apart so a test can say how many *pulls* a sync made without counting the probe.
+    if (args.sort?.direction === 'descending' && args.page_size === 1) {
+      this.calls.push('search:probe');
+      this.guard();
+      const newest = [...this.store].sort((a, b) => b.lastEdited.localeCompare(a.lastEdited))[0];
+      return { results: newest ? [this.asPage(newest)] : [], next_cursor: null };
+    }
     this.calls.push(`search:${args.start_cursor ?? 'first'}`);
     this.guard();
     // Two pages of results, so pagination is covered.
@@ -80,17 +89,21 @@ class StubNotion {
     const firstPage = !args.start_cursor;
     const slice = firstPage ? this.store.slice(0, half) : this.store.slice(half);
     return {
-      results: slice.map((p) => ({
-        object: 'page',
-        id: p.id,
-        url: `https://notion.so/${p.id}`,
-        last_edited_time: p.lastEdited,
-        parent: p.parent,
-        properties: titleProp(p.title),
-      })),
+      results: slice.map((p) => this.asPage(p)),
       next_cursor: firstPage && this.store.length > half ? 'cursor-2' : null,
     };
   };
+
+  private asPage(p: StubPage): Record<string, unknown> {
+    return {
+      object: 'page',
+      id: p.id,
+      url: `https://notion.so/${p.id}`,
+      last_edited_time: p.lastEdited,
+      parent: p.parent,
+      properties: titleProp(p.title),
+    };
+  }
 
   readonly blocks = {
     children: {
@@ -124,6 +137,8 @@ const source = (id: string, projectId: string): DocumentSourceRow =>
     lastSyncedAt: null,
     lastError: null,
     documentCount: 0,
+    syncIntervalMinutes: null,
+    nextSyncAt: null,
     createdAt: new Date(),
   }) as DocumentSourceRow;
 
@@ -177,13 +192,16 @@ describe('notion source', () => {
     const stub = new StubNotion([HOME, CHILD]);
     const driver = new NotionDriver(
       source(sourceId, projectId),
-      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } },
+      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] } },
       stub as never,
     );
 
     const result = await driver.sync();
     expect(result.note).toContain('2 pages');
-    expect(stub.calls.filter((c) => c.startsWith('search:'))).toEqual(['search:first', 'search:cursor-2']);
+    // Two paginated pulls, and then the one extra `search` that mints the revision token the
+    // scheduler will compare against ([ADR-0048](../.ssot/ADR.md#adr-0048)).
+    expect(stub.calls.filter((c) => c.startsWith('search:'))).toEqual(['search:first', 'search:cursor-2', 'search:probe']);
+    expect(result.configPatch).toEqual({ syncProbeToken: `edited=${CHILD.lastEdited}` });
 
     // The child page sits in a folder named after its parent; both stems carry the id prefix.
     expect(await listFiles()).toEqual(['product-handbook--aaaaaaaa/kurulum-rehberi--11112222.md', 'product-handbook--aaaaaaaa.md'].sort());
@@ -209,7 +227,7 @@ describe('notion source', () => {
     ]);
     const driver = new NotionDriver(
       source(sourceId, projectId),
-      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } },
+      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] } },
       stub as never,
     );
 
@@ -228,7 +246,7 @@ describe('notion source', () => {
     stub.failWith = 'API token is invalid.';
     const driver = new NotionDriver(
       source(sourceId, projectId),
-      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } },
+      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] } },
       stub as never,
     );
 
@@ -245,7 +263,7 @@ describe('notion source', () => {
     } as DocumentSourceRow;
     const driver = new NotionDriver(
       rooted,
-      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } },
+      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] } },
       stub as never,
     );
 
@@ -257,7 +275,7 @@ describe('notion source', () => {
     const stub = new StubNotion([HOME]);
     const driver = new NotionDriver(
       source(sourceId, projectId),
-      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [] } },
+      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] } },
       stub as never,
     );
 

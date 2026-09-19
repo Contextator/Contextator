@@ -1,6 +1,6 @@
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { PROJECT_NAME_RE } from '../config.js';
+import { PROJECT_NAME_RE, SYNC_MAX_INTERVAL_MINUTES, SYNC_MIN_INTERVAL_MINUTES } from '../config.js';
 import type { Db } from '../db/client.js';
 import { documents, documentSources, type DocumentSourceRow } from '../db/schema.js';
 import { encryptSecret, randomSecret } from './crypto.js';
@@ -33,11 +33,44 @@ const Language = z
   .optional()
   .transform((value) => (value === '' ? undefined : value));
 
+/**
+ * The driver-owned revision token the scheduler compares against
+ * ([ADR-0048](../../.ssot/ADR.md#adr-0048)). Written by `sync()` through `SyncResult.configPatch`,
+ * exactly as git's `lastCommit` is, and never by a client — `UpdateSourceInput` strips it.
+ *
+ * It appears in all four schemas rather than in a shared base, for the reason stated above the
+ * language field: each of these objects is also this type's documentation in
+ * [DATA-MODEL.md](../../.ssot/DATA-MODEL.md) §1, and a key that every type carries should be visible
+ * in every type. Unvalidated length is the point of the cap: a driver that one day returned a
+ * megabyte of etag would otherwise put it in a row the dashboard renders.
+ */
+const ProbeToken = z.string().max(500).optional();
+
+/** The `config` key that token lives under. One constant, so the drivers and the scheduler agree. */
+export const PROBE_TOKEN_KEY = 'syncProbeToken';
+
+/**
+ * Two configs compared as values rather than as text. One side of the comparison below has just come
+ * out of zod (keys in schema order) and the other out of `jsonb` (keys in PostgreSQL's own order), so
+ * a plain `JSON.stringify` of the two would report a difference that is not one. Shallow, because the
+ * only nested value in any of the four schemas is an array, whose order is meaningful.
+ */
+function canonicalConfig(value: Record<string, unknown>): string {
+  return JSON.stringify(Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))));
+}
+
+/** The stored token of a source, or `undefined` when nothing has written one yet. */
+export function storedProbeToken(config: Record<string, unknown>): string | undefined {
+  const value = config[PROBE_TOKEN_KEY];
+  return typeof value === 'string' ? value : undefined;
+}
+
 /** Non-secret, type-specific settings stored in `document_sources.config`. */
 export const LocalConfig = z.object({
   path: z.string().min(1).max(4096),
   extensions: Extensions.default([...DEFAULT_EXTENSIONS]),
   language: Language,
+  syncProbeToken: ProbeToken,
 });
 export const GitConfig = z.object({
   url: z.url().max(2048),
@@ -49,16 +82,19 @@ export const GitConfig = z.object({
   lastCommit: z.string().max(64).optional(),
   extensions: Extensions.default([...DEFAULT_EXTENSIONS]),
   language: Language,
+  syncProbeToken: ProbeToken,
 });
 export const UploadConfig = z.object({
   extensions: Extensions.default(['md', 'mdx', 'txt']),
   language: Language,
+  syncProbeToken: ProbeToken,
 });
 export const NotionConfig = z.object({
   /** Page or database ids to start from; empty = everything shared with the integration. */
   rootIds: z.array(z.string().min(1).max(64)).max(50).default([]),
   extensions: Extensions.default(['md']),
   language: Language,
+  syncProbeToken: ProbeToken,
 });
 
 export const SourceConfigByType = { local: LocalConfig, git: GitConfig, upload: UploadConfig, notion: NotionConfig } as const;
@@ -84,6 +120,10 @@ export interface SourceView {
   lastSyncedAt: Date | null;
   lastError: string | null;
   documentCount: number;
+  /** Minutes between scheduled considerations; `null` is off ([ADR-0048](../../.ssot/ADR.md#adr-0048)). */
+  syncIntervalMinutes: number | null;
+  /** When the scheduler will next consider it. `null` while it is off, or before the first tick. */
+  nextSyncAt: Date | null;
   createdAt: Date;
 }
 
@@ -109,6 +149,8 @@ export function toSourceView(row: DocumentSourceRow, opts: SourceViewOptions = {
     lastSyncedAt: row.lastSyncedAt,
     lastError: row.lastError,
     documentCount: row.documentCount,
+    syncIntervalMinutes: row.syncIntervalMinutes,
+    nextSyncAt: row.nextSyncAt,
     createdAt: row.createdAt,
   };
 }
@@ -118,6 +160,32 @@ export function parseSourceConfig<T extends SourceType>(type: T, raw: unknown): 
   const result = SourceConfigByType[type].safeParse(raw ?? {});
   if (!result.success) throw new ValidationError(`Invalid ${type} source settings: ${z.prettifyError(result.error)}`);
   return result.data as z.infer<(typeof SourceConfigByType)[T]>;
+}
+
+/**
+ * The interval a client may set on a source: `null` switches scheduling off, and any other value has
+ * to sit inside the band `config.ts` documents. Shared by the create and the update route so that
+ * "off" means the same thing on both.
+ */
+export const SyncIntervalMinutes = z.number().int().min(SYNC_MIN_INTERVAL_MINUTES).max(SYNC_MAX_INTERVAL_MINUTES).nullable();
+
+/**
+ * The first `next_sync_at` of a source: **now plus a uniformly random fraction of one interval**
+ * ([ADR-0048](../../.ssot/ADR.md#adr-0048)).
+ *
+ * **The jitter is here, at the write, and nowhere near the tick.** A hundred sources created by one
+ * import script land on a hundred different minutes, and every later advance adds a whole interval to
+ * the moment the source was considered — so that spread is a property the population *keeps*, for as
+ * long as the rows live. Jittering at the tick instead would re-randomise the herd into a fresh
+ * collision every cycle: uniform in expectation, clumped in every actual hour.
+ *
+ * It is also why a source that has just been switched on does not fire immediately. That is
+ * deliberate: switching ten sources on from the dashboard in one minute should not produce ten runs
+ * in that minute, and the operator who wants one now has the "Sync now" button that has always been
+ * there.
+ */
+export function firstSyncDueAt(intervalMinutes: number, now: Date = new Date()): Date {
+  return new Date(now.getTime() + Math.random() * intervalMinutes * 60_000);
 }
 
 export function slugifySourceName(input: string): string {
@@ -173,6 +241,12 @@ export interface CreateSourceInput {
   config?: unknown;
   /** Plain token; encrypted before it is stored. */
   secret?: string;
+  /**
+   * Minutes between scheduled syncs, `null` for none. The route defaults it to
+   * `SYNC_DEFAULT_INTERVAL_MINUTES`; **undefined here means none**, so a caller that has never heard
+   * of scheduling creates an unscheduled source rather than one that starts calling out.
+   */
+  syncIntervalMinutes?: number | null;
 }
 
 export interface SourceServiceOptions {
@@ -211,9 +285,22 @@ export async function createSource(db: Db, projectId: string, input: CreateSourc
   const secretEnc = input.secret ? encryptSecret(input.secret, opts.secretKey) : null;
   const webhookSecret = input.type === 'git' ? randomSecret() : null;
   try {
+    const syncIntervalMinutes = input.syncIntervalMinutes ?? null;
     const [row] = await db
       .insert(documentSources)
-      .values({ projectId, type: input.type, name, label: input.label?.trim() ?? '', flavor, config, secretEnc, webhookSecret })
+      .values({
+        projectId,
+        type: input.type,
+        name,
+        label: input.label?.trim() ?? '',
+        flavor,
+        config,
+        secretEnc,
+        webhookSecret,
+        syncIntervalMinutes,
+        // Jittered from the moment of creation, so a scripted import spreads itself.
+        nextSyncAt: syncIntervalMinutes === null ? null : firstSyncDueAt(syncIntervalMinutes),
+      })
       .returning();
     return row;
   } catch (err) {
@@ -228,6 +315,8 @@ export interface UpdateSourceInput {
   config?: unknown;
   /** New plain token; `null` removes the stored one. */
   secret?: string | null;
+  /** Minutes between scheduled syncs; `null` switches scheduling off. Omitted leaves it alone. */
+  syncIntervalMinutes?: number | null;
 }
 
 export async function updateSource(
@@ -248,9 +337,33 @@ export async function updateSource(
   if (input.config !== undefined) {
     // Keep driver-owned keys (e.g. git lastCommit) unless the user changed something that invalidates them.
     const merged = { ...existing.config, ...(input.config as Record<string, unknown>) };
-    patch.config = await validateConfig(existing.type as SourceType, merged, opts);
+    // **The probe token is not one of those keys, when anything else moved.** It describes the source
+    // as it was configured a moment ago, and the point of an edit is that the source now means
+    // something else — a different path, a different branch, a different set of file extensions.
+    // Leaving it would let the scheduler answer "unchanged" about a question nobody is asking any
+    // more ([ADR-0048](../../.ssot/ADR.md#adr-0048)). Stripping it here is also the reason a client
+    // cannot write it: this is the only path that takes `config` from one.
+    //
+    // An edit that changed nothing keeps it, and that is not a nicety — the dashboard sends the whole
+    // config on every save, so forgetting the token unconditionally would turn "Save changes" with
+    // nothing changed into a re-sync of the source, and the route below reads exactly this comparison
+    // to decide whether to queue a run at all.
+    delete merged[PROBE_TOKEN_KEY];
+    const nextConfig = await validateConfig(existing.type as SourceType, merged, opts);
+    const previous = { ...existing.config };
+    const token = previous[PROBE_TOKEN_KEY];
+    delete previous[PROBE_TOKEN_KEY];
+    if (token !== undefined && canonicalConfig(nextConfig) === canonicalConfig(previous)) nextConfig[PROBE_TOKEN_KEY] = token;
+    patch.config = nextConfig;
   }
   if (input.secret !== undefined) patch.secretEnc = input.secret ? encryptSecret(input.secret, opts.secretKey) : null;
+  if (input.syncIntervalMinutes !== undefined && input.syncIntervalMinutes !== existing.syncIntervalMinutes) {
+    patch.syncIntervalMinutes = input.syncIntervalMinutes;
+    // Re-jittered rather than carried over: a source moved from daily to hourly would otherwise keep
+    // a due time up to a day out, and one moved the other way would fire straight away. Off clears
+    // the due time so that switching it back on is indistinguishable from creating it.
+    patch.nextSyncAt = input.syncIntervalMinutes === null ? null : firstSyncDueAt(input.syncIntervalMinutes);
+  }
   if (Object.keys(patch).length === 0) return existing;
   const [row] = await db.update(documentSources).set(patch).where(eq(documentSources.id, sourceId)).returning();
   return row;

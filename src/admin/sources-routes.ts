@@ -7,6 +7,7 @@ import { ConflictError, NotFoundError, getProjectById } from '../services/projec
 import { driverFor, isDriverAvailable } from '../services/sources/driver.js';
 import {
   SOURCE_TYPES,
+  SyncIntervalMinutes,
   createSource,
   deleteSource,
   getSource,
@@ -31,6 +32,12 @@ const CreateBody = z.object({
   flavor: z.enum(FLAVORS).optional(),
   config: z.record(z.string(), z.unknown()).optional(),
   secret: z.string().min(1).max(4096).optional(),
+  /**
+   * Minutes between scheduled syncs, `null` for none ([ADR-0048](../../.ssot/ADR.md#adr-0048)).
+   * Omitted takes `SYNC_DEFAULT_INTERVAL_MINUTES`, and `0` there means the instance creates every new
+   * source unscheduled.
+   */
+  syncIntervalMinutes: SyncIntervalMinutes.optional(),
   /** Queue an index run right away (default true). */
   index: z.boolean().default(true),
 });
@@ -40,6 +47,8 @@ const UpdateBody = z.object({
   flavor: z.enum(FLAVORS).optional(),
   config: z.record(z.string(), z.unknown()).optional(),
   secret: z.string().max(4096).nullable().optional(),
+  /** `null` switches scheduling off; omitted leaves it as it is. */
+  syncIntervalMinutes: SyncIntervalMinutes.optional(),
 });
 
 /** `/api/projects/:id/sources/*` — registered inside adminRoutes so the ADMIN_TOKEN hook applies. */
@@ -66,7 +75,11 @@ export const sourceRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     const body = CreateBody.parse(req.body);
     await requireProject(id);
     if (!isDriverAvailable(body.type)) throw new ConflictError(`Source type "${body.type}" is not available on this server yet`);
-    const row = await createSource(db, id, body, serviceOpts);
+    // The instance's default reaches a source only here, at creation. `0` means "unscheduled", which
+    // is also what a client that never sends the field gets — an upgrade and an old client both end
+    // up making no outbound calls nobody asked for (NFR-10, [ADR-0048](../../.ssot/ADR.md#adr-0048)).
+    const syncIntervalMinutes = body.syncIntervalMinutes !== undefined ? body.syncIntervalMinutes : config.SYNC_DEFAULT_INTERVAL_MINUTES || null;
+    const row = await createSource(db, id, { ...body, syncIntervalMinutes }, serviceOpts);
     if (body.index) indexer.enqueue(id);
     return reply.code(201).send(toSourceView(row));
   });
