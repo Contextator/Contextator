@@ -153,10 +153,11 @@ export async function startMcpInstance(database: TestDatabase, opts: { dataDir: 
     log: silentLogger,
     embeddings: stubEmbeddings,
     chunkBudget: { checked: true },
-    // The two questions the admin routes registered here actually ask of the indexer: whether a
-    // project is busy — which a source deletion refuses on — and the queue depth `/metrics` reports.
-    // Nothing in these suites indexes anything, so there is no queue to have and both are constants.
-    indexer: { isBusy: () => false, stats: () => ({ interactive: 0, scheduled: 0, running: 0 }) },
+    // The three things the admin routes registered here actually ask of the indexer: whether a project
+    // is busy — which a source deletion refuses on — the queue depth `/metrics` reports, and dropping
+    // a deleted project's queue state. Nothing in these suites indexes anything, so there is no queue
+    // to have: the first two are constants and the third has nothing to forget.
+    indexer: { isBusy: () => false, stats: () => ({ interactive: 0, scheduled: 0, running: 0 }), forget: () => {} },
     // Real, because a source deletion takes the project's lock and a stub would either deadlock or
     // quietly skip the thing the lock is there for.
     locks: new KeyedMutex(),

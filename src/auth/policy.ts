@@ -38,6 +38,12 @@ export const satisfies = (have: ProjectAccess, need: ProjectAccess): boolean => 
 /** Routes that are not about one project: the instance role they need, or null for any account. */
 export function requiredRole(method: string, url: string): UserRole | null {
   if (url.startsWith('/api/users')) return 'admin';
+  // Reading the audit log ([ADR-0055](../../.ssot/ADR.md#adr-0055)). It is **not** a project route and
+  // must not become one: the log records deleting a project, so its rows outlive the membership that
+  // would otherwise decide, and there is nothing for a `member` to be a member of. What it holds is
+  // also instance-wide by nature — who was given the root role, whose account was disabled, which
+  // address an action came from — so it asks for the same standing user management does.
+  if (url.startsWith('/api/audit')) return 'admin';
   // Creating and deleting a project is instance lifecycle: a new /mcp/<name> surface, disk, CPU.
   if (url === '/api/projects' && method === 'POST') return 'admin';
   // An import creates a project, so it is the same decision — and it is stated here rather than in

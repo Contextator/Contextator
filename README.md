@@ -745,6 +745,7 @@ no ambient credential.
 | `GET /api/projects/:id/members` | Accounts with access to this project and their role (any member of it) |
 | `PUT /api/projects/:id/members/:userId` `{ role }` | Grant or change `viewer` / `editor` (root/admin) |
 | `DELETE /api/projects/:id/members/:userId` | Revoke access (root/admin) |
+| `GET /api/audit?actor&action&project&from&to&limit&cursor` | The audit log, newest first (root/admin). `actor` is the label as it was at the time, `action` is `<METHOD> <route template>`, `project` is a project id or `none`; `from`/`to` are **UTC days** and `to` is inclusive of the day named. Answers `{ events, nextCursor, filters, retentionDays }` — `nextCursor` is the keyset position of the next page and `null` on the last, `filters` carries the distinct actors, actions and projects for the pickers and comes back with the first page only |
 
 A project a member has no access to answers `404`, not `403`, so project ids cannot be probed. `409` guards the last
 root account; `403` guards an admin reaching for a root one.
@@ -762,8 +763,16 @@ one of `open`/`token`/`account`, and so on). That is what keeps it a different r
 holds what agents asked and is governed by [its own retention](#configuration) and its own per-project switch. The
 two are deliberately not one table.
 
-There is no panel over it yet and no API endpoint that reads it; today it is queried with `psql`. Rows older than
-`AUDIT_LOG_RETENTION_DAYS` are swept on the same quarter-hourly timer as expired sessions.
+`GET /api/audit` reads it, and the dashboard's **Audit log** — in the account menu, beside Users — is the panel over
+that. Both are root/admin only: the log is instance-wide, and a project membership is not standing to read who was
+given the root role. Each row is rendered as a sentence ("dana deleted a source from handbook") rather than as the
+columns it is stored in, and every filter — who, what, which project, and a range of UTC days — is applied in SQL,
+one keyset page at a time. A project that has since been deleted still has its rows: `project_id` carries no foreign
+key, so what the panel cannot do is look its *name* up, and it says so on the row rather than leaving it blank.
+
+The panel is deliberately not reassuring about two things, because neither is true: the log is **not tamper-evident**
+— anyone with database access can remove a row and nothing here would show it ([SECURITY.md](SECURITY.md)) — and rows
+older than `AUDIT_LOG_RETENTION_DAYS` are swept on the same quarter-hourly timer as expired sessions.
 
 ## Local development (without Docker for the app)
 
@@ -847,6 +856,7 @@ src/admin/webhooks.ts         push webhooks, verified with the per-source secret
 src/services/notion-webhook.ts which Notion deliveries mean a run, the window a captured token may be stored in, and the debounce before the queue
 src/admin/auth-routes.ts      /api/auth/* and /api/setup/*
 src/admin/users-routes.ts     /api/users/*
+src/admin/audit-routes.ts     /api/audit — the read side of the audit log: the filters, the keyset page, and the sentence a row is rendered as
 src/admin/members-routes.ts   /api/projects/:id/members/*
 src/admin/mcp-routes.ts       /api/projects/:id/mcp-tokens/* and the open/token/account switch
 src/mcp/access.ts             the MCP endpoint's access rule, as a pure function
@@ -859,6 +869,8 @@ public/                       vanilla HTML/JS dashboard (no build step)
 public/core.js                shared helpers: el(), api(), state, the event bus
 public/auth.js                the signed-in account, the top-bar menu, permission helpers
 public/users.js               the account list at #/~users
+public/audit.js               the audit log at #/~audit — who changed this instance, filtered and paged by the server
+public/queries.js             a project's query-log panel: what agents asked, and the export beside it
 public/members.js             a project's Members panel
 public/mcp.js                 a project's MCP access panel and its tokens
 public/search.js              a project's search box and the hits it renders, scores and all

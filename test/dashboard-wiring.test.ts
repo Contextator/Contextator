@@ -46,6 +46,40 @@ describe('the dashboard markup and its modules agree', () => {
     for (const id of selectorsIn(authPage)) expect(ids).toContain(id);
   });
 
+  /**
+   * The audit panel holds no state of its own ([ADR-0055](../.ssot/ADR.md#adr-0055)'s panel, and
+   * ADR-0050's rule about what a poll may not destroy). `renderDetail()` replaces `#detail` wholesale
+   * every two seconds, so a chosen filter or the page somebody paged to has to live in `core.js`'s
+   * shared `state` — and a key the panel reads that nothing declares there is `undefined` in the
+   * browser and an error nowhere, which is exactly the class of failure this file exists for.
+   */
+  it('keeps the audit panel’s transient state in core.js, where a poll cannot wipe it', async () => {
+    const core = await readFile(new URL('core.js', PUBLIC), 'utf8');
+    const audit = await readFile(new URL('audit.js', PUBLIC), 'utf8');
+
+    const block = core.match(/\n {2}audit: \{([\s\S]*?)\n {2}\},/);
+    expect(block, 'core.js declares a state.audit block').not.toBeNull();
+    const declared = new Set([...(block?.[1] ?? '').matchAll(/^ {4}(\w+):/gm)].map((m) => m[1]));
+
+    const used = new Set([...audit.matchAll(/state\.audit\.(\w+)/g)].map((m) => m[1]));
+    // Guards the assertion below against passing because the panel stopped reading state at all —
+    // an alias (`const a = state.audit`) would empty this set and prove nothing.
+    expect(used.size).toBeGreaterThan(8);
+    for (const key of used) expect([...declared]).toContain(key);
+  });
+
+  /**
+   * The two instance views are reachable only from the account menu, and a hash nothing routes is a
+   * menu item that quietly lands on the project list.
+   */
+  it('routes every hash the account menu links to', async () => {
+    const menu = await readFile(new URL('auth.js', PUBLIC), 'utf8');
+    const app = await readFile(new URL('app.js', PUBLIC), 'utf8');
+    const linked = [...menu.matchAll(/href: '#\/(~[a-z]+)'/g)].map((m) => m[1]);
+    expect(linked).toEqual(expect.arrayContaining(['~users', '~audit']));
+    for (const hash of linked) expect(app).toContain(`raw === '${hash}'`);
+  });
+
   it('loads every module index.html needs through the one entry point', async () => {
     const html = await readFile(new URL('index.html', PUBLIC), 'utf8');
     const scripts = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1]);
