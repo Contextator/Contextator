@@ -7,9 +7,9 @@ import { encryptSecret } from '../src/services/crypto.js';
 import { sourceCurrentDir } from '../src/services/data-dir.js';
 import { cqlFor, HttpConfluenceClient } from '../src/services/sources/confluence-client.js';
 import { storageToHtml, storageToMarkdown } from '../src/services/sources/confluence-render.js';
-import { ConfluenceDriver } from '../src/services/sources/confluence.js';
+import { ConfluenceDriver, MAX_PAGES } from '../src/services/sources/confluence.js';
 import { toSourceView } from '../src/services/sources.js';
-import { CAMPAIGN, HANDBOOK, ROTATION, SPACE, StubConfluence, type StubPage } from './support/confluence-stub.js';
+import { CAMPAIGN, HANDBOOK, LONG_TITLE, ROTATION, SPACE, StubConfluence, type StubPage } from './support/confluence-stub.js';
 
 /**
  * The Confluence source against a stub of the REST API ([ADR-0059](../.ssot/ADR.md#adr-0059)).
@@ -196,6 +196,34 @@ describe('confluence source', () => {
     );
   });
 
+  /**
+   * **The incremental skip is the connector's cost, and this is the case that used to defeat it
+   * silently.** The version was the fifth front-matter key, behind a percent-encoded copy of the
+   * title, so a page titled like the one below pushed it past the fixed read; `storedVersion` answered
+   * `null`, `null === page.version` is false, and the body was pulled again on every single sync. It
+   * fails *green*: the note says "rendered" and every assertion about content still holds.
+   */
+  it('skips a page whose title is long enough to have pushed the version out of the read', async () => {
+    const first = new StubConfluence([HANDBOOK, LONG_TITLE]);
+    expect((await driverFor(first).sync()).note).toContain('2 rendered');
+
+    // **The claim, and it is about cost rather than content.** Nothing is re-read on a second sync of
+    // a wiki nobody touched. Asserted before the arithmetic below, so that a regression fails on the
+    // behaviour it is about and not only on a byte offset.
+    const second = new StubConfluence([HANDBOOK, LONG_TITLE]);
+    expect((await driverFor(second).sync()).note).toContain('0 rendered');
+    expect(second.calls.filter((c) => c.startsWith('storage:'))).toEqual([]);
+
+    // And why it holds, measured rather than assumed: the version is the first thing in the file, at
+    // byte 4, while the URL that used to sit in front of it is 300-odd characters of percent-encoding.
+    const stem = (await listFiles()).find((f) => f.includes('uretim-ortaminda'))!;
+    const written = await fs.readFile(path.join(currentDir(), ...stem.split('/')), 'utf8');
+    expect(Buffer.byteLength(written.slice(0, written.indexOf('confluence_version')), 'utf8')).toBe(4);
+    const urlLine = /^url: "(.*)"$/m.exec(written)![1];
+    expect(urlLine).toContain(encodeURIComponent('Üretim').replace(/%20/g, '+'));
+    expect(urlLine.length).toBeGreaterThan(300);
+  });
+
   it('removes the file of a page that is gone', async () => {
     const stub = new StubConfluence([HANDBOOK, ROTATION]);
     await driverFor(stub).sync();
@@ -204,6 +232,46 @@ describe('confluence source', () => {
     const result = await driverFor(second).sync();
     expect(result.note).toContain('1 removed');
     expect(await listFiles()).toEqual(['eng/engineering-handbook--100001.md']);
+  });
+
+  /**
+   * **The ceiling has to be in the sentence an operator reads.** A wiki larger than `MAX_PAGES`
+   * otherwise indexes its first five thousand pages and reports a perfectly ordinary success, after
+   * which `search_docs` answers "not in the documentation" about pages that exist — which is the one
+   * answer this product is built not to give.
+   */
+  it('says out loud that it stopped at the ceiling, instead of reporting a wiki as fully indexed', async () => {
+    const many: StubPage[] = Array.from({ length: MAX_PAGES + 1 }, (_, i) => ({
+      ...HANDBOOK,
+      id: `9${String(i).padStart(6, '0')}`,
+      title: `Page ${i}`,
+      ancestors: [],
+      storage: '<p>x</p>',
+    }));
+    const stub = new StubConfluence(many);
+    stub.pageSize = 1000;
+    const result = await driverFor(stub).sync();
+
+    expect(result.note).toContain(`STOPPED AT THE ${MAX_PAGES}-PAGE CEILING`);
+    expect(result.note).toContain('are NOT indexed');
+    expect(result.note).toContain(`${MAX_PAGES} pages`);
+    // And the probe still reports the real total, so the two numbers sit beside each other.
+    expect(await driverFor(new StubConfluence(many)).probe()).toBe(`pages=${MAX_PAGES + 1};modified=${HANDBOOK.lastModified}`);
+  }, 120_000);
+
+  /**
+   * The subset of the empty-scope case that a count cannot see: two spaces configured, one of them
+   * renamed. The listing is not empty, so the guard on `pages.length` is satisfied, and the removal
+   * pass would delete every document of the space that went away while the run reports success.
+   */
+  it('refuses when one configured space goes quiet, not only when all of them do', async () => {
+    const both = { spaceKeys: [SPACE, 'MKT'] };
+    await driverFor(new StubConfluence([HANDBOOK, ROTATION, CAMPAIGN]), both).sync();
+    expect(await listFiles()).toHaveLength(3);
+
+    // ENG still answers; MKT does not. Nothing may be deleted on the strength of that.
+    await expect(driverFor(new StubConfluence([HANDBOOK, ROTATION]), both).sync()).rejects.toThrow(/no pages for space\(s\) MKT/);
+    expect(await listFiles()).toHaveLength(3);
   });
 
   it('refuses to empty a source that Confluence has answered nothing about', async () => {
@@ -220,6 +288,19 @@ describe('confluence source', () => {
     stub.failWith = 'Current user not permitted to use Confluence';
     await expect(driverFor(stub).sync()).rejects.toThrow('Current user not permitted to use Confluence');
     expect(await listFiles()).toHaveLength(2); // nothing was deleted
+  });
+
+  /**
+   * **A request that failed is a sync that failed, and only a render failure is a complaint.** These
+   * were one `catch` once, and a rate limit during a first large pull then put every throttled page
+   * into the note while the sync returned successfully — `indexer.ts` writes `lastError: null` over a
+   * source that synced, so a third of a wiki could be missing from the index with nothing on the
+   * source row saying so.
+   */
+  it('fails the sync when a page body cannot be read, instead of reporting it as a page it could not render', async () => {
+    const stub = new StubConfluence([HANDBOOK, ROTATION]);
+    stub.storageFailures.add(ROTATION.id);
+    await expect(driverFor(stub).sync()).rejects.toThrow(/429/);
   });
 
   it('reports a page it could not render without failing the source or losing the old file', async () => {
@@ -372,7 +453,9 @@ describe('the confluence credential', () => {
     await client.revision(cqlFor(['ENG']));
 
     const cqls = urls.map((u) => new URL(u).searchParams.get('cql'));
-    expect(cqls).toEqual(['type = page and space in ("ENG") order by id', 'type = page and space in ("ENG") order by lastmodified desc']);
+    // `created` is a documented CQL sort field and never moves for a page, which is what paging a
+    // cursor over a wiki somebody is editing needs. `id` is neither documented nor refusable by a stub.
+    expect(cqls).toEqual(['type = page and space in ("ENG") order by created asc', 'type = page and space in ("ENG") order by lastmodified desc']);
     // The trailing slash on the configured site URL does not become a double slash in the path.
     expect(urls[0].startsWith('https://acme.atlassian.net/wiki/rest/api/search?')).toBe(true);
     expect(new URL(urls[1]).searchParams.get('limit')).toBe('1');

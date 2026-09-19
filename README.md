@@ -162,6 +162,19 @@ Confluence's storage format (the XHTML a page is stored as) goes through the sam
 `.html` files do, so tables, code blocks, task lists and admonitions survive as structure. Macros are
 unwrapped: the text inside an expand or a panel is indexed, the macro's own configuration is not.
 
+**One source indexes at most 5 000 pages.** A wiki larger than that is indexed up to the ceiling and
+the run says so, in those words, on the source's row — because the alternative is a source that looks
+completely indexed while `search_docs` answers "not in the documentation" about pages that exist. Split
+a larger wiki across several sources by naming fewer spaces on each; the scheduled check below reports
+the space's real total beside the number indexed, so the two are visible together.
+
+**If one of several named spaces stops answering, nothing is deleted.** A renamed space key, or a
+permission withdrawn from the account, reads to the API as a space with no pages — not as an error —
+and the ordinary "remove what is gone" pass would then delete every document that came from it while
+the run reported success. A configured space that held documents a moment ago and offers none now fails
+the sync instead, naming the space. With *Spaces* left empty there is no list of what should be there,
+so that check cannot be made; name your spaces if you want it.
+
 There is **no Confluence webhook yet**. The sync interval below is how a Confluence source stays fresh.
 
 ### Keeping a source fresh on its own

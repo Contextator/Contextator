@@ -43,6 +43,8 @@ export class StubConfluence implements ConfluenceClient {
   readonly queries: Array<{ call: 'list' | 'revision'; cql: string }> = [];
   /** Set to make every call reject, the way a revoked token does. */
   failWith: string | null = null;
+  /** Page ids whose **body read** fails, the way a rate limit or a 500 does mid-pull. */
+  readonly storageFailures = new Set<string>();
   /** Pages per listing response, so paging is exercised rather than assumed. */
   pageSize = 2;
 
@@ -94,6 +96,7 @@ export class StubConfluence implements ConfluenceClient {
   async storage(id: string): Promise<string> {
     this.calls.push(`storage:${id}`);
     this.guard();
+    if (this.storageFailures.has(id)) throw new Error(`Confluence answered 429 for /rest/api/content/${id}: rate limit`);
     const page = this.store.find((p) => p.id === id);
     if (!page) throw new Error(`No content found with id ${id}`);
     return page.storage;
@@ -108,7 +111,12 @@ export function summaryOf(p: StubPage): ConfluencePageSummary {
     version: p.version,
     lastModified: p.lastModified,
     ancestors: p.ancestors,
-    webUrl: `https://acme.atlassian.net/wiki/spaces/${p.spaceKey}/pages/${p.id}`,
+    // **The page title is in the URL, because it is in Confluence's.** `_links.webui` is
+    // `/spaces/ENG/pages/<id>/<title>` with the title percent-encoded, which for a Turkish title is
+    // about three bytes a character. A stub that answered a short URL here would have let a driver
+    // reading a fixed number of bytes of front matter look correct while being wrong on every real
+    // page with a long name ([ADR-0059](../../.ssot/ADR.md#adr-0059)).
+    webUrl: `https://acme.atlassian.net/wiki/spaces/${p.spaceKey}/pages/${p.id}/${encodeURIComponent(p.title).replace(/%20/g, '+')}`,
   };
 }
 
@@ -135,6 +143,27 @@ export const ROTATION: StubPage = {
     '<ac:parameter ac:name="language">bash</ac:parameter>' +
     '<ac:plain-text-body><![CDATA[npm ci && npm run build]]></ac:plain-text-body>' +
     '</ac:structured-macro>',
+};
+
+/**
+ * A real title from a real wiki: long, Turkish, and therefore percent-encoded to roughly three bytes a
+ * character in the `url` this driver writes into front matter.
+ *
+ * It exists because a page like this is the one the incremental skip used to miss entirely — the
+ * version key sat behind that URL, past the end of a fixed-size read, so `storedVersion` answered
+ * `null` and the body was re-fetched on **every** sync while the note cheerfully said "rendered".
+ */
+export const LONG_TITLE: StubPage = {
+  id: '100003',
+  // 195 characters, well inside Confluence's own 255 limit, and Turkish — so the `url` this driver
+  // writes above it is 363 characters of percent-encoding. That is the page the old fixed read lost.
+  title:
+    'Üretim ortamında sertifika yenileme ve imza anahtarı döndürme prosedürü — çağrı listesi, geri alma adımları, bilgilendirilecek ekipler ve müşteri iletişimi için hazırlanmış örnek duyuru metinleri',
+  spaceKey: SPACE,
+  version: 5,
+  lastModified: '2026-09-03T10:00:00.000Z',
+  ancestors: [{ id: '100001', title: 'Engineering Handbook' }],
+  storage: '<p>Sertifikayi yenilemeden once cagri listesini kontrol edin.</p>',
 };
 
 export const CAMPAIGN: StubPage = {

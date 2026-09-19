@@ -193,7 +193,13 @@ export const ConfluenceConfig = z.object({
     .array(z.string().regex(/^[A-Za-z0-9~_-]{1,255}$/))
     .max(50)
     .default([]),
-  /** The driver writes Markdown, so this is `['md']` and the checkbox row is hidden for the type. */
+  /**
+   * The driver writes Markdown, so `['md']` is the default a source created through the API takes.
+   * The dashboard's file-type checkboxes are **not** hidden for this type and are not special-cased,
+   * so a source added there stores `['md','mdx']` — the form's own default. Harmless, because the only
+   * files under the source root are the `.md` this driver wrote, and stated here because a comment
+   * that claimed otherwise would be the kind of thing a later reader trusts.
+   */
   extensions: Extensions.default(['md']),
   language: Language,
   version: Version,

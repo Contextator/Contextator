@@ -200,11 +200,15 @@ export class HttpConfluenceClient implements ConfluenceClient {
   }
 
   async listPages(cql: string, cursor?: string): Promise<ConfluencePageList> {
-    // `order by id` rather than by date: paging a cursor over a set that is being edited underneath
-    // you is only stable if the sort key is stable, and `lastmodified` is the one field that moves
-    // while the pull is running. The probe orders the other way because it asks for exactly one row.
+    // **`created`, and not `id` and not `lastmodified`.** Paging a cursor over a set somebody is
+    // editing underneath you is only stable if the sort key does not move, which rules out
+    // `lastmodified` — the one field a pull of this length is guaranteed to disturb. `id` has that
+    // property too and is **not a documented CQL sort field**, so it would have been a guess that a
+    // stub cannot refuse and a real site can; `created` is documented, never changes for a page, and
+    // is all this needs. Pages created in the same second may tie, which the `seen` set in the driver
+    // already absorbs. The probe orders the other way because it asks for exactly one row.
     const body = (await this.get('/rest/api/search', {
-      cql: `${cql} order by id`,
+      cql: `${cql} order by created asc`,
       limit: '50',
       expand: SEARCH_EXPAND,
       cursor,

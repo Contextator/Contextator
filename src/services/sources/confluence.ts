@@ -6,7 +6,7 @@ import { sourceCurrentDir } from '../data-dir.js';
 import { ValidationError } from '../projects.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig, type ConfluenceConfig } from '../sources.js';
 import { cqlFor, HttpConfluenceClient, type ConfluenceClient, type ConfluencePageSummary } from './confluence-client.js';
-import { storageToMarkdown } from './confluence-render.js';
+import { ConfluenceRenderError, storageToMarkdown } from './confluence-render.js';
 import { registerDriver, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
 // Reused rather than reimplemented: the file-stem rule (a slug plus an id prefix, so two pages with
 // one title are two files) and the front-matter writer are not Notion's, they are this product's, and
@@ -14,10 +14,37 @@ import { registerDriver, type DriverContext, type SourceDriver, type SyncResult 
 // they live in belongs to the Notion driver and is not edited here.
 import { frontmatter, pageFileStem } from './notion-render.js';
 
-/** The same ceiling the Notion driver carries, for the same reason: a pull has to have an end. */
-const MAX_PAGES = 5000;
-/** How much of a file has to be read to find its front matter. Two pages' worth of keys, generously. */
-const HEAD_BYTES = 600;
+/**
+ * The most pages one source will index, and the ceiling the Notion driver carries for the same reason:
+ * a pull has to have an end.
+ *
+ * **Reaching it is said out loud.** A wiki of a hundred thousand pages otherwise indexes its first five
+ * thousand, reports "5000 pages, 0 removed", and then answers "not in the documentation" about pages
+ * that exist — which is the worst answer this product can give and the whole reason
+ * [ADR-0045](../../../.ssot/ADR.md#adr-0045) put a floor under a bad match rather than letting one be
+ * returned. So `sync()` says it was cut, in the sentence an operator reads on the run.
+ */
+export const MAX_PAGES = 5000;
+
+/**
+ * How much of a file has to be read to find the version it was written from.
+ *
+ * **It is small because the answer is the first line of the file, by construction**, and that is the
+ * point: `confluence_version` is written as the **first** front-matter key precisely so that this
+ * number can be derived rather than guessed. `---\n` is 4 bytes, `confluence_version: "` is 21, and
+ * what follows is an integer and a closing quote. 64 bytes is therefore provably enough for any
+ * version number Confluence can produce, and the regex below anchors at the start of the file so a
+ * line of the page's own prose can never be mistaken for it.
+ *
+ * The version used to be the fifth key, behind a `url` carrying a percent-encoded copy of the page
+ * title — so a long title, or a 150-character Turkish one, pushed it past a fixed read and
+ * `storedVersion` answered `null` for ever. `null` re-renders, which is the safe direction and is
+ * exactly why nothing went red: the page was silently re-fetched and re-written on **every** sync,
+ * and the run's note said "rendered" each time. A cost defect hides inside a correct answer, which is
+ * why the read is now bounded by something the format guarantees instead of by a number somebody
+ * chose.
+ */
+const HEAD_BYTES = 64;
 
 /**
  * Confluence Cloud as a source ([ADR-0059](../../../.ssot/ADR.md#adr-0059)): every page in the
@@ -84,23 +111,32 @@ export class ConfluenceDriver implements SourceDriver {
     return `Connected as ${who} — ${total} page(s) in ${scope}`;
   }
 
-  /** Every page in scope, paged until Confluence stops offering a cursor or the cap bites. */
-  private async listAll(client: ConfluenceClient): Promise<ConfluencePageSummary[]> {
+  /**
+   * Every page in scope, paged until Confluence stops offering a cursor or `MAX_PAGES` stops it.
+   *
+   * `truncated` is the half that matters: a ceiling nobody is told about is a wiki that looks indexed.
+   */
+  private async listAll(client: ConfluenceClient): Promise<{ pages: ConfluencePageSummary[]; truncated: boolean }> {
     const pages: ConfluencePageSummary[] = [];
     const seen = new Set<string>();
     let cursor: string | undefined;
+    let truncated = false;
     do {
       const batch = await client.listPages(this.cql, cursor);
       for (const page of batch.results) {
         // A cursor that repeats a row — a page edited between two requests, under a sort that is
         // stable but not unique across concurrent writes — would otherwise become two files.
         if (seen.has(page.id)) continue;
+        if (pages.length >= MAX_PAGES) {
+          truncated = true;
+          break;
+        }
         seen.add(page.id);
         pages.push(page);
       }
       cursor = batch.nextCursor;
-    } while (cursor && pages.length < MAX_PAGES);
-    return pages;
+    } while (cursor && !truncated);
+    return { pages, truncated };
   }
 
   /**
@@ -119,7 +155,7 @@ export class ConfluenceDriver implements SourceDriver {
   async sync(): Promise<SyncResult> {
     const client = this.client();
     const root = await this.docRoot();
-    const pages = await this.listAll(client);
+    const { pages, truncated } = await this.listAll(client);
 
     const existingFiles = await walkFiles(root);
     // **A scope that has gone empty is a failure, not an empty wiki.** A renamed space, a revoked
@@ -136,6 +172,24 @@ export class ConfluenceDriver implements SourceDriver {
       );
     }
 
+    // **And the same refusal one space at a time**, which is the subset of the case above that the
+    // count alone cannot see. Two spaces configured, one of them renamed: the listing is not empty, so
+    // the guard above is satisfied, and the removal pass silently deletes every document of the space
+    // that went away while the run reports "n removed" and succeeds. A configured space that held
+    // files a moment ago and offers no pages now is the same event as the whole scope going quiet, and
+    // gets the same answer. It is only checkable when the spaces are named: with `spaceKeys` empty
+    // there is no list of what *should* be there, and that limit is stated in FR-467 rather than left
+    // to be discovered.
+    const vanished = this.cfg.spaceKeys.filter(
+      (key) => !pages.some((page) => page.spaceKey === key) && [...existingFiles].some((file) => file.startsWith(`${spaceFolder(key)}/`)),
+    );
+    if (vanished.length > 0) {
+      throw new ValidationError(
+        `Confluence returned no pages for space(s) ${vanished.join(', ')}, but this source already holds documents from them. ` +
+          'Refusing to delete those: check that the space keys are still correct and that the account can still read them.',
+      );
+    }
+
     const seen = new Set<string>();
     let written = 0;
     const failures: string[] = [];
@@ -148,25 +202,41 @@ export class ConfluenceDriver implements SourceDriver {
 
       if (existingFiles.has(key) && (await storedVersion(abs)) === page.version) continue;
 
+      // **The read is outside the boundary, and that is the whole of this distinction.** A page this
+      // product cannot *render* is a complaint; a request that failed is a **sync that failed**. They
+      // were one `try` once, and the consequence was specific: Confluence rate-limiting body reads
+      // during a first large pull put every throttled page into `failures`, the sync returned
+      // successfully, `indexer.ts` wrote `lastError: null` over the source, and the only trace that a
+      // third of the wiki never reached the index was one clause of a run note. That is the same class
+      // of silent loss the empty-scope refusal above exists to stop, arriving from the other end.
+      const storage = await client.storage(page.id);
+
       let markdown: string;
       try {
-        markdown = storageToMarkdown(await client.storage(page.id), page.title);
+        markdown = storageToMarkdown(storage, page.title);
       } catch (err) {
-        // One page that cannot be rendered is not a source that failed. Its previous file stays where
-        // it is — `seen` already holds the path, so the removal pass below leaves it alone — and the
-        // reason is reported on the run, which is the shape `indexer.ts` uses for a file it cannot
-        // convert ([ADR-0056](../../../.ssot/ADR.md#adr-0056)).
-        failures.push(`${page.title} (${err instanceof Error ? err.message : String(err)})`);
+        // Only a render failure is a complaint. Anything else is not a statement about this page, so
+        // it leaves here and fails the run — the distinction `indexer.ts` draws around
+        // `DocumentExtractionError` ([ADR-0056](../../../.ssot/ADR.md#adr-0056)), and the pattern is
+        // taken from there rather than invented.
+        if (!(err instanceof ConfluenceRenderError)) throw err;
+        // The page's previous file stays where it is: `seen` already holds the path, so the removal
+        // pass below leaves it alone, and the reason is reported on the run.
+        failures.push(`${page.title} (${err.message})`);
         continue;
       }
 
       const md =
         frontmatter({
+          // **First, deliberately.** `frontmatter` writes the keys in insertion order and
+          // `storedVersion` below reads a fixed window from the start of the file; putting the version
+          // anywhere else makes the size of that window depend on the length of a page title, which is
+          // not a bound at all. See `HEAD_BYTES`.
+          confluence_version: String(page.version),
           title: page.title,
           confluence_id: page.id,
           space: page.spaceKey,
           url: page.webUrl,
-          confluence_version: String(page.version),
           last_modified: page.lastModified,
         }) + `\n${markdown}\n`;
       await fs.mkdir(path.dirname(abs), { recursive: true });
@@ -181,7 +251,14 @@ export class ConfluenceDriver implements SourceDriver {
       removed++;
     }
 
-    const note = `${pages.length} pages, ${written} rendered, ${removed} removed`;
+    const counted = `${pages.length} pages, ${written} rendered, ${removed} removed`;
+    // Said in the note rather than only in a constant, because the alternative is an operator who
+    // believes the wiki is indexed. The probe's own token carries the real total, so the two numbers
+    // sitting side by side in the dashboard are the measurement.
+    const note = truncated
+      ? `${counted} — STOPPED AT THE ${MAX_PAGES}-PAGE CEILING: this source holds more pages than that and the rest are NOT indexed. ` +
+        'Narrow it by naming fewer spaces, or split it across several sources.'
+      : counted;
     // One more request at the end of a sync that just made many, buying every future consideration of
     // this source the chance to cost exactly one ([ADR-0048](../../../.ssot/ADR.md#adr-0048)). It is
     // `probe()` itself rather than a maximum computed from `pages` above, so that both sides of the
@@ -249,16 +326,29 @@ async function walkFiles(root: string): Promise<Set<string>> {
   return out;
 }
 
-const VERSION_LINE = /^confluence_version: "(\d+)"$/m;
+/**
+ * The file's very first line, and nothing else: `---` then the version this driver wrote it from.
+ *
+ * Anchored at byte 0 rather than multiline, so a page whose prose happens to contain the words
+ * `confluence_version: "3"` cannot answer for it — and so that the fixed-size read above is a
+ * consequence of the format rather than a guess about titles.
+ */
+const VERSION_HEAD = /^---\nconfluence_version: "(\d+)"\n/;
 
-/** The version a file was written from, read off its front matter; `null` when it says nothing. */
+/**
+ * The version a file was written from, read off the head of the file; `null` when it does not say.
+ *
+ * `null` means *re-render*, which is the safe direction and is what a file written by an older build —
+ * one that put this key fifth — answers. Such a file is re-fetched once and then written in the new
+ * order, so the upgrade repairs itself in a single sync rather than needing anything.
+ */
 async function storedVersion(absolutePath: string): Promise<number | null> {
   try {
     const handle = await fs.open(absolutePath, 'r');
     try {
       const buffer = Buffer.alloc(HEAD_BYTES);
       const { bytesRead } = await handle.read(buffer, 0, HEAD_BYTES, 0);
-      const match = VERSION_LINE.exec(buffer.subarray(0, bytesRead).toString('utf8'));
+      const match = VERSION_HEAD.exec(buffer.subarray(0, bytesRead).toString('utf8'));
       return match ? Number(match[1]) : null;
     } finally {
       await handle.close();
