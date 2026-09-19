@@ -1,0 +1,158 @@
+# The other half of the sentence in `ci.yml`'s `image` job: "publishing is a later phase, and a
+# workflow that can push is a workflow that has to be trusted to." `ci.yml` builds and throws away on
+# every pull request, with no registry credential anywhere near it. This workflow is the one place
+# `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` are read, and it only runs on a `v*` tag — something a
+# maintainer pushed on purpose, not a branch a pull request can point at.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# Two tags cannot land on the same ref, so this only matters for the same tag pushed twice (a
+# re-tag after deleting the first one). `cancel-in-progress: false`, not the `ci.yml` default: a
+# cancelled `docker push` can leave a manifest list half-written on Docker Hub, and a queued rerun
+# is cheap where an inconsistent published tag is not.
+concurrency:
+  group: "release-${{ github.ref_name }}"
+  cancel-in-progress: false
+
+# Docker Hub credentials are handed to actions as inputs, never as `GITHUB_TOKEN` — this token
+# reaches nothing Docker Hub owns. `packages: write` (the GitHub Container Registry permission)
+# is not requested because nothing here talks to GHCR.
+permissions:
+  contents: read
+
+jobs:
+  # One job, not two. It used to be `verify` building amd64 and asserting against it, then a
+  # separate `publish` job building both architectures over again and pushing that — connected only
+  # by `cache-from: type=gha`, and a remote cache is allowed to evict between two jobs, and
+  # `Dockerfile`'s base images (`node:22-bookworm-slim`, `pgvector/pgvector:pg16`) are mutable tags
+  # that can move between them too. Either one meant the image actually pushed to Docker Hub was
+  # never, itself, the image the assertions below ran against — only one built the same way.
+  #
+  # A single job with a single `docker/setup-buildx-action` builder closes that gap structurally
+  # rather than by hoping a cache hits: the amd64 layers the assertions exercise are produced once,
+  # sit in that builder's own local cache for the rest of this job, and the multi-arch push below
+  # reuses them by content address — no eviction window exists because nothing leaves this runner in
+  # between. `cache-from`/`cache-to: type=gha` stays on both builds regardless, but only as a
+  # cross-run accelerator (a cold builder pulling what `ci.yml` or a previous release already built);
+  # it is no longer what carries the verified layers into the pushed image — the shared builder is.
+  publish:
+    name: Verify, then build and push contextator/contextator
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # `cache-to: type=gha` writes to the Actions cache, which the read-only default above does not
+      # reach — the same reason `ci.yml`'s `image` job carries it.
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # Registered before either build: the amd64-only build below does not need it, but the
+      # multi-arch build later in this same job does, and setting it up once up front is simpler than
+      # arguing about whether a later step still needs QEMU registered from an earlier one.
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      # amd64 only, loaded into the local daemon rather than pushed: the three checks below run
+      # inside it, and nothing here has registry credentials yet — that arrives only once this image
+      # has been proven, further down.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: contextator:verify
+          cache-from: type=gha
+
+      # `v0.1.0` publishing code whose `package.json` says `0.2.0` is a released image whose version
+      # nobody can trust, and it would not be caught by looking at the checked-out repository alone —
+      # the question is what actually ended up in the image. So this reads `package.json` the same way
+      # the running server would, from `/app/package.json` inside the image that was just built,
+      # against the tag that is about to publish it.
+      - name: Tag matches the version baked into the image
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          image_version=$(docker run --rm --entrypoint node contextator:verify -p "require('/app/package.json').version")
+          echo "tag: ${GITHUB_REF_NAME} (${tag_version})  image: ${image_version}"
+          if [ "$tag_version" != "$image_version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match the package.json version (${image_version}) inside the image it built"
+            exit 1
+          fi
+
+      # The two assertions `ci.yml`'s `image` job runs on every pull request, run again here, verbatim.
+      # Both guard defects that broke silently before (ADR-0032, ADR-0033), and a defect reaching a
+      # published image is more expensive to notice and to undo than the same defect reaching a pull
+      # request — so the tag they gate on is the one place they cannot be skipped. Because this is one
+      # job, a failure on either step below stops the job here: the push step further down is never
+      # reached, on this image or any other.
+      - name: The migrations are inside the image
+        run: |
+          set -o pipefail
+          output=$(docker run --rm --entrypoint sh contextator:verify -c 'ls /app/drizzle /app/drizzle/meta')
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep -qF '0000_baseline.sql'
+          printf '%s\n' "$output" | grep -qF '_journal.json'
+
+      - name: The recovery tool runs inside the image
+        run: |
+          set -o pipefail
+          output=$(docker run --rm --entrypoint sh contextator:verify -c 'npm run reset-password 2>&1' || true)
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep -qF 'Usage: npm run reset-password -- <username>'
+
+      # Only reached once every check above has passed. `docker/login-action` is pinned to a commit
+      # and not a tag for the same reason `cla.yml` pins the actions in its own token-holding job: it
+      # is handed `DOCKERHUB_TOKEN`, a personal access token scoped read/write/delete against the
+      # `contextator` Docker Hub organisation, and a tag is a name its owner can move. Resolve `v4.6.0`
+      # again to move this, and read the diff first.
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: "${{ secrets.DOCKERHUB_USERNAME }}"
+          password: "${{ secrets.DOCKERHUB_TOKEN }}"
+
+      # Turns one tag into the set of tags the image is actually published under. `latest` is excluded
+      # on a pre-release (`v0.2.0-rc.1` has a `-` in `github.ref_name`) so that publishing a release
+      # candidate never moves the tag every plain `docker pull contextator/contextator` resolves to.
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: contextator/contextator
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: "${{ steps.meta.outputs.tags }}"
+          labels: "${{ steps.meta.outputs.labels }}"
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Publish summary
+        env:
+          # Interpolated into the environment rather than straight into the script, matching the
+          # standard `cla.yml` sets: a value this workflow does not fully control (here, computed by
+          # an action rather than typed by a stranger) still does not reach a shell through `${{ }}`.
+          TAGS: "${{ steps.meta.outputs.tags }}"
+        run: |
+          {
+            echo "## Published \`contextator/contextator\`"
+            echo
+            echo '```'
+            printf '%s\n' "$TAGS"
+            echo '```'
+            echo
+            echo 'Pull it:'
+            echo '```bash'
+            echo "docker pull contextator/contextator:${GITHUB_REF_NAME#v}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -12,7 +12,10 @@ labels: bug
 
 **How it is deployed.** One of:
 
-- the single container (`docker compose up -d`)
+- the published image (`docker compose up -d`, pulling `contextator/contextator` from Docker Hub) —
+  say which tag or digest: `docker image inspect --format '{{index .RepoDigests 0}}' contextator/contextator`
+- built from source (`docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`,
+  or a plain `docker build`)
 - `npm run dev` against `docker-compose.dev.yml`
 - something else — say what
 
