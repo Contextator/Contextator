@@ -12,12 +12,15 @@ import { applySchema, createTestDatabase, dropTestDatabase, TEST_EMBEDDING_DIMEN
  * **The fixture is one page that answers the question six times over**, which is the shape the cap
  * exists for: a corpus where a five-result answer is one document's five consecutive chunks.
  *
- * Two properties of it are load-bearing and neither is visible in the assertions. Every chunk carries
- * `Guide` in its breadcrumb, so every chunk is dense-near the question *and* `guide` is in fifteen of
- * fifteen chunks — over ADR-0041's document-frequency threshold, so the lexical half never sees it.
- * `install` is in nine, so it survives, and the chunks that hold it are the lexical list. That is what
- * makes "the filter reached **both** halves" observable: a source whose documents are on both lists,
- * and an assertion that neither list escaped the filter.
+ * Three properties of it are load-bearing and none of them is visible in the assertions. Every chunk
+ * carries `Guide` in its breadcrumb, so every chunk is dense-near the question *and* `guide` is in
+ * fifteen of fifteen chunks — over ADR-0041's document-frequency threshold, so the lexical half never
+ * sees it. `install` is in nine, so it survives, and the chunks that hold it are the lexical list.
+ * That is what makes "the filter reached **both** halves" observable: a source whose documents are on
+ * both lists, and an assertion that neither list escaped the filter.
+ *
+ * The third is that **no two chunks share an embedding**, and `beforeAll` proves it rather than
+ * assuming it — see the comment there for what it cost to learn.
  */
 
 const baseUrl = inject('postgresBaseUrl');
@@ -31,7 +34,16 @@ const HANDBOOK_DECOY = 'handbook/guides/gettingXstarted.md';
 const HANDBOOK_OPS = 'handbook/operations/backup.md';
 const NOTES = 'notes/scratch.md';
 
-/** Bag of `[a-z]{3,}` runs, L2-normalised: every chunk below shares `install`, so all of them are near. */
+/**
+ * Bag of `[a-z]{3,}` runs, L2-normalised: every chunk below shares `install`, so all of them are near.
+ *
+ * **It cannot see a digit**, which is the whole reason the bodies below grow. `Scratch 0:` and
+ * `Scratch 1:` are one bag, so two chunks that read differently can be the *same vector*. Giving a
+ * chunk a *new* word does not help either: the question's vector is two unit spikes, so the cosine
+ * is `(how many of the two the chunk holds) / sqrt(Σ count²)` and any two chunks with the same word
+ * multiplicities land on exactly the same distance however different their words are. Only
+ * repetition moves one, which is why each document grows by a repeated word rather than a new one.
+ */
 function stubVector(text: string): number[] {
   const v = new Array<number>(DIMS).fill(0);
   for (const token of text.toLowerCase().match(/[a-z]{3,}/g) ?? []) {
@@ -104,13 +116,51 @@ beforeAll(async () => {
   handbookId = handbook.id;
   notesId = notes.id;
 
+  // Every document grows by one repetition per chunk, so chunk `i` is a little further from the
+  // question than chunk `i - 1` and no two chunks of the corpus can land on the same distance. The
+  // check at the end of this hook is what holds that claim to account.
+  //
   // The dominant page: short chunks that hold the question's rare term, so it wins both lists.
   await seed(HANDBOOK_GUIDE, handbookId, 6, (i) => `Step ${i}: install the thing${' carefully'.repeat(i)}.`);
   // Two documents that share only the common term, so they are dense-near and lexically silent.
-  await seed(HANDBOOK_DECOY, handbookId, 3, (i) => `Note ${i}: rivers, weather and other prose about nothing in particular.`);
-  await seed(HANDBOOK_OPS, handbookId, 3, (i) => `Backup ${i}: taking and restoring a snapshot of the database.`);
+  await seed(
+    HANDBOOK_DECOY,
+    handbookId,
+    3,
+    (i) => `Note ${i}: rivers, weather and other prose about nothing in particular${' whatsoever'.repeat(i)}.`,
+  );
+  await seed(HANDBOOK_OPS, handbookId, 3, (i) => `Backup ${i}: taking and restoring a snapshot of the database${' nightly'.repeat(i)}.`);
   // The other source, on both lists, which is what the source filter has to be asserted against.
-  await seed(NOTES, notesId, 3, (i) => `Scratch ${i}: a note that mentions install once, among other things.`);
+  // `2 * i` and not `i`: at one repetition per chunk this document's second chunk carries the same
+  // word multiplicities as the guide's third, and by the note on `stubVector` the two would tie.
+  await seed(NOTES, notesId, 3, (i) => `Scratch ${i}: a note that mentions install once, among other things${' besides'.repeat(2 * i)}.`);
+
+  // **The fixture's dense order is a total order on distance, and this is where that is made true
+  // rather than hoped for.** It was not, and the cost was a flake: the three `notes/scratch.md`
+  // chunks used to differ only in a digit, which `stubVector` cannot see, so all three had one
+  // embedding and one distance. `dense`'s `order by distance, id` then settled their ranks by
+  // `gen_random_uuid()`, while the lexical half ordered the same three by `chunk_index`. RRF was
+  // pairing a random dense rank with a fixed lexical one — six permutations, of which one put two
+  // notes chunks above the guide's fourth and made the control below report three where it needs
+  // four. Measured over 24 seeded corpora: 5 runs in 24, the 1-in-6 that predicts.
+  //
+  // Asserting the *count* first is not belt and braces: a search that answered short would make the
+  // uniqueness check below pass by having nothing to compare, which is how the last flake in this
+  // suite hid.
+  const everyChunk = await search({ limit: 20, selection: { maxPerDocument: 20, neighborContext: 0 } });
+  if (everyChunk.length !== 15) {
+    throw new Error(`The fixture is 15 chunks and an uncapped search has to return all of them; it returned ${everyChunk.length}.`);
+  }
+  const byDistance = new Map<number, string[]>();
+  for (const hit of everyChunk) byDistance.set(hit.score, [...(byDistance.get(hit.score) ?? []), `${hit.file}#${hit.chunkIndex}`]);
+  const tied = [...byDistance.values()].filter((group) => group.length > 1);
+  if (tied.length > 0) {
+    throw new Error(
+      `Chunks of this fixture share an embedding: ${tied.map((group) => group.join(' = ')).join('; ')}. ` +
+        'Their dense ranks are then decided by `gen_random_uuid()` and every assertion in this file becomes a lottery. ' +
+        'Give each chunk of a document one more repetition than the one before it — see the note on `stubVector`.',
+    );
+  }
 });
 
 afterAll(async () => {
@@ -133,12 +183,18 @@ describe('the per-document cap', () => {
   it('is what stands between five results and one page over and over', async () => {
     // The control, and the reason the cap is not a hypothetical: uncapped, this fixture spends four of
     // its five results on consecutive chunks of one document. Asserted as "most of the page is one
-    // document" rather than "all of it", because which document takes the fifth slot is a property of
-    // the fixture's tie-breaks and not of the cap.
+    // document" rather than "all of it", because which document takes the fifth slot is fusion
+    // arithmetic over this particular corpus and not a claim about the cap.
+    //
+    // This is the premise the case above rests on rather than a property of the product, so it carries
+    // a message: read bare, "expected 3 to be greater than or equal to 4" is a sentence about nothing.
     const uncapped = await search({ limit: 5, selection: { maxPerDocument: 20, neighborContext: 0 } });
     const perDocument = [...new Set(files(uncapped))].map((file) => files(uncapped).filter((f) => f === file).length);
 
-    expect(Math.max(...perDocument)).toBeGreaterThanOrEqual(4);
+    expect(
+      Math.max(...perDocument),
+      `Uncapped, the busiest document should take four of five slots — otherwise the cap above is capping nothing. Got ${files(uncapped).join(', ')}`,
+    ).toBeGreaterThanOrEqual(4);
   });
 
   it('keeps the best excerpts of each document rather than an arbitrary two', async () => {
