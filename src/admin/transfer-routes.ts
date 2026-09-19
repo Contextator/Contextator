@@ -104,7 +104,7 @@ export const transferRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (ap
       if (!archive) throw new ValidationError('Attach the .tar.gz produced by GET /api/projects/:id/export as a file part.');
 
       const { name } = ImportFields.parse(fields);
-      const report = await importProject({ db, config, embeddings }, scratch, name);
+      const report = await importProject({ db, config, embeddings, log: req.log }, scratch, name);
       req.log.info(
         { projectId: report.projectId, documents: report.documents, chunks: report.chunks, from: report.manifest.instance.id },
         'imported a project',

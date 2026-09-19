@@ -4,10 +4,11 @@ import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 import type { Config } from '../../config.js';
+import type { Logger } from '../../context.js';
 import type { Db } from '../../db/client.js';
 import { documentSources, projects } from '../../db/schema.js';
 import { type ImportLimits, importTree, unpackTar, withScratch } from '../archives.js';
-import { sourceCurrentDir } from '../data-dir.js';
+import { removeProjectDir, sourceCurrentDir } from '../data-dir.js';
 import { FLAVORS, type Flavor } from '../flavors.js';
 import { createProject } from '../projects.js';
 import { SOURCE_TYPES, type SourceType, parseSourceConfig } from '../sources.js';
@@ -35,9 +36,18 @@ import { schemaFacts, instanceId } from './export.js';
  * skip, the Windows-portable name check and the `isInside` containment. A second implementation of any
  * of those is the one that would get the traversal check wrong.
  *
- * **The refusals happen before anything is written.** The manifest is read first, checked first, and a
- * mismatch of model or dimension stops the import there — with no project row, no source row and no
- * files on disk to clean up after.
+ * **Four of the five refusals happen before anything is written**, and the fifth cannot. The manifest
+ * is read first and checked first, so a wrong model, a wrong dimension, an unreadable manifest format
+ * and a too-new schema all stop the import with no project row, no source row and no files on disk.
+ *
+ * **The fifth is the one that makes the rest of this function's shape necessary.** A manifest is a
+ * *claim* about bytes, and the bytes are the untrusted part: a hand-edited tarball can say 384 and
+ * carry 768, and only the per-chunk re-check in `writeDocuments` can see that. By then the project
+ * row, its sources and its carried files exist. So the whole write phase is unwound on any failure —
+ * `discardPartialImport` below — because a refusal that fires late and a refusal that fires early must
+ * look the same from outside, and "look the same" means *leave the same nothing behind*. That property
+ * is asserted, not reasoned about: `test/integration/project-transfer.itest.ts` censuses every table
+ * an import can write and every directory it can create, around each of the refusals.
  *
  * The import is memory-bounded but not stream-only: the tarball is expanded to a scratch directory and
  * `documents.ndjson` is then read a line at a time. Streaming was the *export's* requirement, because
@@ -103,6 +113,12 @@ export interface ImportDeps {
   db: Db;
   config: Config;
   embeddings: { id: string; dimensions: number };
+  /**
+   * Optional, and there for exactly one line: the case where unwinding a failed import **itself**
+   * fails. That leaves rows an operator has to delete by hand, and it is the only outcome of this
+   * whole path that nothing else would report.
+   */
+  log?: Logger;
 }
 
 /**
@@ -138,84 +154,149 @@ export async function importProject(deps: ImportDeps, archivePath: string, name?
     // two halves disagree is refused before a project exists rather than landing documents with no source.
     const byName = new Map(sources.map((s) => [s.name, s]));
 
+    // Everything from here on writes. `createProject` is deliberately outside the unwind: a name
+    // collision throws from inside it, having written nothing, and there is no project id to unwind.
     const project = await createProject(db, { name: name ?? manifest.project.name }, config.ALLOWED_DOC_ROOTS);
 
-    const created = new Map<string, { id: string; type: SourceType; config: Record<string, unknown> }>();
-    for (const source of sources) {
-      const row = await insertImportedSource(db, project.id, source);
-      created.set(source.name, { id: row.id, type: row.type as SourceType, config: row.config });
+    try {
+      return await landProject(deps, { scratch, manifest, sources, byName, project, name });
+    } catch (err) {
+      await discardPartialImport(deps, project.id, err);
+      throw err;
     }
+  });
+}
 
-    const carried = await carryUploadTrees(deps, scratch, project.id, sources, created);
-    const written = await writeDocuments(deps, project.id, path.join(scratch, DOCUMENTS_ENTRY), byName, created);
+/** What `importProject` does once a project row exists — every line of it undone if any line throws. */
+async function landProject(
+  deps: ImportDeps,
+  ctx: {
+    scratch: string;
+    manifest: Manifest;
+    sources: Array<z.infer<typeof ImportedSource>>;
+    byName: Map<string, z.infer<typeof ImportedSource>>;
+    project: { id: string; name: string };
+    name?: string;
+  },
+): Promise<ImportReport> {
+  const { db } = deps;
+  const { scratch, manifest, sources, byName, project } = ctx;
 
-    const counts = await recountProject(db, project.id, 0);
+  const created = new Map<string, { id: string; type: SourceType; config: Record<string, unknown> }>();
+  for (const source of sources) {
+    const row = await insertImportedSource(db, project.id, source);
+    created.set(source.name, { id: row.id, type: row.type as SourceType, config: row.config });
+  }
+
+  const carried = await carryUploadTrees(deps, scratch, project.id, sources, created);
+  const written = await writeDocuments(deps, project.id, path.join(scratch, DOCUMENTS_ENTRY), byName, created);
+
+  const counts = await recountProject(db, project.id, 0);
+  await db
+    .update(projects)
+    .set({
+      // Renumbered to 0, which is the whole of [ADR-0039](../../../.ssot/ADR.md#adr-0039)'s reason:
+      // a generation number is instance-local and load-bearing in every search predicate, so a
+      // project that arrived carrying "7" would be a project whose live generation is a number this
+      // instance never wrote.
+      liveGeneration: 0,
+      chunkCount: counts.chunkCount,
+      documentCount: counts.documentCount,
+      embeddingModel: manifest.embedding?.id ?? null,
+      mcpAuth: manifest.project.mcpAuth,
+      queryLogEnabled: manifest.project.queryLogEnabled,
+      // A true statement about the corpus: this text was indexed then, on another machine.
+      lastIndexedAt: manifest.project.lastIndexedAt ? new Date(manifest.project.lastIndexedAt) : null,
+      status: 'idle',
+      lastError: null,
+    })
+    .where(eq(projects.id, project.id));
+
+  for (const source of sources) {
+    const id = created.get(source.name);
+    if (!id) continue;
     await db
-      .update(projects)
-      .set({
-        // Renumbered to 0, which is the whole of [ADR-0039](../../../.ssot/ADR.md#adr-0039)'s reason:
-        // a generation number is instance-local and load-bearing in every search predicate, so a
-        // project that arrived carrying "7" would be a project whose live generation is a number this
-        // instance never wrote.
-        liveGeneration: 0,
-        chunkCount: counts.chunkCount,
-        documentCount: counts.documentCount,
-        embeddingModel: manifest.embedding?.id ?? null,
-        mcpAuth: manifest.project.mcpAuth,
-        queryLogEnabled: manifest.project.queryLogEnabled,
-        // A true statement about the corpus: this text was indexed then, on another machine.
-        lastIndexedAt: manifest.project.lastIndexedAt ? new Date(manifest.project.lastIndexedAt) : null,
-        status: 'idle',
-        lastError: null,
-      })
-      .where(eq(projects.id, project.id));
+      .update(documentSources)
+      .set({ documentCount: written.perSource.get(source.name) ?? 0 })
+      .where(eq(documentSources.id, id.id));
+  }
 
-    for (const source of sources) {
-      const id = created.get(source.name);
-      if (!id) continue;
-      await db
-        .update(documentSources)
-        .set({ documentCount: written.perSource.get(source.name) ?? 0 })
-        .where(eq(documentSources.id, id.id));
-    }
+  const members = manifest.excluded.projectMembers;
+  return {
+    projectId: project.id,
+    projectName: project.name,
+    manifest,
+    documents: written.documents,
+    chunks: written.chunks,
+    sources: sources.map((s) => ({
+      name: s.name,
+      type: s.type,
+      files: carried.get(s.name) ?? 0,
+      needs: describeNeeds(manifest.sources.find((m) => m.name === s.name)?.needs ?? []),
+    })),
+    memberships: {
+      carried: 0,
+      sourceHad: members,
+      note:
+        members.viewer + members.editor === 0
+          ? 'The exported project had no members.'
+          : `The exported project had ${members.viewer} viewer and ${members.editor} editor membership(s). None were carried: they name ` +
+            'accounts of the instance the export came from, which either do not exist here or belong to different people. ' +
+            'This project is currently reachable by root and admin accounts only — add members with ' +
+            `PUT /api/projects/${project.id}/members/:userId.`,
+    },
+    mcpTokens: {
+      carried: 0,
+      sourceHad: manifest.excluded.mcpTokens,
+      note:
+        manifest.excluded.mcpTokens === 0
+          ? 'The exported project had no MCP tokens.'
+          : `${manifest.excluded.mcpTokens} MCP token(s) stayed behind: they are bearer credentials for the other instance's ` +
+            `endpoint and only their hashes were ever stored. Mint new ones here${
+              manifest.project.mcpAuth === 'token' ? ', which this project needs before any agent can reach it.' : '.'
+            }`,
+    },
+    sameInstance: manifest.instance.id === (await instanceId(db)),
+  };
+}
 
-    const members = manifest.excluded.projectMembers;
-    return {
-      projectId: project.id,
-      projectName: project.name,
-      manifest,
-      documents: written.documents,
-      chunks: written.chunks,
-      sources: sources.map((s) => ({
-        name: s.name,
-        type: s.type,
-        files: carried.get(s.name) ?? 0,
-        needs: describeNeeds(manifest.sources.find((m) => m.name === s.name)?.needs ?? []),
-      })),
-      memberships: {
-        carried: 0,
-        sourceHad: members,
-        note:
-          members.viewer + members.editor === 0
-            ? 'The exported project had no members.'
-            : `The exported project had ${members.viewer} viewer and ${members.editor} editor membership(s). None were carried: they name ` +
-              'accounts of the instance the export came from, which either do not exist here or belong to different people. ' +
-              'This project is currently reachable by root and admin accounts only — add members with ' +
-              `PUT /api/projects/${project.id}/members/:userId.`,
-      },
-      mcpTokens: {
-        carried: 0,
-        sourceHad: manifest.excluded.mcpTokens,
-        note:
-          manifest.excluded.mcpTokens === 0
-            ? 'The exported project had no MCP tokens.'
-            : `${manifest.excluded.mcpTokens} MCP token(s) stayed behind: they are bearer credentials for the other instance's ` +
-              `endpoint and only their hashes were ever stored. Mint new ones here${
-                manifest.project.mcpAuth === 'token' ? ', which this project needs before any agent can reach it.' : '.'
-              }`,
-      },
-      sameInstance: manifest.instance.id === (await instanceId(db)),
-    };
+/**
+ * Undoes a landing that failed, so that a refusal which could only fire late leaves exactly what an
+ * early one leaves: nothing.
+ *
+ * **One `DELETE` and one `rm`, because that is already the product's own definition of removing a
+ * project.** `documents`, `chunks` and `document_sources` all cascade from `projects.id`, and
+ * `removeProjectDir` is what `DELETE /api/projects/:id` calls; re-deriving either here would be a
+ * second answer to a question that already has one.
+ *
+ * **Not a transaction, and the reason is the filesystem.** Wrapping the landing in one would make the
+ * database half atomic and do nothing at all for the carried upload trees, so a compensating action is
+ * needed either way — and then the transaction is a second mechanism covering a subset of what the
+ * first already covers, at the price of holding write locks and a growing WAL for the length of a
+ * whole corpus import, on the one path that writes a whole corpus. `replaceDocument` stays
+ * per-document transactional, as the indexer has it.
+ *
+ * **What this does not cover, stated rather than discovered: a process that dies mid-import.** That
+ * leaves a project row and its directory behind. It is visible in the dashboard and deletable from it,
+ * which is the difference that matters — the failure this whole function exists to prevent is a
+ * project that is *wrong*, not one that is obviously unfinished. (`sweepOrphanDirs` will not collect
+ * the directory, because it collects directories whose project row is *gone*.)
+ *
+ * The original failure is always what the caller sees. A cleanup that fails itself is logged at
+ * `error` naming the project id, because it is the only outcome here that leaves an operator with
+ * something to do and nothing else would tell them.
+ */
+async function discardPartialImport(deps: ImportDeps, projectId: string, cause: unknown): Promise<void> {
+  try {
+    await deps.db.delete(projects).where(eq(projects.id, projectId));
+  } catch (err) {
+    deps.log?.error({ err, cause, projectId }, 'a project import failed and could not be unwound; delete this project by hand — it is incomplete');
+    return;
+  }
+  await removeProjectDir(deps.config.DATA_DIR, projectId).catch((err: unknown) => {
+    // The rows are gone, so the tree is an orphan by `sweepOrphanDirs`'s own definition and the next
+    // start collects it. Worth a line, not worth failing over.
+    deps.log?.warn({ err, projectId }, 'could not remove the data directory of an import that was unwound');
   });
 }
 

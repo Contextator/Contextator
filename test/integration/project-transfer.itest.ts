@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -24,6 +24,7 @@ import {
   users,
 } from '../../src/db/schema.js';
 import { sourceCurrentDir } from '../../src/services/data-dir.js';
+import { ConflictError } from '../../src/services/projects.js';
 import { ImportRefusedError } from '../../src/services/transfer/manifest.js';
 import { exportProject } from '../../src/services/transfer/export.js';
 import { importProject } from '../../src/services/transfer/import.js';
@@ -556,47 +557,248 @@ describe('importing it into a second instance', () => {
   });
 });
 
+/**
+ * A complete census of the destination: every row of every table an import can write, and every
+ * directory it can create under `DATA_DIR`.
+ *
+ * It is a **census and not a lookup by name** on purpose. "No project called `handbook-3`" would pass
+ * for a half-written project under any other name, and would say nothing at all about source rows,
+ * document rows or a directory left behind — which are exactly what a refusal that fires late leaves.
+ * The destination already holds one successfully imported project, so this is a populated baseline and
+ * a leak shows up as a delta rather than as the difference between zero and zero.
+ */
+async function census(db: Db, dataDir: string): Promise<Record<string, unknown>> {
+  const [projectRows, sourceRows, documentRows, chunkRows] = await Promise.all([
+    db.select({ id: projects.id, name: projects.name }).from(projects),
+    db.select({ id: documentSources.id }).from(documentSources),
+    db.select({ id: documents.id }).from(documents),
+    db.select({ id: chunks.id }).from(chunks),
+  ]);
+  const dirs = await fs.readdir(path.join(dataDir, 'projects')).catch(() => [] as string[]);
+  return {
+    projects: projectRows.map((r) => r.name).sort(),
+    sources: sourceRows.length,
+    documents: documentRows.length,
+    chunks: chunkRows.length,
+    dataDirs: [...dirs].sort(),
+  };
+}
+
+/**
+ * **"Refused before anything is written", asserted rather than read off the code.**
+ *
+ * A refusal that fires late looks identical to a refusal that fires early from outside the call — until
+ * somebody has to clean up the rows. `importProject` opens no transaction, so nothing but this assertion
+ * stands between a mismatched archive and a half-written project.
+ */
+async function expectRefusedWithoutWriting(
+  what: string,
+  attempt: () => Promise<unknown>,
+  message: RegExp,
+  /** The class it must be, because that is what decides the status the route answers with. */
+  type: new (...args: never[]) => Error = ImportRefusedError,
+): Promise<void> {
+  const before = await census(destination.db, destinationDataDir);
+  const rejection = expect(attempt(), `${what} was not refused`).rejects;
+  // The message, because several refusals share a code and only the sentence says which check ran;
+  // and the class, because `ImportRefusedError` is what `adminRoutes` turns into a 409 rather than a 500.
+  await rejection.toThrow(message);
+  const after = await census(destination.db, destinationDataDir);
+  expect(after, `${what} was refused, but not before it had written to the destination`).toEqual(before);
+
+  // Re-run it to inspect the error itself: `rejects` consumed the first one.
+  await expect(attempt(), `${what} was not refused as a ${type.name}`).rejects.toBeInstanceOf(type);
+  expect(await census(destination.db, destinationDataDir), `${what} wrote to the destination on a second attempt`).toEqual(before);
+}
+
 describe('the refusals', () => {
-  it('refuses an instance running a different model, loudly, before writing anything', async () => {
-    const before = (await destination.db.select().from(projects)).length;
-    await expect(
-      importProject(
-        { db: destination.db, config: configFor(destinationDataDir), embeddings: { id: 'local:some-other-model:fp32', dimensions: DIMS } },
-        archive,
-        'handbook-2',
-      ),
-    ).rejects.toThrow(/indexed with "local:stub-bag-of-words:fp32" and this instance embeds with "local:some-other-model:fp32"/);
-    expect((await destination.db.select().from(projects)).length).toBe(before);
+  const here = (embeddings: { id: string; dimensions: number }) => ({
+    db: destination.db,
+    config: configFor(destinationDataDir),
+    embeddings,
   });
 
-  it('refuses an instance storing a different dimension', async () => {
-    await expect(
-      importProject(
-        { db: destination.db, config: configFor(destinationDataDir), embeddings: { id: MODEL_ID, dimensions: 768 } },
-        archive,
-        'handbook-3',
-      ),
-    ).rejects.toThrow(ImportRefusedError);
+  it('refuses an instance running a different model, loudly, and writes nothing', async () => {
+    await expectRefusedWithoutWriting(
+      'a different model',
+      () => importProject(here({ id: 'local:some-other-model:fp32', dimensions: DIMS }), archive, 'handbook-2'),
+      /indexed with "local:stub-bag-of-words:fp32" and this instance embeds with "local:some-other-model:fp32"/,
+    );
   });
 
-  it('refuses a name that is already taken rather than merging into it', async () => {
-    await expect(
-      importProject({ db: destination.db, config: configFor(destinationDataDir), embeddings: { id: MODEL_ID, dimensions: DIMS } }, archive),
-    ).rejects.toThrow(/already exists/);
+  /**
+   * The matcher is the **manifest check's own sentence** and not `ImportRefusedError`. Both the
+   * manifest check and the per-chunk re-check raise `dimension_mismatch`, so an assertion that only
+   * asked whether *something* threw would stay green with the manifest check deleted — the late one
+   * would catch it instead, and the test would be pinning "it is refused" rather than "it is refused
+   * by the check that runs first".
+   */
+  it('refuses an instance storing a different dimension, and writes nothing', async () => {
+    await expectRefusedWithoutWriting(
+      'a different dimension',
+      () => importProject(here({ id: MODEL_ID, dimensions: 768 }), archive, 'handbook-3'),
+      /vectors are 384-dimensional and this instance stores 768-dimensional ones/,
+    );
   });
 
-  it('refuses an archive that is not a project export', async () => {
+  it('refuses a manifest format it does not read, and writes nothing', async () => {
+    const tarball = await archiveWith({ manifestVersion: 99 });
+    try {
+      await expectRefusedWithoutWriting(
+        'a newer manifest format',
+        () => importProject(here({ id: MODEL_ID, dimensions: DIMS }), tarball, 'handbook-4'),
+        /manifest format 99/,
+      );
+    } finally {
+      await fs.rm(tarball, { force: true });
+    }
+  });
+
+  it('refuses an export from a newer schema, and writes nothing', async () => {
+    const tarball = await archiveWith({ schema: { version: '5', migrations: 999 } });
+    try {
+      await expectRefusedWithoutWriting(
+        'a newer schema',
+        () => importProject(here({ id: MODEL_ID, dimensions: DIMS }), tarball, 'handbook-5'),
+        /999 migrations in/,
+      );
+    } finally {
+      await fs.rm(tarball, { force: true });
+    }
+  });
+
+  it('refuses an archive that is not a project export, and writes nothing', async () => {
     const notAnExport = path.join(tmpdir(), `contextator-not-an-export-${Date.now()}.tar.gz`);
     const stage = await fs.mkdtemp(path.join(tmpdir(), 'contextator-stage-'));
     await fs.writeFile(path.join(stage, 'readme.md'), '# just a tarball');
     await tar.create({ gzip: true, cwd: stage, file: notAnExport }, ['readme.md']);
     try {
-      await expect(
-        importProject({ db: destination.db, config: configFor(destinationDataDir), embeddings: { id: MODEL_ID, dimensions: DIMS } }, notAnExport),
-      ).rejects.toThrow(/not a Contextator project export/);
+      await expectRefusedWithoutWriting(
+        'a tarball that is not an export',
+        () => importProject(here({ id: MODEL_ID, dimensions: DIMS }), notAnExport, 'handbook-6'),
+        /not a Contextator project export/,
+      );
     } finally {
       await fs.rm(notAnExport, { force: true });
       await fs.rm(stage, { recursive: true, force: true });
     }
   });
+
+  it('refuses a name that is already taken rather than merging into it, and writes nothing', async () => {
+    await expectRefusedWithoutWriting(
+      'a name that is taken',
+      () => importProject(here({ id: MODEL_ID, dimensions: DIMS }), archive),
+      /already exists/,
+      ConflictError,
+    );
+  });
+
+  /**
+   * **The manifest is a claim about bytes, and this is the tarball where the claim is false.**
+   *
+   * Its manifest says exactly what this instance runs, so `checkManifest` passes it; its first chunk
+   * carries a vector of the wrong length, which only the per-chunk re-check can see — and that check
+   * runs *after* the project row, the source rows and the carried files exist. This is the one refusal
+   * that cannot be made early, and therefore the one that has to clean up after itself.
+   */
+  it('refuses a tarball that lies about its dimension, and leaves nothing behind when it does', async () => {
+    const tarball = await archiveWith({}, (line) => {
+      const doc = JSON.parse(line) as { chunks: Array<{ embedding: number[] }> };
+      if (doc.chunks.length > 0) doc.chunks[0].embedding = [...doc.chunks[0].embedding, 0];
+      return JSON.stringify(doc);
+    });
+    try {
+      await expectRefusedWithoutWriting(
+        'a tarball whose manifest lies',
+        () => importProject(here({ id: MODEL_ID, dimensions: DIMS }), tarball, 'handbook-7'),
+        /makes this file inconsistent with itself/,
+      );
+    } finally {
+      await fs.rm(tarball, { force: true });
+    }
+  });
+
+  /**
+   * **"Before a byte of data is read", asserted as an ordering rather than as an outcome.**
+   *
+   * The census two dozen lines up cannot see this any more, and that is a consequence of the fix
+   * rather than a gap in it: now that a failed landing is unwound, a refusal that fires late leaves
+   * exactly the nothing that a refusal firing early leaves — which is the point, and which also erases
+   * the evidence of which one fired.
+   *
+   * So the ordering is pinned by a different observable. Each archive below has a manifest this
+   * instance must refuse **and** a `documents.ndjson` that is not JSON at all. If the refusal is
+   * decided from the manifest, the corrupt data is never parsed and the manifest's own sentence comes
+   * back. If it is ever decided later, the parse error arrives first and the expected sentence does
+   * not — which is precisely what deleting a manifest check looks like from outside.
+   */
+  const MANIFEST_REFUSALS: Array<{ what: string; patch: Record<string, unknown>; embeddings: { id: string; dimensions: number }; message: RegExp }> =
+    [
+      {
+        what: 'a different model',
+        patch: {},
+        embeddings: { id: 'local:some-other-model:fp32', dimensions: DIMS },
+        message: /this instance embeds with "local:some-other-model:fp32"/,
+      },
+      {
+        what: 'a different dimension',
+        patch: {},
+        embeddings: { id: MODEL_ID, dimensions: 768 },
+        message: /vectors are 384-dimensional and this instance stores 768-dimensional ones/,
+      },
+      {
+        what: 'a newer manifest format',
+        patch: { manifestVersion: 99 },
+        embeddings: { id: MODEL_ID, dimensions: DIMS },
+        message: /manifest format 99/,
+      },
+      {
+        what: 'a newer schema',
+        patch: { schema: { version: '5', migrations: 999 } },
+        embeddings: { id: MODEL_ID, dimensions: DIMS },
+        message: /999 migrations in/,
+      },
+    ];
+
+  for (const [index, refusal] of MANIFEST_REFUSALS.entries()) {
+    it(`refuses ${refusal.what} from the manifest alone, without reading the data`, async () => {
+      // Data that would fail loudly if anything ever reached it, and differently from the manifest.
+      const tarball = await archiveWith(refusal.patch, () => 'this line is not JSON');
+      try {
+        await expectRefusedWithoutWriting(
+          refusal.what,
+          () => importProject(here(refusal.embeddings), tarball, `handbook-ordering-${index}`),
+          refusal.message,
+        );
+      } finally {
+        await fs.rm(tarball, { force: true });
+      }
+    });
+  }
 });
+
+/**
+ * A copy of the real export with its manifest patched, and optionally each of its document lines
+ * rewritten. Built from the genuine archive rather than from hand-written JSON, so the only thing
+ * these cases differ by is the thing under test.
+ */
+async function archiveWith(patch: Record<string, unknown>, rewriteDocument?: (line: string) => string): Promise<string> {
+  const stage = await fs.mkdtemp(path.join(tmpdir(), 'contextator-patch-'));
+  const out = path.join(tmpdir(), `contextator-patched-${randomUUID()}.tar.gz`);
+  await tar.extract({ file: archive, cwd: stage });
+
+  const manifestPath = path.join(stage, 'manifest.json');
+  const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+  await fs.writeFile(manifestPath, JSON.stringify({ ...manifest, ...patch }, null, 2));
+
+  if (rewriteDocument) {
+    const documentsPath = path.join(stage, 'documents.ndjson');
+    const lines = (await fs.readFile(documentsPath, 'utf8')).trim().split('\n');
+    await fs.writeFile(documentsPath, `${lines.map(rewriteDocument).join('\n')}\n`);
+  }
+
+  const entries = await fs.readdir(stage);
+  await tar.create({ gzip: true, cwd: stage, file: out, portable: true }, entries);
+  await fs.rm(stage, { recursive: true, force: true });
+  return out;
+}
