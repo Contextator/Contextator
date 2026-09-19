@@ -63,6 +63,15 @@ vulnerabilities, and a report about one of them will be closed with a link back 
   `SEARCH_QUERY_LOG_RETENTION_DAYS`, switch the log off per project, or set `SEARCH_QUERY_LOG=0`. The
   [Privacy Policy](public/pages/privacy.html) §4 states all of it. A query log readable by somebody with *no*
   access to the project would be a vulnerability; one readable by that project's viewers is the design.
+- **A source with a sync interval makes outbound requests on a timer, to an address an editor chose.**
+  The server contacts that source's git host or Notion on its schedule — the cheapest request each one
+  has, `git ls-remote` or a single search — using the credential that was already supplied for the
+  manual sync. It adds a clock, not a reach: there is no address the scheduler can contact that a
+  *Sync now* could not. It is off for every source that predates the feature, it is off unless
+  somebody sets an interval, and `SYNC_DEFAULT_INTERVAL_MINUTES=0` keeps it off for new sources too.
+  Anyone who can add a source can already point the server at a host; that is what the `editor` rule
+  and the deployment assumption are for. A way to make the server contact an address **without** an
+  editor's source would be a vulnerability.
 - **`/mcp/*` is not rate-limited**, and `ADMIN_TOKEN` has no lockout. Both rely on the entropy of the
   credential and on the network boundary. Sign-in to the dashboard *is* limited, per account and per IP.
 - **`ADMIN_TOKEN` acts with root permissions and bypasses every membership.** That is what it is for —

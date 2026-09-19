@@ -103,13 +103,41 @@ The name is the mount point, so it cannot change after creation; everything else
 | Type | What it is | Synced by |
 |------|-----------|-----------|
 | **Local directory** | A folder mounted on the server, scanned in place. Must live inside `ALLOWED_DOC_ROOTS`; nothing is copied. | Reading it at index time |
-| **Git repository** | A shallow, single-branch checkout under `DATA_DIR`. Any HTTPS git server: GitHub, GitLab, Bitbucket, Gitea/Forgejo/Codeberg. Optionally only a **subdirectory** of the repository (`docs/`). | `git fetch` of the branch tip at the start of every index run, or a push webhook |
+| **Git repository** | A shallow, single-branch checkout under `DATA_DIR`. Any HTTPS git server: GitHub, GitLab, Bitbucket, Gitea/Forgejo/Codeberg. Optionally only a **subdirectory** of the repository (`docs/`). | `git fetch` of the branch tip at the start of every index run, a push webhook, or the sync interval below |
 | **Upload** | Files, whole folders (structure preserved) and archives — `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.rar` — unpacked on the server. Add to the existing files or replace them all. | Nothing to sync; the files live under `DATA_DIR` |
 | **Notion** | Every page shared with an internal integration (or the configured root pages/databases and their descendants), rendered to Markdown, nested by parent page. | The Notion API, re-rendering only pages whose `last_edited_time` changed |
 
 Sources are synced at the start of every index run, one after another; a source that fails to sync is
 reported on its own row and the others still index. **Sync** on a row and **Re-index** in the header
 both queue the same run.
+
+### Keeping a source fresh on its own
+
+A source can carry a **sync interval** — the *Sync every* field in its dialog — and the server checks it
+on that schedule instead of waiting for somebody to press a button.
+
+**It does not re-read the files to decide.** Each source type answers one cheap question first, and the
+index run only happens when the answer moved since the last successful sync:
+
+| Type | What is asked | Instead of |
+|------|---------------|-----------|
+| Git | `git ls-remote` on the tracked branch — one ref advertisement, no objects | A fetch |
+| Notion | One `search`, newest edit first, one result | A page read per page, 350 ms apart |
+| Local, Upload | The file count and the newest modification time | Reading and hashing every file |
+
+A check that cannot answer — a directory that has gone, a rate-limited API, a network that is down —
+counts as *changed*, so the run happens and reports the real error. The check is an optimisation; it is
+never a reason a source silently stops syncing.
+
+Two things about the timing are deliberate. A source that is switched on is given a **random** first
+due time inside its first interval, so a hundred sources added by one script do not all wake in the
+same minute — and keep not waking together afterwards. And scheduled runs queue **behind** anything a
+person or a webhook asked for, so pressing *Re-index* never means waiting for the timer's backlog.
+
+**Upgrading an existing installation switches nothing on.** Every source that already existed stays at
+*Never*; only sources created afterwards take `SYNC_DEFAULT_INTERVAL_MINUTES` (an hour by default, and
+`0` means new sources are unscheduled too). If this server should never make an outbound call nobody
+asked for, it does not have to be turned off — it was never on.
 
 ### Content types (flavors)
 
@@ -521,6 +549,8 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `SEARCH_MAX_PER_DOCUMENT` | `2` | Excerpts one document may contribute to one answer, applied after ranking and refilled from the excerpts below it, so an agent that asked for five still gets five. Measured on the golden set it *gains* a question — what it drops is a near-duplicate of something already on the page. `20` turns it off |
 | `SEARCH_NEIGHBOR_CONTEXT` | `1` | Chunks either side of each hit, shown as context around it rather than as further results. `0` turns it off. A chunk is `CHUNK_MAX_TOKENS`, so one either side is about three times the context a hit used to be |
 | `SEARCH_MAX_RESULT_CHARS` | `12000` | Ceiling on one rendered `search_docs` answer; past it whole excerpts are dropped and the result says how many. A default answer is around 3 300 characters |
+| `SYNC_DEFAULT_INTERVAL_MINUTES` | `60` | The sync interval a **newly created** source is given, in minutes; `0` creates them unscheduled. It never reaches a source that already exists — not on upgrade, and not when this value changes — so an upgrade starts no outbound traffic nobody asked for. Per source the dashboard and the API accept 5 to 43200 (30 days), or *never* |
+| `SYNC_PROBES_PER_TICK` | `10` | How many due sources one tick — one minute — may check. The rest keep their turn, oldest first, and the next tick takes them |
 | `SEARCH_SCORE_FLOOR` | `0.82` | Similarity below which `search_docs` answers *no good match* rather than its best hit. `0` turns it off. **Measured against the default embedding model and meaningless on another one** — the server warns at startup if they disagree. A question naming an identifier that the keyword half actually matched skips the gate, because an exact string match is correct at any similarity |
 | `ADMIN_TOKEN` | – | **Machine access** to `/api/*` via `Authorization: Bearer …`, acting with root permissions. Browsers sign in with an account instead; treat this token like a root password |
 | `AUTH_SESSION_IDLE_MS` | `43200000` (12 h) | A dashboard session unused for this long has to sign in again. Refreshed while the dashboard is in use |
@@ -580,8 +610,8 @@ no ambient credential.
 | `GET /api/projects/:id/search?q=…&limit=…&source=…&path_prefix=…` | The same search the project's `search_docs` tool runs, as JSON: `{ query, limit, source, pathPrefix, belowFloor, scoreFloor, hits: [{ score, fusedScore, denseRank, lexicalRank, path, title, headingPath, chunkIndex, content, contextBefore, contextAfter }] }`. `score` is the cosine similarity and is shown rather than ranked on; `fusedScore` is what ordered the list, and the two ranks say which half of search found the excerpt (`null` for the half that did not). `belowFloor` is whether an agent would have been told *no good match* — the hits come back either way, so the dashboard can show what was withheld. `limit` is 1–20 (default 5); `source` and `path_prefix` are optional. `400 invalid_request` for a source this project does not have (the message names the ones it does), `409 not_indexed` when the project has no chunks, `409 model_mismatch` when they were embedded with another model |
 | `DELETE /api/projects/:id` | Delete project, its chunks and open MCP sessions (`409` while indexing) |
 | `GET /api/projects/:id/sources` | The project's sources (type, name, config, status, document count). Secrets are never returned — only `hasSecret` |
-| `POST /api/projects/:id/sources` `{ type, name, label?, flavor?, config?, secret?, index? }` | Add a source. `type` is `local`, `git`, `upload` or `notion`; `config` is type-specific (`path` / `url`+`branch`+`subdir` / `rootIds`) |
-| `PATCH /api/projects/:id/sources/:sid` | Change label, content type, config or token (`secret: null` removes it). Type and name are immutable |
+| `POST /api/projects/:id/sources` `{ type, name, label?, flavor?, config?, secret?, syncIntervalMinutes?, index? }` | Add a source. `type` is `local`, `git`, `upload` or `notion`; `config` is type-specific (`path` / `url`+`branch`+`subdir` / `rootIds`). `syncIntervalMinutes` is 5–43200 or `null`; omitted takes the instance default |
+| `PATCH /api/projects/:id/sources/:sid` | Change label, content type, config, token (`secret: null` removes it) or `syncIntervalMinutes` (`null` switches the schedule off). Type and name are immutable |
 | `DELETE /api/projects/:id/sources/:sid` | Remove the source, its documents, chunks and materialised directory (`409` while indexing) |
 | `POST /api/projects/:id/sources/:sid/sync` | Queue a re-index (every source is synced at the start of it) → `202 { job }` |
 | `POST /api/projects/:id/sources/:sid/test` | Connectivity check without indexing → `{ ok, message }` |
@@ -695,6 +725,7 @@ src/services/passwords.ts     scrypt hashing (node:crypto), policy and temporary
 src/services/auth/            accounts, sessions, memberships and the first-run setup gate
 src/services/rate-limit.ts    in-memory sliding window for sign-in attempts
 src/admin/routes.ts           REST API for the dashboard
+src/services/scheduler.ts     the sync schedule: which sources are due, the cheap per-driver check, and the run it queues
 src/admin/sources-routes.ts   source CRUD, sync, test, webhook secret
 src/admin/upload-routes.ts    multipart upload sessions (the only multipart-parsing plugin)
 src/admin/webhooks.ts         push webhooks, verified with the per-source secret
