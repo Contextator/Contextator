@@ -28,8 +28,10 @@ http://localhost:3444/mcp/<project-name>
   access becomes the memberships you already manage. Browser-based connectors sign in through OAuth 2.1.
   See [MCP access](#mcp-access).
 - **Incremental indexing.** Files are hashed; only changed files are re-embedded, removed files are deleted.
+- **More than Markdown.** `.html`, `.docx`, `.csv` and `.pdf` are converted to Markdown as they are indexed, so an agent
+  reads a Word file or a PDF the way it reads a page of documentation. See [File types](#file-types).
 
-Stack: TypeScript · Node.js 20+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/sdk` · `@huggingface/transformers`.
+Stack: TypeScript · Node.js 22+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/sdk` · `@huggingface/transformers` · `unpdf` / `mammoth` / `turndown`.
 Ships as **one Docker container** (`contextator`) that holds both the database and the app.
 Free software under the **AGPL-3.0-or-later** ([why](#license)), with a commercial license available.
 
@@ -492,10 +494,83 @@ your documentation at all. What it does **not** catch is a question shaped like 
 answer is not written down — those score exactly where real questions score, and no threshold
 separates them.
 
+## File types
+
+A source indexes `.md` and `.mdx` by default and can be told to take `.txt`, `.html`/`.htm`, `.csv`, `.docx` and
+`.pdf` as well. **Everything becomes Markdown on the way in** — the chunker, the embedder and
+`read_document` see one format, and the conversion happens once, at the edge.
+
+| Type | What it becomes | Kept | Lost |
+|------|-----------------|------|------|
+| `.md`, `.mdx`, `.txt` | itself, unchanged | everything | nothing |
+| `.html`, `.htm` | Markdown via turndown + GFM | headings, lists, tables, code, links, `<title>` | scripts, stylesheets, `svg`, embedded image data (the `alt` text stays) |
+| `.docx` | Markdown via mammoth, then the same converter | Word's own heading styles, numbered and bulleted lists, tables, links | images, footnotes, comments, tracked changes |
+| `.csv` | one GFM table, `## Rows n–m` sections every 200 rows | the header above every section, quoted commas and newlines, `;`/tab/pipe delimiters | nothing of the data; cell newlines become `<br>` |
+| `.pdf` | Markdown reconstructed from glyph positions | headings by font size, paragraphs rejoined across line ends and de-hyphenated, bullet and numbered lists, column-aligned tables, two-column reading order, running heads and feet dropped | footnotes, figures, and any table whose columns are not aligned |
+
+Every failure — a parser's own exception included — leaves the conversion as a refusal that names the
+file. That is not tidiness: the indexer treats an unrecognised exception as a failed *run*, and because
+a malformed file fails the same way every time, one of them would stop the whole project from being
+re-indexed until somebody found it.
+
+**A file that cannot be converted is refused, not indexed.** A scan of paper contains pictures of words
+and no words, and there is no OCR in this product. Such a file is skipped, the reason — naming the file
+— is shown on its source in the dashboard, and the rest of the source indexes normally. The alternative
+is a document that exists, matches nothing and reads as blank, which nobody ever notices is wrong. The
+same happens to an encrypted PDF, a `.doc` renamed to `.docx`, a Word file whose content is entirely
+pictures, a damaged file of any of these types, and a page or spreadsheet that converts to no text at
+all.
+
+**A refusal never fails the run.** The source is not marked failed and the project is not marked
+failed: it synced, and everything else in it indexed. The dashboard shows the source's reason line
+whether or not the source failed, which is the only thing that makes the refusal visible rather than
+merely recorded. On an incremental run the file keeps whatever document it already had; a **rebuild**
+(`force`, or a changed embedding model) publishes the corpus as it stands, so a file that can no longer
+be converted is not in the new generation — the same rule the index applies to a source that cannot be read.
+
+**What a file may cost while it is converted.** Conversion runs in the server's own process, beside the
+dashboard and the MCP endpoint, and until now only the upload path had any size limit at all — a file
+reached through a local directory or a git checkout was parsed at whatever size it happened to be.
+Three caps bound it, and each closes something the others do not:
+
+| Setting | Default | What it stops |
+|---------|---------|---------------|
+| `MAX_CONVERTED_FILE_BYTES` | 32 MiB | one enormous document taking the process down with it. Checked against the size the **scan** recorded, before the file is read — a limit applied to the bytes already in memory is not a limit. `.md`, `.mdx` and `.txt` are decoded rather than parsed and are not capped |
+| `MAX_PDF_PAGES` | 2000 | a few kilobytes of PDF that *declares* a hundred thousand pages — every page is read into memory at once |
+| `MAX_DOCX_UNPACKED_BYTES` | 256 MiB | the zip bomb. A `.docx` is a zip, and the size in its directory is a number the file's author writes, so each part is inflated through a counter and discarded, with the cap as the ceiling. DEFLATE reaches about 1030:1, so nothing short of measuring it is a bound |
+
+A file over a cap is refused by name, the same way a scan is. So is a file the filesystem will not hand
+over — deleted between the scan and the read, permissions changed, or simply larger than `fs.readFile`
+will return.
+
+A converted document is stored under its original path and extension (`handbook/support-handbook.pdf`),
+and that is the path `search_docs` cites and `read_document` takes. Its **title** comes from the
+document — a `<title>`, a PDF's `Title` metadata, the first heading — and falls back to the filename.
+
+**Where a long PDF falls against `MAX_STORED_DOCUMENT_BYTES`** (1 MB of UTF-8, past which the prefix is
+stored and `content_truncated` is set). Measured on generated manuals of 80, 200, 600 and 1600 pages,
+each page a dense one — 42 lines of about 95 characters, a running head and foot, a chapter heading
+every tenth page:
+
+| Pages | Markdown | Per page | Extraction |
+|-------|----------|----------|------------|
+| 80 | 316 KiB | 4.0 KiB | 0.18 s |
+| 200 | 795 KiB | 4.0 KiB | 0.21 s |
+| 600 | 2393 KiB | 4.0 KiB | 0.61 s |
+| 1600 | 6414 KiB | 4.0 KiB | 1.73 s |
+
+So the cap bites at roughly **250 dense pages**, and a typical page is looser than these — call it 300
+to 400 pages of a real manual. Past that the document is still fully searchable, because the cut is on
+`documents.content` and not on the chunks: every page is chunked and embedded, and only the stored text
+`read_document` serves is truncated, which the tool says. Extraction costs about a millisecond a page
+and happens once, after the content hash says the file changed.
+
+What is capped on the way *in* is the file itself: `UPLOAD_MAX_FILE_BYTES`, 50 MB by default.
+
 ## How indexing works
 
-1. Every source of the project is synced in turn (git fetch, Notion pull; local and upload sources have nothing to fetch), then its directory is walked for the file types the source selected — `.md`/`.mdx` by default, optionally `.txt` (dotfiles, `node_modules`, `dist`, `build`, symlinks and `IGNORE_GLOBS` are skipped). Every path collected is prefixed with the source name, so two sources can both hold an `install.md` without colliding.
-2. The source's content type is applied (Obsidian wikilinks, Notion export ids), and every file is hashed (sha256). Unchanged files are skipped, changed/new files are re-chunked and re-embedded, files that disappeared are deleted. A **force** re-index (and one triggered by a changed embedding model) rebuilds everything, and does it *beside* the live index rather than by wiping it first: the project keeps answering `search_docs`, `list_topics` and `read_document` for the whole run, and a run that fails halfway leaves the previous index serving instead of an empty project. Every finished run (mode, counts, duration, error) is stored in `index_runs`; the last 20 per project are kept and shown in the dashboard.
+1. Every source of the project is synced in turn (git fetch, Notion pull; local and upload sources have nothing to fetch), then its directory is walked for the file types the source selected — `.md`/`.mdx` by default, optionally `.txt`, `.html`/`.htm`, `.csv`, `.docx` and `.pdf` (dotfiles, `node_modules`, `dist`, `build`, symlinks and `IGNORE_GLOBS` are skipped). Every path collected is prefixed with the source name, so two sources can both hold an `install.md` without colliding.
+2. Every file is hashed (sha256) over its **raw bytes**, then converted to Markdown by its type ([File types](#file-types)) and the source's content type is applied (Obsidian wikilinks, Notion export ids). Unchanged files are skipped, changed/new files are re-chunked and re-embedded, files that disappeared are deleted. A **force** re-index (and one triggered by a changed embedding model) rebuilds everything, and does it *beside* the live index rather than by wiping it first: the project keeps answering `search_docs`, `list_topics` and `read_document` for the whole run, and a run that fails halfway leaves the previous index serving instead of an empty project. Every finished run (mode, counts, duration, error) is stored in `index_runs`; the last 20 per project are kept and shown in the dashboard.
 3. Chunking is Markdown-aware: frontmatter is parsed (`title` wins), MDX `import`/`export` lines and component tags are stripped, the document is split at headings (`#`–`####`) with a breadcrumb kept per chunk, and oversized sections are packed from paragraphs and fenced code blocks (code is never split mid-block when avoidable) with a small overlap.
 4. Each chunk is embedded as `heading breadcrumb + content` and stored in `chunks` with an HNSW cosine index. The same string is also stored as a `tsvector` with a GIN index — that is the keyword half of search, and it is written in the same statement as the row, so the two halves can never describe different text.
 
@@ -794,6 +869,10 @@ src/services/fs-scan.ts       safe directory walking + path-escape checks
 src/services/sources.ts       source CRUD and the zod schema of each type's config
 src/services/sources/         one driver per type: local, git (isomorphic-git), upload, notion
 src/services/flavors.ts       content-type transforms (Obsidian wikilinks, Notion export ids)
+src/services/doc-types/       one transform per file extension, all of them producing Markdown: html, docx, csv, pdf
+src/services/doc-types/pdf.ts a PDF read as a layout — lines, columns, running heads, headings by size, tables by alignment
+scripts/build-doc-fixtures.ts the dependency-free PDF and zip writers the binary test fixtures come from
+src/types/                    ambient declarations for the two dependencies that ship none (mammoth, the turndown GFM plugin)
 src/services/archives.ts      zip / tar / tar.gz / rar extraction with path and size guards
 src/services/uploads.ts       staged upload sessions and their commit into a source
 src/services/data-dir.ts      layout of DATA_DIR, atomic directory swaps, orphan sweep
@@ -850,6 +929,7 @@ test/*.test.ts                unit suite — pure functions, no database, no Doc
 test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
 test/integration/fixtures/    a pre-v3 `0.1` schema derived from history, and the frozen DDL ladder the migrations replaced
+test/fixtures/doc-types/      one real file per supported type, plus the malformed ones a refusal has to survive
 eval/corpus/                  the fixture corpus the golden set asks about: 15 English and 11 Turkish pages, written for this
 eval/golden.jsonl             48 questions, one JSON object per line, each naming the file that answers it
 eval/README.md                what a good question is, how to add one, and why the failures are kept
