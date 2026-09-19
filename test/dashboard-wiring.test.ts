@@ -117,6 +117,27 @@ describe('the dashboard markup and its modules agree', () => {
   });
 
   /**
+   * **Focus is captured before `#detail` is emptied, never after.**
+   *
+   * `search.js` learned this the hard way and says so in its own comment: Chrome fires `blur` when a
+   * focused node is removed, and it does so while the node still looks connected, so nothing
+   * downstream can tell "the operator left the field" from "the poll wiped the panel". The only
+   * moment `document.activeElement` still means anything is *before* `replaceChildren()`. Moving
+   * either capture below that line breaks focus restore in both panels and breaks no test but this
+   * one — the browser simply stops giving the caret back, twice a second, to whoever was typing.
+   */
+  it('asks which control had focus before it empties the panel that holds it', async () => {
+    const app = await readFile(new URL('app.js', PUBLIC), 'utf8');
+    const wipe = app.indexOf('main.replaceChildren()');
+    expect(wipe).toBeGreaterThan(-1);
+    for (const capture of ['captureSearchFocus()', 'captureAuditFocus()']) {
+      const at = app.indexOf(capture);
+      expect(at, `${capture} is not called in renderDetail()`).toBeGreaterThan(-1);
+      expect(at, `${capture} runs after #detail has been emptied`).toBeLessThan(wipe);
+    }
+  });
+
+  /**
    * The two instance views are reachable only from the account menu, and a hash nothing routes is a
    * menu item that quietly lands on the project list.
    */

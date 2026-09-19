@@ -2,11 +2,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { PHRASED_ACTIONS } from '../../src/admin/audit-routes.js';
-import { type ProjectRow, type UserRow, documentSources } from '../../src/db/schema.js';
+import { type ProjectRow, type UserRow, auditEvents, documentSources } from '../../src/db/schema.js';
 import { createUser } from '../../src/services/auth/users.js';
 import { type LiveInstance, seedProject, startMcpInstance } from './support/mcp-instance.js';
 import { type TestDatabase, applySchema, createTestDatabase, dropTestDatabase } from './support/postgres.js';
@@ -23,7 +23,9 @@ import { type TestDatabase, applySchema, createTestDatabase, dropTestDatabase } 
  * that has since been deleted — survive the deletion and say what they are.
  *
  * Every row asserted here was written by the policy layer in response to a request made through
- * `app.inject`. Nothing in this file inserts into `audit_events`.
+ * `app.inject`. Nothing in this file inserts into `audit_events`; the one test that needs two events
+ * inside the same millisecond moves the instants of three rows that were genuinely written, because
+ * real traffic produces that collision rarely and a test may not wait for it.
  */
 
 const baseUrl = inject('postgresBaseUrl');
@@ -219,18 +221,43 @@ describe('the filters, which are SQL and not the browser', () => {
   it('narrows by a UTC day range that includes the day typed into both boxes', async () => {
     const today = new Date().toISOString().slice(0, 10);
     const all = await read('limit=200');
-    const sameDay = await read(`limit=200&from=${today}&to=${today}`);
-    expect(sameDay.events.length).toBe(all.events.length);
+    // Counted from the unfiltered page rather than assumed to be all of it: another test in this file
+    // moves three rows to an old instant on purpose, and a hard "everything" here would then be wrong
+    // about which test broke.
+    const writtenToday = all.events.filter((e) => e.createdAt.slice(0, 10) === today);
+    expect(writtenToday.length).toBeGreaterThan(5);
 
-    // A window that ended yesterday holds nothing this suite wrote.
+    const sameDay = await read(`limit=200&from=${today}&to=${today}`);
+    expect(sameDay.events.map((e) => e.id)).toEqual(writtenToday.map((e) => e.id));
+
+    // A window that ended yesterday holds nothing this suite wrote today.
     const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
-    expect((await read(`limit=200&from=2020-01-01&to=${yesterday}`)).events).toHaveLength(0);
+    const dayBefore = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
+    expect((await read(`limit=200&from=${dayBefore}&to=${yesterday}`)).events).toHaveLength(0);
   });
 
-  it('refuses a limit past the cap, a date that is not one, and a cursor it did not produce', async () => {
-    for (const query of ['limit=1000', 'from=19-09-2026', 'cursor=nonsense']) {
-      expect((await request(cookie, 'GET', `/api/audit?${query}`)).statusCode, query).toBe(400);
+  /**
+   * Every refusal is a `400`, and the point of asserting them together is that none of them is a
+   * `500`: a value that is not a uuid must be stopped here rather than reaching a `uuid` column, where
+   * PostgreSQL's `22P02` would become an internal error and tell the reader nothing.
+   */
+  it('refuses what it cannot answer with 400, never by letting the database refuse it', async () => {
+    for (const query of [
+      'limit=1000',
+      'limit=0',
+      'from=19-09-2026',
+      'to=2026-13-45',
+      'cursor=nonsense',
+      `cursor=${'00000000-0000-4000-8000-000000000000'}`,
+      'project=abc',
+      'project=00000000-0000-4000-8000-00000000000z',
+    ]) {
+      const res = await request(cookie, 'GET', `/api/audit?${query}`);
+      expect(res.statusCode, `${query} answered ${res.statusCode}: ${res.body}`).toBe(400);
     }
+    // A project id of the right shape that names nothing is not an error — it is an empty page.
+    const none = await read('limit=5&project=00000000-0000-4000-8000-000000000001');
+    expect(none.events).toHaveLength(0);
   });
 });
 
@@ -271,6 +298,58 @@ describe('the keyset page', () => {
     expect(second.nextCursor).toBeNull();
     // The two pages are the filtered set, in order — not a re-count that a new row could shift.
     expect([...first.events, ...second.events].map((e) => e.id)).toEqual(whole.events.map((e) => e.id));
+  });
+});
+
+/**
+ * **Two events inside one millisecond**, which is where a cursor carrying a timestamp loses a row.
+ *
+ * `audit_events.created_at` is `timestamptz` and PostgreSQL keeps it to the microsecond;
+ * node-postgres truncates that to the millisecond on the way into a JavaScript `Date`. A cursor built
+ * from the truncated instant therefore names a moment *earlier* than the row it was taken from — so
+ * the next page, asking for rows strictly before it, skips every row of that millisecond. With the
+ * page boundary inside the group, those rows appear on **no page at all**: not repeated, not
+ * reordered, gone. That is the one failure an audit log may not have, and the reason the cursor is a
+ * row id resolved in SQL.
+ *
+ * Arranged rather than waited for: three rows that were genuinely written above are moved onto one
+ * millisecond with distinct microseconds, and onto an old instant so that nothing else shares the day
+ * they are then filtered by. `.999`, `.500` and `.100` of the same millisecond, read newest first.
+ */
+describe('two events inside one millisecond', () => {
+  const DAY = '2021-03-04';
+  /** Descending, which is the order the page must hand them back in. */
+  const MICROS = ['12:00:00.123999', '12:00:00.123500', '12:00:00.123100'];
+  let ids: string[];
+
+  beforeAll(async () => {
+    const [a, b, c] = (await read('limit=3')).events.map((e) => e.id);
+    ids = [a, b, c];
+    for (const [i, id] of ids.entries()) {
+      await database.db
+        .update(auditEvents)
+        .set({ createdAt: sql`${`${DAY} ${MICROS[i]}+00`}::timestamptz` })
+        .where(eq(auditEvents.id, id));
+    }
+    // The database really does hold microseconds; if it did not, the rest of this would prove nothing.
+    const stamped = await database.db.execute<{ micro: string }>(
+      sql`select to_char(created_at, 'US') as micro from audit_events where id = ${ids[0]}::uuid`,
+    );
+    expect(stamped.rows[0]?.micro).toBe('123999');
+  });
+
+  it('hands back every one of them, in order, one page at a time', async () => {
+    const walked: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 6; page++) {
+      const next: AuditPage = await read(`limit=1&from=${DAY}&to=${DAY}${cursor === null ? '' : `&cursor=${encodeURIComponent(cursor)}`}`);
+      walked.push(...next.events.map((e) => e.id));
+      cursor = next.nextCursor;
+      if (cursor === null) break;
+    }
+    // Exactly the three, once each, newest microsecond first. A cursor truncated to the millisecond
+    // returns the first of them and then nothing: the other two are silently lost.
+    expect(walked).toEqual(ids);
   });
 });
 

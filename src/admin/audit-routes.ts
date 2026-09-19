@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, isNotNull, isNull, lt, or } from 'drizzle-orm';
+import { and, desc, eq, gte, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
@@ -21,6 +21,18 @@ import { ValidationError } from '../services/projects.js';
  * year of every state-changing request is not something to ship to a dashboard and filter there, and
  * an operator looking for one action would be paging through the whole of it. The ordering and the
  * cursor are `(created_at DESC, id DESC)`, which is what `audit_events_created_idx` is for.
+ *
+ * **What is not indexed, said here rather than discovered later.** Three of the six accesses land on
+ * an index the schema already has: the unfiltered page and the day range on `audit_events_created_idx`,
+ * the project filter on `audit_events_project_created_idx`. Three do not. The actor filter compares
+ * `actor_label`, while the index beside it is on `actor_user_id` — and it has to be the label, because
+ * that is the column that survives the account being deleted, which is half of what this panel is for.
+ * `action` has no index at all. And the three `DISTINCT` scans behind the filter pickers read the table.
+ * Paging is unaffected — the pickers are computed once per filter run, not per page turn — so the cost
+ * falls on *changing* a filter, and it is a sequential scan of an append-only table bounded by
+ * `AUDIT_LOG_RETENTION_DAYS`. Measured at 690 rows it is 36 ms including all three picker scans. Adding
+ * `(actor_label, created_at desc)` and `(action, created_at desc)` is a migration, and a migration
+ * belongs to whoever owns this schema rather than to the panel reading it.
  */
 
 /** One screenful. Large enough that scrolling is the normal way to read, small enough to be one page. */
@@ -78,15 +90,31 @@ function startOfDay(day: string, plusDays: number): Date {
   return new Date(at.getTime() + plusDays * 86_400_000);
 }
 
-/** The position of the last row handed out, which is what the next page starts after. */
-export const encodeCursor = (row: { createdAt: Date; id: string }): string => `${row.createdAt.toISOString()}~${row.id}`;
+/** Version 4 UUID, which is the only shape a row id or a project id can have. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function decodeCursor(raw: string): { createdAt: Date; id: string } {
-  const at = raw.indexOf('~');
-  const createdAt = at < 0 ? new Date(Number.NaN) : new Date(raw.slice(0, at));
-  const id = at < 0 ? '' : raw.slice(at + 1);
-  if (Number.isNaN(createdAt.getTime()) || id.length === 0) throw new ValidationError('That page cursor is not one this endpoint produced.');
-  return { createdAt, id };
+/**
+ * The position of the last row handed out — **its id, and nothing else.**
+ *
+ * The obvious cursor carries the instant as well, and it is wrong here. `audit_events.created_at` is
+ * `timestamptz`, which PostgreSQL keeps to the **microsecond**; node-postgres truncates that to the
+ * millisecond on the way into a JavaScript `Date`. A cursor built from the truncated value therefore
+ * names an instant *earlier* than the row it was taken from, and a `<` comparison against it skips
+ * every row in the same millisecond — including rows it has not shown yet. Two events at `.123456`
+ * and `.123100` with the page boundary between them: the cursor says `.123000`, the next page asks
+ * for rows before `.123000`, and `.123100` appears on no page at all. **A row that silently vanishes
+ * is worse than the record not existing**, which is the one thing an audit log may not do.
+ *
+ * So the instant never leaves the database. The id is opaque, cannot be truncated, and — unlike an
+ * encoded timestamp — is something the endpoint can actually verify it produced, which is what makes
+ * the `400` below an honest answer rather than a shape check.
+ */
+export const encodeCursor = (row: { id: string }): string => row.id;
+
+/** A cursor is a row id. Anything else is refused here rather than reaching a `uuid` column. */
+export function decodeCursor(raw: string): string {
+  if (!UUID.test(raw)) throw new ValidationError('That page cursor is not one this endpoint produced.');
+  return raw;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -107,12 +135,26 @@ export function decodeCursor(raw: string): { createdAt: Date; id: string } {
  *
  * `prep` is the word that joins the phrase to the project name; `''` when the phrase already ends in
  * the place the name goes. `target` renames the route template's own parameter for the reader — the
- * column keeps `id`, the sentence says `account`.
+ * column keeps `userId`, the sentence says `account`.
+ *
+ * **`verb` may be a function of `detail`, and for two routes it has to be.** `PATCH .../query-log`
+ * with `{"enabled":false}` is somebody turning recording *off*; a fixed phrase and a trailing
+ * `(enabled: false)` renders that as "switched query logging on handbook (enabled: false)", which an
+ * operator scanning a page reads as the opposite of what happened. The same is true of
+ * `/oauth/authorize`, where `deny` is the substance of the event. `consumes` then names the detail
+ * keys the verb has already said, so the sentence does not repeat them in its parenthetical.
  */
-const PHRASES: Readonly<Record<string, { verb: string; prep?: string; target?: string }>> = {
+type Phrase = {
+  verb: string | ((detail: Record<string, string | boolean>) => string);
+  prep?: string;
+  target?: string;
+  consumes?: readonly string[];
+};
+
+const PHRASES: Readonly<Record<string, Phrase>> = {
   // Projects
-  'POST /api/projects': { verb: 'created a project' },
-  'POST /api/projects/import': { verb: 'imported a project' },
+  'POST /api/projects': { verb: 'created a project', target: 'project' },
+  'POST /api/projects/import': { verb: 'imported a project', target: 'project' },
   'DELETE /api/projects/:id': { verb: 'deleted the project', prep: '' },
   'POST /api/projects/:id/reindex': { verb: 'queued a re-index', prep: 'of' },
   // Sources
@@ -133,19 +175,38 @@ const PHRASES: Readonly<Record<string, { verb: string; prep?: string; target?: s
   'DELETE /api/projects/:id/mcp-tokens/:tokenId': { verb: 'revoked an MCP credential', prep: 'of', target: 'credential' },
   'PUT /api/projects/:id/members/:userId': { verb: 'granted access', prep: 'to', target: 'account' },
   'DELETE /api/projects/:id/members/:userId': { verb: 'revoked access', prep: 'to', target: 'account' },
-  // The query log
-  'PATCH /api/projects/:id/query-log': { verb: 'switched query logging', prep: 'on' },
+  // The query log. The switch says which way it was thrown, or the panel reads as its own opposite.
+  'PATCH /api/projects/:id/query-log': {
+    verb: (detail) =>
+      detail.enabled === undefined
+        ? 'switched query logging'
+        : detail.enabled === true || detail.enabled === 'true'
+          ? 'turned query logging on'
+          : 'turned query logging off',
+    prep: 'for',
+    consumes: ['enabled'],
+  },
   'DELETE /api/projects/:id/query-log': { verb: 'purged the query log', prep: 'of' },
   // Accounts
-  'POST /api/users': { verb: 'created an account' },
+  'POST /api/users': { verb: 'created an account', target: 'account' },
   'PATCH /api/users/:id': { verb: 'changed an account', target: 'account' },
   'DELETE /api/users/:id': { verb: 'deleted an account', target: 'account' },
   'POST /api/users/:id/password': { verb: 'reset the password of an account', target: 'account' },
   'DELETE /api/users/:id/sessions': { verb: 'signed an account out everywhere', target: 'account' },
-  // The actor's own session
+  // The actor's own session. `POST /api/auth/login` and `POST /api/setup` are recorded since
+  // [ADR-0055](../../.ssot/ADR.md#adr-0055)'s second pass: they create the actor they then name.
+  'POST /api/auth/login': { verb: 'signed in' },
+  'POST /api/setup': { verb: 'set this instance up and became its first account', target: 'account' },
   'POST /api/auth/logout': { verb: 'signed out' },
   'POST /api/auth/password': { verb: 'changed their own password' },
   'DELETE /api/auth/sessions': { verb: 'signed their other sessions out' },
+  // A person granting a connector lasting read access to a project — the one refusal this log keeps,
+  // because a `deny` is somebody deciding rather than the permission matrix declining.
+  'POST /oauth/authorize': {
+    verb: (detail) =>
+      detail.decision === 'deny' ? 'refused a connector' : detail.decision === 'approve' ? 'approved a connector' : 'answered a connector request',
+    consumes: ['decision'],
+  },
 };
 
 /** Enough of a uuid to recognise and to search for, and short enough to sit inside a sentence. */
@@ -172,7 +233,7 @@ export interface AuditSummaryInput {
  */
 export function summarizeAuditEvent(event: AuditSummaryInput): string {
   const phrase = PHRASES[event.action];
-  const words = [event.actorLabel, phrase?.verb ?? `ran ${event.action}`];
+  const words = [event.actorLabel, verbOf(phrase, event.detail) ?? `ran ${event.action}`];
 
   if (event.projectId !== null) {
     // The name is joined from `projects`, and a deleted project has none to join to. Saying the id
@@ -185,12 +246,19 @@ export function summarizeAuditEvent(event: AuditSummaryInput): string {
   const aside: string[] = [];
   if (event.targetType !== null && event.targetId !== null) aside.push(`${phrase?.target ?? event.targetType} ${shortId(event.targetId)}`);
   // `detail` is already a closed set of fields and values (src/auth/policy.ts), so this cannot widen
-  // into free text however a request body was shaped.
-  for (const [key, value] of Object.entries(event.detail)) aside.push(`${key}: ${String(value)}`);
+  // into free text however a request body was shaped. A field the verb has already said is left out
+  // rather than repeated — "turned query logging off … (enabled: false)" says it twice.
+  for (const [key, value] of Object.entries(event.detail)) {
+    if (phrase?.consumes?.includes(key)) continue;
+    aside.push(`${key}: ${String(value)}`);
+  }
   if (aside.length > 0) words.push(`(${aside.join(', ')})`);
 
   return words.join(' ');
 }
+
+const verbOf = (phrase: Phrase | undefined, detail: Record<string, string | boolean>): string | null =>
+  phrase === undefined ? null : typeof phrase.verb === 'string' ? phrase.verb : phrase.verb(detail);
 
 // ---------------------------------------------------------------------------------------------
 // The route
@@ -222,17 +290,23 @@ export const auditRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
   app.get('/api/audit', async (req) => {
     const query = AuditQuery.parse(req.query);
     const window = dayBounds(query.from, query.to);
+    const cursor = query.cursor === undefined ? null : decodeCursor(query.cursor);
+    if (cursor !== null) await assertCursorExists(cursor);
 
     const where = [
       query.actor === undefined ? null : eq(auditEvents.actorLabel, query.actor),
       query.action === undefined ? null : eq(auditEvents.action, query.action),
-      query.project === undefined ? null : query.project === 'none' ? isNull(auditEvents.projectId) : eq(auditEvents.projectId, query.project),
+      query.project === undefined
+        ? null
+        : query.project === 'none'
+          ? isNull(auditEvents.projectId)
+          : eq(auditEvents.projectId, projectId(query.project)),
       window.from === null ? null : gte(auditEvents.createdAt, window.from),
       window.to === null ? null : lt(auditEvents.createdAt, window.to),
       // Keyset paging, in the order the index already holds: strictly after the last row handed out.
       // An offset would re-count the rows of every page before this one, and would skip or repeat a
       // row when an action is recorded while somebody is paging.
-      cursorPredicate(query.cursor),
+      cursor === null ? null : cursorPredicate(cursor),
     ].filter((clause) => clause !== undefined && clause !== null);
 
     // One row more than asked for: whether there is another page is a fact about the query, and
@@ -268,10 +342,23 @@ export const auditRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       nextCursor: rows.length > query.limit && last ? encodeCursor(last) : null,
       // Only on the first page of a filter run: the pickers do not change as somebody pages, and three
       // `DISTINCT` scans per page turn would be the load ADR-0050 declined to put on the query log.
-      filters: query.cursor === undefined ? await facets() : null,
+      filters: cursor === null ? await facets() : null,
       retentionDays: config.AUDIT_LOG_RETENTION_DAYS,
     };
   });
+
+  /**
+   * That the cursor names a row this log still holds.
+   *
+   * One primary-key lookup, and it is what makes the `400` true rather than a shape check: a cursor
+   * that is a well-formed uuid but names nothing would otherwise compare against `NULL` in the
+   * predicate below and hand back a silently empty page, which reads as "no more events". It also
+   * catches the real race — the anchor row swept by `AUDIT_LOG_RETENTION_DAYS` between two page turns.
+   */
+  async function assertCursorExists(id: string): Promise<void> {
+    const [row] = await db.select({ id: auditEvents.id }).from(auditEvents).where(eq(auditEvents.id, id)).limit(1);
+    if (!row) throw new ValidationError('That page cursor does not name an event this log still holds; start again from the newest page.');
+  }
 
   /**
    * The distinct values the pickers offer — **over the whole table, not over the current filter.**
@@ -279,37 +366,48 @@ export const auditRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
    * already chosen, which is the one thing a filter picker must not do.
    */
   async function facets() {
+    // One row past the cap, so "there are more than this" is a fact rather than a guess: at exactly
+    // `MAX_FACET_ROWS` rows a query capped *at* the cap cannot tell a full list from a cut one.
+    const probe = MAX_FACET_ROWS + 1;
     const [actors, actions, withProject] = await Promise.all([
       db
         .selectDistinct({ label: auditEvents.actorLabel, kind: auditEvents.actorKind })
         .from(auditEvents)
         .orderBy(auditEvents.actorLabel)
-        .limit(MAX_FACET_ROWS),
-      db.selectDistinct({ action: auditEvents.action }).from(auditEvents).orderBy(auditEvents.action).limit(MAX_FACET_ROWS),
+        .limit(probe),
+      db.selectDistinct({ action: auditEvents.action }).from(auditEvents).orderBy(auditEvents.action).limit(probe),
       db
         .selectDistinct({ id: auditEvents.projectId, name: projects.name })
         .from(auditEvents)
         .leftJoin(projects, eq(projects.id, auditEvents.projectId))
         .where(isNotNull(auditEvents.projectId))
-        .orderBy(auditEvents.projectId)
-        .limit(MAX_FACET_ROWS),
+        // Ordered by name in SQL and not in JavaScript, because the cap is applied by the database:
+        // sorting afterwards would decide *which* projects are offered by `project_id` order, which is
+        // random. PostgreSQL sorts NULL last on an ASC ordering, so a deleted project falls to the end
+        // of the picker — which is where it belongs and not where it disappears.
+        .orderBy(projects.name)
+        .limit(probe),
     ]);
 
     return {
-      actors,
-      actions: actions.map((a) => ({ action: a.action, summary: summarizeAction(a.action) })),
-      // A project whose rows are still here and whose name is not is sorted last and named by its id,
-      // so the picker can reach the events of something that has been deleted.
-      projects: withProject
-        .filter((p): p is { id: string; name: string | null } => p.id !== null)
-        .sort((a, b) => (a.name === null ? 1 : b.name === null ? -1 : a.name.localeCompare(b.name))),
-      truncated: actors.length >= MAX_FACET_ROWS || actions.length >= MAX_FACET_ROWS || withProject.length >= MAX_FACET_ROWS,
+      actors: actors.slice(0, MAX_FACET_ROWS),
+      actions: actions.slice(0, MAX_FACET_ROWS).map((a) => ({ action: a.action, summary: summarizeAction(a.action) })),
+      // A project whose rows are still here and whose name is not is named by its id in the panel, so
+      // the picker can still reach the events of something that has been deleted.
+      projects: withProject.slice(0, MAX_FACET_ROWS).filter((p): p is { id: string; name: string | null } => p.id !== null),
+      truncated: actors.length > MAX_FACET_ROWS || actions.length > MAX_FACET_ROWS || withProject.length > MAX_FACET_ROWS,
     };
   }
 };
 
-/** The `action` picker's label: the phrase with no actor, no project and no target in front of it. */
-export const summarizeAction = (action: string): string => PHRASES[action]?.verb ?? `ran ${action}`;
+/**
+ * The `action` picker's label: the phrase with no actor, no project and no target in front of it.
+ *
+ * A picker chooses a *route*, not one event, so a verb that depends on `detail` is asked with none —
+ * which is why each of those has a neutral wording for the empty case ("switched query logging"
+ * rather than either direction of it).
+ */
+export const summarizeAction = (action: string): string => verbOf(PHRASES[action], {}) ?? `ran ${action}`;
 
 /**
  * Every action a phrase has been written for — exported so `test/audit-view.test.ts` can check the
@@ -319,10 +417,23 @@ export const summarizeAction = (action: string): string => PHRASES[action]?.verb
  */
 export const PHRASED_ACTIONS: readonly string[] = Object.keys(PHRASES);
 
-function cursorPredicate(cursor: string | undefined) {
-  if (cursor === undefined) return null;
-  const { createdAt, id } = decodeCursor(cursor);
-  return or(lt(auditEvents.createdAt, createdAt), and(eq(auditEvents.createdAt, createdAt), lt(auditEvents.id, id)));
+/**
+ * Everything strictly after the cursor row, in `(created_at DESC, id DESC)` — **resolved in SQL.**
+ *
+ * The anchor's instant is read by the database, compared by the database, and never crosses into
+ * JavaScript, so the microsecond `timestamptz` keeps is the microsecond the comparison uses. See
+ * `encodeCursor` for what carrying it through a `Date` costs. The row-wise `<` is the two-column
+ * comparison `audit_events_created_idx` supports, spelled the way PostgreSQL can use it.
+ */
+function cursorPredicate(id: string) {
+  return sql`(${auditEvents.createdAt}, ${auditEvents.id}) < (select anchor.created_at, anchor.id from audit_events as anchor where anchor.id = ${id}::uuid)`;
+}
+
+/** A project filter is a row id too, and is refused here rather than reaching a `uuid` column. */
+function projectId(value: string): string {
+  if (!UUID.test(value))
+    throw new ValidationError(`"${value}" is not a project id. Use a project's id, or "none" for the events that belong to none.`);
+  return value;
 }
 
 type AuditRow = {

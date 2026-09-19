@@ -47,10 +47,40 @@ describe('a row as a sentence', () => {
         detail: { mode: 'account' },
       }),
     ).toBe('dana changed who may reach the MCP endpoint of handbook (mode: account)');
-    // A boolean stays a boolean in the row and reads as a word here.
-    expect(
-      summarizeAuditEvent({ ...base, action: 'PATCH /api/projects/:id/query-log', targetType: null, targetId: null, detail: { enabled: false } }),
-    ).toBe('dana switched query logging on handbook (enabled: false)');
+  });
+
+  /**
+   * The switch whose fixed phrasing read as its own opposite: `{"enabled":false}` is somebody turning
+   * recording **off**, and "switched query logging on handbook (enabled: false)" is what an operator
+   * scanning a page reads as "on". The direction belongs in the verb, and the detail key it consumed
+   * is then not repeated in the parenthetical.
+   */
+  it('says which way a switch was thrown, in the verb', () => {
+    const switched = (enabled: boolean) =>
+      summarizeAuditEvent({ ...base, action: 'PATCH /api/projects/:id/query-log', targetType: null, targetId: null, detail: { enabled } });
+    expect(switched(false)).toBe('dana turned query logging off for handbook');
+    expect(switched(true)).toBe('dana turned query logging on for handbook');
+    expect(switched(false)).not.toContain(' on ');
+    // Nothing is lost by leaving it out of the parenthetical: the row still carries `detail` itself.
+    expect(switched(false)).not.toContain('enabled');
+
+    // The same shape one route along: a person refusing a connector is the substance of that event.
+    const decided = (decision: string) =>
+      summarizeAuditEvent({
+        ...base,
+        action: 'POST /oauth/authorize',
+        projectId: null,
+        projectName: null,
+        targetType: null,
+        targetId: null,
+        detail: { decision },
+      });
+    expect(decided('deny')).toBe('dana refused a connector');
+    expect(decided('approve')).toBe('dana approved a connector');
+
+    // A picker chooses a route rather than an event, so the neutral wording is what it offers.
+    expect(summarizeAction('PATCH /api/projects/:id/query-log')).toBe('switched query logging');
+    expect(summarizeAction('POST /oauth/authorize')).toBe('answered a connector request');
   });
 
   /**
@@ -157,11 +187,27 @@ describe('the page cursor', () => {
   const row = { createdAt: new Date('2026-09-19T08:30:00.000Z'), id: '5f2c0a1b-0000-4000-8000-000000000002' };
 
   it('round-trips the position of the last row handed out', () => {
-    expect(decodeCursor(encodeCursor(row))).toEqual(row);
+    expect(decodeCursor(encodeCursor(row))).toEqual(row.id);
   });
 
-  it('refuses anything it did not produce', () => {
-    for (const bad of ['', 'nonsense', '~', 'not-a-date~5f2c0a1b', '2026-09-19T08:30:00.000Z~']) {
+  /**
+   * **It carries no timestamp, and that is the point.** `created_at` is `timestamptz` — microseconds
+   * in PostgreSQL — and node-postgres truncates it to the millisecond on the way into a JS `Date`. A
+   * cursor built from that truncated instant names a moment *before* the row it came from, so the next
+   * page's `<` skips every row sharing that millisecond, including ones it has not shown yet. In an
+   * audit log that is a row appearing on no page at all. `test/integration/audit-view.itest.ts` drives
+   * the collision against a real PostgreSQL; this is the property that makes it impossible.
+   */
+  it('carries the row id and nothing that could be truncated', () => {
+    expect(encodeCursor(row)).toBe(row.id);
+    expect(encodeCursor(row)).not.toContain('2026');
+    // Two rows one microsecond apart in the same millisecond encode to two different cursors, where
+    // a timestamp cursor truncated to the millisecond would encode both to the same string.
+    expect(encodeCursor({ id: '5f2c0a1b-0000-4000-8000-000000000003' })).not.toBe(encodeCursor(row));
+  });
+
+  it('refuses anything that is not a row id, rather than letting it reach a uuid column', () => {
+    for (const bad of ['', 'nonsense', '~', '2026-09-19T08:30:00.000Z~5f2c0a1b', `${row.id}x`, 'zzzzzzzz-0000-4000-8000-000000000002']) {
       expect(() => decodeCursor(bad), bad).toThrow(ValidationError);
     }
   });

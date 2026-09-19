@@ -48,6 +48,7 @@ export async function loadAudit(force = false) {
   if (!force && state.audit.loadedKey === key) return;
   state.audit.loadedKey = key;
   state.audit.status = 'loading';
+  emit('render'); // so the Refresh button says "Reading…" while it is
   try {
     const data = await api(`/api/audit?${params()}`);
     if (state.audit.loadedKey !== key) return; // a filter moved while this was in flight
@@ -191,6 +192,9 @@ function controls() {
 /** A visible label, joined to its control by wrapping it: no id to keep in step with index.html. */
 const field = (label, control) => el('label', { class: 'audit-field' }, [el('span', { class: 'field-hint', text: label }), control]);
 
+/** `2026-09-19 08:30:12Z` — an ISO instant with the `T` opened out, still unambiguous and UTC. */
+const utcStamp = (when) => `${when.toISOString().slice(0, 19).replace('T', ' ')}Z`;
+
 const hasFilter = () => Boolean(state.audit.actor || state.audit.action || state.audit.project || state.audit.from || state.audit.to);
 
 function clearFilters() {
@@ -242,10 +246,22 @@ function body() {
   ]);
 }
 
+/**
+ * The exact instant first and the human one under it.
+ *
+ * "2 min ago" is what a dashboard usually shows and it is the wrong primary value here: in an
+ * accountability record *when exactly* is the fact somebody is establishing, and a relative time
+ * cannot be compared against a log line, a ticket or another instance. It is shown in **UTC**, which
+ * is also the zone the two date filters are in — a row stamped in local time beside a filter counted
+ * in UTC is how an operator concludes a row is missing.
+ */
 function row(event) {
   const when = new Date(event.createdAt);
   return el('div', { class: 'audit-grid' }, [
-    el('span', { class: 'sub', text: relativeTime(event.createdAt), title: when.toLocaleString() }),
+    el('span', { class: 'audit-when' }, [
+      el('span', { class: 'mono', text: utcStamp(when), title: `${event.createdAt} — local: ${when.toLocaleString()}` }),
+      el('span', { class: 'sub', text: relativeTime(event.createdAt) }),
+    ]),
     el('span', { class: 'audit-actor' }, [
       el('span', { class: 'audit-who', text: event.actor.label }),
       event.actor.kind === 'token'

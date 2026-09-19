@@ -2584,13 +2584,13 @@ body.auth .gate-card a {
 
 .audit-grid {
   display: grid;
-  grid-template-columns: 110px minmax(120px, 0.9fr) minmax(0, 2.4fr) 60px;
+  grid-template-columns: 168px minmax(120px, 0.9fr) minmax(0, 2.4fr) 60px;
   gap: 12px;
   align-items: start;
   padding: 10px 0;
   border-bottom: 1px solid var(--border);
   font-size: 13.5px;
-  min-width: 620px;
+  min-width: 660px;
 }
 
 .audit-grid:last-child {
@@ -2612,6 +2612,7 @@ body.auth .gate-card a {
   font-family: var(--font-mono);
 }
 
+.audit-when,
 .audit-actor,
 .audit-cell {
   display: flex;
@@ -2629,8 +2630,15 @@ body.auth .gate-card a {
   overflow-wrap: anywhere;
 }
 
+.audit-when .mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
 .audit-cell .sub,
-.audit-actor .sub {
+.audit-actor .sub,
+.audit-when .sub {
   font-size: 12px;
   color: var(--muted);
   overflow-wrap: anywhere;
