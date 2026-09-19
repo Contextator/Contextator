@@ -76,9 +76,9 @@ describe('the row an audit event becomes', () => {
   it('keeps the address beside the actor and out of the actor columns', () => {
     const withIp = buildAuditRow(subjectOf('POST', '/api/projects/:id/reindex', { id: 'p-1' }), {
       principal: session,
-      // Whatever `req.ip` was. With `trustProxy: true` this is the left-most `X-Forwarded-For`, which
-      // a client writes when the server is reachable directly — so it is stored, and it is never what
-      // identifies the actor. `SECURITY.md` says so as a known limit.
+      // Whatever `req.ip` was — which is `TRUST_PROXY`'s answer ([ADR-0060](../.ssot/ADR.md#adr-0060))
+      // and, at `1` on a directly reachable instance, a value the client writes. So it is stored, and
+      // it is never what identifies the actor. `SECURITY.md` says so as a known limit.
       ip: '203.0.113.9',
       statusCode: 202,
     });

@@ -16,6 +16,7 @@ import './services/sources/notion.js';
 import { loadConfig, OAUTH_CLIENT_STALE_MS, OAUTH_CLIENT_UNUSED_MS, OAUTH_CREDENTIAL_SWEEP_GRACE_MS } from './config.js';
 import type { AppContext } from './context.js';
 import { createDb, waitForDb } from './db/client.js';
+import { httpServerOptions } from './http.js';
 import { bootstrapDatabase, SchemaMismatchError } from './db/bootstrap.js';
 import { oauthRoutes } from './mcp/oauth-routes.js';
 import { mcpRoutes } from './mcp/router.js';
@@ -50,11 +51,21 @@ async function main(): Promise<void> {
     logger: { level: config.LOG_LEVEL },
     // The dashboard polls; per-request log lines are noise unless debugging.
     logController: new LogController({ disableRequestLogging: !verbose }),
-    bodyLimit: 4 * 1024 * 1024, // matches the MCP SDK's own body limit
-    forceCloseConnections: true, // hijacked SSE sockets must not block shutdown
-    trustProxy: true,
+    ...httpServerOptions(config),
   });
   const log = app.log;
+
+  // The one way `TRUST_PROXY=0` goes wrong is quiet — every request keys on the proxy's address, so the
+  // per-IP sign-in budget becomes an instance-wide one — and both of these say a proxy is terminating
+  // TLS in front of this process. Say so at startup rather than letting an operator find it as a
+  // lockout nobody can explain.
+  if (config.TRUST_PROXY === false && (config.PUBLIC_BASE_URL?.startsWith('https://') || config.AUTH_COOKIE_SECURE === '1')) {
+    log.warn(
+      'TRUST_PROXY is off but this instance looks like it is behind a terminating proxy: every request will be ' +
+        'keyed on the proxy’s address, so the per-IP sign-in limit becomes instance-wide. Set TRUST_PROXY to the ' +
+        'proxy’s address or CIDR (for example TRUST_PROXY=loopback).',
+    );
+  }
 
   const { db, pool } = createDb(config.DATABASE_URL, log);
   const embeddings = createEmbeddingProvider(config, log);

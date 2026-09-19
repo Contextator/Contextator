@@ -126,13 +126,15 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
    * ([ADR-0054](../../.ssot/ADR.md#adr-0054)). Its own instance rather than `ctx.loginLimiter`,
    * because a burst of registrations must not spend a host's sign-in budget.
    *
-   * **What it is and is not worth.** `req.ip` under `trustProxy: true` is the left-most value of
-   * `X-Forwarded-For`, which the client writes, so a single script rotating that header is a different
+   * **What it is and is not worth.** A "host" here is whatever `req.ip` resolves to, and that is
+   * `TRUST_PROXY`'s answer ([ADR-0060](../../.ssot/ADR.md#adr-0060)): the socket's peer address by
+   * default, and the left-most `X-Forwarded-For` — which the client writes — on an instance set to
+   * `1`. Set to `1` on a directly reachable port, a single script rotating that header is a different
    * "host" on every request and walks straight past this. That is a property of the instance's proxy
-   * configuration and it is older than this plugin — `ctx.loginLimiter` rests on the same `req.ip` —
-   * so this is a limit on *ordinary* traffic and on unsophisticated abuse, not a defence against
-   * somebody who has read this comment. The thing that actually bounds the damage is the sweep:
-   * a client that registers and never connects is dropped within a day, whatever address it claimed.
+   * configuration and it is not this plugin's to fix — `ctx.loginLimiter` rests on the same `req.ip`.
+   * Even configured correctly this is a limit on *ordinary* traffic, since an office behind one
+   * address is one host. The thing that actually bounds the damage is the sweep: a client that
+   * registers and never connects is dropped within a day, whatever address it claimed.
    *
    * It is also bounded in itself. Nothing external sweeps it — `ctx.loginLimiter` rides the session
    * reaper and this instance is not reachable from `server.ts` — and its keys are chosen by the

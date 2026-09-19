@@ -1,3 +1,4 @@
+import net from 'node:net';
 import path from 'node:path';
 import { z } from 'zod';
 
@@ -11,6 +12,51 @@ const csv = (value: string): string[] =>
     .filter(Boolean);
 
 const flag = (value: string): boolean => value === '1' || value.toLowerCase() === 'true';
+
+/**
+ * The three subnet names `proxy-addr` — the library behind Fastify's `trustProxy` — understands, and
+ * the only entries in `TRUST_PROXY` that are not a literal address. `loopback` is the one a
+ * single-container deployment with a proxy on the host actually wants.
+ */
+const TRUST_PROXY_SUBNETS = new Set(['loopback', 'linklocal', 'uniquelocal']);
+
+/** `10.0.0.0/8`, `fd00::/8`, `192.0.2.7`, or one of the names above. Nothing else is an entry. */
+function isTrustProxyEntry(entry: string): boolean {
+  if (TRUST_PROXY_SUBNETS.has(entry)) return true;
+  const slash = entry.lastIndexOf('/');
+  if (slash === -1) return net.isIP(entry) !== 0;
+  const family = net.isIP(entry.slice(0, slash));
+  if (family === 0) return false;
+  const prefix = entry.slice(slash + 1);
+  // A prefix *length*, not a netmask: `proxy-addr` accepts `10.0.0.0/255.0.0.0` too, and this
+  // deliberately does not — two spellings of one subnet is a second thing to get wrong.
+  if (!/^\d{1,3}$/.test(prefix)) return false;
+  return Number(prefix) <= (family === 4 ? 32 : 128);
+}
+
+/**
+ * Turns `TRUST_PROXY` into the value Fastify takes, or `undefined` when it is not a value we accept
+ * ([ADR-0060](../.ssot/ADR.md#adr-0060)).
+ *
+ * **Three forms, and the fourth is refused on purpose.** `0`/`false` trusts nothing, `1`/`true` trusts
+ * every proxy, and a comma-separated list of addresses, CIDR blocks and subnet names trusts exactly
+ * those peers. Fastify also accepts a **hop count**, and this does not: a number is a claim about how
+ * many proxies are in front of the instance that the server cannot check, and it goes silently wrong
+ * the day somebody puts a CDN in front of the reverse proxy — which is the class of failure this whole
+ * variable exists to end. A list is checkable against the socket's own peer address, so a request that
+ * did not arrive from the named proxy cannot claim anything by writing a header.
+ *
+ * Refusing the hop count is also what keeps `1` unambiguous: it is `true` here, as it is for every
+ * other flag in this file, and not "one hop".
+ */
+function parseTrustProxy(value: string): boolean | string[] | undefined {
+  const lowered = value.trim().toLowerCase();
+  if (lowered === '0' || lowered === 'false') return false;
+  if (lowered === '1' || lowered === 'true') return true;
+  const entries = csv(value);
+  if (entries.length === 0) return undefined;
+  return entries.every(isTrustProxyEntry) ? entries : undefined;
+}
 
 /**
  * Held back from `CHUNK_MAX_TOKENS` when it is checked against the model's window (ADR-0035).
@@ -184,10 +230,12 @@ export const OAUTH_CLIENT_UNUSED_MS = 24 * 60 * 60_000;
  * for an hour with nothing in the message to tell them why. A "host" here is an address, not a person,
  * and the common deployment puts a department behind one.
  *
- * It is deliberately **not** the thing that bounds abuse: `req.ip` is the left-most `X-Forwarded-For`
- * under `trustProxy: true` and a script can write it. What bounds abuse is
- * `OAUTH_CLIENT_UNUSED_MS` — a row that never connects is gone within a day, whatever address claimed
- * it — and this is what keeps ordinary traffic and ordinary mistakes from reaching the ceiling at all.
+ * It is deliberately **not** the thing that bounds abuse. `req.ip` is only as trustworthy as
+ * `TRUST_PROXY` makes it ([ADR-0060](../.ssot/ADR.md#adr-0060)): at `1` it is the left-most
+ * `X-Forwarded-For` and a script can write it, and even named to the proxy it is one address for a
+ * whole office. What bounds abuse is `OAUTH_CLIENT_UNUSED_MS` — a row that never connects is gone
+ * within a day, whatever address claimed it — and this is what keeps ordinary traffic and ordinary
+ * mistakes from reaching the ceiling at all.
  */
 export const OAUTH_REGISTER_MAX_PER_HOST = 60;
 export const OAUTH_REGISTER_WINDOW_MS = 60 * 60_000;
@@ -200,6 +248,44 @@ export const EnvSchema = z
     HOST: z.string().default('0.0.0.0'),
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
     PUBLIC_BASE_URL: z.url().optional(),
+    /**
+     * Which peers may tell this server where a request came from
+     * ([ADR-0060](../.ssot/ADR.md#adr-0060)).
+     *
+     * `req.ip` is the key of both sliding windows in this product — the sign-in budget and
+     * `/oauth/register`'s per-host budget — and of the address stored beside an audit event. With this
+     * on, `req.ip` is the left-most `X-Forwarded-For` value; with it off, it is the socket's own peer
+     * address, which no header can change.
+     *
+     * **`0` is the default, and it is the default because of the shape this product ships in.**
+     * `docker-compose.yml` publishes 3444 with nothing in front of it, and there `1` would have bought
+     * nothing at all while letting any caller write its own rate-limit key — a limiter that looks like
+     * it is working and is not. The cost of `0` is real and lands the other way: **behind a reverse
+     * proxy, left unset, every request appears to come from the proxy**, so the per-IP sign-in budget
+     * becomes an instance-wide one and ten failures can shut the sign-in page for everybody. That is a
+     * misconfiguration an operator can see happening and fix with this one variable; a forged `req.ip`
+     * is one nobody can see at all. So: **put a proxy in front of this and you must set this.**
+     *
+     * Set it to the proxy rather than to `1` wherever you can. `1` is "trust whoever wrote the header",
+     * which is only safe when nothing but the proxy can open a socket to this port.
+     */
+    TRUST_PROXY: z
+      .string()
+      .default('0')
+      .transform((value, ctx) => {
+        const parsed = parseTrustProxy(value);
+        if (parsed === undefined) {
+          ctx.addIssue({
+            code: 'custom',
+            message:
+              'must be 0/false, 1/true, or a comma-separated list of IP addresses, CIDR blocks and the subnet names ' +
+              `${[...TRUST_PROXY_SUBNETS].join('/')} (for example "loopback" or "10.0.0.0/8,172.18.0.0/16"); ` +
+              'a hop count is deliberately not accepted — name the proxy instead',
+          });
+          return z.NEVER;
+        }
+        return parsed;
+      }),
     /** Machine access to /api/*, acting with root permissions. People sign in with an account. */
     ADMIN_TOKEN: z.string().min(1).optional(),
     ALLOWED_ORIGINS: z.string().default('').transform(csv),
