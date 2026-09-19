@@ -12,7 +12,7 @@ Read [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) too. Security problems do not go
 
 ## Running it
 
-You need Node.js 20 or newer (the image runs 22) and a container runtime for the database.
+You need Node.js 22 or newer — what the image runs and what CI has always used — and a container runtime for the database.
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d   # PostgreSQL 16 + pgvector on localhost:5432, nothing else

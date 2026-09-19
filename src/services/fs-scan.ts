@@ -19,8 +19,15 @@ export interface ScannedFile {
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'vendor', '__pycache__']);
 const MARKDOWN_EXT = /\.(md|mdx)$/i;
 
-/** File extensions a source may index (lower-case, without the dot). */
-export const SUPPORTED_EXTENSIONS = ['md', 'mdx', 'txt'] as const;
+/**
+ * File extensions a source may index (lower-case, without the dot).
+ *
+ * **Every one of them is a Markdown document by the time the chunker sees it**
+ * ([ADR-0056](../../.ssot/ADR.md#adr-0056)). The list is the registry's key set — `services/doc-types`
+ * holds one transform per entry and the compiler checks the two agree — so adding a type here without
+ * a transform for it does not compile.
+ */
+export const SUPPORTED_EXTENSIONS = ['md', 'mdx', 'txt', 'html', 'htm', 'csv', 'docx', 'pdf'] as const;
 export type SupportedExtension = (typeof SUPPORTED_EXTENSIONS)[number];
 export const DEFAULT_EXTENSIONS: SupportedExtension[] = ['md', 'mdx'];
 
@@ -102,10 +109,19 @@ export async function* walkMarkdown(
   yield* walk(rootReal, []);
 }
 
-export async function readAndHash(absolutePath: string): Promise<{ content: string; hash: string; sizeBytes: number }> {
+/**
+ * The file's bytes, its sha256 and its size.
+ *
+ * **Bytes and not a string, since [ADR-0056](../../.ssot/ADR.md#adr-0056).** Half the types a source
+ * may now index — `.pdf`, `.docx` — are not text at all, and `buf.toString('utf8')` on one of them is
+ * a lossy decode that the extractor then has to undo. The hash is over the raw bytes exactly as
+ * before, because that is what decides whether a file changed ([ADR-0014](../../.ssot/ADR.md#adr-0014));
+ * what those bytes *say* is `extractDocument`'s question, and it is asked after this one.
+ */
+export async function readAndHash(absolutePath: string): Promise<{ bytes: Buffer; hash: string; sizeBytes: number }> {
   const buf = await fs.readFile(absolutePath);
   return {
-    content: buf.toString('utf8'),
+    bytes: buf,
     hash: createHash('sha256').update(buf).digest('hex'),
     sizeBytes: buf.byteLength,
   };
