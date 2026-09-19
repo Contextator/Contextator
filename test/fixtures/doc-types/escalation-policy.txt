@@ -1,0 +1,13 @@
+ESCALATION POLICY
+=================
+
+Every report opens at level one.
+
+A report is raised to level two when it blocks a customer from working, and to
+level three when it affects more than one customer at once.
+
+  * Level one is answered during office hours.
+  * Level two is answered within the hour, every day.
+  * Level three wakes the on-call engineer.
+
+The duty engineer makes the call and writes down why.

@@ -9,7 +9,7 @@ import type { Db } from '../../db/client.js';
 import { documentSources, projects } from '../../db/schema.js';
 import { type ImportLimits, importTree, unpackTar, withScratch } from '../archives.js';
 import { removeProjectDir, sourceCurrentDir } from '../data-dir.js';
-import { FLAVORS, type Flavor } from '../flavors.js';
+import { allowedExtensionsFor, FLAVORS, type Flavor } from '../flavors.js';
 import { createProject } from '../projects.js';
 import { SOURCE_TYPES, type SourceType, parseSourceConfig, sourceVersion } from '../sources.js';
 import { textSearchConfigFor } from '../text-search.js';
@@ -134,9 +134,11 @@ export async function importProject(deps: ImportDeps, archivePath: string, name?
     maxTotalBytes: config.ARCHIVE_MAX_TOTAL_BYTES,
     maxFileBytes: config.UPLOAD_MAX_FILE_BYTES,
     // The extension filter that applies to the carried trees is the *source's* own, read from its
-    // config below. This one covers the unpack, where nothing is being decided about a document yet.
+    // config below. This one covers the unpack, where nothing is being decided about a document yet,
+    // so neither the path cleanup nor the permission is consulted.
     extensions: [],
-    flavor: 'plain',
+    pathFlavor: 'plain',
+    allowedExtensions: [],
   };
 
   return withScratch(async (scratch) => {
@@ -416,6 +418,12 @@ async function insertImportedSource(
  * `config.extensions`, not the exporter's claim about them, so a tarball cannot widen what this
  * instance is willing to store by saying so in a file.
  */
+/** The manifest's flavor, already validated by `createSources`; `plain` for anything it did not name. */
+function flavorOf(source: z.infer<typeof ImportedSource>): Flavor {
+  const flavor = source.flavor as Flavor;
+  return FLAVORS.includes(flavor) ? flavor : 'plain';
+}
+
 async function carryUploadTrees(
   deps: ImportDeps,
   scratch: string,
@@ -439,7 +447,13 @@ async function carryUploadTrees(
       // `plain`, not the source's flavor: the tree in the tarball is the *materialised* tree, whose
       // paths a flavor has already been applied to once. Applying it twice would rename what the
       // documents in the same file point at.
-      flavor: 'plain',
+      pathFlavor: 'plain',
+      // The **source's** content type, not `plain`, and that is a different question from the one
+      // above ([ADR-0057](../../../.ssot/ADR.md#adr-0057)). What may be carried in is whatever this
+      // source indexes, and reading it off `pathFlavor` would have dropped every `.yaml` of a restored
+      // `openapi` source — silently, with a green import, and then the first re-index would delete
+      // every document derived from the files that never arrived.
+      allowedExtensions: allowedExtensionsFor(flavorOf(source)),
     });
     carried.set(source.name, stats.files);
   }

@@ -7,7 +7,7 @@ import type { Config } from '../config.js';
 import type { DocumentSourceRow } from '../db/schema.js';
 import { cleanEntryPath, extractArchive, importTree, isArchiveName, type ImportLimits, type ImportStats } from './archives.js';
 import { mergeDirectory, sourceCurrentDir, stagingDir, swapDirectory } from './data-dir.js';
-import type { Flavor } from './flavors.js';
+import { allowedExtensionsFor, type Flavor } from './flavors.js';
 import { isInside, normalizeRelativePath } from './fs-scan.js';
 import { NotFoundError, ValidationError } from './projects.js';
 
@@ -31,7 +31,10 @@ export class UploadService {
       maxTotalBytes: this.config.ARCHIVE_MAX_TOTAL_BYTES,
       maxFileBytes: this.config.UPLOAD_MAX_FILE_BYTES,
       extensions,
-      flavor: source.flavor as Flavor,
+      pathFlavor: source.flavor as Flavor,
+      // A live upload source: the tree being built *is* the source's own, so its content type decides
+      // both the path cleanup and which extensions may land ([ADR-0057](../../.ssot/ADR.md#adr-0057)).
+      allowedExtensions: allowedExtensionsFor(source.flavor as Flavor),
     };
   }
 
@@ -93,7 +96,7 @@ export class UploadService {
       return stats;
     }
 
-    const cleaned = cleanEntryPath(normalized, limits.flavor);
+    const cleaned = cleanEntryPath(normalized, limits.pathFlavor);
     if (!cleaned) {
       // Drain and ignore (dotfiles, non-portable names).
       await pipeline(stream, createWriteStream(path.join(filesDir, '..', 'discard')));

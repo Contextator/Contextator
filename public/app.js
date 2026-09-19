@@ -660,6 +660,11 @@ function renderSources(project, busy) {
   const rows = sources.map((s) => {
     const confirming = state.confirmDeleteSource === s.id;
     const failed = s.status === 'error';
+    // A source can carry a complaint without having failed: since ADR-0056 a file the indexer could
+    // not convert — a scanned PDF, a file over the conversion limit — writes its reason here while the
+    // source itself synced perfectly and everything else in it indexed. Showing `lastError` only when
+    // `status === 'error'` hid exactly that case, which made the refusal a silent failure of its own.
+    const warned = !failed && Boolean(s.lastError);
     const actions = [
       mayEdit && (s.type === 'git' || s.type === 'notion')
         ? el('button', {
@@ -697,7 +702,7 @@ function renderSources(project, busy) {
         : null,
     ];
     return el('div', { class: 'source-row' }, [
-      el('span', { class: `source-glyph ${failed ? 'error' : s.type}`, text: SOURCE_GLYPH[s.type] ?? '?' }),
+      el('span', { class: `source-glyph ${failed ? 'error' : warned ? 'warn' : s.type}`, text: SOURCE_GLYPH[s.type] ?? '?' }),
       el('span', { class: 'source-cell' }, [
         el('code', { text: s.name }),
         el('span', { class: 'sub', text: s.label || SOURCE_TITLE[s.type] || s.type }),
@@ -705,9 +710,9 @@ function renderSources(project, busy) {
       el('span', { class: 'source-cell' }, [
         el('code', { text: sourceOrigin(s), title: sourceOrigin(s) }),
         el('span', {
-          class: `sub${failed ? ' err' : ''}`,
-          text: failed ? shortError(s.lastError, 80) : sourceDetail(s),
-          title: failed ? s.lastError || '' : '',
+          class: `sub${failed ? ' err' : warned ? ' warn' : ''}`,
+          text: failed || warned ? shortError(s.lastError, 80) : sourceDetail(s),
+          title: failed || warned ? s.lastError || '' : '',
         }),
       ]),
       el('span', { class: 'sub', text: s.flavor === 'plain' ? '—' : s.flavor, title: 'Content type' }),
@@ -1030,6 +1035,33 @@ function splitRoot(absolute) {
   return { root: allowedRoots()[0] || '', rest: full };
 }
 
+/**
+ * Shows only the file types the selected content type can read.
+ *
+ * `.yaml`, `.yml` and `.json` belong to the OpenAPI content type alone — it is the only reader that
+ * knows what to do with a structured file — and the API refuses them on any other, so offering them
+ * everywhere would offer a save that cannot succeed. A box that goes away is also unchecked, or an
+ * operator who tried OpenAPI and changed their mind would carry an invisible `.yaml` into the save.
+ */
+function syncFlavorFields({ check = false } = {}) {
+  const flavor = srcForm.elements.flavor.value;
+  for (const box of srcForm.querySelectorAll('.flavor-only')) {
+    const mine = box.dataset.flavor.split(' ').includes(flavor);
+    box.hidden = !mine;
+    // **A type that appears unchecked is a trap.** Choosing "OpenAPI / Swagger" and then uploading a
+    // specification without noticing the new `.yaml` box would pass the source's extension filter with
+    // nothing in it: the file is dropped on the way in, quietly, and the source indexes the README it
+    // came with. So picking the content type checks what that content type is *for*. Only on a change
+    // the operator just made — loading an existing source keeps whatever it has stored.
+    for (const input of box.querySelectorAll('input')) input.checked = mine ? check || input.checked : false;
+  }
+}
+
+srcForm.elements.flavor.addEventListener('change', () => {
+  syncFlavorFields({ check: true });
+  renderQueue();
+});
+
 function setKind(kind) {
   srcUi.kind = kind;
   const meta = SOURCE_KINDS[kind];
@@ -1040,6 +1072,7 @@ function setKind(kind) {
   $('#source-subtitle').textContent = meta.subtitle;
   if (meta.flavor) srcForm.elements.flavor.value = meta.flavor;
   srcForm.elements.flavor.disabled = Boolean(meta.flavor);
+  syncFlavorFields();
   $('#upload-mode-row').hidden = !(isUploadKind(kind) && editing);
   $('#index-label').textContent = isUploadKind(kind) ? 'Index after upload' : 'Index now';
   $('#source-test').hidden = !(editing && (meta.type === 'git' || meta.type === 'notion'));
@@ -1109,6 +1142,7 @@ function fillSourceForm(s) {
   srcForm.elements.name.value = s.name;
   srcForm.elements.label.value = s.label || '';
   srcForm.elements.flavor.value = s.flavor || 'plain';
+  syncFlavorFields();
   srcForm.elements.version.value = c.version || '';
   setSyncIntervalField(s.syncIntervalMinutes);
   $('#src-next-sync').textContent = syncScheduleLabel(s);
@@ -1353,7 +1387,24 @@ async function entriesFromDataTransfer(dt) {
   return out;
 }
 
+/**
+ * The dropzone says which extensions *this source* takes, read off the File types checkboxes above it.
+ *
+ * It used to be a fixed list in the markup, and a fixed list is wrong whichever list it is: a new
+ * upload source defaults to `.md` and `.mdx`, so an operator who read "…, .docx, .pdf" and dropped a
+ * PDF was told "unsupported file type" by the line directly under the sentence that invited it.
+ */
+function renderDropzoneTypes() {
+  const types = extensionsFromForm();
+  const hint = $('#dropzone-types');
+  if (!hint) return;
+  hint.textContent =
+    (types.length ? `${types.map((e) => `.${e}`).join(', ')} · ` : 'tick a file type above · ') +
+    'folders keep their structure · .zip, .tar.gz and .rar are unpacked on the server';
+}
+
 function renderQueue(note) {
+  renderDropzoneTypes();
   const queued = srcUi.queue.filter((i) => i.status === 'queued').length;
   const settled = srcUi.queue.filter((i) => i.status === 'ok' || i.status === 'skip').length;
   const skipped = srcUi.queue.filter((i) => i.status === 'skip').length;

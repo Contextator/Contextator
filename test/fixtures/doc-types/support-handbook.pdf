@@ -1,0 +1,88 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 9 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 964 >>
+stream
+BT /F1 8 Tf 1 0 0 1 72.00 756.00 Tm (Acme Support  Internal) Tj ET
+BT /F1 8 Tf 1 0 0 1 300.00 36.00 Tm (Page 1 of 3) Tj ET
+BT /F1 18 Tf 1 0 0 1 72.00 696.00 Tm (Support Handbook) Tj ET
+BT /F1 13 Tf 1 0 0 1 72.00 652.00 Tm (Escalation levels) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 624.00 Tm (Every report opens at level one. A report is raised to level two when it blocks a customer) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 609.00 Tm (from working, and to level three when it affects more than one customer at once. Escala-) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 594.00 Tm (tion is a judgement the duty engineer makes and writes down.) Tj ET
+BT /F1 13 Tf 1 0 0 1 72.00 556.00 Tm (What each level owes) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 528.00 Tm (• Level one is answered during office hours.) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 510.00 Tm (• Level two is answered within the hour, every day.) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 492.00 Tm (• Level three wakes the on-call engineer.) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 9 0 R >> >> /Contents 6 0 R >>
+endobj
+6 0 obj
+<< /Length 1052 >>
+stream
+BT /F1 8 Tf 1 0 0 1 72.00 756.00 Tm (Acme Support  Internal) Tj ET
+BT /F1 8 Tf 1 0 0 1 300.00 36.00 Tm (Page 2 of 3) Tj ET
+BT /F1 13 Tf 1 0 0 1 72.00 696.00 Tm (Response targets) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 660.00 Tm (Level) Tj ET
+BT /F1 10 Tf 1 0 0 1 200.00 660.00 Tm (First reply) Tj ET
+BT /F1 10 Tf 1 0 0 1 360.00 660.00 Tm (Resolution) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 640.00 Tm (One) Tj ET
+BT /F1 10 Tf 1 0 0 1 200.00 640.00 Tm (Two working days) Tj ET
+BT /F1 10 Tf 1 0 0 1 360.00 640.00 Tm (Ten working days) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 620.00 Tm (Two) Tj ET
+BT /F1 10 Tf 1 0 0 1 200.00 620.00 Tm (One hour) Tj ET
+BT /F1 10 Tf 1 0 0 1 360.00 620.00 Tm (Two working days) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 600.00 Tm (Three) Tj ET
+BT /F1 10 Tf 1 0 0 1 200.00 600.00 Tm (Fifteen minutes) Tj ET
+BT /F1 10 Tf 1 0 0 1 360.00 600.00 Tm (Same day) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 552.00 Tm (The targets are measured from the moment the report is filed, not from the moment somebody) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 537.00 Tm (reads it.) Tj ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 9 0 R >> >> /Contents 8 0 R >>
+endobj
+8 0 obj
+<< /Length 449 >>
+stream
+BT /F1 8 Tf 1 0 0 1 72.00 756.00 Tm (Acme Support  Internal) Tj ET
+BT /F1 8 Tf 1 0 0 1 300.00 36.00 Tm (Page 3 of 3) Tj ET
+BT /F1 13 Tf 1 0 0 1 72.00 696.00 Tm (Who to call) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 660.00 Tm (The duty roster lives in the team calendar. Outside office hours the on-call engineer is the) Tj ET
+BT /F1 10 Tf 1 0 0 1 72.00 645.00 Tm (only person who may change a level three, and the change is recorded in the incident.) Tj ET
+endstream
+endobj
+9 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+10 0 obj
+<< /Title (Support Handbook) >>
+endobj
+xref
+0 11
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000127 00000 n 
+0000000253 00000 n 
+0000001268 00000 n 
+0000001394 00000 n 
+0000002498 00000 n 
+0000002624 00000 n 
+0000003124 00000 n 
+0000003221 00000 n 
+trailer
+<< /Size 11 /Root 1 0 R /Info 10 0 R >>
+startxref
+3269
+%%EOF

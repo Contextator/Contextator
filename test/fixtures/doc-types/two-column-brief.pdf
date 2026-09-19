@@ -1,0 +1,54 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 1587 >>
+stream
+BT /F1 16 Tf 1 0 0 1 60.00 712.00 Tm (Quarterly Platform Brief — Q3 Summary) Tj ET
+BT /F1 10 Tf 1 0 0 1 60.00 662.00 Tm (The platform team spent the quarter on) Tj ET
+BT /F1 10 Tf 1 0 0 1 60.00 647.00 Tm (the queue. Two lanes replaced the single) Tj ET
+BT /F1 10 Tf 1 0 0 1 60.00 632.00 Tm (one, and a person pressing a button no) Tj ET
+BT /F1 10 Tf 1 0 0 1 60.00 617.00 Tm (longer waits behind an hour of timers.) Tj ET
+BT /F1 10 Tf 1 0 0 1 60.00 602.00 Tm (Nothing else about the queue changed.) Tj ET
+BT /F1 10 Tf 1 0 0 1 60.00 587.00 Tm (The dashboard now says how many runs) Tj ET
+BT /F1 10 Tf 1 0 0 1 60.00 572.00 Tm (are ahead of the one being waited on,) Tj ET
+BT /F1 10 Tf 1 0 0 1 60.00 557.00 Tm (and says it in the queue lane the run) Tj ET
+BT /F1 10 Tf 1 0 0 1 60.00 542.00 Tm (actually sits in rather than in total.) Tj ET
+BT /F1 10 Tf 1 0 0 1 330.00 662.00 Tm (Retrieval moved less. The model is the) Tj ET
+BT /F1 10 Tf 1 0 0 1 330.00 647.00 Tm (one it was, the chunk budget is the one) Tj ET
+BT /F1 10 Tf 1 0 0 1 330.00 632.00 Tm (it was, and the only number that moved) Tj ET
+BT /F1 10 Tf 1 0 0 1 330.00 617.00 Tm (was the cap on how many results one) Tj ET
+BT /F1 10 Tf 1 0 0 1 330.00 602.00 Tm (document may contribute to an answer.) Tj ET
+BT /F1 10 Tf 1 0 0 1 330.00 587.00 Tm (That cap is per document and not per) Tj ET
+BT /F1 10 Tf 1 0 0 1 330.00 572.00 Tm (source, which is the distinction the) Tj ET
+BT /F1 10 Tf 1 0 0 1 330.00 557.00 Tm (previous release got wrong and the) Tj ET
+BT /F1 10 Tf 1 0 0 1 330.00 542.00 Tm (reason two answers looked identical.) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+6 0 obj
+<< /Title (Quarterly Platform Brief) >>
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000001880 00000 n 
+0000001977 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R /Info 6 0 R >>
+startxref
+2032
+%%EOF
