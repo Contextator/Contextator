@@ -115,6 +115,7 @@
           <button type="button" class="tab" role="tab" data-kind="upload">Upload files</button>
           <button type="button" class="tab" role="tab" data-kind="obsidian">Obsidian vault</button>
           <button type="button" class="tab" role="tab" data-kind="notion">Notion</button>
+          <button type="button" class="tab" role="tab" data-kind="confluence">Confluence</button>
         </div>
         <div class="dialog-body">
           <div class="field-row">
@@ -217,6 +218,35 @@
                 <button type="button" class="ghost small" id="notion-webhook-copy-token">Copy token</button>
               </div>
             </div>
+          </div>
+
+          <div class="kind-only" data-kind="confluence">
+            <label class="field">
+              <span class="field-label">Site URL</span>
+              <input name="confluenceUrl" type="url" placeholder="https://your-site.atlassian.net/wiki" autocomplete="off" spellcheck="false" />
+              <span class="field-hint"><strong>Confluence Cloud only.</strong> Include the <code>/wiki</code> path. Data Center and Server are not supported.</span>
+            </label>
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Account e-mail</span>
+                <input name="confluenceEmail" type="email" placeholder="you@example.com" autocomplete="off" spellcheck="false" />
+                <span class="field-hint">The Atlassian account the API token belongs to.</span>
+              </label>
+              <label class="field">
+                <span class="field-label">API token</span>
+                <input name="confluenceSecret" type="password" placeholder="ATATT…" autocomplete="off" />
+                <span class="field-hint">Create one at id.atlassian.com/manage-profile/security/api-tokens. Stored encrypted with <code>SECRET_KEY</code>.</span>
+              </label>
+            </div>
+            <label class="check-inline" id="confluence-clear-secret-row" hidden>
+              <input type="checkbox" id="confluence-clear-secret" />
+              <span>Remove the stored token</span>
+            </label>
+            <label class="field">
+              <span class="field-label">Spaces <span class="muted">— optional</span></span>
+              <textarea name="spaceKeys" rows="2" placeholder="Space keys, one per line. Empty = every space this account can read."></textarea>
+              <span class="field-hint">Pages are indexed as <code>&lt;name&gt;/&lt;space&gt;/&lt;parent page&gt;/&lt;page&gt;.md</code>, nested the way they are in Confluence.</span>
+            </label>
           </div>
 
           <div class="kind-only" data-kind="obsidian">

@@ -1,9 +1,9 @@
 # Contextator
 
 **Self-hosted, multi-tenant MCP documentation server.** Give a project its document sources — mounted
-folders, git repositories, uploaded archives, a Notion workspace — and it becomes its own
-[Model Context Protocol](https://modelcontextprotocol.io) endpoint that AI agents (Cursor, Claude Code,
-Claude Desktop, …) can search semantically:
+folders, git repositories, uploaded archives, a Notion workspace, a Confluence Cloud site — and it
+becomes its own [Model Context Protocol](https://modelcontextprotocol.io) endpoint that AI agents
+(Cursor, Claude Code, Claude Desktop, …) can search semantically:
 
 ```
 http://localhost:3444/mcp/<project-name>
@@ -13,8 +13,9 @@ http://localhost:3444/mcp/<project-name>
   vector embeddings in PostgreSQL + [pgvector](https://github.com/pgvector/pgvector). A client
   connected to `/mcp/billing` never sees `/mcp/mobile`.
 - **Many sources per project.** A local directory, a git repository (or one subdirectory of it), an
-  upload of files/folders/`.zip`/`.tar.gz`/`.rar`, or a Notion workspace — combined into one searchable
-  endpoint. Every source is mounted under its own name, so documents read as `handbook/install.md`.
+  upload of files/folders/`.zip`/`.tar.gz`/`.rar`, a Notion workspace or a Confluence Cloud site —
+  combined into one searchable endpoint. Every source is mounted under its own name, so documents read
+  as `handbook/install.md`.
 - **100 % local by default.** Embeddings are generated on the CPU with
   [transformers.js](https://huggingface.co/docs/transformers.js) (`Xenova/multilingual-e5-small`, a
   retrieval model covering 100 languages incl. Turkish). Switch to OpenAI embeddings with two env vars.
@@ -110,6 +111,7 @@ The name is the mount point, so it cannot change after creation; everything else
 | **Git repository** | A shallow, single-branch checkout under `DATA_DIR`. Any HTTPS git server: GitHub, GitLab, Bitbucket, Gitea/Forgejo/Codeberg. Optionally only a **subdirectory** of the repository (`docs/`). | `git fetch` of the branch tip at the start of every index run, a push webhook, or the sync interval below |
 | **Upload** | Files, whole folders (structure preserved) and archives — `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.rar` — unpacked on the server. Add to the existing files or replace them all. | Nothing to sync; the files live under `DATA_DIR` |
 | **Notion** | Every page shared with an internal integration (or the configured root pages/databases and their descendants), rendered to Markdown, nested by parent page. | The Notion API, re-rendering only pages whose `last_edited_time` changed |
+| **Confluence** | **Cloud only** (see below). Every page in the chosen spaces — or in every space the account can read — rendered from Confluence's storage format to Markdown, nested the way it is in the wiki: `<name>/<space>/<parent page>/<page>.md`. | The Confluence REST API, re-rendering only pages whose version number changed |
 
 Sources are synced at the start of every index run, one after another; a source that fails to sync is
 reported on its own row and the others still index. **Sync** on a row and **Re-index** in the header
@@ -139,6 +141,42 @@ one.
 another name: `api-v3` and `sdk-v3` are two mount points of one release, and `version: "v3"` searches
 both. Changing a source's version re-indexes it, the way changing its content type does.
 
+### Confluence: Cloud, and not Data Center
+
+The Confluence source speaks **Confluence Cloud** — the REST API under `https://<site>.atlassian.net/wiki`,
+authenticated with an Atlassian account e-mail and an [API token](https://id.atlassian.com/manage-profile/security/api-tokens).
+Put the site URL in with its `/wiki` path, the e-mail of the account the token belongs to, and the token
+itself; it is stored encrypted with `SECRET_KEY` and is never shown again or returned by the API.
+
+**Confluence Data Center and Server are not supported.** They publish a different API at a different
+base path and authenticate with a personal access token as a bearer, and a connector that half-works
+against them would be worse than one that says so: the failure would be a 404 or an empty space rather
+than a message. If that is what you run, the honest workaround today is to export the space and add it
+as an **Upload** source.
+
+Leave *Spaces* empty and the source indexes every space the account can read; name space keys — one per
+line, `ENG`, `OPS` — and it indexes exactly those. The account's own permissions are the outer boundary
+either way: this product never sees a page the account cannot.
+
+Confluence's storage format (the XHTML a page is stored as) goes through the same HTML→Markdown transform
+`.html` files do, so tables, code blocks, task lists and admonitions survive as structure. Macros are
+unwrapped: the text inside an expand or a panel is indexed, the macro's own configuration is not.
+
+**One source indexes at most 5 000 pages.** A wiki larger than that is indexed up to the ceiling and
+the run says so, in those words, on the source's row — because the alternative is a source that looks
+completely indexed while `search_docs` answers "not in the documentation" about pages that exist. Split
+a larger wiki across several sources by naming fewer spaces on each; the scheduled check below reports
+the space's real total beside the number indexed, so the two are visible together.
+
+**If one of several named spaces stops answering, nothing is deleted.** A renamed space key, or a
+permission withdrawn from the account, reads to the API as a space with no pages — not as an error —
+and the ordinary "remove what is gone" pass would then delete every document that came from it while
+the run reported success. A configured space that held documents a moment ago and offers none now fails
+the sync instead, naming the space. With *Spaces* left empty there is no list of what should be there,
+so that check cannot be made; name your spaces if you want it.
+
+There is **no Confluence webhook yet**. The sync interval below is how a Confluence source stays fresh.
+
 ### Keeping a source fresh on its own
 
 A source can carry a **sync interval** — the *Sync every* field in its dialog — and the server checks it
@@ -151,6 +189,7 @@ index run only happens when the answer moved since the last successful sync:
 |------|---------------|-----------|
 | Git | `git ls-remote` on the tracked branch — one ref advertisement, no objects | A fetch |
 | Notion | One `search`, newest edit first, one result | A page read per page, 350 ms apart |
+| Confluence | One CQL search over the same spaces the run indexes: how many pages there are, and when the newest was touched | A listing plus a body read per page |
 | Local, Upload | The file count and the newest modification time | Reading and hashing every file |
 
 A check that cannot answer — a directory that has gone, a rate-limited API, a network that is down —
@@ -902,7 +941,10 @@ src/db/bootstrap.ts           startup: the extension, the migration journal, `mi
 src/services/chunker.ts       Markdown/MDX-aware chunking with heading breadcrumbs; pure and synchronous, the token counter injected
 src/services/fs-scan.ts       safe directory walking + path-escape checks
 src/services/sources.ts       source CRUD and the zod schema of each type's config
-src/services/sources/         one driver per type: local, git (isomorphic-git), upload, notion
+src/services/sources/         one driver per type: local, git (isomorphic-git), upload, notion, confluence
+src/services/sources/confluence.ts        the Confluence Cloud driver: the page tree, the incremental skip, and the probe
+src/services/sources/confluence-client.ts the REST surface it talks to, as an interface plus an HTTPS implementation, and the one place CQL is built
+src/services/sources/confluence-render.ts storage format → the plain XHTML `doc-types/html.ts` converts; it does not convert HTML itself
 src/services/flavors.ts       content-type transforms (Obsidian wikilinks, Notion export ids) and which of them expand one file into many
 src/services/openapi.ts       OpenAPI/Swagger → one Markdown document per operation: $ref resolution, cycle and depth guards, derived paths
 src/services/doc-types/       one transform per file extension, all of them producing Markdown: html, docx, csv, pdf
@@ -966,6 +1008,7 @@ test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vect
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
 test/integration/fixtures/    a pre-v3 `0.1` schema derived from history, and the frozen DDL ladder the migrations replaced
 test/fixtures/doc-types/      one real file per supported type, plus the malformed ones a refusal has to survive
+test/support/confluence-stub.ts a `ConfluenceClient` answering out of an array, shared by the unit and the integration suite so one page tree drives both
 eval/corpus/                  the fixture corpus the golden set asks about: 15 English and 11 Turkish pages, written for this
 eval/golden.jsonl             48 questions, one JSON object per line, each naming the file that answers it
 eval/README.md                what a good question is, how to add one, and why the failures are kept

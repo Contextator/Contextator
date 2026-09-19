@@ -46,8 +46,14 @@ const TOOLS = [
   { name: 'read_document', text: 'Markdown of one indexed file from the database — a whole page, or one section by its heading.' },
 ];
 
-const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN' };
-const SOURCE_TITLE = { local: 'Local directory', git: 'Git repository', upload: 'Uploaded files', notion: 'Notion workspace' };
+const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN', confluence: 'CNF' };
+const SOURCE_TITLE = {
+  local: 'Local directory',
+  git: 'Git repository',
+  upload: 'Uploaded files',
+  notion: 'Notion workspace',
+  confluence: 'Confluence site',
+};
 
 /**
  * Dialog tabs ("kinds") are not server-side types: an Obsidian vault is an upload source that carries
@@ -68,7 +74,28 @@ const SOURCE_KINDS = {
     subtitle: 'An uploaded vault; [[wikilinks]] are rewritten to Markdown links.',
   },
   notion: { type: 'notion', title: 'Notion', subtitle: 'Pages shared with an internal integration are rendered to Markdown on every sync.' },
+  confluence: {
+    type: 'confluence',
+    title: 'Confluence',
+    subtitle: 'Confluence Cloud. Pages in the chosen spaces are rendered to Markdown, nested the way they are in the wiki.',
+  },
 };
+
+/**
+ * The source types that hold a credential, and the form field each one's token is typed into.
+ *
+ * One set rather than a chain of `||`: the Test button, the "remove the stored token" checkbox and
+ * the patch below all mean the same thing by it, and a new type that was added to two of the three is
+ * exactly the bug this shape removes.
+ */
+const SECRET_FIELD = { git: 'secret', notion: 'notionSecret', confluence: 'confluenceSecret' };
+const CREDENTIALLED = new Set(Object.keys(SECRET_FIELD));
+const CLEAR_SECRET_ROWS = () => ({
+  git: $('#git-clear-secret-row'),
+  notion: $('#notion-clear-secret-row'),
+  confluence: $('#confluence-clear-secret-row'),
+});
+const clearSecretRow = (type) => CLEAR_SECRET_ROWS()[type];
 
 // ---------- helpers ----------
 
@@ -666,7 +693,7 @@ function renderSources(project, busy) {
     // `status === 'error'` hid exactly that case, which made the refusal a silent failure of its own.
     const warned = !failed && Boolean(s.lastError);
     const actions = [
-      mayEdit && (s.type === 'git' || s.type === 'notion')
+      mayEdit && CREDENTIALLED.has(s.type)
         ? el('button', {
             type: 'button',
             class: 'ghost small',
@@ -743,7 +770,7 @@ function renderSources(project, busy) {
       : el('p', {
           class: 'sources-empty',
           text: mayEdit
-            ? 'No sources yet. Add a local directory, a git repository, an upload or a Notion workspace to give this project something to index.'
+            ? 'No sources yet. Add a local directory, a git repository, an upload, a Notion workspace or a Confluence site to give this project something to index.'
             : 'No sources yet. An editor on this project can add one.',
         }),
   ]);
@@ -755,6 +782,7 @@ function sourceOrigin(s) {
   if (s.type === 'local') return c.path || '—';
   if (s.type === 'git') return c.url || '—';
   if (s.type === 'notion') return (c.rootIds || []).length ? `${c.rootIds.length} root page(s)` : 'everything shared with the integration';
+  if (s.type === 'confluence') return c.baseUrl || '—';
   return `${s.name}/`;
 }
 
@@ -1075,9 +1103,9 @@ function setKind(kind) {
   syncFlavorFields();
   $('#upload-mode-row').hidden = !(isUploadKind(kind) && editing);
   $('#index-label').textContent = isUploadKind(kind) ? 'Index after upload' : 'Index now';
-  $('#source-test').hidden = !(editing && (meta.type === 'git' || meta.type === 'notion'));
+  $('#source-test').hidden = !(editing && CREDENTIALLED.has(meta.type));
   // Clearing a token is only offered where one is actually stored.
-  for (const type of ['git', 'notion']) {
+  for (const type of CREDENTIALLED) {
     const row = clearSecretRow(type);
     row.hidden = !(editing?.hasSecret && meta.type === type);
     if (row.hidden) row.querySelector('input').checked = false;
@@ -1107,6 +1135,7 @@ function openSourceDialog(project, source) {
   srcForm.reset();
   srcForm.elements.secret.placeholder = 'leave empty for public repositories';
   srcForm.elements.notionSecret.placeholder = 'ntn_… / secret_…';
+  srcForm.elements.confluenceSecret.placeholder = 'ATATT…';
   $('#secret-hint').innerHTML = SECRET_HINT_HTML; // static markup restored, never user data
   renderSrcRootPrefix();
 
@@ -1122,7 +1151,7 @@ function openSourceDialog(project, source) {
   setKind(source ? kindOfSource(source) : 'local');
   if (srcUi.readOnly) {
     for (const field of srcForm.querySelectorAll('input, select, textarea')) field.disabled = true;
-    for (const secret of [srcForm.elements.secret, srcForm.elements.notionSecret]) secret.value = '';
+    for (const type of CREDENTIALLED) srcForm.elements[SECRET_FIELD[type]].value = '';
   }
 
   openDialog(srcDialog);
@@ -1166,6 +1195,12 @@ function fillSourceForm(s) {
   if (s.type === 'notion') {
     srcForm.elements.rootIds.value = (c.rootIds || []).join('\n');
     if (s.hasSecret) srcForm.elements.notionSecret.placeholder = 'unchanged — type to replace';
+  }
+  if (s.type === 'confluence') {
+    srcForm.elements.confluenceUrl.value = c.baseUrl || '';
+    srcForm.elements.confluenceEmail.value = c.email || '';
+    srcForm.elements.spaceKeys.value = (c.spaceKeys || []).join('\n');
+    if (s.hasSecret) srcForm.elements.confluenceSecret.placeholder = 'unchanged — type to replace';
   }
   updateProviderHint();
 }
@@ -1285,6 +1320,15 @@ function setSyncIntervalField(minutes) {
 
 const NOTION_ID_RE = /[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}/i;
 
+/** Space keys, one per line; the server rejects anything outside `[A-Za-z0-9~_-]`. */
+function parseSpaceKeys(text) {
+  return String(text || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 50);
+}
+
 /** Accepts ids or pasted page URLs, one per line. */
 function parseNotionIds(text) {
   return String(text || '')
@@ -1331,18 +1375,21 @@ function configForKind(kind) {
     const ids = parseNotionIds(srcForm.elements.rootIds.value);
     return { rootIds: ids, ...common };
   }
+  if (type === 'confluence') {
+    const baseUrl = srcForm.elements.confluenceUrl.value.trim().replace(/\/+$/, '');
+    if (!baseUrl) throw new Error('A Confluence site URL is required');
+    return { baseUrl, email: srcForm.elements.confluenceEmail.value.trim(), spaceKeys: parseSpaceKeys(srcForm.elements.spaceKeys.value), ...common };
+  }
   return { ...common };
 }
-
-const clearSecretRow = (type) => $(type === 'git' ? '#git-clear-secret-row' : '#notion-clear-secret-row');
 
 /** `{}` keeps the stored token, `{ secret }` replaces it, `{ secret: null }` removes it. */
 function secretPatchForKind(kind) {
   const { type } = SOURCE_KINDS[kind];
-  if (type !== 'git' && type !== 'notion') return {};
+  if (!CREDENTIALLED.has(type)) return {};
   const row = clearSecretRow(type);
   if (!row.hidden && row.querySelector('input').checked) return { secret: null };
-  const value = (type === 'git' ? srcForm.elements.secret : srcForm.elements.notionSecret).value.trim();
+  const value = srcForm.elements[SECRET_FIELD[type]].value.trim();
   return value ? { secret: value } : {};
 }
 

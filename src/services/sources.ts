@@ -9,7 +9,7 @@ import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './
 import { ConflictError, NotFoundError, ValidationError } from './projects.js';
 import { TEXT_SEARCH_CONFIGS } from './text-search.js';
 
-export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion'] as const;
+export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion', 'confluence'] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
 
 /**
@@ -171,11 +171,53 @@ export const NotionConfig = z.object({
   syncProbeToken: ProbeToken,
 });
 
-export const SourceConfigByType = { local: LocalConfig, git: GitConfig, upload: UploadConfig, notion: NotionConfig } as const;
+/**
+ * Confluence **Cloud** ([ADR-0059](../../.ssot/ADR.md#adr-0059)). Data Center publishes a different
+ * API under a different base path and authenticates differently; it is not supported, and `README.md`
+ * says which one this is rather than leaving an operator to find out from a 404.
+ */
+export const ConfluenceConfig = z.object({
+  /** `https://acme.atlassian.net/wiki` — the site, including the `/wiki` context path Cloud serves on. */
+  baseUrl: z.url().max(2048),
+  /** The Atlassian account the API token belongs to; the user half of HTTP Basic. Not a secret. */
+  email: z.string().max(320).default(''),
+  /**
+   * Space keys to index; empty = every space the account can read.
+   *
+   * **The character class is a security boundary, not tidiness.** These keys are interpolated into a
+   * CQL query in `sources/confluence-client.ts`, and CQL is a query language with string literals in
+   * it. Confluence's own keys are alphanumeric (`~` begins a personal space), so restricting the
+   * field to exactly that makes a key that could close the quote unrepresentable rather than escaped.
+   */
+  spaceKeys: z
+    .array(z.string().regex(/^[A-Za-z0-9~_-]{1,255}$/))
+    .max(50)
+    .default([]),
+  /**
+   * The driver writes Markdown, so `['md']` is the default a source created through the API takes.
+   * The dashboard's file-type checkboxes are **not** hidden for this type and are not special-cased,
+   * so a source added there stores `['md','mdx']` — the form's own default. Harmless, because the only
+   * files under the source root are the `.md` this driver wrote, and stated here because a comment
+   * that claimed otherwise would be the kind of thing a later reader trusts.
+   */
+  extensions: Extensions.default(['md']),
+  language: Language,
+  version: Version,
+  syncProbeToken: ProbeToken,
+});
+
+export const SourceConfigByType = {
+  local: LocalConfig,
+  git: GitConfig,
+  upload: UploadConfig,
+  notion: NotionConfig,
+  confluence: ConfluenceConfig,
+} as const;
 export type LocalConfig = z.infer<typeof LocalConfig>;
 export type GitConfig = z.infer<typeof GitConfig>;
 export type UploadConfig = z.infer<typeof UploadConfig>;
 export type NotionConfig = z.infer<typeof NotionConfig>;
+export type ConfluenceConfig = z.infer<typeof ConfluenceConfig>;
 
 export interface SourceView {
   id: string;
