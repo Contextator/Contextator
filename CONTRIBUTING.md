@@ -234,7 +234,7 @@ your GitHub username, user id, the pull request and the time. It is deliberately
 database: the record is the only evidence the licence grant ever happened, and it is not rented from
 anybody. Nothing about you is published, and nothing is collected beyond what your comment already showed.
 
-### What is in force, and what merely stops a merge
+### What binds you, and what stops the merge
 
 `CLA.md` is in force. It stopped calling itself a draft in the same change that gave the workflow a
 signatures repository and a token to reach it, because the two have to move together: a signature
@@ -242,11 +242,12 @@ collected under a document still saying "do not treat anything in this document 
 entered into" would have been worth nothing, and the window between them is closed by ordering rather
 than by hoping it is short.
 
-What is not yet in place is **branch protection** — the setting that makes a red **Licence grant** a
-refusal rather than a warning. Until it is, the check still runs and still names anybody who has not
-signed, but a maintainer could merge past it. That is a gap in enforcement and not in the grant: signing
-is what binds you, and protection is only what stops the merge. It is the next thing to switch on, and
-this paragraph goes when it does.
+**Licence grant** is now a required check on `main`, administrators included. A red one is a refusal and
+not a warning: `main` takes no direct pushes and no merge past an unsigned commit, and getting round it
+means deliberately turning the protection off rather than clicking merge anyway. The two halves stay
+different things, though — signing is what binds you, and protection is only what stops the merge. A
+contribution merged without a signature would still be a contribution nobody granted a licence to, which
+is why the check exists rather than a note asking politely.
 
 If that is not something you are willing to grant, say so early. Opening an issue that describes the
 problem and lets a maintainer implement it is a perfectly good contribution and needs none of this.
