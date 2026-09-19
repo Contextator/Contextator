@@ -55,6 +55,16 @@ three are Turkish questions whose answer is an English page; the reverse directi
 Turkish page — answers two of three at rank 1. The multilingual model is not symmetric on this corpus,
 and nothing in the product currently notices.
 
+**Half of that was refuted on 2026-09-19, and the sentence above is left standing because it is what
+this run recorded.** What held is the headline: cross-lingual was the worst thing here, and it got
+worse rather than better through every change since. What did not hold is the **direction**. At three
+failures the claim rested on which three failed; at fifteen questions in each direction both measure
+`recall@5` **13.3 %**, and the gap in `recall@1` — 6.7 % against 13.3 % — is one question. The
+measurement is under "What thirty questions say that seven could not" below, and this sentence earned
+its keep by being testable: it is the reason the enlarged slice was written fifteen a side.
+[ROADMAP.md](../../.ssot/ROADMAP.md)'s copy of the same finding carries the same correction in the same
+place, and for the same reason — a refuted sentence that is deleted is a sentence nobody can check.
+
 **Reference tables are not retrievable.** Every `config` question fails: an operator asking which
 environment variable sets the attempt timeout gets prose about the retry schedule instead of the table
 that contains `HALYARD_DISPATCH_TIMEOUT`. This is the dense-retrieval failure mode that Phase 1's
@@ -985,40 +995,74 @@ heading moved, which is why the sixty-four reproduce exactly.
 
 A rerank reorders the fused pool; it cannot add to it. So the number that prices ROADMAP.md Item 12's
 second stage is not how good a cross-encoder is — it is **how often the right page is in the pool at
-all**, and that is answerable today. The same eighty-four questions, the same index, the result window
-opened from ten to fifty and the per-document cap raised to its maximum so the page is as close to the
-fused pool as the product's own settings allow:
+all**, and that is answerable today.
 
-| | in the top 5 | in the top 50 |
-|---|--:|--:|
-| all 84 questions | 69.0 % (58) | 81.0 % (68) |
-| `cross-lingual`, all 30 | 13.3 % (4) | **46.7 % (14)** |
-| `cross-lingual`, natural language (21) | 0 % (0) | **28.6 % (6)** |
-| `cross-lingual`, identifier-shaped (9) | 44.4 % (4) | 88.9 % (8) |
+**The pool has two depths, and this section reports both because they are two measurements and the file
+used to carry them as one.** A search takes `DENSE_CANDIDATES = 50` from the vector index and
+`LEXICAL_CANDIDATES = 50` from `ts_rank_cd`, fuses the two lists with RRF, and only then applies the
+per-document cap and the limit ([ADR-0041](../../.ssot/ADR.md#adr-0041)) — so the fused set is **50 to
+94 distinct chunks, 73.9 on average over the eighty-four questions**: fifty when the two halves nominate
+the same chunks, ninety-four when they almost entirely disagree. *In the top fifty* is a window into
+that set — the same eighty-four questions with the result window opened from ten to fifty and the
+per-document cap raised to its maximum, which is as close to the pool as the product's own settings
+allow. *In the whole fused set* is every chunk either retriever nominated, read off the fusion with no
+window and no cap, which is exactly the list `rerankedPage` hands a reranker.
 
-**46.7 % is the ceiling on the whole of stage 2's first candidate.** Sixteen of the thirty cross-lingual
-questions have no chunk of the right page anywhere in fifty results, so no reranker reaches them at any
-price; the ten that are in the pool and outside the top five sit at ranks 10, 11, 12, 13, 20, 25, 26,
-26, 27 and 43. A perfect rerank — the right chunk first every time it is present — measures 46.7 %.
-A rerank that recovers half of what is reachable measures about 30 %.
+| | in the top 5 | in the top 50 | in the whole fused set |
+|---|--:|--:|--:|
+| all 84 questions | 69.0 % (58) | 81.0 % (68) | 83.3 % (70) |
+| `cross-lingual`, all 30 | 13.3 % (4) | **46.7 % (14)** | **53.3 % (16)** |
+| `cross-lingual`, natural language (21) | 0 % (0) | **28.6 % (6)** | **38.1 % (8)** |
+| `cross-lingual`, identifier-shaped (9) | 44.4 % (4) | 88.9 % (8) | 88.9 % (8) |
 
-Two things follow, and they point opposite ways, which is the useful part.
+**The last two columns differ by exactly two questions, and both are natural language.** `x-tr-en-13`
+sits at rank 53 of a pool of 83 and `x-en-tr-10` at rank 65 of 81; nothing else the fusion nominates for
+a cross-lingual question falls outside the first fifty of it, which is why the identifier row does not
+move between the two columns and the other two rows do.
 
-**The ceiling clears the number to beat, and by four points.** `paraphrase-multilingual-MiniLM-L12-v2`
-managed 42.9 % before [ADR-0037](../../.ssot/ADR.md#adr-0037) replaced it. So a rerank is not
-arithmetically doomed — but it has to be very nearly perfect over a fifty-deep list to beat a model this
-product already had, and anything short of that lands underneath it.
+**53.3 % is the ceiling on the candidate stage 2 actually built; 46.7 % is the ceiling on one handed
+only the first fifty.** Fourteen of the thirty cross-lingual questions have no chunk of the right page
+anywhere in the fusion, so no reorderer reaches them at any price; sixteen have none inside the first
+fifty. The ten that are in the pool and outside the top five sit at ranks 10, 11, 12, 13, 20, 25, 26,
+26, 27 and 43. A perfect rerank — the right chunk first every time it is present — measures 53.3 % over
+the whole pool and 46.7 % over a fifty-deep window. One that recovers half of what is reachable and not
+already in the top five — six of the twelve, or five of the ten — measures about 33 % or 30 %.
+
+**Both figures bound a *reorderer*, and neither bounds a retriever.** This is the one way the number is
+easy to quote one step too far. A reranker can only move what the fusion already handed it, so a page
+that is not in the pool is out of its reach by construction — but a **second retriever fused as a third
+RRF list changes the pool** rather than reordering it, and nothing measured here says anything about
+what such a list would find. The bitext-aligned encoder of the LaBSE class is precisely that candidate,
+and it was rejected **on price** — a gigabyte-class download, a second `vector(768)` column and a second
+HNSW index, a full re-index on every installation and a change to the `EmbeddingProvider` pooling
+contract — and not on this ceiling. [ADR-0052](../../.ssot/ADR.md#adr-0052) states it in those terms and
+is the wording to quote.
+
+Two things follow from the ceiling as a bound on reordering, and they point opposite ways, which is the
+useful part.
+
+**The ceiling clears the number to beat, and the margin depends on which ceiling.**
+`paraphrase-multilingual-MiniLM-L12-v2` managed 42.9 % before
+[ADR-0037](../../.ssot/ADR.md#adr-0037) replaced it. A reranker over a fifty-deep window clears that by
+3.8 points; one over the whole fused pool, which is what the spike does, clears it by 10.4 — and has to
+get **thirteen of the sixteen reachable questions to the top five** to do it. So a rerank is not
+arithmetically doomed, but it has to be very nearly perfect against a model this product already had,
+and anything short of that lands underneath it.
 
 **The half the product most needs is the half least reachable.** Of the twenty-one natural-language
-cross-lingual questions a perfect rerank rescues six, and fifteen stay unanswerable because the encoder
-that builds the pool never puts their page in it. Those fifteen are the questions Item 12 exists for.
-The identifier-shaped row is the mirror image and says the same thing about the same mechanism: 88.9 %
-of them are in the pool because the lexical half put them there.
+cross-lingual questions a perfect rerank over the whole pool reaches **eight**, and six over the first
+fifty; the other **thirteen** are not in the pool at all, because the encoder that builds it never puts
+their page there. Those thirteen are the questions Item 12 exists for, and they are the ones a reranker
+is the wrong instrument for — not because reranking is hard, but because it is the wrong operation on
+them. The identifier-shaped row is the mirror image and says the same thing about the same mechanism:
+88.9 % of them are in the pool at either depth, because the lexical half put them there.
 
-This measurement was taken with a throwaway edit to `SEARCH_LIMIT` in `scripts/eval.ts` and
-`SEARCH_MAX_PER_DOCUMENT=20`, and nothing about it shipped. It is recorded here because it is the
-cheapest thing that could have priced the rerank out, and because a spike that does not check it first
-would spend its time box discovering it.
+The top-fifty column was taken with a throwaway edit to `SEARCH_LIMIT` in `scripts/eval.ts` and
+`SEARCH_MAX_PER_DOCUMENT=20`; the whole-fused-set column and the pool sizes come from `searchChunks`
+asked for five hundred results with the cap lifted, which returns the fusion entire. Nothing about
+either shipped. They are recorded here because they are the cheapest thing that could have priced the
+rerank out, and because a spike that does not check them first would spend its time box discovering
+them.
 
 ## Reproducing it
 
@@ -1044,8 +1088,19 @@ change.
 | Date | 2026-09-19 |
 | Rerank | `local-rerank:Xenova/bge-reranker-base:q8`, `max_tokens=128`, `batch=16` |
 | On disk | 296 MB — `onnx/model_quantized.onnx` 279.3 MB plus a 17.1 MB tokenizer |
-| Where | between the fusion and the truncation, over the fused candidate pool (50–94 chunks, mean 73.4) |
+| Where | between the fusion and the truncation, over the **whole** fused candidate pool (50–94 chunks, mean 73.9 — see below) |
 | Everything else | the run above, unchanged: 26 documents, 577 chunks, 84 questions, `e5-small` at 96/24 |
+
+**One figure in that row was wrong and is corrected in place (2026-09-19).** The pool was recorded here
+as a mean of 73.4 chunks. Re-measured off `searchChunks` with no window and no cap, over the same
+eighty-four questions against the same corpus and the same index, it is **73.9** — 73.96 with the
+twenty-four negative questions counted too. The bounds, 50 and 94, reproduce exactly, and nothing in
+this section or the one above turns on the mean; it is corrected rather than left because a figure in a
+row that describes the measurement is one a later reader will re-derive from.
+
+**The pool is the *whole* fusion and not a window into it**, which is what makes the ceiling above apply
+here at 53.3 % rather than at 46.7 %: `rerankedPage` scores every chunk either retriever nominated, and
+applies the per-document cap and the limit afterwards, over the new ordering.
 
 **The shipped path is byte-identical with the rerank off.** The statement is assembled from the same
 fragment it always was, and a run with `SEARCH_RERANK=off` after this change reproduces the run before
@@ -1117,8 +1172,11 @@ documentation is the case Item 12 exists for, and it is exactly the case that di
 
 Three of twenty-one. The rerank is best at exactly what the lexical half was already best at — the
 identifier row nearly doubles — and moves three of the twenty-one questions that nothing else has ever
-moved. Stage 1 measured that at most eight of those twenty-one are reachable at all, because the biased
-encoder never puts the other thirteen in the pool. The rerank found three of the eight.
+moved. Stage 1 measured that at most **eight** of those twenty-one are reachable at all: eight over the
+whole fused set, which is the list this rerank is handed, against six inside the first fifty of it — and
+for the other thirteen the biased encoder never puts the page in the pool, so no reordering of it can
+reach them. The rerank found three of the eight. Across all thirty it found ten of the sixteen
+reachable, which is the same ratio said the other way.
 
 ## The number to beat, measured on the same thirty questions
 
