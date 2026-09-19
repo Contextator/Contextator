@@ -31,7 +31,10 @@ function isTrustProxyEntry(entry: string): boolean {
   // A prefix *length*, not a netmask: `proxy-addr` accepts `10.0.0.0/255.0.0.0` too, and this
   // deliberately does not — two spellings of one subnet is a second thing to get wrong.
   if (!/^\d{1,3}$/.test(prefix)) return false;
-  return Number(prefix) <= (family === 4 ? 32 : 128);
+  // `/0` is refused at both ends of the same argument. It is `1` spelled as a subnet — every address
+  // matches it — and `proxy-addr` throws `TypeError: invalid range on address` on it while Fastify is
+  // being constructed, which would end the process on a bare stack trace instead of the message below.
+  return Number(prefix) >= 1 && Number(prefix) <= (family === 4 ? 32 : 128);
 }
 
 /**
@@ -43,17 +46,28 @@ function isTrustProxyEntry(entry: string): boolean {
  * those peers. Fastify also accepts a **hop count**, and this does not: a number is a claim about how
  * many proxies are in front of the instance that the server cannot check, and it goes silently wrong
  * the day somebody puts a CDN in front of the reverse proxy — which is the class of failure this whole
- * variable exists to end. A list is checkable against the socket's own peer address, so a request that
- * did not arrive from the named proxy cannot claim anything by writing a header.
+ * variable exists to end.
+ *
+ * **What a list actually does, because it is not what it looks like.** `proxy-addr` walks
+ * `[socket address, ...X-Forwarded-For reversed]` from the socket outwards and stops at the first
+ * address the list does **not** trust; `req.ip` is that address. So the list is applied to *every hop*,
+ * not only to the peer — which is what makes it strong when the trusted range holds nothing but
+ * proxies, and worthless when clients live in it too. `TRUST_PROXY=uniquelocal` on a LAN is the
+ * example worth remembering: a client at `192.168.1.77` is inside the range, so it is walked past, and
+ * `X-Forwarded-For: 203.0.113.99` puts that value straight into `req.ip`. Name the proxy, not the
+ * network the callers are on.
  *
  * Refusing the hop count is also what keeps `1` unambiguous: it is `true` here, as it is for every
  * other flag in this file, and not "one hop".
  */
 function parseTrustProxy(value: string): boolean | string[] | undefined {
+  // Lowercased once, for the whole value rather than for the booleans only: `Loopback` and `FD00::/8`
+  // are the same entries as their lowercase spellings, and an operator who writes one and is refused
+  // learns nothing from the refusal. Addresses are case-insensitive, so nothing is lost by folding.
   const lowered = value.trim().toLowerCase();
   if (lowered === '0' || lowered === 'false') return false;
   if (lowered === '1' || lowered === 'true') return true;
-  const entries = csv(value);
+  const entries = csv(lowered);
   if (entries.length === 0) return undefined;
   return entries.every(isTrustProxyEntry) ? entries : undefined;
 }
@@ -266,8 +280,18 @@ export const EnvSchema = z
      * misconfiguration an operator can see happening and fix with this one variable; a forged `req.ip`
      * is one nobody can see at all. So: **put a proxy in front of this and you must set this.**
      *
-     * Set it to the proxy rather than to `1` wherever you can. `1` is "trust whoever wrote the header",
-     * which is only safe when nothing but the proxy can open a socket to this port.
+     * **It is not only the rate limits.** `req.protocol` follows the same setting, and three places
+     * build a base URL from it when `PUBLIC_BASE_URL` is unset — the OAuth protected-resource metadata,
+     * the `WWW-Authenticate` pointer on a `401` from `/mcp/*`, and the admin API's own URLs. Off behind
+     * a TLS-terminating proxy, those read `http://`, the client sends `https://`, and
+     * `projectNameFromResource` refuses the mismatch: every connector is answered `invalid_target`.
+     * `AUTH_COOKIE_SECURE=auto` loses its `Secure` flag for the same reason. **Set `PUBLIC_BASE_URL`
+     * as well as this**, and the two URL-shaped failures stop depending on the header at all.
+     *
+     * Set it to the proxy rather than to `1` wherever you can — and to the **proxy**, not to the
+     * network the callers sit on: the list is applied to every hop, so a range that holds clients as
+     * well as proxies is walked past and the caller writes `req.ip` again. `1` is "trust whoever wrote
+     * the header", which is only safe when nothing but the proxy can open a socket to this port.
      */
     TRUST_PROXY: z
       .string()

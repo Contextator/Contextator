@@ -5,7 +5,7 @@ import { adminRoutes } from '../src/admin/routes.js';
 import { oauthRoutes } from '../src/mcp/oauth-routes.js';
 import { EnvSchema, loadConfig, OAUTH_REGISTER_MAX_PER_HOST } from '../src/config.js';
 import type { AppContext } from '../src/context.js';
-import { httpServerOptions } from '../src/http.js';
+import { httpServerOptions, warnAboutProxyConfiguration } from '../src/http.js';
 import { AuditWriter } from '../src/services/audit.js';
 import { SetupGate } from '../src/services/auth/setup.js';
 import { MetricsRegistry } from '../src/services/metrics.js';
@@ -22,8 +22,10 @@ import { SlidingWindow } from '../src/services/rate-limit.js';
  * question, and it is decided by a header the injected request writes.
  *
  * Make `httpServerOptions` ignore `TRUST_PROXY` and return `trustProxy: true` again — the state this
- * product shipped in before [ADR-0060](../.ssot/ADR.md#adr-0060) — and two of these go red: every
- * forwarded address becomes its own bucket and the `429` never arrives.
+ * product shipped in before [ADR-0060](../.ssot/ADR.md#adr-0060) — and **six** of these go red: every
+ * forwarded address becomes its own bucket, the `429` never arrives, and `req.protocol` reads `https`
+ * for anybody who claims it. Pinning it to `false` instead kills six as well, from the other side.
+ * The counts are measured, not remembered; re-measure them if you add a case.
  */
 
 /** Small, so a budget is a handful of requests rather than a loop worth timing. */
@@ -54,7 +56,7 @@ const hollowCtx = (config: AppContext['config'], log: AppContext['log']): AppCon
  * The admin API on a Fastify built from `httpServerOptions` — the same call `src/server.ts` makes, and
  * the reason this file asserts something about the product rather than about a copy of it. Make that
  * function return `trustProxy: true` unconditionally, which is what this instance did before
- * [ADR-0060](../.ssot/ADR.md#adr-0060), and the first and fourth tests below go red.
+ * [ADR-0060](../.ssot/ADR.md#adr-0060), and six of the cases in this file go red.
  */
 async function buildApi(env: Record<string, string> = {}): Promise<FastifyInstance> {
   const config = loadConfig({
@@ -146,9 +148,9 @@ describe('TRUST_PROXY decides what the rate-limited routes are keyed on', () => 
   });
 
   /**
-   * **The form worth recommending.** A CIDR is checked against the socket's own peer address, so the
-   * forwarded address counts when the proxy sent it and is ignored when anybody else did — which a
-   * hop count, the form this product deliberately does not accept, cannot express.
+   * **The form worth recommending, and what it really matches.** The peer has to be inside the range
+   * before a forwarded address counts at all — which a hop count, the form this product deliberately
+   * does not accept, cannot express. The next case says what this one must not be read as promising.
    */
   it('takes the forwarded address only from a peer inside the named CIDR', async () => {
     const viaProxy = await buildApi({ TRUST_PROXY: '10.0.0.0/8' });
@@ -158,6 +160,33 @@ describe('TRUST_PROXY decides what the rate-limited routes are keyed on', () => 
     const direct = await buildApi({ TRUST_PROXY: '10.0.0.0/8' });
     expect(await fromManyClaimedHosts(direct, MAX_ATTEMPTS + 1, '192.0.2.5')).toEqual(spent(MAX_ATTEMPTS));
     await direct.close();
+  });
+
+  /**
+   * **The hazard the documentation now has to carry, pinned so it cannot be re-described wrongly.**
+   * `proxy-addr` walks `[socket address, ...X-Forwarded-For reversed]` and stops at the first address
+   * the list does not trust — so the list is applied to *every hop*, not to the peer alone. Name a
+   * range that holds clients as well as proxies, and a client is walked past exactly as a proxy would
+   * be: `TRUST_PROXY=uniquelocal` on a LAN hands `req.ip` straight back to the caller, and the flaw
+   * this whole file is about is undone by a setting the README used to recommend without qualification.
+   *
+   * Asserted rather than merely written down, because a sentence in a comment is the thing that rots.
+   */
+  it('lets a caller inside a trusted range choose its own key, which is why the range must be the proxy', async () => {
+    const lan = await buildApi({ TRUST_PROXY: 'uniquelocal' });
+    // Every request is from one LAN client, and every request claims a different address.
+    expect(await fromManyClaimedHosts(lan, MAX_ATTEMPTS + 2, '192.168.1.77')).toEqual(Array.from({ length: MAX_ATTEMPTS + 2 }, () => 400));
+    await lan.close();
+
+    // The same walk, seen from the other end: a trusted hop *inside* the header is stepped over, and
+    // `req.ip` is the first address the range does not cover.
+    const chained = await buildApi({ TRUST_PROXY: '10.0.0.0/8' });
+    const codes: number[] = [];
+    for (let i = 0; i < MAX_ATTEMPTS + 1; i++) {
+      codes.push((await login(chained, `203.0.113.${i + 1}, 10.9.9.9`, '10.1.2.3')).statusCode);
+    }
+    expect(codes).toEqual(Array.from({ length: MAX_ATTEMPTS + 1 }, () => 400));
+    await chained.close();
   });
 
   /**
@@ -180,6 +209,99 @@ describe('TRUST_PROXY decides what the rate-limited routes are keyed on', () => 
       expect((await register(trusting, `198.51.100.${i % 254}`)).statusCode).toBe(400);
     }
     await trusting.close();
+  });
+});
+
+/**
+ * `req.ip` is not the only thing `trustProxy` decides. `req.protocol` follows it too, and three places
+ * build a base URL out of it when `PUBLIC_BASE_URL` is unset ([ADR-0060](../.ssot/ADR.md#adr-0060)) —
+ * the OAuth protected-resource metadata, the `WWW-Authenticate` pointer on a `401` from `/mcp/*`, and
+ * the admin API's own URLs. Behind a TLS-terminating proxy with `TRUST_PROXY` off, those read `http://`
+ * while the client sends `https://`, and `/oauth/authorize` then answers `invalid_target` to every
+ * connector. That is a working installation breaking on upgrade, so it is asserted here rather than
+ * left to the section of the ADR that describes it.
+ */
+describe('TRUST_PROXY decides req.protocol as well, which is what the published URLs are built from', () => {
+  const protocolSeenBy = async (env: Record<string, string>, from = '10.1.2.3'): Promise<string> => {
+    const config = loadConfig({ DATABASE_URL: 'postgres://unused/unused', ...env });
+    const app = Fastify({ logger: false, ...httpServerOptions(config) });
+    app.get('/probe', async (req) => ({ protocol: req.protocol }));
+    const reply = await app.inject({ method: 'GET', url: '/probe', remoteAddress: from, headers: { 'x-forwarded-proto': 'https' } });
+    await app.close();
+    return reply.json().protocol;
+  };
+
+  it('reads http behind a terminating proxy when nothing is trusted', async () => {
+    expect(await protocolSeenBy({})).toBe('http');
+  });
+
+  it('reads https once the proxy is named, and still not for anybody else', async () => {
+    expect(await protocolSeenBy({ TRUST_PROXY: '10.0.0.0/8' })).toBe('https');
+    expect(await protocolSeenBy({ TRUST_PROXY: '10.0.0.0/8' }, '192.0.2.5')).toBe('http');
+    expect(await protocolSeenBy({ TRUST_PROXY: '1' })).toBe('https');
+  });
+
+  /**
+   * The remedy the warning names, asserted as a remedy: `PUBLIC_BASE_URL` takes the published URLs off
+   * `req.protocol` entirely, so the OAuth half is repaired without touching `TRUST_PROXY`. The sign-in
+   * limiter is *not* repaired by it, which is why the warning names both.
+   */
+  it('stops mattering to a published URL once PUBLIC_BASE_URL is set', () => {
+    const config = loadConfig({ DATABASE_URL: 'postgres://unused/unused', PUBLIC_BASE_URL: 'https://docs.example.com' });
+    expect(config.PUBLIC_BASE_URL).toBe('https://docs.example.com');
+    expect(config.TRUST_PROXY).toBe(false);
+  });
+});
+
+/**
+ * The detector ([ADR-0060](../.ssot/ADR.md#adr-0060)). It is an observation, so what it is worth is
+ * exactly whether it fires on traffic that proves a proxy is in front and stays quiet on traffic that
+ * does not. Delete the hook and the first two cases go red; make it fire unconditionally and the third
+ * does — which is the case that keeps it off every default `docker compose` installation.
+ */
+describe('a TRUST_PROXY that disagrees with the traffic says so, once', () => {
+  const runWith = async (env: Record<string, string>, requests: Array<{ from?: string; headers?: Record<string, string> }>): Promise<string[]> => {
+    const config = loadConfig({ DATABASE_URL: 'postgres://unused/unused', ...env });
+    const app = Fastify({ logger: false, ...httpServerOptions(config) });
+    const said: string[] = [];
+    warnAboutProxyConfiguration(app, config, (message) => said.push(message));
+    app.get('/probe', async () => ({ ok: true }));
+    for (const r of requests) await app.inject({ method: 'GET', url: '/probe', remoteAddress: r.from ?? '10.1.2.3', headers: r.headers ?? {} });
+    await app.close();
+    return said;
+  };
+
+  it('fires on a forwarded header that TRUST_PROXY is ignoring, and only the first time', async () => {
+    const said = await runWith({}, [{ headers: { 'x-forwarded-proto': 'https' } }, { headers: { 'x-forwarded-for': '203.0.113.9' } }]);
+    expect(said).toHaveLength(1);
+    // The three consequences and the remedy, because a warning that does not say what broke is noise.
+    expect(said[0]).toContain('sign-in');
+    expect(said[0]).toContain('invalid_target');
+    expect(said[0]).toContain('Secure flag');
+    expect(said[0]).toContain('PUBLIC_BASE_URL');
+  });
+
+  /** The case no startup rule could have seen: a list that names a proxy other than the real one. */
+  it('fires when the named range is not where the proxy actually is', async () => {
+    const wrong = await runWith({ TRUST_PROXY: '172.18.0.0/16' }, [{ from: '10.1.2.3', headers: { 'x-forwarded-for': '203.0.113.9' } }]);
+    expect(wrong).toHaveLength(1);
+  });
+
+  /**
+   * **The reason this is not a startup rule.** The shipped `docker compose` installation runs
+   * `TRUST_PROXY=0` with no `PUBLIC_BASE_URL` and nothing in front of it, and it is not misconfigured.
+   * A rule over the settings would warn every one of those operators on every start.
+   */
+  it('stays quiet on a deployment with no proxy, and on one whose proxy is named correctly', async () => {
+    expect(await runWith({}, [{ headers: {} }, { headers: {} }])).toEqual([]);
+    expect(await runWith({ TRUST_PROXY: '10.0.0.0/8' }, [{ from: '10.1.2.3', headers: { 'x-forwarded-for': '203.0.113.9' } }])).toEqual([]);
+  });
+
+  /** `TRUST_PROXY=1` is the danger the setting *is*, so it needs no evidence and waits for no request. */
+  it('states the risk of TRUST_PROXY=1 at startup, without waiting for traffic', async () => {
+    const said = await runWith({ TRUST_PROXY: '1' }, []);
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain('every hop');
   });
 });
 
@@ -206,12 +328,23 @@ describe('TRUST_PROXY accepts three forms and refuses the rest', () => {
     expect(parsed('192.0.2.7,uniquelocal,::1')).toEqual(['192.0.2.7', 'uniquelocal', '::1']);
   });
 
+  /** Case folding reaches the list too, or `Loopback` would be refused while `TRUE` was accepted. */
+  it('is as case-insensitive about a list as it is about a boolean', () => {
+    expect(parsed('Loopback')).toEqual(['loopback']);
+    expect(parsed('FD00::/8,UniqueLocal')).toEqual(['fd00::/8', 'uniquelocal']);
+  });
+
   /**
    * A hop count is the form Fastify accepts and this product does not: the refusal is the decision, so
    * `2` failing here is the assertion and `1` staying a boolean is its consequence.
    */
   it('refuses a hop count, and everything that is not an address', () => {
-    for (const bad of ['2', '10', 'yes', 'on', 'localhost', '10.0.0.0/33', 'fd00::/200', '10.0.0.0/255.0.0.0', '10.0.0.0/', '999.1.1.1']) {
+    const refused = ['2', '10', 'yes', 'on', 'localhost', '10.0.0.0/33', 'fd00::/200', '10.0.0.0/255.0.0.0', '10.0.0.0/', '999.1.1.1'];
+    // `/0` is `1` spelled as a subnet, and `proxy-addr` throws on it while Fastify is being
+    // constructed — so without this the process would die on a bare stack trace instead of the
+    // message that names the accepted forms.
+    refused.push('10.0.0.0/0', '0.0.0.0/0', '::/0');
+    for (const bad of refused) {
       expect(parse(bad).success, bad).toBe(false);
     }
     // One bad entry refuses the whole list rather than being dropped from it.
