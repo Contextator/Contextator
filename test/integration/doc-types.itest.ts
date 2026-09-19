@@ -1,4 +1,4 @@
-import { copyFile, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, readdir, rm, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -69,6 +69,21 @@ const embeddings: EmbeddingProvider = {
   embedQuery: async (text: string) => stubVector(text),
 };
 
+/** The product's defaults, over one scratch root. */
+const indexerConfig = (root: string) => ({
+  ALLOWED_DOC_ROOTS: [path.dirname(root)],
+  IGNORE_GLOBS: [] as string[],
+  CHUNK_MAX_TOKENS: 256,
+  CHUNK_OVERLAP_TOKENS: 32,
+  EMBEDDING_BATCH_SIZE: 64,
+  DATA_DIR: path.join(root, '.data'),
+  SECRET_KEY: '0'.repeat(64),
+  MAX_STORED_DOCUMENT_BYTES: 1024 * 1024,
+  MAX_CONVERTED_FILE_BYTES: 32 * 1024 * 1024,
+  MAX_PDF_PAGES: 2000,
+  MAX_DOCX_UNPACKED_BYTES: 256 * 1024 * 1024,
+});
+
 interface Fixture {
   database: TestDatabase;
   project: ProjectRow;
@@ -130,25 +145,7 @@ beforeAll(async () => {
     })
     .returning();
 
-  const indexer = new Indexer({
-    db: database.db,
-    embeddings,
-    config: {
-      ALLOWED_DOC_ROOTS: [path.dirname(root)],
-      IGNORE_GLOBS: [],
-      CHUNK_MAX_TOKENS: 256,
-      CHUNK_OVERLAP_TOKENS: 32,
-      EMBEDDING_BATCH_SIZE: 64,
-      DATA_DIR: path.join(root, '.data'),
-      SECRET_KEY: '0'.repeat(64),
-      MAX_STORED_DOCUMENT_BYTES: 1024 * 1024,
-      MAX_CONVERTED_FILE_BYTES: 32 * 1024 * 1024,
-      MAX_PDF_PAGES: 2000,
-      MAX_DOCX_UNPACKED_BYTES: 256 * 1024 * 1024,
-    },
-    log: silentLogger,
-    locks: new KeyedMutex(),
-  });
+  const indexer = new Indexer({ db: database.db, embeddings, config: indexerConfig(root), log: silentLogger, locks: new KeyedMutex() });
 
   const job = await settle(database.db, indexer.enqueue(project.id));
   expect(job.phase).toBe('done');
@@ -231,17 +228,25 @@ describe('a project of mixed file types', () => {
 
   it('writes every refusal onto the source, and indexes nothing for any of them', async () => {
     const [source] = await fx.database.db.select().from(documentSources).where(eq(documentSources.id, fx.sourceId));
-    expect(source.lastError).toMatch(/3 file\(s\) could not be indexed/);
+    expect(source.lastError).toMatch(/4 of 11 file\(s\) could not be indexed/);
     expect(source.lastError).toContain('scanned-invoice.pdf');
     expect(source.lastError).toMatch(/no text layer/);
     expect(source.lastError).toMatch(/character recognition is out of scope/);
     // The two malformed files are reported the same way, each named — and the run still finished.
     expect(source.lastError).toContain('damaged-report.pdf');
     expect(source.lastError).toContain('notes-renamed.docx');
+    expect(source.lastError).toContain('pictures-only.docx');
+    // Every refusal says what to do about it, not only that it happened.
+    expect(source.lastError).toMatch(/re-export it with its text/);
     // A refusal is not a failed sync: the source is still usable and the run still succeeded.
     expect(source.status).toBe('idle');
 
-    for (const path of ['handbook/scanned-invoice.pdf', 'handbook/damaged-report.pdf', 'handbook/notes-renamed.docx']) {
+    for (const path of [
+      'handbook/scanned-invoice.pdf',
+      'handbook/damaged-report.pdf',
+      'handbook/notes-renamed.docx',
+      'handbook/pictures-only.docx',
+    ]) {
       expect((await call('read_document', { path })).isError).toBe(true);
     }
   });
@@ -253,37 +258,99 @@ describe('a project of mixed file types', () => {
    * failures are deterministic it would have done so on every run after this one — so the other seven
    * documents would never be updated again until somebody found the two files by hand.
    */
-  it('finished the run and left the project healthy, with three unreadable files in it', async () => {
+  it('finished the run and left the project healthy, with four unreadable files in it', async () => {
     const project = await getProjectById(fx.database.db, fx.project.id);
     expect(project?.status).toBe('idle');
     expect(project?.lastError).toBeNull();
     expect(project?.documentCount).toBe(7);
   });
 
+  /**
+   * **The same blocker, one line above the conversion boundary**, and the cap that has to be applied
+   * before the read rather than after it.
+   *
+   * Both files below are sparse: each declares 2 GiB + 1 and occupies no disk at all, which is what a
+   * corrupt export or a disk image renamed to `.pdf` looks like to a scan. They are two different
+   * halves of the same defect.
+   *
+   * The `.pdf` is a converted type, so the ceiling applies — against the size the **walk** recorded,
+   * before `readAndHash` makes 2 GiB resident. A limit checked on the buffer that call returns is a
+   * limit that has already been exceeded.
+   *
+   * The `.md` is decoded rather than parsed and is deliberately not capped, so the read is actually
+   * attempted — and `fs.readFile` refuses a file this size outright with `ERR_FS_FILE_TOO_LARGE`.
+   * That is not a `DocumentExtractionError`, so before the read moved inside the boundary it left the
+   * file loop and failed the **run**, deterministically, on every run afterwards.
+   */
+  it('refuses a file too large to read without reading it, and without failing the run', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'contextator-doc-types-huge-'));
+    await copyFile(path.join(FIXTURES, 'support-handbook.pdf'), path.join(root, 'handbook.pdf'));
+    for (const name of ['disk-image.pdf', 'notes-dump.md']) {
+      await writeFile(path.join(root, name), '');
+      await truncate(path.join(root, name), 2 * 1024 * 1024 * 1024 + 1);
+    }
+
+    const [project] = await fx.database.db.insert(projects).values({ name: 'huge-file' }).returning();
+    const [source] = await fx.database.db
+      .insert(documentSources)
+      .values({ projectId: project.id, type: 'local', name: 'manuals', config: { path: root, extensions: ['md', 'pdf'] } })
+      .returning();
+
+    const indexer = new Indexer({ db: fx.database.db, embeddings, config: indexerConfig(root), log: silentLogger, locks: new KeyedMutex() });
+    const job = await settle(fx.database.db, indexer.enqueue(project.id));
+
+    expect(job.phase).toBe('done');
+    const after = await getProjectById(fx.database.db, project.id);
+    expect(after?.status).toBe('idle');
+    // The healthy file beside it indexed, which is the whole point of refusing one file rather than the run.
+    expect(after?.documentCount).toBe(1);
+    const [row] = await fx.database.db.select().from(documentSources).where(eq(documentSources.id, source.id));
+    expect(row.status).toBe('idle');
+    expect(row.lastError).toMatch(/2 of 3 file\(s\) could not be indexed/);
+    // The converted type is refused on its size, without the read that would have made it resident…
+    expect(row.lastError).toMatch(/"manuals\/disk-image\.pdf" is 2048\.0 MiB, over the 32\.0 MiB/);
+    // …and the type that is only decoded, and therefore not capped, is refused by what the filesystem
+    // said when the read was attempted — which is not an error type the indexer knows on its own.
+    expect(row.lastError).toMatch(/"manuals\/notes-dump\.md" could not be read from disk/);
+    await rm(root, { recursive: true, force: true });
+  }, 120_000);
+
+  /**
+   * **Some of a source's files refused is a complaint; all of them is a failure.** Once a read that the
+   * filesystem refuses became a per-file refusal rather than a failed run, a folder unmounted between
+   * the scan and the read would otherwise refuse every file one at a time and leave a green project
+   * serving an index with nothing behind it. The escalation is on the count, not on the reason.
+   */
+  it('marks a source failed when nothing in it could be indexed, and says so on the project', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'contextator-doc-types-scans-'));
+    await copyFile(path.join(FIXTURES, 'scanned-invoice.pdf'), path.join(root, 'invoice-2026-01.pdf'));
+    await copyFile(path.join(FIXTURES, 'scanned-invoice.pdf'), path.join(root, 'invoice-2026-02.pdf'));
+
+    const [project] = await fx.database.db.insert(projects).values({ name: 'scans-only' }).returning();
+    const [source] = await fx.database.db
+      .insert(documentSources)
+      .values({ projectId: project.id, type: 'local', name: 'invoices', config: { path: root, extensions: ['pdf'] } })
+      .returning();
+
+    const indexer = new Indexer({ db: fx.database.db, embeddings, config: indexerConfig(root), log: silentLogger, locks: new KeyedMutex() });
+    const job = await settle(fx.database.db, indexer.enqueue(project.id));
+
+    expect(job.phase).toBe('error');
+    const [row] = await fx.database.db.select().from(documentSources).where(eq(documentSources.id, source.id));
+    expect(row.status).toBe('error');
+    expect(row.lastError).toMatch(/none of this source's 2 file\(s\) could be indexed/);
+    const after = await getProjectById(fx.database.db, project.id);
+    expect(after?.status).toBe('error');
+    expect(after?.lastError).toMatch(/no file of invoices could be indexed/);
+    await rm(root, { recursive: true, force: true });
+  }, 120_000);
+
   it('skips every file on a second run, because the hash is still over the raw bytes', async () => {
-    const indexer = new Indexer({
-      db: fx.database.db,
-      embeddings,
-      config: {
-        ALLOWED_DOC_ROOTS: [path.dirname(fx.root)],
-        IGNORE_GLOBS: [],
-        CHUNK_MAX_TOKENS: 256,
-        CHUNK_OVERLAP_TOKENS: 32,
-        EMBEDDING_BATCH_SIZE: 64,
-        DATA_DIR: path.join(fx.root, '.data'),
-        SECRET_KEY: '0'.repeat(64),
-        MAX_STORED_DOCUMENT_BYTES: 1024 * 1024,
-        MAX_CONVERTED_FILE_BYTES: 32 * 1024 * 1024,
-        MAX_PDF_PAGES: 2000,
-        MAX_DOCX_UNPACKED_BYTES: 256 * 1024 * 1024,
-      },
-      log: silentLogger,
-      locks: new KeyedMutex(),
-    });
+    const indexer = new Indexer({ db: fx.database.db, embeddings, config: indexerConfig(fx.root), log: silentLogger, locks: new KeyedMutex() });
     const job = await settle(fx.database.db, indexer.enqueue(fx.project.id));
     expect(job.phase).toBe('done');
-    // Seven unchanged documents plus the three that are refused again.
-    expect(job.filesSkipped).toBe(10);
+    // Seven unchanged documents plus the four that are refused again.
+    expect(job.filesSkipped).toBe(11);
     expect(job.chunksDone).toBe(0);
     expect(job.filesRemoved).toBe(0);
   }, 120_000);

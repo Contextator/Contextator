@@ -14,6 +14,16 @@ export interface ScannedFile {
   /** posix-style path relative to the project root, e.g. `guides/install.md` */
   relativePath: string;
   absolutePath: string;
+  /**
+   * Size and modification time, taken during the walk.
+   *
+   * **The size is here so that a ceiling can be applied before the file is read**
+   * ([ADR-0056](../../.ssot/ADR.md#adr-0056)). `readAndHash` puts the whole file in the heap; a limit
+   * checked on the buffer it returns is a limit that has already been exceeded. One `stat` per file is
+   * what `directoryRevision` was paying anyway, and it now pays it once instead of twice.
+   */
+  sizeBytes: number;
+  mtimeMs: number;
 }
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'build', 'vendor', '__pycache__']);
@@ -102,7 +112,15 @@ export async function* walkMarkdown(
       if (!entry.isFile() || !matchesExt.test(entry.name)) continue;
       const relativePath = rel.join('/');
       if (isIgnored(relativePath)) continue;
-      yield { relativePath, absolutePath: abs };
+      // A file that disappears between `readdir` and this `stat` is simply not in the scan, which is
+      // the same answer the walk would have given a moment earlier.
+      let stat: Awaited<ReturnType<typeof fs.stat>>;
+      try {
+        stat = await fs.stat(abs);
+      } catch {
+        continue;
+      }
+      yield { relativePath, absolutePath: abs, sizeBytes: stat.size, mtimeMs: stat.mtimeMs };
     }
   }
 

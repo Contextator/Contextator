@@ -148,13 +148,85 @@ const EXTRACTORS: Record<SupportedExtension, DocumentExtractor> = {
  */
 const CONVERTED: ReadonlySet<string> = new Set(['html', 'htm', 'csv', 'docx', 'pdf']);
 
-/** Heading lines are the title this module adds; they are not evidence that the document has content. */
+/**
+ * What an operator can do about a file of this type that carried no text, per type, because "it
+ * converted to nothing" on its own is a diagnosis without a next step — and the next step is different
+ * for each of them. A Word file of nothing but pictures is re-exported; a spreadsheet with no rows is
+ * removed; a page that was all script was never a document.
+ */
+const REMEDY: Record<string, string> = {
+  docx: 'A Word file whose content is entirely images or drawings has nothing to index; re-export it with its text, or remove it from the source.',
+  pdf: 'Run it through OCR if it is a scan, or remove it from the source.',
+  csv: 'A spreadsheet export with no rows has nothing to index; remove it from the source, or export it with its data.',
+  html: 'A page whose whole body was script, style or images has no text to index; point the source at the rendered documentation instead.',
+  htm: 'A page whose whole body was script, style or images has no text to index; point the source at the rendered documentation instead.',
+};
+
+/**
+ * Whether anything survives once the title this module may have added is taken back off.
+ *
+ * **Only the first line, and only when it is an `# H1`.** The earlier version excluded *every* heading
+ * line, which made a document whose content is headings — an index page of `<h1>`/`<h2>` links, a Word
+ * outline written entirely in heading styles — "converted to nothing" and refused. That is a real
+ * document, and on a rebuild refusing it drops the one that was already indexed. It also counted a
+ * `# comment` inside a fenced code block as a heading, which needed fence tracking to fix; taking one
+ * line instead of a class of lines removes the question rather than answering it.
+ */
 function hasBodyText(markdown: string): boolean {
-  return markdown.split('\n').some((line) => !/^#{1,6}\s/.test(line) && line.trim() !== '');
+  const lines = markdown.split('\n');
+  const body = lines.length > 0 && /^#\s+\S/.test(lines[0]) ? lines.slice(1) : lines;
+  return body.some((line) => line.trim() !== '');
 }
 
-function bytesLabel(count: number): string {
+export function bytesLabel(count: number): string {
   return count >= 1024 * 1024 ? `${(count / (1024 * 1024)).toFixed(1)} MiB` : `${Math.ceil(count / 1024)} KiB`;
+}
+
+/** Whether a file of this type is parsed — and therefore capped — or merely decoded. */
+export function isConvertedType(relativePath: string): boolean {
+  return CONVERTED.has(extensionOf(relativePath));
+}
+
+/**
+ * The byte ceiling, **checked against a `stat` before the file is read**.
+ *
+ * Reading first and refusing afterwards is not a cap at all: `fs.readFile` puts the whole file in the
+ * heap and hashes it, so a gigabyte of PDF is a gigabyte of resident memory whatever this function
+ * then says about it. The indexer calls this on the size the scan already knows; `extractDocument`
+ * calls it again on the bytes it was handed, for callers that arrive with a buffer and no path on disk.
+ */
+export function checkFileSize(relativePath: string, sizeBytes: number, limits: ExtractLimits): void {
+  if (!isConvertedType(relativePath) || sizeBytes <= limits.maxFileBytes) return;
+  throw new DocumentExtractionError(
+    `"${relativePath}" is ${bytesLabel(sizeBytes)}, over the ${bytesLabel(limits.maxFileBytes)} a file of this type may be when it is converted. ` +
+      `Converting it happens in the server's own process, so the limit is there to keep one document from taking the dashboard and the MCP endpoint down with it; ` +
+      `raise MAX_CONVERTED_FILE_BYTES if this file is genuinely a document, or split it.`,
+  );
+}
+
+/**
+ * Anything the filesystem says while a file is being read, as a refusal that names the file.
+ *
+ * **The scan and the read are two moments, and the directory belongs to somebody else in between.** A
+ * local source is a folder on a host this process does not control and a git source is a checkout the
+ * driver may re-create: a file can be deleted (`ENOENT`), have its permissions changed (`EACCES`), or
+ * be a size `fs.readFile` refuses to return at all (`ERR_FS_FILE_TOO_LARGE`, over 2 GiB). None of
+ * those is a `DocumentExtractionError`, so before this existed each of them failed the *run* — and the
+ * last one deterministically, on every run after it, which is the same defect the conversion boundary
+ * was written to close, one line further up.
+ */
+export function readFailure(err: unknown, relativePath: string): DocumentExtractionError {
+  const code = (err as { code?: string })?.code ?? '';
+  if (code === 'ENOENT') {
+    return new DocumentExtractionError(`"${relativePath}" disappeared between the scan and the read; the next run will index it if it comes back.`);
+  }
+  if (code === 'EACCES' || code === 'EPERM') {
+    return new DocumentExtractionError(
+      `"${relativePath}" could not be read: permission denied. Give the server read access to it, or exclude it with IGNORE_GLOBS.`,
+    );
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return new DocumentExtractionError(`"${relativePath}" could not be read from disk: ${message}`);
 }
 
 /**
@@ -178,13 +250,9 @@ export async function extractDocument(relativePath: string, bytes: Buffer, limit
   if (!extractor) throw new DocumentExtractionError(`"${relativePath}" has no supported file type (".${ext}")`);
 
   const converted = CONVERTED.has(ext);
-  if (converted && bytes.byteLength > limits.maxFileBytes) {
-    throw new DocumentExtractionError(
-      `"${relativePath}" is ${bytesLabel(bytes.byteLength)}, over the ${bytesLabel(limits.maxFileBytes)} a file of this type may be when it is converted. ` +
-        `Converting it happens in the server's own process, so the limit is there to keep one document from taking the dashboard and the MCP endpoint down with it; ` +
-        `raise MAX_CONVERTED_FILE_BYTES if this file is genuinely a document, or split it.`,
-    );
-  }
+  // A backstop. The indexer has already refused this size against a `stat`, before the read that would
+  // have made the bytes resident; a caller that arrives holding a buffer is checked here instead.
+  checkFileSize(relativePath, bytes.byteLength, limits);
 
   let markdown: string;
   try {
@@ -198,6 +266,7 @@ export async function extractDocument(relativePath: string, bytes: Buffer, limit
   if (converted && !hasBodyText(markdown)) {
     throw new DocumentExtractionError(
       `"${relativePath}" converted to nothing — the file holds no text this product can index. ` +
+        `${REMEDY[ext] ?? 'Export it in a form that carries its text, or remove it from the source.'} ` +
         `Indexing it anyway would add a document that is listed, matches nothing and reads as blank, which is the one failure nobody ever notices.`,
     );
   }

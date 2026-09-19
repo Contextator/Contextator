@@ -471,8 +471,7 @@ failed: it synced, and everything else in it indexed. The dashboard shows the so
 whether or not the source failed, which is the only thing that makes the refusal visible rather than
 merely recorded. On an incremental run the file keeps whatever document it already had; a **rebuild**
 (`force`, or a changed embedding model) publishes the corpus as it stands, so a file that can no longer
-be converted is not in the new generation — the same rule [ADR-0039](#) applies to a source that cannot
-be read.
+be converted is not in the new generation — the same rule the index applies to a source that cannot be read.
 
 **What a file may cost while it is converted.** Conversion runs in the server's own process, beside the
 dashboard and the MCP endpoint, and until now only the upload path had any size limit at all — a file
@@ -481,11 +480,13 @@ Three caps bound it, and each closes something the others do not:
 
 | Setting | Default | What it stops |
 |---------|---------|---------------|
-| `MAX_CONVERTED_FILE_BYTES` | 32 MiB | one enormous document taking the process down with it. `.md`, `.mdx` and `.txt` are decoded rather than parsed and are not capped |
+| `MAX_CONVERTED_FILE_BYTES` | 32 MiB | one enormous document taking the process down with it. Checked against the size the **scan** recorded, before the file is read — a limit applied to the bytes already in memory is not a limit. `.md`, `.mdx` and `.txt` are decoded rather than parsed and are not capped |
 | `MAX_PDF_PAGES` | 2000 | a few kilobytes of PDF that *declares* a hundred thousand pages — every page is read into memory at once |
-| `MAX_DOCX_UNPACKED_BYTES` | 256 MiB | the ordinary zip bomb: a `.docx` is a zip, and its central directory is read before anything is inflated |
+| `MAX_DOCX_UNPACKED_BYTES` | 256 MiB | the zip bomb. A `.docx` is a zip, and the size in its directory is a number the file's author writes, so each part is inflated through a counter and discarded, with the cap as the ceiling. DEFLATE reaches about 1030:1, so nothing short of measuring it is a bound |
 
-A file over a cap is refused by name, the same way a scan is.
+A file over a cap is refused by name, the same way a scan is. So is a file the filesystem will not hand
+over — deleted between the scan and the read, permissions changed, or simply larger than `fs.readFile`
+will return.
 
 A converted document is stored under its original path and extension (`handbook/support-handbook.pdf`),
 and that is the path `search_docs` cites and `read_document` takes. Its **title** comes from the

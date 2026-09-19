@@ -243,10 +243,14 @@ export const EnvSchema = z
      * What a `.docx`'s own central directory may claim its parts unpack to (ADR-0056).
      *
      * A `.docx` is a zip, mammoth hands it to `jszip`, and `jszip` has no size ceiling of its own — so
-     * the ordinary zip bomb, a megabyte that inflates to a terabyte, would inflate into this process's
-     * heap. The directory is read before anything is inflated. It trusts what the archive says about
-     * itself, which stops the bomb any standard tool produces rather than one written against this
-     * check; `MAX_CONVERTED_FILE_BYTES` is the bound that holds either way.
+     * a zip bomb, a megabyte that inflates to a terabyte, would inflate into this process's heap.
+     *
+     * **The size in the archive's directory is not trusted, because whoever built the archive wrote
+     * it** — `jszip` reads the same field and only compares it against reality *after* inflating the
+     * part, by which time the memory is gone. Each part is inflated through a counter and discarded,
+     * with this as the ceiling. Bounding `compressedSize × worst case` instead would be sound and
+     * useless: DEFLATE reaches about 1030:1, so it would refuse an ordinary one-megabyte Word file on
+     * the grounds that it *could* have been a gigabyte.
      */
     MAX_DOCX_UNPACKED_BYTES: z.coerce
       .number()

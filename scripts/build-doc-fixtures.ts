@@ -345,6 +345,41 @@ function renamedZipDocx(): Buffer {
   return buildZip([{ name: 'readme.txt', data: 'Notes about the onboarding process. This archive was renamed, not exported.\n' }]);
 }
 
+/**
+ * A Word document that is entirely a picture: real styles, real structure, and not one word of text.
+ * Word writes exactly this when somebody pastes a screenshot into an empty file and saves it, and it
+ * is the case whose refusal has to tell an operator to re-export rather than merely that it failed.
+ */
+function picturesOnlyDocx(): Buffer {
+  const document =
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:document ${NS}><w:body>` +
+    '<w:p><w:pPr/><w:r><w:drawing/></w:r></w:p>' +
+    '<w:p><w:pPr/><w:r><w:drawing/></w:r></w:p>' +
+    '</w:body></w:document>';
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:styles ${NS}></w:styles>`;
+  const contentTypes =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    '</Types>';
+  const rels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+    '</Relationships>';
+  const documentRels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+    '</Relationships>';
+  return buildZip([
+    { name: '[Content_Types].xml', data: contentTypes },
+    { name: '_rels/.rels', data: rels },
+    { name: 'word/_rels/document.xml.rels', data: documentRels },
+    { name: 'word/document.xml', data: document },
+    { name: 'word/styles.xml', data: styles },
+  ]);
+}
+
 async function main(): Promise<void> {
   const files: Array<[string, Buffer]> = [
     ['support-handbook.pdf', handbookPdf()],
@@ -353,6 +388,7 @@ async function main(): Promise<void> {
     ['damaged-report.pdf', damagedPdf()],
     ['onboarding-checklist.docx', onboardingDocx()],
     ['notes-renamed.docx', renamedZipDocx()],
+    ['pictures-only.docx', picturesOnlyDocx()],
   ];
   for (const [name, data] of files) {
     await fs.writeFile(path.join(OUT, name), data);

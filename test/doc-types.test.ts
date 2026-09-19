@@ -1,15 +1,18 @@
 import { readFileSync } from 'node:fs';
+import { deflateRawSync } from 'node:zlib';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { chunkMarkdown } from '../src/services/chunker.js';
 import { csvToMarkdown, parseDelimited, sniffDelimiter } from '../src/services/doc-types/csv.js';
-import { declaredUnpackedBytes } from '../src/services/doc-types/docx.js';
+import { declaredUnpackedBytes, measureUnpackedBytes } from '../src/services/doc-types/docx.js';
 import { htmlToMarkdown, promoteBlankTableHeader } from '../src/services/doc-types/html.js';
 import {
   DocumentExtractionError,
   type ExtractLimits,
+  checkFileSize,
   extensionOf,
   extractDocument,
+  readFailure,
   titleFromPath,
   withTitle,
 } from '../src/services/doc-types/index.js';
@@ -39,6 +42,44 @@ async function readable(name: string): Promise<string> {
   const stored = storedDocumentContent(transformContent('plain', markdown), 1024 * 1024);
   expect(stored.contentTruncated).toBe(false);
   return stored.content;
+}
+
+/**
+ * A zip whose parts inflate to `size` bytes and whose directory claims they inflate to almost nothing.
+ * Written here rather than committed as a fixture: an archive built to break a reader is an artefact
+ * of this test, not a specimen of what the world sends.
+ */
+function bombDocx(size: number): Buffer {
+  const payload = deflateRawSync(Buffer.alloc(size, 0x41));
+  const name = Buffer.from('word/document.xml', 'utf8');
+
+  const local = Buffer.alloc(30 + name.length);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt16LE(8, 8); // deflate
+  local.writeUInt32LE(payload.length, 18);
+  local.writeUInt32LE(64, 22); // the lie: "this unpacks to 64 bytes"
+  local.writeUInt16LE(name.length, 26);
+  name.copy(local, 30);
+
+  const central = Buffer.alloc(46 + name.length);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt16LE(8, 10);
+  central.writeUInt32LE(payload.length, 20);
+  central.writeUInt32LE(64, 24); // the same lie, where the reader looks for it
+  central.writeUInt16LE(name.length, 28);
+  central.writeUInt32LE(0, 42);
+  name.copy(central, 46);
+
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(central.length, 12);
+  end.writeUInt32LE(local.length + payload.length, 16);
+  return Buffer.concat([local, payload, central, end]);
 }
 
 /** The `#` lines of a document, which is the structure a reader navigates by and the chunker splits on. */
@@ -395,6 +436,38 @@ describe('a conversion that produced nothing', () => {
     expect(markdown).toBe(['# Columns', '', '| Service | Owner |', '| --- | --- |'].join('\n'));
   });
 
+  /**
+   * A refusal that only diagnoses is a refusal an operator cannot act on, and the next step is
+   * different for each type: a Word file of nothing but pictures is re-exported, a spreadsheet with no
+   * rows is removed, a page that was all script was never a document.
+   */
+  it('says what to do about it, per type', async () => {
+    const cases: Array<[string, Buffer, RegExp]> = [
+      ['pictures-only.docx', bytesOf('pictures-only.docx'), /re-export it with its text/],
+      ['blank.csv', Buffer.from('\n\n', 'utf8'), /remove it from the source, or export it with its data/],
+      ['app.html', Buffer.from('<body><script>x()</script></body>', 'utf8'), /point the source at the rendered documentation/],
+      ['app.htm', Buffer.from('<body><style>b{}</style></body>', 'utf8'), /point the source at the rendered documentation/],
+    ];
+    for (const [name, bytes, remedy] of cases) {
+      await expect(extract(name, bytes)).rejects.toThrow(remedy);
+      await expect(extract(name, bytes)).rejects.toThrow(/converted to nothing/);
+    }
+  });
+
+  /**
+   * Excluding *every* heading line made a document whose content **is** headings — an index page of
+   * links, a Word outline written in heading styles — "converted to nothing". That is a real document,
+   * and on a rebuild refusing it drops the one that was already indexed.
+   */
+  it('keeps a document whose content is headings, and refuses only one that is a title and nothing else', async () => {
+    const index = Buffer.from('<h1>Handbook</h1><h2>Escalation</h2><h2>Rotas</h2>', 'utf8');
+    expect(await extract('index.html', index)).toBe('# Handbook\n\n## Escalation\n\n## Rotas');
+    // A fenced `#` is content too, and needs no fence tracking now that only the first line is taken.
+    const fenced = Buffer.from('<pre><code># not a heading\n</code></pre>', 'utf8');
+    expect(await extract('snippet.html', fenced)).toContain('# not a heading');
+    await expect(extract('empty.html', Buffer.from('<title>Nothing</title>', 'utf8'))).rejects.toThrow(/converted to nothing/);
+  });
+
   it('leaves an empty .md alone, because an empty file is not a failed conversion', async () => {
     expect(await extract('stub.md', Buffer.from('', 'utf8'))).toBe('');
     expect(await extract('stub.txt', Buffer.from('   \n', 'utf8'))).toBe('   \n');
@@ -420,23 +493,81 @@ describe('what one file may cost', () => {
     await expect(extract('support-handbook.pdf', bytesOf('support-handbook.pdf'), twoPages)).rejects.toThrow(/declares 3 pages, over the limit of 2/);
   });
 
-  it('reads what a .docx says its parts unpack to, and refuses one that claims too much', async () => {
-    const real = declaredUnpackedBytes(bytesOf('onboarding-checklist.docx'));
-    expect(real).toBeGreaterThan(0);
-    expect(real).toBeLessThan(64 * 1024);
+  it('refuses a .docx that declares more than the limit, without inflating anything', async () => {
+    const declared = declaredUnpackedBytes(bytesOf('onboarding-checklist.docx'));
+    expect(declared).toBeGreaterThan(0);
+    expect(declared).toBeLessThan(64 * 1024);
     await expect(extract('onboarding-checklist.docx', bytesOf('onboarding-checklist.docx'), { ...LIMITS, maxUnpackedBytes: 1024 })).rejects.toThrow(
-      /claim to unpack to/,
+      /declare that they unpack past the limit/,
     );
-    // Nothing is inflated to find that out: the answer comes off the central directory.
     expect(declaredUnpackedBytes(Buffer.from('not a zip at all'))).toBeNull();
   });
 
-  it('treats a ZIP64 archive as too large rather than as readable', () => {
-    const bomb = Buffer.from(bytesOf('onboarding-checklist.docx'));
-    // The first central-directory record's uncompressed size, set to ZIP64's "look elsewhere" marker.
-    const at = bomb.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
-    bomb.writeUInt32LE(0xffffffff, at + 24);
-    expect(declaredUnpackedBytes(bomb)).toBe(Number.POSITIVE_INFINITY);
+  /**
+   * **The declared size is a number the attacker writes, so the cap cannot be a check on it.** `jszip`
+   * reads the same field and only compares it against reality *after* inflating the part, by which
+   * time the memory is spent — and DEFLATE reaches about 1030:1 on repetitive input, so a megabyte of
+   * archive really can become a gigabyte of heap in the process that also serves `/mcp`.
+   */
+  it('refuses a .docx that lies about its size, by measuring what it really unpacks to', async () => {
+    const bomb = bombDocx(64 * 1024 * 1024);
+    // The lie: every part claims to be tiny, and the archive is under the raw-bytes ceiling.
+    expect(declaredUnpackedBytes(bomb)).toBeLessThan(4096);
+    expect(bomb.byteLength).toBeLessThan(1024 * 1024);
+    // The measurement disagrees, and gives up rather than counting all of it.
+    await expect(measureUnpackedBytes(bomb, 1024 * 1024)).resolves.toBe(Number.POSITIVE_INFINITY);
+    await expect(extract('bomb.docx', bomb, { ...LIMITS, maxUnpackedBytes: 1024 * 1024 })).rejects.toThrow(/actually unpack past the limit/);
+  });
+
+  it('measures an honest .docx as its real size and lets it through', async () => {
+    const measured = await measureUnpackedBytes(bytesOf('onboarding-checklist.docx'), 256 * 1024 * 1024);
+    expect(measured).toBe(declaredUnpackedBytes(bytesOf('onboarding-checklist.docx')));
+    await expect(extract('onboarding-checklist.docx', bytesOf('onboarding-checklist.docx'))).resolves.toContain('# Onboarding checklist');
+  });
+
+  it('treats a ZIP64 archive as unreadable rather than as small', async () => {
+    const at = (b: Buffer): number => b.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    // ZIP64 in the field the declaration is read from: the claim is "look elsewhere", not "it is tiny".
+    const declaredElsewhere = Buffer.from(bytesOf('onboarding-checklist.docx'));
+    declaredElsewhere.writeUInt32LE(0xffffffff, at(declaredElsewhere) + 24);
+    expect(declaredUnpackedBytes(declaredElsewhere)).toBe(Number.POSITIVE_INFINITY);
+
+    // ZIP64 in a field the measurement needs: it declines rather than measuring the wrong bytes.
+    const sizeElsewhere = Buffer.from(bytesOf('onboarding-checklist.docx'));
+    sizeElsewhere.writeUInt32LE(0xffffffff, at(sizeElsewhere) + 20);
+    await expect(measureUnpackedBytes(sizeElsewhere, 256 * 1024 * 1024)).resolves.toBeNull();
+    await expect(extract('huge.docx', sizeElsewhere)).rejects.toThrow(/not a readable zip archive/);
+  });
+
+  /**
+   * The size is read from the scan's `stat` and refused *before* `readAndHash` puts the file in the
+   * heap. A limit applied to the buffer that call returns is a limit that has already been exceeded.
+   */
+  it('refuses on a size, with no bytes in hand at all', () => {
+    expect(() => checkFileSize('handbook/manual.pdf', 2 * 1024 * 1024 * 1024, LIMITS)).toThrow(/over the 32\.0 MiB/);
+    expect(() => checkFileSize('handbook/manual.pdf', 1024, LIMITS)).not.toThrow();
+    // The three decoded types are not parsed and are not capped, whatever their size.
+    expect(() => checkFileSize('handbook/huge.md', 2 * 1024 * 1024 * 1024, LIMITS)).not.toThrow();
+  });
+
+  /**
+   * The scan and the read are two moments, and the directory belongs to somebody else in between.
+   * None of these is a `DocumentExtractionError` on its own, and each used to fail the run instead of
+   * the file — `ERR_FS_FILE_TOO_LARGE` deterministically, on every run after the first.
+   */
+  it('turns what the filesystem says into a refusal that names the file', () => {
+    const cases: Array<[string, RegExp]> = [
+      ['ENOENT', /disappeared between the scan and the read/],
+      ['EACCES', /permission denied/],
+      ['ERR_FS_FILE_TOO_LARGE', /could not be read from disk/],
+    ];
+    for (const [code, expected] of cases) {
+      const err = Object.assign(new Error(`${code}: something`), { code });
+      const refusal = readFailure(err, 'handbook/notes.md');
+      expect(refusal).toBeInstanceOf(DocumentExtractionError);
+      expect(refusal.message).toContain('handbook/notes.md');
+      expect(refusal.message).toMatch(expected);
+    }
   });
 });
 
