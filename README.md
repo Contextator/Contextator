@@ -1129,6 +1129,7 @@ eval/golden.jsonl             48 questions, one JSON object per line, each namin
 eval/README.md                what a good question is, how to add one, and why the failures are kept
 eval/BASELINE.md              the last recorded run of the default configuration
 drizzle/                      generated migrations (`npm run db:generate`), applied at startup and shipped in the image
+CHANGELOG.md                  what shipped in each release, Keep a Changelog style, for the operator pulling the image — not the commit log
 CONTRIBUTING.md               how to run it, the four checks, the pairs kept in sync, and the licence grant
 CLA.md                        the contributor licence grant, in force; signed on a pull request
 SECURITY.md                   how to report a vulnerability, and what is documented behaviour rather than one
