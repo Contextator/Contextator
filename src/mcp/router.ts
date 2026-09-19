@@ -7,8 +7,8 @@ import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
 import { isOriginAllowed } from '../services/origin.js';
 import { getProjectByName } from '../services/projects.js';
-import { verifyMcpToken } from '../services/auth/mcp-tokens.js';
-import { mcpAccessDecision, readMcpBearer } from './access.js';
+import { mcpAccessDecision, mcpAccessMessage, mcpAccessStatus, readMcpBearer } from './access.js';
+import { resolveMcpCredential } from './identity.js';
 import { createProjectMcpServer } from './server-factory.js';
 
 /**
@@ -73,20 +73,30 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     req.mcpProject = project;
 
     const bearer = readMcpBearer(req.headers.authorization);
-    // The id and not only the verdict, so that a search made through this session can say which token
-    // it came through ([ADR-0047](../../.ssot/ADR.md#adr-0047)). An `open` project verifies nothing and
-    // therefore records nothing, which is exactly what it means for a project to be open.
-    const tokenId = bearer ? await verifyMcpToken(ctx.db, project.id, bearer) : null;
+    // The credential and not only the verdict, for two reasons that used to be one. The token id is
+    // what lets a search made through this session say which credential it came through
+    // ([ADR-0047](../../.ssot/ADR.md#adr-0047)); the *account* behind it is what the decision now turns
+    // on ([ADR-0054](../../.ssot/ADR.md#adr-0054)). An `open` project answered without a credential
+    // still verifies nothing and still records nothing, which is what it means for it to be open.
+    const { credential, tokenId } = await resolveMcpCredential(ctx.db, project.id, bearer);
     req.mcpTokenId = tokenId;
-    const verdict = mcpAccessDecision(project.mcpAuth, bearer, tokenId !== null);
+    const verdict = mcpAccessDecision(project.mcpAuth, credential);
     if (verdict === 'ok') return;
 
-    if (verdict === 'token_invalid') log.warn({ project: project.name }, 'mcp request with an unknown or revoked token');
-    // RFC 6750: say which scheme is expected, so a client can report something better than "401".
+    if (verdict === 'token_invalid') log.warn({ project: project.name }, 'mcp request with an unknown, expired or revoked credential');
+    if (verdict === 'not_a_member') log.warn({ project: project.name }, 'mcp request by an account with no membership of this project');
+
+    // RFC 6750 says which scheme is expected; RFC 9728 says where to find out what would satisfy it,
+    // and that pointer is what lets a browser-based connector start the OAuth flow from a 401 rather
+    // than from a URL somebody had to paste. It is emitted whether or not this instance is an
+    // authorization server: with `MCP_OAUTH=0` the document is simply not there to fetch, which is the
+    // same answer a client gets from any resource server that does not do OAuth.
+    const base = (config.PUBLIC_BASE_URL ?? `${req.protocol}://${req.host}`).replace(/\/+$/, '');
+    const challenge = `Bearer realm="${project.name}", resource_metadata="${base}/.well-known/oauth-protected-resource/mcp/${project.name}"`;
     return reply
-      .code(401)
-      .header('www-authenticate', `Bearer realm="${project.name}"`)
-      .send(rpcError(-32000, verdict === 'token_missing' ? 'This project requires an MCP token' : 'Unknown or revoked MCP token'));
+      .code(mcpAccessStatus(verdict))
+      .header('www-authenticate', challenge)
+      .send(rpcError(-32000, mcpAccessMessage(verdict, project.mcpAuth)));
   });
 
   /** The hook has already resolved it and answered 404 if it does not exist. */

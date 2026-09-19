@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MCP_READ_ACCESS,
   PASSWORD_CHANGE_ALLOWED,
   PUBLIC_ROUTES,
   accessFromMembership,
@@ -11,6 +12,8 @@ import {
   roleAtLeast,
   satisfies,
 } from '../src/auth/policy.js';
+import { mcpAccessDecision } from '../src/mcp/access.js';
+import type { McpAuthMode } from '../src/db/schema.js';
 import type { Principal, ProjectAccess } from '../src/auth/types.js';
 
 const token: Principal = { kind: 'token', role: 'root', userId: null, username: 'ADMIN_TOKEN', mustChangePassword: false };
@@ -197,6 +200,95 @@ describe('moving a project between instances', () => {
     expect(isProjectScoped('/api/projects/import')).toBe(false);
     // A GET of the same path is not a thing, and must not inherit the POST's rule.
     expect(requiredRole('GET', '/api/projects/import')).toBeNull();
+  });
+});
+
+/**
+ * `/mcp/:project`, which is the one surface in this product whose rule is **not** in the table above
+ * ([ADR-0054](../.ssot/ADR.md#adr-0054)). It is not an `/api/*` route and has no route template to
+ * key on, so it is stated rather than derived — and it is asserted here, beside the table, because a
+ * rule that lives somewhere else is a rule the next person changing permissions will not find.
+ *
+ * Every row states an actor, a mode and an answer, and every case that is allowed has a refused twin:
+ * the negative rows are the ones that carry the decision, since the positive ones are also what the
+ * previous behaviour did.
+ */
+const MCP_CASES: Array<{
+  mode: McpAuthMode;
+  actor: Principal | 'nobody' | 'static token';
+  membership: 'viewer' | 'editor' | null;
+  allowed: boolean;
+}> = [
+  // An open project, unchanged: anyone who can reach the URL, with or without a credential.
+  { mode: 'open', actor: 'nobody', membership: null, allowed: true },
+  { mode: 'open', actor: 'static token', membership: null, allowed: true },
+  // ...except for the one thing that *is* new. A credential naming an account is judged by that
+  // account's membership even here, which is the whole point of the entry.
+  { mode: 'open', actor: as('member'), membership: 'viewer', allowed: true },
+  { mode: 'open', actor: as('member'), membership: null, allowed: false },
+
+  // A token project, unchanged for the credential every CLI install in the field is configured with.
+  { mode: 'token', actor: 'nobody', membership: null, allowed: false },
+  { mode: 'token', actor: 'static token', membership: null, allowed: true },
+  { mode: 'token', actor: as('member'), membership: 'viewer', allowed: true },
+  { mode: 'token', actor: as('member'), membership: null, allowed: false },
+
+  // An account project: the static token stops working, and only a membership opens it.
+  { mode: 'account', actor: 'nobody', membership: null, allowed: false },
+  { mode: 'account', actor: 'static token', membership: null, allowed: false },
+  { mode: 'account', actor: as('member'), membership: 'viewer', allowed: true },
+  { mode: 'account', actor: as('member'), membership: 'editor', allowed: true },
+  { mode: 'account', actor: as('member'), membership: null, allowed: false },
+  // An administrator reaches every project in the dashboard and reaches every project here, by the
+  // same `accessFromMembership` that decides it there rather than by a second rule.
+  { mode: 'account', actor: as('admin'), membership: null, allowed: true },
+  { mode: 'account', actor: as('root'), membership: null, allowed: true },
+];
+
+describe('the MCP endpoint, which the table above does not cover', () => {
+  for (const c of MCP_CASES) {
+    const who = typeof c.actor === 'string' ? c.actor : `${c.actor.role}${c.membership ? `/${c.membership}` : ' with no membership'}`;
+    it(`${c.allowed ? 'lets' : 'refuses'} ${who} read a ${c.mode} project`, () => {
+      const credential =
+        c.actor === 'nobody'
+          ? ({ kind: 'anonymous' } as const)
+          : c.actor === 'static token'
+            ? ({ kind: 'bearer' } as const)
+            : ({ kind: 'account', access: accessFromMembership(c.actor, c.membership) } as const);
+      expect(mcpAccessDecision(c.mode, credential) === 'ok').toBe(c.allowed);
+    });
+  }
+
+  it('asks for the access a project page asks for, and not the one the method would have implied', () => {
+    expect(MCP_READ_ACCESS).toBe('viewer');
+    // Every MCP request is a POST, so the route-derived default would have said `editor` — which is
+    // the reason this is a constant and not a lookup. The comparison is the assertion.
+    expect(requiredProjectAccess('POST', '/api/projects/:id/anything-else')).toBe('editor');
+    expect(MCP_READ_ACCESS).not.toBe(requiredProjectAccess('POST', '/api/projects/:id/anything-else'));
+    expect(MCP_READ_ACCESS).toBe(requiredProjectAccess('GET', '/api/projects/:id/sources'));
+  });
+
+  /**
+   * The OAuth endpoints are **deliberately outside** the policy table and outside `/api/*`: three of
+   * them have to answer a client that holds nothing at all (RFC 9728 and RFC 8414 exist to be fetched
+   * anonymously, and RFC 7591 registration grants nothing), and the two that decide anything read the
+   * dashboard's session cookie directly. Asserted here so that "it is not in the table" is a claim
+   * somebody wrote down rather than a gap.
+   */
+  it('keeps the OAuth flow out of the policy table, and out of the surface the table governs', () => {
+    for (const url of [
+      '/.well-known/oauth-protected-resource',
+      '/.well-known/oauth-authorization-server',
+      '/oauth/register',
+      '/oauth/authorize',
+      '/oauth/token',
+      '/oauth/revoke',
+    ]) {
+      expect(url.startsWith('/api/')).toBe(false);
+      expect(isProjectScoped(url)).toBe(false);
+      expect(requiredRole('POST', url)).toBeNull();
+      expect(PUBLIC_ROUTES.has(url)).toBe(false);
+    }
   });
 });
 

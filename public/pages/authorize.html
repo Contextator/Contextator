@@ -1,0 +1,21 @@
+<form class="gate-card" method="post" action="/oauth/authorize">
+  <span class="gate-icon" aria-hidden="true">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 4.4-2.9 8.2-7 9-4.1-.8-7-4.6-7-9V7z"></path><path d="M9 12l2 2 4-4"></path></svg>
+  </span>
+  <h1>Connect {{client}}</h1>
+  <p class="muted">
+    <strong>{{client}}</strong> is asking to read the <strong>{{project}}</strong> project over MCP, as <strong>{{account}}</strong>.
+  </p>
+  <p class="field-hint">
+    It will be able to search that project's documentation, list its pages and read any page in it — everything a
+    <em>viewer</em> of {{project}} can read, and nothing else. It reaches no other project, and it can change nothing
+    anywhere. Your access is re-checked on every request: if your membership of {{project}} is removed, this connection
+    stops working with it.
+  </p>
+  {{fields}}
+  <button type="submit" class="primary block" name="decision" value="approve">Allow {{client}} to read {{project}}</button>
+  <button type="submit" class="ghost block" name="decision" value="deny">Refuse</button>
+  <p class="field-hint center">
+    You are signed in as {{account}}. Sign in as somebody else first if this connection should be theirs.
+  </p>
+</form>

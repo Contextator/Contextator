@@ -2175,13 +2175,17 @@ button.user-btn:hover {
 }
 
 .pill.admin,
-.pill.editor {
+.pill.editor,
+/* The MCP access panel's third mode (ADR-0054): the accent, because "account required" is the
+   strongest of the three and the other two already own the red and the green. */
+.pill.account {
   background: var(--accent-tint);
   color: var(--accent);
 }
 
 .pill.admin::before,
-.pill.editor::before {
+.pill.editor::before,
+.pill.account::before {
   background: var(--accent);
 }
 

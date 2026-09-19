@@ -142,6 +142,24 @@ export const SYNC_MAX_INTERVAL_MINUTES = 30 * 24 * 60;
  */
 export const WEBHOOK_VERIFICATION_WINDOW_MINUTES = 15;
 
+/**
+ * How long an expired OAuth credential is kept before the sweep deletes it
+ * ([ADR-0054](../.ssot/ADR.md#adr-0054)), and how long an unused registered client is.
+ *
+ * Constants and not settings, because neither is a number an operator has a reason to hold an opinion
+ * about. The grace exists for one reason: `search_queries.mcp_token_id` points at these rows
+ * ([ADR-0047](../.ssot/ADR.md#adr-0047)), so deleting one the instant it expires would take the
+ * attribution of every search that session made. A week is longer than any access token's life and far
+ * shorter than the query log's own thirty-day retention, so the log's rows outlive their tokens by
+ * design and lose their `askers` count rather than their content.
+ *
+ * Thirty days for a client, because a connector that registered and never came back is a row nobody
+ * will ever recognise — and one that *did* come back is exempt by the sweep's own predicate, which
+ * keeps any client still holding a live credential whatever its age.
+ */
+export const OAUTH_CREDENTIAL_SWEEP_GRACE_MS = 7 * 24 * 60 * 60_000;
+export const OAUTH_CLIENT_STALE_MS = 30 * 24 * 60 * 60_000;
+
 /** Exported for the tests: the cross-field rules are the only part of this file that has behaviour. */
 export const EnvSchema = z
   .object({
@@ -176,6 +194,52 @@ export const EnvSchema = z
     PASSWORD_MIN_LENGTH: z.coerce.number().int().min(8).max(128).default(12),
     /** Pins the first-run setup code instead of generating one. Ignored once an account exists. */
     SETUP_CODE: z.string().min(8).max(128).optional(),
+
+    // MCP OAuth 2.1 (ADR-0054). What these switch on is a *second* way to present a credential at
+    // /mcp/*, never a second set of rights: what an OAuth session reaches is the membership of the
+    // account that approved it, checked on every request.
+    /**
+     * Whether this instance is an OAuth authorization server for its own MCP endpoints.
+     *
+     * **On by default, because off is the state the feature exists to end**: a browser-based MCP
+     * connector has no way to send a configured header, so with this off such a client cannot connect
+     * to this product at all — which is the defect, not a safe default. What turning it on actually
+     * exposes is three metadata documents that disclose nothing an operator has not already published
+     * (RFC 9728 and RFC 8414 are designed to be public), a consent page that redirects an anonymous
+     * visitor to `/login`, a token endpoint that answers only a code somebody signed in to get, and
+     * one unauthenticated write: a dynamic client registration, capped by `MCP_OAUTH_MAX_CLIENTS` and
+     * swept when unused.
+     *
+     * `0` unregisters every one of those routes rather than making them answer 404, so an instance
+     * that wants only static tokens has no OAuth surface at all.
+     */
+    MCP_OAUTH: z.string().default('1').transform(flag),
+    /**
+     * How long an issued access token lives, in minutes.
+     *
+     * An hour is the usual OAuth answer and it is short for a reason that is specific to this product:
+     * every request re-reads the account and its membership, so a removed membership takes effect on
+     * the next call rather than at expiry — the TTL is what bounds a *stolen* token, and the membership
+     * check is what bounds a revoked person. The refresh token is what keeps an hour from being an
+     * hourly interruption.
+     */
+    MCP_OAUTH_ACCESS_TTL_MIN: z.coerce.number().int().min(5).max(1440).default(60),
+    /**
+     * How long a refresh token lives, in days, counted from the moment it was issued — and it is
+     * reissued on every use, so an actively used connection is never older than one rotation.
+     *
+     * Thirty days matches `AUTH_SESSION_TTL_DAYS`' default on purpose: a browser connector's grant is
+     * the same person's continued access by another door, and the two going stale at different times
+     * would be a difference nobody could explain.
+     */
+    MCP_OAUTH_REFRESH_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+    /**
+     * The ceiling on rows in `oauth_clients`. It is a cap on an **unauthenticated write**, not on
+     * access: registering a client grants nothing at all, so this defends the table rather than the
+     * documents. Two hundred is far more connectors than an instance has and far fewer than a script
+     * can write in a second.
+     */
+    MCP_OAUTH_MAX_CLIENTS: z.coerce.number().int().min(1).max(100_000).default(200),
 
     // Database: a connection string, or (when unset) the libpq PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE
     // variables that node-postgres reads itself. The Docker image uses the latter for its embedded PostgreSQL.

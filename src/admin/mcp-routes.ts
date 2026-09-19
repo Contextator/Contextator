@@ -41,11 +41,15 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
 
   app.patch('/api/projects/:id/mcp-auth', async (req) => {
     const { id } = ProjectParams.parse(req.params);
-    const { mode } = z.object({ mode: z.enum(['open', 'token']) }).parse(req.body);
+    // `account` since [ADR-0054](../../.ssot/ADR.md#adr-0054): a widening of this enum and not a
+    // change to it, so a dashboard or script written against the previous version still sends a value
+    // this route accepts and still means by it what it meant.
+    const { mode } = z.object({ mode: z.enum(['open', 'token', 'account']) }).parse(req.body);
     const mcpAuth = await setProjectMcpAuth(db, id, mode);
     // Closing on the way in as well as out: a session opened while the endpoint was public should
-    // not outlive the moment it stopped being public.
-    if (mode === 'token') await sessions.closeForProject(id);
+    // not outlive the moment it stopped being public. `account` narrows further than `token` does,
+    // so it closes for the same reason.
+    if (mode !== 'open') await sessions.closeForProject(id);
     return { mcpAuth };
   });
 };

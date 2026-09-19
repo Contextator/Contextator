@@ -89,7 +89,16 @@ export const Manifest = z.object({
      * numbers are instance-local and load-bearing in every search predicate, so the import writes 0.
      */
     exportedGeneration: z.number().int().min(0),
-    mcpAuth: z.enum(['open', 'token']),
+    /**
+     * The access mode travels ([ADR-0051](../../../.ssot/ADR.md#adr-0051), FR-354), so a project that
+     * was closed at home arrives closed. `account` joined the set in
+     * [ADR-0054](../../../.ssot/ADR.md#adr-0054) and `manifestVersion` deliberately did **not** move
+     * with it: this is a value added to a field, not a field that changed meaning, and bumping the
+     * format would have made every new export unreadable by builds that could have read all of it but
+     * one enum. What it costs is that a `0.1`-era importer meeting an `account` export refuses it as
+     * unreadable — which is the right answer from a build that has no such mode to put it in.
+     */
+    mcpAuth: z.enum(['open', 'token', 'account']),
     queryLogEnabled: z.boolean(),
     lastIndexedAt: z.string().nullable(),
   }),

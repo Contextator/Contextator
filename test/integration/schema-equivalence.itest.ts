@@ -57,9 +57,19 @@ const opened: TestDatabase[] = [];
  * the second partial index the tick's widened due predicate needs. `webhook_secret` is **not** in this
  * list and must not be — it is a baseline column that entry reuses rather than adds, so a term for it
  * would wave through a future migration that re-typed the secret every delivery is verified against.
+ * `0008_mcp_oauth` ([ADR-0054](../../.ssot/ADR.md#adr-0054)) is the last eight: one whole table, four
+ * columns and two indexes on `mcp_tokens`, and the `kind` CHECK — `kind` and `user_id` are qualified by
+ * their table and their column position for `trigger`'s reason, because both words are ordinary enough
+ * that an unqualified term would wave through a future migration adding one anywhere else.
+ * `projects_mcp_auth_check` **is** in the list, and it is the one term here that names a *baseline*
+ * constraint. It has to be: `('open', 'token')` becoming `('open', 'token', 'account')` is a DROP and
+ * an ADD, so the projection line changes text rather than appearing. The cost is real and is the price
+ * of the widening — a future migration that narrowed this constraint would now pass unread — and it is
+ * bounded by the whole projection being compared as text in the test above, where a narrowing would
+ * show up as a difference between a database carried forward and one created today.
  */
 const POST_BASELINE_MARKERS =
-  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx/;
+  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check/;
 
 afterAll(async () => {
   for (const database of opened) await dropTestDatabase(baseUrl, database);

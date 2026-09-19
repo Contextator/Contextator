@@ -12,10 +12,11 @@ import { webhookRoutes } from './admin/webhooks.js';
 // Source drivers register themselves on import.
 import './services/sources/git.js';
 import './services/sources/notion.js';
-import { loadConfig } from './config.js';
+import { loadConfig, OAUTH_CLIENT_STALE_MS, OAUTH_CREDENTIAL_SWEEP_GRACE_MS } from './config.js';
 import type { AppContext } from './context.js';
 import { createDb, waitForDb } from './db/client.js';
 import { bootstrapDatabase, SchemaMismatchError } from './db/bootstrap.js';
+import { oauthRoutes } from './mcp/oauth-routes.js';
 import { mcpRoutes } from './mcp/router.js';
 import { SessionRegistry } from './mcp/sessions.js';
 import { newChunkBudgetState, verifyChunkBudget } from './services/chunk-budget.js';
@@ -28,6 +29,8 @@ import { QueryLog, sweepQueryLog } from './services/query-log.js';
 import { startSyncScheduler } from './services/scheduler.js';
 import { floorModelWarning } from './services/relevance.js';
 import { countUsers } from './services/auth/users.js';
+import { sweepExpiredMcpCredentials } from './services/auth/mcp-tokens.js';
+import { sweepStaleOauthClients } from './services/auth/oauth.js';
 import { startSessionReaper } from './services/auth/sessions.js';
 import { SetupGate } from './services/auth/setup.js';
 import { SlidingWindow } from './services/rate-limit.js';
@@ -97,6 +100,10 @@ async function main(): Promise<void> {
   await app.register(authPageRoutes, { ctx });
   await app.register(adminRoutes, { ctx });
   await app.register(webhookRoutes, { ctx });
+  // Before the MCP router, because a client that cannot connect yet has to be able to discover how.
+  // Registered at all only when this instance is an authorization server: `MCP_OAUTH=0` leaves the
+  // routes unregistered rather than answering 404 from a handler that exists (ADR-0054).
+  if (config.MCP_OAUTH) await app.register(oauthRoutes, { ctx });
   await app.register(mcpRoutes, { ctx });
 
   let stopSessionReaper: (() => void) | undefined;
@@ -146,6 +153,21 @@ async function main(): Promise<void> {
   // is not a number anybody can observe.
   stopSessionReaper = startSessionReaper(db, log, config.AUTH_SESSION_IDLE_MS, 15 * 60_000, () => {
     loginLimiter.sweep();
+    // The OAuth credentials and the clients that hold none ([ADR-0054](../.ssot/ADR.md#adr-0054)), on
+    // the same quarter-hourly timer and for the same reason: a fourth interval in this process would
+    // buy latency nobody can observe on a seven-day and a thirty-day window.
+    if (config.MCP_OAUTH) {
+      void sweepExpiredMcpCredentials(db, OAUTH_CREDENTIAL_SWEEP_GRACE_MS)
+        .then((deleted) => {
+          if (deleted > 0) log.info({ deleted }, 'swept expired mcp oauth credentials');
+        })
+        .catch((err: unknown) => log.warn({ err }, 'mcp credential sweep failed'));
+      void sweepStaleOauthClients(db, OAUTH_CLIENT_STALE_MS)
+        .then((deleted) => {
+          if (deleted > 0) log.info({ deleted }, 'swept oauth clients that registered and never connected');
+        })
+        .catch((err: unknown) => log.warn({ err }, 'oauth client sweep failed'));
+    }
     if (!config.SEARCH_QUERY_LOG) return;
     void sweepQueryLog(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)
       .then((deleted) => {

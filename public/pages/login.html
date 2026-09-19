@@ -17,5 +17,9 @@
   <p class="field-hint center" id="login-setup-hint" hidden>
     No account exists yet. <a href="/setup">Complete the first-run setup</a> with the code from the server log.
   </p>
-  <p class="field-hint center">The MCP endpoints under <code>/mcp/*</code> are not affected by this sign-in.</p>
+  <p class="field-hint center">
+    Signing in here does not by itself open any <code>/mcp/*</code> endpoint. A project set to
+    <em>account required</em> is reached with a credential an MCP client obtains through this account, and it then
+    reaches exactly the projects your memberships do.
+  </p>
 </form>

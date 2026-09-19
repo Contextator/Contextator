@@ -1,8 +1,10 @@
 // Who may reach a project's MCP endpoint, and the tokens that let them.
 //
-// This is the one panel where the dashboard's own permissions stop mattering: a token is a bearer
-// credential for the endpoint itself, so whoever holds it reads the project's documents whatever
-// their role here — or without an account at all. The copy says so.
+// Two of the three modes are the ones where the dashboard's own permissions stop mattering: a static
+// token is a bearer credential for the endpoint itself, so whoever holds it reads the project's
+// documents whatever their role here — or without an account at all. `account` is the third
+// (ADR-0054), and it is the one where a member's MCP access is their membership. The copy says which
+// is which, because the difference is the whole decision this panel is asking the operator to make.
 
 import { $, ApiError, api, closeDialog, copyText, el, emit, openDialog, relativeTime, state, toast } from './core.js';
 import { canEdit, isAdmin } from './auth.js';
@@ -26,8 +28,32 @@ export async function loadMcpTokens(force = false) {
   }
 }
 
+/** The three access modes, in the order they narrow: what the pill says, and what the copy explains. */
+const MODES = {
+  open: {
+    pill: 'open',
+    tone: 'error',
+    label: 'Open',
+    blurb: 'Anyone who can reach this URL can read every document indexed here — no account, no token. That is the historical behaviour.',
+  },
+  token: {
+    pill: 'token required',
+    tone: 'idle',
+    label: 'Token required',
+    blurb:
+      'Only a client presenting one of the tokens below can read this project over MCP. A token carries no identity: whoever holds it reads everything indexed here, whatever their role in this dashboard. Revoking one cuts its client off immediately.',
+  },
+  account: {
+    pill: 'account required',
+    tone: 'account',
+    label: 'Account required',
+    blurb:
+      'A client has to sign in as somebody, and it then reads this project only if that account is a member of it. The tokens below stop working here — they name nobody. This is the mode where the memberships on this page reach the MCP endpoint.',
+  },
+};
+
 export function renderMcpAccess(project) {
-  const locked = project.mcpAuth === 'token';
+  const mode = MODES[project.mcpAuth] ? project.mcpAuth : 'open';
   const tokens = state.mcpTokensFor === project.id ? state.mcpTokens : [];
   const mayToggle = isAdmin();
   const mayMint = canEdit(project);
@@ -49,28 +75,35 @@ export function renderMcpAccess(project) {
   return el('section', { class: 'panel' }, [
     el('div', { class: 'sources-head' }, [
       el('div', {}, [
-        el('h3', {}, ['MCP access ', el('span', { class: `pill small ${locked ? 'idle' : 'error'}`, text: locked ? 'token required' : 'open' })]),
-        el('p', {
-          text: locked
-            ? 'Only a client presenting one of the tokens below can read this project over MCP. Revoking a token cuts its client off immediately.'
-            : 'Anyone who can reach this URL can read every document indexed here — no account, no token. That is the historical behaviour; require a token to change it.',
-        }),
+        el('h3', {}, ['MCP access ', el('span', { class: `pill small ${MODES[mode].tone}`, text: MODES[mode].pill })]),
+        el('p', { text: MODES[mode].blurb }),
       ]),
+      // Three modes, so this is a choice and no longer a toggle: a two-state button would have to
+      // pick which of the other two it means, and an operator would find out by pressing it.
       mayToggle
-        ? el('button', {
-            type: 'button',
-            class: locked ? 'ghost small' : 'primary small',
-            text: locked ? 'Make open again' : 'Require a token',
-            onclick: () => setMode(project, locked ? 'open' : 'token'),
-          })
+        ? el(
+            'div',
+            { class: 'source-actions' },
+            Object.entries(MODES)
+              .filter(([key]) => key !== mode)
+              .map(([key, meta]) => el('button', { type: 'button', class: 'ghost small', text: meta.label, onclick: () => setMode(project, key) })),
+          )
         : null,
     ]),
 
-    // A locked project with no live token is unreachable; say so where the mistake is made.
-    locked && rows.length === 0
+    // A `token` project with no live token is unreachable; say so where the mistake is made.
+    mode === 'token' && rows.length === 0
       ? el('p', { class: 'members-note' }, [
           el('strong', { text: 'No token, no access. ' }),
           'This project requires a token and has none, so nothing can connect to it right now.',
+        ])
+      : null,
+
+    // The same mistake one mode along, and a different remedy: tokens do not help here.
+    mode === 'account'
+      ? el('p', { class: 'members-note' }, [
+          el('strong', { text: 'Membership is the access. ' }),
+          'Only accounts listed in Members — and administrators — can reach this endpoint. The tokens below do not open it.',
         ])
       : null,
 
@@ -90,11 +123,17 @@ export const authHeaderFor = (secret) => `Authorization: Bearer ${secret ?? '<yo
 
 // ---------- actions ----------
 
+const MODE_TOAST = {
+  open: (name) => `${name} is open again`,
+  token: (name) => `${name} now requires an MCP token`,
+  account: (name) => `${name} now requires an account that is a member of it`,
+};
+
 async function setMode(project, mode) {
   try {
     await api(`/api/projects/${project.id}/mcp-auth`, { method: 'PATCH', body: { mode } });
     project.mcpAuth = mode; // optimistic: the poll would take up to 15 s to catch up
-    toast(mode === 'token' ? `${project.name} now requires an MCP token` : `${project.name} is open again`);
+    toast(MODE_TOAST[mode](project.name));
     await loadMcpTokens(true);
     emit('refresh');
   } catch (err) {
