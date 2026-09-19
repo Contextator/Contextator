@@ -119,15 +119,24 @@ jobs:
           # read on github.com and a relative path would resolve against the fork.
           path-to-document: https://github.com/Contextator/Contextator/blob/main/CLA.md
           #
-          # **`allowlist` is deliberately absent, and it stays absent.** An entry there is not a list of
-          # accounts; it is a string compared against `login || name`, where `name` is the free text in a
-          # commit's author field whenever that commit's e-mail belongs to no GitHub account
-          # (`graphql.ts`). So any entry — a wildcard or an exact one — is a string an outsider can put in
-          # their own commit to walk past this gate with no account and no signature. `bot*` is worse
-          # still: `checkAllowList.ts` compiles it unanchored, so it matches `Abbott` and `sabotage`.
-          # Nothing is lost by leaving it empty. `github-actions[bot]` is already dropped by user id in
-          # `graphql.ts`, Dependabot is switched off for this repository, and a maintainer signing once is
-          # one comment against an entire class of bypass.
+          # **`<none>` is not an allowlist entry and nobody is exempt here. Do not add a username to this
+          # line.** `checkAllowList.ts` compares each entry against `login || name`, and `graphql.ts`
+          # falls back to `name` — the free text in a commit's author field — whenever that commit's
+          # e-mail belongs to no GitHub account. So *every* entry, an exact username as much as a
+          # wildcard, is a string an outsider can set as their own git author name to walk past this gate
+          # with no account and no signature. Wildcards are worse again: the pattern is compiled
+          # unanchored, so `bot*` matches `Abbott` and `sabotage`. Nobody is lost by exempting nobody —
+          # `github-actions[bot]` is already dropped by user id in `graphql.ts`, Dependabot is switched
+          # off for this repository, and a maintainer signing once is one comment against a whole class
+          # of bypass.
+          #
+          # The value is here because *empty* is not empty: the Action splits this input on commas
+          # unconditionally, so `""` becomes the one-element list `[""]` and any committer whose resolved
+          # name is the empty string matches it. `<none>` is filler that consumes that slot. It can never
+          # equal a committer name — `<` and `>` are forbidden in a git ident and absent from every
+          # GitHub login — and it carries no `*`, so it stays on the plain `pattern === committer` branch
+          # rather than being compiled into a regex.
+          allowlist: "<none>"
           #
           # Locking a merged thread is the `lock` job below; here it must be off, or this job would lock
           # instead of checking whenever a pull request closes.
