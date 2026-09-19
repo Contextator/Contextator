@@ -314,7 +314,9 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
         ) < corpus.common_at
       ),
       dense_candidates as materialized (
-        select c.id, (c.embedding <=> ${vector}) as distance
+        -- c.chunk_index is carried for the tie-break below and for nothing else. It is a column of the
+        -- projection, not of the ORDER BY, which is the distinction the comment below is about.
+        select c.id, (c.embedding <=> ${vector}) as distance, c.chunk_index
         from chunks c
         where c.project_id = ${projectId} and c.index_generation = ${generation} ${withinScope}
         -- One sort key, and no tie-break. A second ORDER BY column here is not free: the HNSW index
@@ -327,7 +329,13 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
         limit ${DENSE_CANDIDATES}
       ),
       dense as (
-        select id, row_number() over (order by distance, id) as rank from dense_candidates
+        -- The same shape as the lexical half below, and for the same reason. Equal cosine distance is
+        -- not exotic — a duplicated chunk, a licence block, the same table on two pages — and with the
+        -- uuid as the only tie-break the ranks of those chunks were settled by gen_random_uuid() and
+        -- changed on every re-index. RRF is positional, so that moved the *fused* order of unrelated
+        -- documents too: measured over 24 freshly seeded corpora, five came back with a different
+        -- five-result page. Corpus first, then the uuid as a total-order backstop.
+        select id, row_number() over (order by distance, chunk_index, id) as rank from dense_candidates
       ),
       lexical_candidates as materialized (
         -- Normalisation 1 is "divide by 1 + log(length)". Two reasons, and the second is the one that

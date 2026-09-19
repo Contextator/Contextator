@@ -86,8 +86,10 @@ const search = (queryText: string, limit = 5): Promise<SearchHit[]> =>
 
 /**
  * The dense half alone, asked of the database directly — the ordering this change has to beat, and the
- * one it has to fall back to. No tie-break, because the fused statement has none either and the
- * fixture is built so that no two chunks are the same distance from anything asked of it.
+ * one it has to fall back to. No tie-break, because the fixture above is built so that no two chunks
+ * are the same distance from anything asked of it, which makes every tie-break equivalent here. The
+ * fused statement does have one — `distance, chunk_index, id` — and the corpus that exercises it is
+ * seeded at the bottom of this file rather than mixed into this one.
  */
 async function denseOnly(queryText: string, limit = 5): Promise<string[]> {
   const result = await database.db.execute(sql`
@@ -352,5 +354,134 @@ describe('a project that has been migrated but not re-indexed', () => {
     // The `IS NULL` guard is what makes the steady-state cost one query that matches nothing. Without
     // it every start would rewrite every chunk on the instance, and this row version would move.
     expect(await version()).toBe(before);
+  });
+});
+
+/**
+ * **The determinism the dense half did not have**, and the corpus above is the wrong place to observe
+ * it: every fixture in this file is built so that no two chunks land on one distance, precisely so the
+ * assertions above are about fusion rather than about a coin toss.
+ *
+ * So this seeds the opposite corpus. `stubVector` cannot see a digit, so three chunks that differ only
+ * in one are **the same vector** — which is not a contrivance but the commonest shape of the real
+ * thing: a duplicated section, a licence block, the same table reproduced on a second page. Their
+ * distance is one number, and until the dense CTE broke that tie on `chunk_index` their ranks were
+ * settled by `gen_random_uuid()`. RRF is positional, so a random dense rank paired with a fixed
+ * lexical one moves the *fused* score, and the page comes out in a different order.
+ *
+ * **Every repetition is a freshly created project**, because that is where the non-determinism came
+ * from: a fresh row mints a fresh uuid, and one project searched twice would have answered the same
+ * both times while the defect was still there.
+ */
+const TIED = 'notes/duplicates.md';
+const TIED_ANCHOR = 'handbook/quarterly.md';
+const TIED_QUESTION = 'quarterly revenue table';
+
+/**
+ * Five, and the arithmetic is worth stating: three tied chunks have six orders, so five independent
+ * draws agreeing by luck is one chance in 1 296. Run against the old ranking this file fails, and the
+ * page it prints has a chunk of the *other* document displaced — which is the collateral damage that
+ * makes this worth a case rather than a comment.
+ */
+const TIED_REPEATS = 5;
+
+/**
+ * One project, two documents, six chunks. The three in `notes/duplicates.md` differ only by a digit —
+ * one bag of words, one vector, one distance, and one `ts_rank_cd` over one content length, so the
+ * lexical half orders them by `chunk_index` and everything that is left is the dense half's to decide.
+ */
+async function seedTiedCorpus(name: string): Promise<string> {
+  const [project] = await database.db.insert(projects).values({ name }).returning({ id: projects.id });
+  const [source] = await database.db
+    .insert(documentSources)
+    .values({ projectId: project.id, type: 'local', name: 'notes' })
+    .returning({ id: documentSources.id });
+
+  const write = async (relativePath: string, headingPath: string, bodies: readonly string[]): Promise<void> => {
+    await replaceDocument(
+      database.db,
+      {
+        projectId: project.id,
+        sourceId: source.id,
+        relativePath,
+        title: relativePath,
+        contentHash: `hash-${relativePath}`,
+        sizeBytes: 512,
+        indexGeneration: LIVE,
+        content: null,
+        contentTruncated: false,
+      },
+      bodies.map((content, chunkIndex) => ({
+        chunkIndex,
+        headingPath,
+        content,
+        tokenCount: 20,
+        embedding: stubVector(`${headingPath} ${content}`),
+      })),
+    );
+  };
+
+  // The digit is the only difference, and it is the one character `stubVector` throws away.
+  await write(
+    TIED,
+    'Notes > Duplicates',
+    [0, 1, 2].map((i) => `Duplicate ${i}: the quarterly revenue table, reproduced on another page.`),
+  );
+  // Distinct vectors, by repetition rather than by new words — see the note on `stubVector` in
+  // `result-selection.itest.ts` for why a new word would not have been enough.
+  await write(
+    TIED_ANCHOR,
+    'Handbook > Quarterly',
+    [0, 1, 2].map((i) => `Quarterly revenue is reported${' quarterly'.repeat(i)} in the handbook.`),
+  );
+  return project.id;
+}
+
+describe('a corpus that genuinely contains tied embeddings', () => {
+  const pages: SearchHit[][] = [];
+
+  beforeAll(async () => {
+    for (let run = 0; run < TIED_REPEATS; run++) {
+      const tiedProjectId = await seedTiedCorpus(`ties-${run}`);
+      pages.push(
+        await searchChunks(database.db, {
+          projectId: tiedProjectId,
+          generation: LIVE,
+          queryEmbedding: stubVector(TIED_QUESTION),
+          queryText: TIED_QUESTION,
+          limit: 6,
+          selection: WHOLE_PAGE,
+        }),
+      );
+    }
+  });
+
+  it('has the tie it is about, which is the premise and not an assertion about the product', () => {
+    // Without this the case below passes against a corpus with nothing to break, which is how a
+    // determinism test quietly becomes a test of nothing.
+    for (const page of pages) {
+      expect(page).toHaveLength(6);
+      const tied = page.filter((hit) => hit.file === TIED);
+      expect(tied).toHaveLength(3);
+      expect(new Set(tied.map((hit) => hit.score)).size).toBe(1);
+    }
+  });
+
+  it('answers five freshly created projects with one fused page, in one order', () => {
+    const orders = pages.map((page) => page.map(identify));
+
+    for (const order of orders) expect(order).toEqual(orders[0]);
+    // Named rather than left implicit: before the dense CTE carried `chunk_index`, this is the list
+    // that came out permuted, and the ranks are what permuted it.
+    for (const page of pages) expect(page.map((hit) => hit.denseRank)).toEqual(pages[0].map((hit) => hit.denseRank));
+  });
+
+  it('breaks the tie on the earlier chunk, the way the lexical half already did', () => {
+    // The direction of the tie-break, not merely its stability: a total order on the uuid would also be
+    // stable *within* one project, and would still differ between two.
+    const tied = pages[0].filter((hit) => hit.file === TIED);
+
+    expect(tied.map((hit) => hit.chunkIndex)).toEqual([0, 1, 2]);
+    expect(tied.map((hit) => hit.denseRank)).toEqual([...tied.map((hit) => hit.denseRank)].sort((a, b) => (a ?? 0) - (b ?? 0)));
   });
 });
