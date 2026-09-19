@@ -129,7 +129,21 @@ export const Manifest = z.object({
   sources: z.array(
     z.object({
       name: z.string().min(1).max(64),
-      type: z.enum(['local', 'git', 'upload', 'notion']),
+      /**
+       * `confluence` joined the set in [ADR-0059](../../../.ssot/ADR.md#adr-0059), and
+       * `manifestVersion` deliberately did **not** move with it — the same decision, for the same
+       * reason, that `account` got above. This is a value added to a field, not a field that changed
+       * meaning, and bumping the format would make every new export unreadable by builds that could
+       * have read all of it but one enum member.
+       *
+       * What it costs is written down rather than discovered: a build from before this entry, meeting
+       * an export that holds a Confluence source, refuses the **whole import** with a raw zod message
+       * naming this field. That is a blunt refusal and it is the right one — such a build has no
+       * driver to put the source in — and the property that matters is that it refuses rather than
+       * importing something it does not understand. Nothing is silently dropped and nothing lands
+       * half-configured.
+       */
+      type: z.enum(['local', 'git', 'upload', 'notion', 'confluence']),
       needs: z.array(z.enum(SOURCE_NEEDS)),
     }),
   ),
