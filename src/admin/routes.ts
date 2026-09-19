@@ -20,6 +20,7 @@ import { ConflictError, NotFoundError, ValidationError, createProject, deletePro
 import { SOURCE_VERSION_MAX_LENGTH, countSourcesByProject, createSource, slugifySourceName } from '../services/sources.js';
 import { ImportRefusedError } from '../services/transfer/manifest.js';
 import { scanFrom, selectionFrom } from '../services/vector-store.js';
+import { auditRoutes } from './audit-routes.js';
 import { authRoutes } from './auth-routes.js';
 import { mcpRoutes } from './mcp-routes.js';
 import { memberRoutes } from './members-routes.js';
@@ -434,6 +435,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     return reply.code(204).send();
   });
 
+  await app.register(auditRoutes, { ctx });
   await app.register(authRoutes, { ctx });
   await app.register(usersRoutes, { ctx });
   await app.register(memberRoutes, { ctx });

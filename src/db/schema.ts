@@ -782,6 +782,14 @@ export const auditEvents = pgTable(
     // default for a DESC column, and leaving it unsaid makes drizzle-kit write `DESC NULLS LAST`.
     index('audit_events_project_created_idx').on(t.projectId, t.createdAt.desc().nullsFirst()),
     index('audit_events_actor_created_idx').on(t.actorUserId, t.createdAt.desc().nullsFirst()),
+    // The two the *panel* asks on, which are not the two above ([ADR-0055](../../.ssot/ADR.md#adr-0055),
+    // FR-451). `audit_events_actor_created_idx` is keyed on `actor_user_id`, and the panel filters on
+    // `actor_label` — it has to, because the label is the column that outlives the account being
+    // deleted, which is half of what the panel exists to show. And "what kind of act was this" had no
+    // index at all. Both are `(column, created_at DESC)` rather than the column alone, so one index
+    // serves the filter and the `(created_at, id)` ordering every page is read in.
+    index('audit_events_actor_label_created_idx').on(t.actorLabel, t.createdAt.desc().nullsFirst()),
+    index('audit_events_action_created_idx').on(t.action, t.createdAt.desc().nullsFirst()),
   ],
 );
 

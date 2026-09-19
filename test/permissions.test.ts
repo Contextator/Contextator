@@ -134,6 +134,17 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'GET', url: METRICS_ROUTE, actor: as('admin'), membership: null, allowed: true },
   { method: 'GET', url: METRICS_ROUTE, actor: token, membership: null, allowed: true },
 
+  // Reading the audit log ([ADR-0055](../.ssot/ADR.md#adr-0055)). The same standing as user
+  // management, and for the same reason: the rows are about the instance rather than about one
+  // project. The `member`/`editor` row is the sharp one — a membership is standing on a project, and
+  // it must not become standing to read who was given the root role or whose account was disabled.
+  { method: 'GET', url: '/api/audit', actor: as('member'), membership: null, allowed: false },
+  { method: 'GET', url: '/api/audit', actor: as('member'), membership: 'viewer', allowed: false },
+  { method: 'GET', url: '/api/audit', actor: as('member'), membership: 'editor', allowed: false },
+  { method: 'GET', url: '/api/audit', actor: as('admin'), membership: null, allowed: true },
+  { method: 'GET', url: '/api/audit', actor: as('root'), membership: null, allowed: true },
+  { method: 'GET', url: '/api/audit', actor: token, membership: null, allowed: true },
+
   // Membership: anyone on the project sees who else is; only root/admin change it.
   { method: 'GET', url: '/api/projects/:id/members', actor: as('member'), membership: 'viewer', allowed: true },
   { method: 'PUT', url: '/api/projects/:id/members/:userId', actor: as('member'), membership: 'editor', allowed: false },
@@ -342,6 +353,34 @@ describe('user management', () => {
     expect(canActOnRole(as('admin'), 'admin')).toBe(true);
     expect(canActOnRole(as('admin'), 'member')).toBe(true);
     expect(canActOnRole(token, 'root')).toBe(true);
+  });
+});
+
+/**
+ * The panel over the audit log ([ADR-0055](../.ssot/ADR.md#adr-0055)).
+ *
+ * Two claims the matrix above cannot make on its own. The first is that the rule is stated as a
+ * *prefix* and so already covers a second audit route nobody has written — the same property
+ * `/api/users` has, and the reason neither is a list. The second is that the log is **not** project
+ * scoped: were it ever moved under `/api/projects/:id`, `requiredProjectAccess` would fall a `GET` to
+ * `viewer` and every member of any project would read the whole instance's record.
+ */
+describe('reading the audit log', () => {
+  it('asks for the standing user management asks for, on every route under it', () => {
+    expect(requiredRole('GET', '/api/audit')).toBe('admin');
+    expect(requiredRole('GET', '/api/audit/whatever-comes-next')).toBe('admin');
+  });
+
+  it('is not a project route, so no membership can open it', () => {
+    expect(isProjectScoped('/api/audit')).toBe(false);
+    expect(accessFromMembership(as('member'), 'editor')).toBe('editor');
+    // Stated against the whole decision and not just the role lookup: a membership is irrelevant here.
+    expect(allows(as('member'), 'editor', 'GET', '/api/audit')).toBe(false);
+    expect(allows(as('admin'), null, 'GET', '/api/audit')).toBe(true);
+  });
+
+  it('is a read and nothing else — reading it is not itself an event', () => {
+    expect(auditSubject('GET', '/api/audit', {}, undefined)).toBeNull();
   });
 });
 

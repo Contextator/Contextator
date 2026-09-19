@@ -24,6 +24,7 @@ import {
   state,
   toast,
 } from './core.js';
+import { captureAuditFocus, loadAudit, renderAuditView } from './audit.js';
 import { canCreateProject, canDeleteProject, canEdit, initAuthUi, loadMe, renderUserMenu } from './auth.js';
 import { authHeaderFor, initMcpUi, loadMcpTokens, renderMcpAccess } from './mcp.js';
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
@@ -153,11 +154,12 @@ function snippetsFor(project) {
 
 /**
  * Hash routing. Project names are `^[a-z0-9][a-z0-9_-]*`, so a leading `~` can never collide
- * with one: `#/~users` is the account list, anything else is a project.
+ * with one: `#/~users` is the account list, `#/~audit` the audit log, anything else is a project.
  */
 function parseHash() {
   const raw = decodeURIComponent(location.hash.replace(/^#\/?/, ''));
   if (raw === '~users') return { view: 'users', selected: null };
+  if (raw === '~audit') return { view: 'audit', selected: null };
   return { view: 'projects', selected: raw || null };
 }
 
@@ -166,8 +168,10 @@ function applyHash() {
   const changed = view !== state.view;
   state.view = view;
   if (view === 'projects' && selected) state.selectedId = selected;
-  document.body.classList.toggle('no-sidebar', view === 'users');
+  // Both instance views are full-width: neither is about the project in the list beside them.
+  document.body.classList.toggle('no-sidebar', view === 'users' || view === 'audit');
   if (view === 'users') void loadUsers();
+  if (view === 'audit') void loadAudit();
   if (changed || view === 'users') renderAll();
 }
 
@@ -387,10 +391,16 @@ function renderDetail() {
   // Before the wipe, not after: emptying #detail takes the search box's focus with it, and nothing
   // downstream can then tell whether the operator was typing. search.js restores what this records.
   captureSearchFocus();
+  captureAuditFocus();
   main.replaceChildren();
 
   if (state.view === 'users') {
     main.append(renderUsersView());
+    return;
+  }
+
+  if (state.view === 'audit') {
+    main.append(renderAuditView());
     return;
   }
 
@@ -862,6 +872,9 @@ async function refresh() {
   }
   // The account list is not part of a project poll; refresh it only while it is on screen.
   if (state.view === 'users') void loadUsers();
+  // A no-op unless a filter or the page moved, for ADR-0050's reason one table along: the audit log
+  // is append-only and a filtered scan of it twice a second buys nothing. The panel carries Refresh.
+  if (state.view === 'audit') void loadAudit();
   schedule();
 }
 
@@ -873,7 +886,9 @@ function schedule() {
   // somebody is typing into. search.js restores the caret for the renders it cannot avoid; this
   // keeps the avoidable ones out of the way, at the cost of a staler job phase while the box is
   // focused. It is the cheapest fix for the whole class of "my typing vanished".
-  const typing = state.search.focused;
+  // …and the audit panel's filter bar is the same class of thing: a half-typed date, or a dropdown
+  // the operator has open, does not survive #detail being replaced underneath it.
+  const typing = state.search.focused || state.audit.focusKey !== null;
   state.timer = setTimeout(refresh, typing ? POLL_TYPING_MS : active || modelLoading ? POLL_ACTIVE_MS : POLL_IDLE_MS);
 }
 

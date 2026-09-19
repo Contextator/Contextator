@@ -1,0 +1,33 @@
+-- Two indexes for the audit panel (ADR-0055, PRD.md FR-451) — and nothing else.
+--
+-- **The panel filters on columns the write side did not index.** `0010` added
+-- `audit_events_actor_created_idx` on `actor_user_id`, which is the right key for "what did this
+-- account do" and the wrong one for the panel: the panel filters on `actor_label`, because that is the
+-- column that survives the account being deleted, and showing those rows is half of what it is for.
+-- `action` — "what kind of act was this" — had no index at all. Both filters were sequential scans.
+--
+-- **Now rather than later, and that is the whole argument for the timing.** `audit_events` is an
+-- append-only table that grows with every state-changing request this instance serves, and it is close
+-- to empty today. Building these indexes on an empty table is instant and takes no meaningful lock;
+-- building them on a year of rows is a write against a large table during a deployment. The cheapest
+-- moment to add an index to a table that only grows is before it has grown.
+--
+-- **`(column, created_at DESC)` and not the column alone**, so one index serves both the filter and
+-- the `(created_at DESC, id DESC)` ordering every page of the panel is read in — a filtered page is
+-- then an index scan rather than a scan plus a sort. `NULLS FIRST` for the reason `0010`'s two
+-- composite indexes carry it: it is PostgreSQL's own default for a DESC column, and leaving it unsaid
+-- makes drizzle-kit write `DESC NULLS LAST` and then see a difference that is not there.
+--
+-- **Nothing is read, rewritten or dropped.** No column changes, no constraint changes, no data is
+-- touched. An installation that applies this and then runs the previous build is the installation it
+-- was, carrying two indexes that build never plans against.
+--
+-- **Undoing it** is two statements and costs nothing but the plans that used them:
+--
+--   DROP INDEX IF EXISTS "audit_events_actor_label_created_idx";
+--   DROP INDEX IF EXISTS "audit_events_action_created_idx";
+--
+-- Rolling back the *application* needs neither: an older build simply does not use them.
+
+CREATE INDEX "audit_events_actor_label_created_idx" ON "audit_events" USING btree ("actor_label","created_at" DESC NULLS FIRST);--> statement-breakpoint
+CREATE INDEX "audit_events_action_created_idx" ON "audit_events" USING btree ("action","created_at" DESC NULLS FIRST);

@@ -25,6 +25,8 @@ export const canEdit = (project) => projectRole(project) === 'editor';
 export const canCreateProject = () => isAdmin();
 export const canDeleteProject = () => isAdmin();
 export const canManageUsers = () => isAdmin();
+/** The audit log is instance-wide, so it asks for the standing user management asks for (ADR-0055). */
+export const canReadAudit = () => isAdmin();
 export const canManageMembers = () => isAdmin();
 
 // ---------- top bar ----------
@@ -76,6 +78,7 @@ export function renderUserMenu() {
         },
       }),
       canManageUsers() ? el('a', { class: 'menu-item', role: 'menuitem', href: '#/~users', text: 'Users', onclick: closeMenu }) : null,
+      canReadAudit() ? el('a', { class: 'menu-item', role: 'menuitem', href: '#/~audit', text: 'Audit log', onclick: closeMenu }) : null,
       el('span', { class: 'menu-sep' }),
       el('button', { type: 'button', class: 'menu-item danger-text', role: 'menuitem', text: 'Sign out', onclick: signOut }),
     ]),

@@ -36,7 +36,7 @@ export const icon = (name) => el('span', { class: 'icon-wrap', html: ICON[name],
  */
 export const state = {
   me: null, // { id, username, displayName, role, mustChangePassword, projects: { <id>: 'viewer'|'editor' } }
-  view: 'projects', // 'projects' | 'users'
+  view: 'projects', // 'projects' | 'users' | 'audit'
   projects: [],
   health: null,
   selectedId: null,
@@ -102,6 +102,39 @@ export const state = {
     error: '',
     data: null,
     confirmPurge: false,
+  },
+  /**
+   * The audit panel (audit.js), whole, and here for the reason state.search and state.queries are:
+   * app.js rebuilds #detail on every poll, so a chosen filter, the page somebody has paged to, and
+   * the control they are typing into would all be thrown away a second or two later.
+   *
+   * Every key the panel reads is declared here rather than assembled on the fly, and
+   * test/dashboard-wiring.test.ts checks that the two files still agree — a `state.audit.actorName`
+   * that nothing declares reads `undefined` in the browser and fails nowhere else.
+   */
+  audit: {
+    /** The four filters, exactly as the endpoint takes them. `''` means "not filtering by this". */
+    actor: '',
+    project: '', // a project id, or 'none' for the events that belong to no project
+    action: '',
+    from: '', // YYYY-MM-DD, UTC — the panel says so beside the inputs
+    to: '',
+    /** The cursor of the page on screen, and the stack of the ones behind it, so Newer can go back. */
+    cursor: null,
+    back: [],
+    nextCursor: null,
+    /** The request the rows in hand answer; a change of any part of it is what refetches. */
+    loadedKey: null,
+    loadedAt: null,
+    status: 'idle', // 'idle' | 'loading' | 'done' | 'error'
+    error: '',
+    events: [],
+    /** The distinct actors, actions and projects the pickers offer; kept from the last unpaged load. */
+    filters: null,
+    retentionDays: null,
+    /** Which control had focus when the last rebuild wiped the panel, and where its caret was. */
+    focusKey: null,
+    caret: 0,
   },
   confirmDelete: null,
   confirmTimer: null,
