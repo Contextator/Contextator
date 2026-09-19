@@ -41,8 +41,15 @@ export const SUPPORTED_EXTENSIONS = ['md', 'mdx', 'txt', 'html', 'htm', 'csv', '
 export type SupportedExtension = (typeof SUPPORTED_EXTENSIONS)[number];
 export const DEFAULT_EXTENSIONS: SupportedExtension[] = ['md', 'mdx'];
 
-export function extensionMatcher(extensions: readonly string[]): RegExp {
-  const list = extensions.filter((e) => (SUPPORTED_EXTENSIONS as readonly string[]).includes(e));
+/**
+ * `allowed` widens the value set for a flavor whose own reader takes extensions no document type does
+ * — `.yaml` and `.json` under `openapi` ([ADR-0057](../../.ssot/ADR.md#adr-0057)). Defaulting it to
+ * `SUPPORTED_EXTENSIONS` is what keeps those extensions unreachable everywhere else: a source that
+ * stored `yaml` and then had its flavor changed back to `plain` scans no YAML, rather than scanning it
+ * and reporting a file per line that nothing can read.
+ */
+export function extensionMatcher(extensions: readonly string[], allowed: readonly string[] = SUPPORTED_EXTENSIONS): RegExp {
+  const list = extensions.filter((e) => allowed.includes(e));
   return new RegExp(`\\.(${(list.length ? list : DEFAULT_EXTENSIONS).join('|')})$`, 'i');
 }
 
@@ -92,10 +99,10 @@ export async function resolveProjectRoot(rootPath: string, allowedRoots: string[
 /** Yields document files (`.md` / `.mdx` by default) under `rootReal`, skipping dotfiles, build dirs, symlinks and ignored globs. */
 export async function* walkMarkdown(
   rootReal: string,
-  opts: { ignoreGlobs: string[]; extensions?: readonly string[] } = { ignoreGlobs: [] },
+  opts: { ignoreGlobs: string[]; extensions?: readonly string[]; allowedExtensions?: readonly string[] } = { ignoreGlobs: [] },
 ): AsyncGenerator<ScannedFile> {
   const isIgnored: (p: string) => boolean = opts.ignoreGlobs.length ? picomatch(opts.ignoreGlobs, { dot: true }) : () => false;
-  const matchesExt = opts.extensions ? extensionMatcher(opts.extensions) : MARKDOWN_EXT;
+  const matchesExt = opts.extensions ? extensionMatcher(opts.extensions, opts.allowedExtensions) : MARKDOWN_EXT;
 
   async function* walk(dirAbs: string, relParts: string[]): AsyncGenerator<ScannedFile> {
     const entries = await fs.readdir(dirAbs, { withFileTypes: true });

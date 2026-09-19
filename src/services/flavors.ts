@@ -1,10 +1,52 @@
 /**
  * Source "flavors": small, pure transforms applied to paths (before prefixing) and to content
  * (after hashing, before chunking) so exports from other tools read as ordinary Markdown.
+ *
+ * Since [ADR-0057](../../.ssot/ADR.md#adr-0057) a flavor may also say something a transform cannot:
+ * that a file is **not one document**. `openapi` is that flavor, and the two things below —
+ * `allowedExtensionsFor` and `expandsToManyDocuments` — are the whole of what the rest of the product
+ * has to know about it. The expansion itself lives in `services/openapi.ts`.
  */
 
-export const FLAVORS = ['plain', 'obsidian', 'notion-export'] as const;
+import { SUPPORTED_EXTENSIONS } from './fs-scan.js';
+import { isSpecificationFile } from './openapi.js';
+
+export const FLAVORS = ['plain', 'obsidian', 'notion-export', 'openapi'] as const;
 export type Flavor = (typeof FLAVORS)[number];
+
+/**
+ * Extensions a flavor's own reader takes, **on top of** `SUPPORTED_EXTENSIONS`.
+ *
+ * `.yaml` and `.json` are not document types and deliberately never became one
+ * ([ADR-0056](../../.ssot/ADR.md#adr-0056) keys off the extension because a `.pdf` is a PDF whatever
+ * anyone believes). A `.yaml` is a CI config, a Helm values file, a test fixture — the extension
+ * implies nothing. Only the operator choosing this flavor says "the structured files in this source are
+ * API specifications", so these extensions are reachable only from here, and a `plain` source cannot be
+ * talked into parsing its lockfile as an API.
+ */
+const FLAVOR_EXTENSIONS: Partial<Record<Flavor, readonly string[]>> = {
+  openapi: ['yaml', 'yml', 'json'],
+};
+
+/** Every extension any flavor adds — the widened value set `document_sources.config` may hold. */
+export const FLAVOR_ONLY_EXTENSIONS = ['yaml', 'yml', 'json'] as const;
+
+/** The extensions a source of this flavor may be configured with, and the set its scan is filtered to. */
+export function allowedExtensionsFor(flavor: Flavor): readonly string[] {
+  const extra = FLAVOR_EXTENSIONS[flavor];
+  return extra ? [...SUPPORTED_EXTENSIONS, ...extra] : SUPPORTED_EXTENSIONS;
+}
+
+/**
+ * Whether this flavor turns this one file into several documents rather than one.
+ *
+ * It is per **file** and not per source, because a repository of specifications nearly always has a
+ * `README.md` beside them and that file is an ordinary Markdown document. Everything this returns
+ * `false` for stays on the path it has always been on.
+ */
+export function expandsToManyDocuments(flavor: Flavor, relativePath: string): boolean {
+  return flavor === 'openapi' && isSpecificationFile(relativePath);
+}
 
 /** Notion export names look like `Getting started 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d.md` (also on directories). */
 const NOTION_ID_SUFFIX = /[ _-]?[0-9a-f]{32}(?=(\.[a-z0-9]+)?$)/i;

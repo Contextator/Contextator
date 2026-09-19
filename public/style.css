@@ -1702,6 +1702,12 @@ button.danger.small {
   font-size: 13.5px;
 }
 
+/* An author rule for `display` beats the UA stylesheet's [hidden], so hiding one has to be said here. */
+.check-row label[hidden],
+.radio-row label[hidden] {
+  display: none;
+}
+
 .check-row input,
 .radio-row input,
 .check-inline input {
