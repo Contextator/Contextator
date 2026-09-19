@@ -6,6 +6,8 @@ import type { AppContext } from '../src/context.js';
 import type { Db } from '../src/db/client.js';
 import { SetupGate } from '../src/services/auth/setup.js';
 import { SlidingWindow } from '../src/services/rate-limit.js';
+import { MetricsRegistry } from '../src/services/metrics.js';
+import { AuditWriter } from '../src/services/audit.js';
 
 /**
  * The contract of `/api/projects/:id/queries/*` ([ADR-0050](../.ssot/ADR.md#adr-0050)) — the bounds a
@@ -58,6 +60,12 @@ async function buildApi(): Promise<FastifyInstance> {
     sessions: {},
     setup: new SetupGate(),
     loginLimiter: new SlidingWindow(10, 1000),
+    // The process counters `/metrics` reports ([ADR-0055](../../.ssot/ADR.md#adr-0055)). Real rather
+    // than stubbed: it is a handful of integers and the audit hook increments one on every write.
+    metrics: new MetricsRegistry(),
+    // A real writer, because the policy layer's `onResponse` hook calls it on every successful
+    // write and `settled()` is what lets a test await the row instead of polling for it.
+    audit: new AuditWriter(stubDb, app.log),
     version: '0.0.0-test',
     startedAt: Date.now(),
   } as unknown as AppContext;

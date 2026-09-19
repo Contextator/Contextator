@@ -74,3 +74,17 @@ export async function recordIndexRun(db: Db, job: FinishedJobSummary): Promise<v
 export async function listIndexRuns(db: Db, projectId: string, limit = RUN_HISTORY_LIMIT): Promise<IndexRunRow[]> {
   return db.select().from(indexRuns).where(eq(indexRuns.projectId, projectId)).orderBy(desc(indexRuns.startedAt)).limit(limit);
 }
+
+/**
+ * The run that finished most recently on this instance, whichever project it belonged to — what
+ * `/metrics` reports as "the last index run" ([ADR-0055](../../.ssot/ADR.md#adr-0055)).
+ *
+ * Ordered by `finished_at` and not by `started_at`: the question a scrape asks is "when did indexing
+ * last complete, and did it work", and a long run that started before a short one still finishes after
+ * it. It has no index of its own and needs none — this table is capped at `RUN_HISTORY_LIMIT` rows per
+ * project by `recordIndexRun`, so the whole of it is a handful of pages on any installation.
+ */
+export async function latestIndexRun(db: Db): Promise<IndexRunRow | undefined> {
+  const [row] = await db.select().from(indexRuns).orderBy(desc(indexRuns.finishedAt)).limit(1);
+  return row;
+}

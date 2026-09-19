@@ -656,6 +656,9 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `ALLOWED_ORIGINS` | – | Extra browser origins allowed on `/mcp/*` (non-browser clients are always allowed) |
 | `PUBLIC_BASE_URL` | – | e.g. `https://docs.example.com` for the URLs shown in the dashboard |
 | `SESSION_IDLE_TTL_MS` | `1800000` | Idle Streamable HTTP sessions are closed after 30 min |
+| `AUDIT_LOG_RETENTION_DAYS` | `365` | How long an audit event is kept. There is no switch for the log itself: every state-changing admin request that succeeds is recorded with the account that made it, written by the policy layer rather than by each route. The rows carry no question, no document and no excerpt — that is the query log, which is a separate table under a separate window |
+| `METRICS_TOKEN` | – | A bearer credential that reaches `GET /metrics` and **nothing else**, so scraping does not mean handing Prometheus an `ADMIN_TOKEN`. At least 16 characters. Unset, `/metrics` still answers a signed-in account or `ADMIN_TOKEN` |
+| `METRICS_PUBLIC` | `0` | `1` answers `/metrics` with no credential at all. For a private network or a proxy that already guards the path; anywhere the port is reachable, leave it off — the exposition describes the instance |
 | `RESET_VECTORS` | `0` | See *Changing the embedding model* |
 
 ### Changing the embedding model
@@ -720,6 +723,7 @@ no ambient credential.
 | `POST /api/projects/:id/mcp-tokens` `{ name? }` | Mint one → `201 { token, secret }`; `secret` is returned **once** |
 | `DELETE /api/projects/:id/mcp-tokens/:tokenId` | Revoke it and close the project's open MCP sessions |
 | `PATCH /api/projects/:id/mcp-auth` `{ mode }` | `open` or `token` (root/admin) |
+| `GET /metrics` | Prometheus text (`text/plain; version=0.0.4`): the indexing queue by lane, whether one is running, the last index run and whether it worked, searches by actor, the database pool and whether the database answers. **Not public** — a signed-in account, `ADMIN_TOKEN`, a `METRICS_TOKEN` bearer, or nothing at all when `METRICS_PUBLIC=1`. `200` even while the database is down, with `contextator_db_up 0` and the rows that need one left out, so a scrape gap is never the way an outage is reported |
 
 ### Accounts
 
@@ -744,6 +748,22 @@ no ambient credential.
 
 A project a member has no access to answers `404`, not `403`, so project ids cannot be probed. `409` guards the last
 root account; `403` guards an admin reaching for a root one.
+
+### The audit log
+
+Every one of the state-changing requests above leaves a row in `audit_events` naming the account that made it —
+what was done, to which project, to which source or token, and when. It is written by the policy layer rather than
+by each handler, so there is no route that can be added without being covered and none that can opt out; the
+exceptions are four and each is listed with its reason in `src/auth/policy.ts`.
+
+The rows carry no user content. A question, a document and an excerpt never reach a column of this table: the only
+body fields any action may record are named in that same file, each restricted to a closed set of values (`mode` is
+one of `open`/`token`/`account`, and so on). That is what keeps it a different record from the query log, which
+holds what agents asked and is governed by [its own retention](#configuration) and its own per-project switch. The
+two are deliberately not one table.
+
+There is no panel over it yet and no API endpoint that reads it; today it is queried with `psql`. Rows older than
+`AUDIT_LOG_RETENTION_DAYS` are swept on the same quarter-hourly timer as expired sessions.
 
 ## Local development (without Docker for the app)
 
@@ -809,7 +829,7 @@ src/mcp/router.ts             /mcp/:project — Streamable HTTP + legacy SSE on 
 src/mcp/tools.ts              search_docs, list_topics, read_document
 src/services/document-read.ts  joining chunks back into a section, and cutting text to a token budget
 src/mcp/sessions.ts           per-connection McpServer/transport registry + idle reaper
-src/auth/policy.ts            every authorization rule as data — no DB, no Fastify, fully unit-tested
+src/auth/policy.ts            every authorization rule as data — no DB, no Fastify, fully unit-tested; also which requests are audit events and what they may record
 src/auth/authorize.ts         the request checks that need no database, in the order they must happen
 src/auth/plugin.ts            resolves the principal (cookie or ADMIN_TOKEN) and applies the policy
 src/auth/cookies.ts           the session cookie's name, flags and Secure decision
@@ -817,6 +837,8 @@ src/auth/csrf.ts              same-site check for cookie-authenticated writes
 src/services/passwords.ts     scrypt hashing (node:crypto), policy and temporary passwords
 src/services/auth/            accounts, sessions, memberships and the first-run setup gate
 src/services/rate-limit.ts    in-memory sliding window for sign-in attempts
+src/services/audit.ts         the audit log: the row an action becomes, the writer the policy layer holds, and the retention sweep
+src/services/metrics.ts       the process counters and the Prometheus text /metrics answers with
 src/admin/routes.ts           REST API for the dashboard
 src/services/scheduler.ts     the sync schedule: which sources are due, the cheap per-driver check, and the run it queues
 src/admin/sources-routes.ts   source CRUD, sync, test, webhook secret

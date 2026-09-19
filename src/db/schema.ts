@@ -687,6 +687,104 @@ export const projectMembers = pgTable(
   ],
 );
 
+/**
+ * Who changed this instance, and what they changed ([ADR-0055](../../.ssot/ADR.md#adr-0055)).
+ *
+ * One row per state-changing admin request that succeeded, written by the policy layer that already
+ * resolved the actor — `src/auth/plugin.ts`, from the table in `src/auth/policy.ts`. Nothing else
+ * writes here, and no route opts in: a call added per route is as complete as the route somebody
+ * forgot to add it to.
+ *
+ * **It records what was done, never what was read.** There is no query text, no document body and no
+ * excerpt in any column — `detail` can only ever hold values from a closed set named in the policy
+ * table. That is what keeps this table out of the query log's privacy regime: `search_queries` is
+ * what an agent asked, held for thirty days because it is user content; this is what an operator did,
+ * held for a year because it is accountability. They are deliberately not one table.
+ *
+ * **Append-only.** Nothing in the product updates or deletes a row except the retention sweep, and
+ * the actor columns are shaped so a row cannot be orphaned into anonymity: `actor_label` is the
+ * username copied at the time, so deleting the account leaves the deed attributed.
+ */
+export const auditEvents = pgTable(
+  'audit_events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * `<METHOD> <route template>`, e.g. `DELETE /api/projects/:id/sources/:sid`.
+     *
+     * The route template is the identity of the action, and it is deliberately not a prettier dotted
+     * name from a lookup table: a name that has to be assigned is a name the next route will not
+     * have, and this column would then say nothing about exactly the route somebody forgot. It is
+     * also the same key space `src/auth/policy.ts` already states every permission in.
+     */
+    action: text('action').notNull(),
+    /** `user` — a dashboard account — or `token`, which is `ADMIN_TOKEN` and has no account row. */
+    actorKind: text('actor_kind').notNull().$type<AuditActorKind>(),
+    /**
+     * The account that acted, when one did. `ON DELETE SET NULL` rather than cascade: deleting a
+     * person must not delete the record of what they did — that is the one deletion an audit log
+     * exists to survive — and `actor_label` beside it is what keeps the row attributed afterwards.
+     */
+    actorUserId: uuid('actor_user_id'),
+    /**
+     * The username as it was at the time, or `ADMIN_TOKEN`. **This is the column that makes "no row
+     * without an actor" true**: it is NOT NULL and constrained non-empty, so there is no way to write
+     * an anonymous event, and it still names the actor after the account is gone or renamed.
+     */
+    actorLabel: text('actor_label').notNull(),
+    /**
+     * The address the request appeared to come from — **a hint beside the actor, never the actor.**
+     *
+     * `src/server.ts` runs Fastify with `trustProxy: true`, so `req.ip` is the left-most
+     * `X-Forwarded-For` value, which the client writes when the server is reachable directly. It is
+     * recorded because it is useful next to an identity that was established properly, and it is
+     * named as a known limit in `SECURITY.md` rather than presented as evidence.
+     */
+    actorIp: text('actor_ip'),
+    /**
+     * The project the action was scoped to, for a project route; NULL otherwise.
+     *
+     * **No foreign key, on purpose.** Deleting a project is itself one of the events recorded here, so
+     * a key to `projects` would either refuse the row or erase it — the same reasoning that keeps
+     * `search_query_hits` on a path rather than a `document_id`.
+     */
+    projectId: uuid('project_id'),
+    /**
+     * What was acted on, when the route names one: the route template's own parameter name
+     * (`sid`, `tokenId`, `userId`, …) and the value it carried. Derived from the path and never from
+     * the body, which is what keeps a credential or a document out of this table by construction.
+     */
+    targetType: text('target_type'),
+    targetId: text('target_id'),
+    /**
+     * The handful of body fields the policy table lets an action record, each restricted to a closed
+     * set of values — `{"mode":"account"}` for the MCP access switch. A field that is not named there,
+     * or a value outside its set, is dropped rather than stored, so free text cannot reach this column.
+     */
+    detail: jsonb('detail').notNull().default({}),
+    /** The status the request answered with. Only successes are written, so this is 2xx by contract. */
+    statusCode: integer('status_code').notNull(),
+  },
+  (t) => [
+    foreignKey({ name: 'audit_events_actor_user_id_fkey', columns: [t.actorUserId], foreignColumns: [users.id] }).onDelete('set null'),
+    check('audit_events_actor_kind_check', sql`${t.actorKind} in ('user', 'token')`),
+    // The two halves of "no row without an actor", stated in the database so that a future writer
+    // — a backfill, a panel, a migration — cannot produce an anonymous event either.
+    check('audit_events_actor_label_check', sql`length(btrim(${t.actorLabel})) > 0`),
+    // `ADMIN_TOKEN` is not an account, so it must not carry one; a `user` event may end up with NULL
+    // here once the account is deleted, which is what the `SET NULL` above is for.
+    check('audit_events_actor_user_check', sql`${t.actorKind} = 'user' or ${t.actorUserId} is null`),
+    // The retention sweep is instance-wide — one `created_at` predicate over every row.
+    index('audit_events_created_idx').on(t.createdAt),
+    // "What happened on this project", and "what did this account do", which are the two questions a
+    // panel over this table asks. `nullsFirst()` for `index_runs`' reason: it is PostgreSQL's own
+    // default for a DESC column, and leaving it unsaid makes drizzle-kit write `DESC NULLS LAST`.
+    index('audit_events_project_created_idx').on(t.projectId, t.createdAt.desc().nullsFirst()),
+    index('audit_events_actor_created_idx').on(t.actorUserId, t.createdAt.desc().nullsFirst()),
+  ],
+);
+
 export const settings = pgTable('settings', {
   key: text('key').primaryKey(),
   value: text('value').notNull(),
@@ -704,6 +802,11 @@ export type QueryActor = 'mcp' | 'dashboard';
 export type McpAuthMode = 'open' | 'token' | 'account';
 /** Which of the three credentials an `mcp_tokens` row is ([ADR-0054](../../.ssot/ADR.md#adr-0054)). */
 export type McpTokenKind = 'static' | 'access' | 'refresh';
+/**
+ * Who an audit event belongs to ([ADR-0055](../../.ssot/ADR.md#adr-0055)): a dashboard account, or
+ * `ADMIN_TOKEN` — machine access that is a credential rather than a person, and says so.
+ */
+export type AuditActorKind = 'user' | 'token';
 export type ProjectMemberRole = 'viewer' | 'editor';
 
 export type UserRow = typeof users.$inferSelect;
@@ -721,3 +824,5 @@ export type SearchQueryRow = typeof searchQueries.$inferSelect;
 export type SearchQueryInsert = typeof searchQueries.$inferInsert;
 export type SearchQueryHitRow = typeof searchQueryHits.$inferSelect;
 export type SearchQueryHitInsert = typeof searchQueryHits.$inferInsert;
+export type AuditEventRow = typeof auditEvents.$inferSelect;
+export type AuditEventInsert = typeof auditEvents.$inferInsert;

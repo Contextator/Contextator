@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AUDIT_EXEMPT_ROUTES,
   MCP_READ_ACCESS,
+  METRICS_ROUTE,
   PASSWORD_CHANGE_ALLOWED,
   PUBLIC_ROUTES,
   accessFromMembership,
+  auditSubject,
   canActOnRole,
   canManageUsers,
   isProjectScoped,
@@ -12,6 +15,7 @@ import {
   roleAtLeast,
   satisfies,
 } from '../src/auth/policy.js';
+import { checkRequest } from '../src/auth/authorize.js';
 import { mcpAccessDecision } from '../src/mcp/access.js';
 import type { McpAuthMode } from '../src/db/schema.js';
 import type { Principal, ProjectAccess } from '../src/auth/types.js';
@@ -119,6 +123,14 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'POST', url: '/api/projects/import', actor: as('admin'), membership: null, allowed: true },
   { method: 'POST', url: '/api/projects/import', actor: as('root'), membership: null, allowed: true },
   { method: 'POST', url: '/api/projects/import', actor: token, membership: null, allowed: true },
+
+  // `/metrics` ([ADR-0055](../.ssot/ADR.md#adr-0055)). It asks for no role and no membership — the
+  // numbers describe the process, not a project — so an ordinary `member` reads it. The refusal that
+  // matters is the one no row in this table can state, because it is about holding *no* credential at
+  // all; it is asserted against `checkRequest` below.
+  { method: 'GET', url: METRICS_ROUTE, actor: as('member'), membership: null, allowed: true },
+  { method: 'GET', url: METRICS_ROUTE, actor: as('admin'), membership: null, allowed: true },
+  { method: 'GET', url: METRICS_ROUTE, actor: token, membership: null, allowed: true },
 
   // Membership: anyone on the project sees who else is; only root/admin change it.
   { method: 'GET', url: '/api/projects/:id/members', actor: as('member'), membership: 'viewer', allowed: true },
@@ -328,6 +340,150 @@ describe('user management', () => {
     expect(canActOnRole(as('admin'), 'admin')).toBe(true);
     expect(canActOnRole(as('admin'), 'member')).toBe(true);
     expect(canActOnRole(token, 'root')).toBe(true);
+  });
+});
+
+/**
+ * `/metrics` ([ADR-0055](../.ssot/ADR.md#adr-0055)), which is the one route in this product whose rule
+ * reads a *setting*. The decision it encodes is that a scrape is not public by default — the exposition
+ * names the version, the model, the queue and the pool, which is a description of the instance — and
+ * that closing it must not mean handing Prometheus an `ADMIN_TOKEN` that acts with root permissions.
+ *
+ * Every row here has its twin: each way in is asserted to open it, and asserted to be *needed*, because
+ * a test that only proved the three positives would pass just as happily on a build that let everyone in.
+ */
+describe('the metrics endpoint', () => {
+  const env = { allowedOrigins: [], needsSetup: false, hasAdminToken: true };
+  const ask = (facts: { principal?: Principal | null; metricsTokenPresented?: boolean }, metricsPublic = false) =>
+    checkRequest(
+      {
+        method: 'GET',
+        url: METRICS_ROUTE,
+        headers: {},
+        host: 'localhost',
+        principal: facts.principal ?? null,
+        metricsTokenPresented: facts.metricsTokenPresented,
+      },
+      { ...env, metricsPublic },
+    );
+
+  it('refuses a caller holding nothing, which is the whole reason it is not in PUBLIC_ROUTES', () => {
+    expect(PUBLIC_ROUTES.has(METRICS_ROUTE)).toBe(false);
+    expect(() => ask({})).toThrow();
+  });
+
+  it('answers a scrape token, and only while one is configured', () => {
+    expect(ask({ metricsTokenPresented: true })).toBe('ok');
+    // The flag is computed from `METRICS_TOKEN` in src/auth/plugin.ts, so `false` here is both "no
+    // token configured" and "the wrong one was presented". Both are the same refusal.
+    expect(() => ask({ metricsTokenPresented: false })).toThrow();
+  });
+
+  it('answers anybody once METRICS_PUBLIC is on, and nobody until it is', () => {
+    expect(ask({}, true)).toBe('ok');
+    expect(() => ask({}, false)).toThrow();
+  });
+
+  it('answers an ordinary signed-in account with neither of those, and asks for no role', () => {
+    expect(ask({ principal: as('member') })).toBe('ok');
+    expect(ask({ principal: token })).toBe('ok');
+    expect(requiredRole('GET', METRICS_ROUTE)).toBeNull();
+    // Not project-scoped, so no membership is ever resolved for it.
+    expect(isProjectScoped(METRICS_ROUTE)).toBe(false);
+  });
+});
+
+/**
+ * The audit log's rule ([ADR-0055](../.ssot/ADR.md#adr-0055)), which is **the permission table's shape
+ * turned round**: auditing is the default and the exemptions are the list, so a route added next month
+ * is recorded without anybody remembering to record it.
+ *
+ * The assertions that carry the decision are the ones about routes that do *not* exist. A table of
+ * audited routes would pass a test listing the routes it contains; this one is asserted against a path
+ * nobody has registered, because that is the property being claimed.
+ */
+describe('what the audit log records', () => {
+  const subject = (method: string, url: string, params: Record<string, unknown> = {}, body?: unknown) => auditSubject(method, url, params, body);
+
+  it('records an unsafe method on a route nobody has written yet, and no safe one', () => {
+    expect(subject('POST', '/api/projects/:id/something-nobody-has-built')?.action).toBe('POST /api/projects/:id/something-nobody-has-built');
+    expect(subject('DELETE', '/api/projects/:id/something-nobody-has-built')).not.toBeNull();
+    // A read changes nothing, so there is nothing to attribute. This is what keeps the table from
+    // becoming a traffic log — and `GET /api/projects/:id/export` is the case that proves it matters,
+    // since that one is a `manager`'s and still records nothing here.
+    expect(subject('GET', '/api/projects/:id/export')).toBeNull();
+    expect(subject('HEAD', '/api/projects/:id')).toBeNull();
+  });
+
+  it('leaves alone what is not the admin API at all', () => {
+    expect(subject('POST', '/mcp/:project')).toBeNull();
+    expect(subject('POST', '/oauth/token')).toBeNull();
+  });
+
+  it('exempts exactly four routes that change something and two that have no actor', () => {
+    expect([...AUDIT_EXEMPT_ROUTES].sort()).toEqual([
+      '/api/auth/login',
+      '/api/projects/:id/sources/:sid/test',
+      '/api/projects/:id/sources/:sid/uploads/:session/files',
+      '/api/setup',
+      '/api/webhooks/git/:sourceId',
+      '/api/webhooks/notion/:sourceId',
+    ]);
+    for (const url of AUDIT_EXEMPT_ROUTES) expect(subject('POST', url)).toBeNull();
+    // And the one they are exempted *against*: the commit is what changes the project, and it is
+    // recorded, which is the reason recording each staged file would be noise rather than evidence.
+    expect(subject('POST', '/api/projects/:id/sources/:sid/uploads/:session/commit')).not.toBeNull();
+  });
+
+  it('names the project from the path and the target from the route template, not from the body', () => {
+    const event = subject('DELETE', '/api/projects/:id/sources/:sid', { id: 'p-1', sid: 's-9' });
+    expect(event).toEqual({ action: 'DELETE /api/projects/:id/sources/:sid', projectId: 'p-1', targetType: 'sid', targetId: 's-9', detail: {} });
+    // An instance route has no project, and its own `:id` is the target rather than a project id.
+    expect(subject('DELETE', '/api/users/:id', { id: 'u-3' })).toEqual({
+      action: 'DELETE /api/users/:id',
+      projectId: null,
+      targetType: 'id',
+      targetId: 'u-3',
+      detail: {},
+    });
+  });
+
+  /**
+   * **The assertion the privacy page rests on.** `search_queries` holds what people typed; this table
+   * holds what an operator did, and the separation is only real if no request body can put text in it.
+   * The allowlist is the mechanism, so it is tested as one: a named field with a value outside its set
+   * is dropped, and a field nobody named is dropped whatever it holds.
+   */
+  it('cannot be made to store user content, whatever the body says', () => {
+    const body = {
+      mode: 'account',
+      query: 'how do I rotate the signing key',
+      secret: 'ctxm_lookslikeacredential',
+      note: 'a paragraph somebody typed',
+    };
+    expect(subject('PATCH', '/api/projects/:id/mcp-auth', { id: 'p-1' }, body)?.detail).toEqual({ mode: 'account' });
+    // A value outside the closed set is not a value this table can hold, even under a named field.
+    expect(subject('PATCH', '/api/projects/:id/mcp-auth', { id: 'p-1' }, { mode: 'something-new' })?.detail).toEqual({});
+    // And a route that names no fields at all records none, whatever it was sent.
+    expect(subject('POST', '/api/projects/:id/reindex', { id: 'p-1' }, body)?.detail).toEqual({});
+    expect(subject('POST', '/api/auth/password', {}, { password: 'a-real-password' })?.detail).toEqual({});
+  });
+
+  it('keeps the boolean of the query-log switch a boolean, and the roles a closed set', () => {
+    expect(subject('PATCH', '/api/projects/:id/query-log', { id: 'p-1' }, { enabled: false })?.detail).toEqual({ enabled: false });
+    expect(subject('PUT', '/api/projects/:id/members/:userId', { id: 'p-1', userId: 'u-2' }, { role: 'editor' })?.detail).toEqual({ role: 'editor' });
+    // `manager` is a `ProjectAccess`, not a membership role, and must not be recordable as one.
+    expect(subject('PUT', '/api/projects/:id/members/:userId', { id: 'p-1', userId: 'u-2' }, { role: 'manager' })?.detail).toEqual({});
+  });
+
+  it('records the three acts the log exists for, each with the project it happened on', () => {
+    for (const [method, url] of [
+      ['DELETE', '/api/projects/:id/sources/:sid'],
+      ['POST', '/api/projects/:id/mcp-tokens'],
+      ['PATCH', '/api/projects/:id/mcp-auth'],
+    ] as const) {
+      expect(subject(method, url, { id: 'p-1', sid: 's-9' })?.projectId).toBe('p-1');
+    }
   });
 });
 

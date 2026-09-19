@@ -509,6 +509,43 @@ export const EnvSchema = z
      */
     SEARCH_QUERY_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
 
+    // The audit log and /metrics (ADR-0055). Both are about the instance rather than about any one
+    // project, which is why neither has a per-project column beside it the way the query log does.
+    /**
+     * How long an audit event is kept, in days. Swept on the same quarter-hourly timer as expired
+     * sessions and the query log, for the reason there is no third timer in this process.
+     *
+     * **A year, where the query log keeps thirty days, and the difference is the point.**
+     * `search_queries` holds what people typed — user content, in every `pg_dump`, under a window
+     * short enough that it is not a permanent record of everything anybody ever asked. `audit_events`
+     * holds what an operator did to the instance: no question, no document, no excerpt, a few dozen
+     * rows a month. The reason to forget the first quickly does not apply to the second, and the
+     * question an audit log is opened for — "who deleted that source, and when" — is routinely asked
+     * about something that happened last quarter.
+     */
+    AUDIT_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(365),
+    /**
+     * A bearer credential that reaches `/metrics` and **nothing else**.
+     *
+     * It exists so that scraping does not mean handing Prometheus an `ADMIN_TOKEN`, which acts with
+     * root permissions over every project: a scrape credential should be able to do exactly the one
+     * thing a scrape does. Unset by default, in which case `/metrics` still answers a signed-in
+     * account or `ADMIN_TOKEN` — what is never true by default is that it answers nobody in particular.
+     */
+    METRICS_TOKEN: z.string().min(16).optional(),
+    /**
+     * `1` answers `/metrics` with no credential at all.
+     *
+     * Off by default, and that is the decision rather than the default: the exposition names this
+     * instance's version, its embedding model, how many projects are queued and how deep its database
+     * pool is, which is a description of the machine to anyone who can reach the port. The case this
+     * exists for is real though — a container on a private network, or an instance behind a proxy that
+     * already decides who may reach `/metrics` — and in that deployment a second credential is
+     * ceremony over a door somebody else is already guarding. So it is expressible, and it has to be
+     * written down.
+     */
+    METRICS_PUBLIC: z.string().default('0').transform(flag),
+
     // Scheduled sync (ADR-0048). The per-source interval is a column and not a setting, for the reason
     // the query log's per-project switch is one: it travels with a `pg_dump`. These two are the
     // instance's policy about sources it has not met yet, and about how hard one tick may push.

@@ -5,7 +5,7 @@ import { ForbiddenError, UnauthorizedError } from '../services/errors.js';
 import { resolveProjectAccess } from '../services/auth/memberships.js';
 import { findSessionUser, touchSession } from '../services/auth/sessions.js';
 import { checkProjectAccess, checkRequest } from './authorize.js';
-import { PUBLIC_ROUTES } from './policy.js';
+import { auditSubject, METRICS_ROUTE, PUBLIC_ROUTES } from './policy.js';
 import { clearSessionCookie, readSessionCookie } from './cookies.js';
 import type { Principal } from './types.js';
 
@@ -23,7 +23,7 @@ const TOKEN_PRINCIPAL: Principal = { kind: 'token', role: 'root', userId: null, 
 const readBearer = (header: string | undefined): string => (header?.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : '');
 
 /**
- * Identity and authorization for everything under /api/*, in two hooks.
+ * Identity and authorization for everything under /api/*, in three hooks.
  *
  * Called directly on the adminRoutes instance rather than registered as a plugin: `register()`
  * encapsulates, and an encapsulated `addHook` would apply to that child alone — which holds no
@@ -33,6 +33,8 @@ const readBearer = (header: string | undefined): string => (header?.startsWith('
  */
 export function installAuth(app: FastifyInstance, ctx: AppContext): void {
   const { config, db } = ctx;
+  /** Read once: it is the one credential in this file that is compared against a single route. */
+  const scrapeToken = config.METRICS_TOKEN;
 
   app.decorateRequest('principal', null); // must be a primitive: object defaults are shared between requests
   app.decorateRequest('projectAccess', null);
@@ -79,8 +81,24 @@ export function installAuth(app: FastifyInstance, ctx: AppContext): void {
   app.addHook('preHandler', async (req) => {
     const url = req.routeOptions.url ?? '';
     const verdict = checkRequest(
-      { method: req.method, url, headers: req.headers, host: req.host, principal: req.principal },
-      { allowedOrigins: config.ALLOWED_ORIGINS, needsSetup: ctx.setup.needsSetup, hasAdminToken: Boolean(config.ADMIN_TOKEN) },
+      {
+        method: req.method,
+        url,
+        headers: req.headers,
+        host: req.host,
+        principal: req.principal,
+        // Computed here because the comparison has to be constant-time and the policy layer holds no
+        // secrets; `checkRequest` is handed the answer, not the credential. Only for the one route it
+        // can open — two SHA-256 digests on every request to buy nothing would be a silly price.
+        metricsTokenPresented:
+          url === METRICS_ROUTE && scrapeToken !== undefined && timingSafeCompare(readBearer(req.headers.authorization), scrapeToken),
+      },
+      {
+        allowedOrigins: config.ALLOWED_ORIGINS,
+        needsSetup: ctx.setup.needsSetup,
+        hasAdminToken: Boolean(config.ADMIN_TOKEN),
+        metricsPublic: config.METRICS_PUBLIC,
+      },
     );
     if (verdict === 'ok') return;
 
@@ -89,6 +107,31 @@ export function installAuth(app: FastifyInstance, ctx: AppContext): void {
     const access = await resolveProjectAccess(db, req.principal!, id);
     checkProjectAccess(req.method, url, access);
     req.projectAccess = access;
+  });
+
+  /**
+   * 3) What did they just change? ([ADR-0055](../../.ssot/ADR.md#adr-0055))
+   *
+   * **Here rather than in the routes**, and that is the whole of the design: a call added per handler
+   * is as complete as the handler somebody forgot to add it to, while this hook covers every route
+   * `adminRoutes` and its nested plugins declare — including ones written after it. It is also the
+   * only place in the process that has already resolved *who* is asking, which is the field the record
+   * exists for.
+   *
+   * `onResponse`, so two things are true: the reply has already gone, so nothing is waiting on the
+   * insert, and the status is known, so a request that was refused writes nothing. Only successes are
+   * recorded — a refusal is the permission matrix working, and `4xx` on every probe would turn this
+   * table into a scan log.
+   *
+   * `ctx.audit` owns the write and what happens when it fails; this hook decides *whether* there is
+   * an event and hands over the actor.
+   */
+  app.addHook('onResponse', async (req, reply) => {
+    const principal = req.principal;
+    if (!principal || reply.statusCode >= 400) return;
+    const subject = auditSubject(req.method, req.routeOptions.url ?? '', (req.params ?? {}) as Record<string, unknown>, req.body);
+    if (!subject) return;
+    ctx.audit.record(subject, { principal, ip: req.ip || null, statusCode: reply.statusCode });
   });
 }
 

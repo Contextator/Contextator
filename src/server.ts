@@ -24,7 +24,9 @@ import { sweepOrphanDirs } from './services/data-dir.js';
 import { createEmbeddingProvider } from './services/embeddings/index.js';
 import { Indexer } from './services/indexer.js';
 import { KeyedMutex } from './services/locks.js';
+import { MetricsRegistry } from './services/metrics.js';
 import { listProjects } from './services/projects.js';
+import { AuditWriter, sweepAuditLog } from './services/audit.js';
 import { QueryLog, sweepQueryLog } from './services/query-log.js';
 import { startSyncScheduler } from './services/scheduler.js';
 import { floorModelWarning } from './services/relevance.js';
@@ -65,6 +67,10 @@ async function main(): Promise<void> {
   // the MCP tool or the search route to hand `searchProject`, so `SEARCH_QUERY_LOG=0` is not a flag the
   // search path has to remember to check — it is the absence of the thing that would have written.
   const queryLog = config.SEARCH_QUERY_LOG ? new QueryLog(db, log) : undefined;
+  // The pool is handed over rather than the numbers: `/metrics` reports node-postgres's own gauges at
+  // scrape time, so there is nothing to keep up to date and nothing that can drift from the pool.
+  const metrics = new MetricsRegistry(pool);
+  const audit = new AuditWriter(db, log, (outcome) => metrics.countAudit(outcome));
   const ctx: AppContext = {
     config,
     db,
@@ -78,6 +84,8 @@ async function main(): Promise<void> {
     setup,
     loginLimiter,
     queryLog,
+    metrics,
+    audit,
     version: APP_VERSION,
     startedAt: Date.now(),
   };
@@ -116,6 +124,10 @@ async function main(): Promise<void> {
     // Before the pool, and awaited: what is buffered is a handful of rows and a shutdown that drops
     // them would lose exactly the queries of the minute somebody restarted the container.
     await queryLog?.close().catch((err: unknown) => log.warn({ err }, 'query log did not flush on shutdown'));
+    // Before the pool for the same reason, and with a sharper one behind it: an audit write is started
+    // after its response has gone, so a signal arriving in that gap would lose the record of the last
+    // thing anybody did. `settled()` never rejects — a failed write has already been logged.
+    await audit.settled();
     await pool.end();
   });
 
@@ -168,6 +180,15 @@ async function main(): Promise<void> {
         })
         .catch((err: unknown) => log.warn({ err }, 'oauth client sweep failed'));
     }
+    // The audit log's retention ([ADR-0055](../.ssot/ADR.md#adr-0055)), on this timer for the reason
+    // every sweep above is on it. **Before the query log's `return` below and not after it**: the two
+    // are separate records under separate windows, and an instance that switched the query log off
+    // must not thereby stop forgetting audit events.
+    void sweepAuditLog(db, config.AUDIT_LOG_RETENTION_DAYS)
+      .then((deleted) => {
+        if (deleted > 0) log.info({ deleted, retentionDays: config.AUDIT_LOG_RETENTION_DAYS }, 'swept expired audit events');
+      })
+      .catch((err: unknown) => log.warn({ err }, 'audit log sweep failed'));
     if (!config.SEARCH_QUERY_LOG) return;
     void sweepQueryLog(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)
       .then((deleted) => {

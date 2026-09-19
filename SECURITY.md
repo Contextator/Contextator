@@ -72,6 +72,22 @@ vulnerabilities, and a report about one of them will be closed with a link back 
   Anyone who can add a source can already point the server at a host; that is what the `editor` rule
   and the deployment assumption are for. A way to make the server contact an address **without** an
   editor's source would be a vulnerability.
+- **`/metrics` needs a credential, and `METRICS_PUBLIC=1` removes it.** The default is closed on purpose:
+  the exposition names this instance's version, its embedding model, how many projects are queued and how
+  deep its database pool is, which is a description of the machine to anyone who can reach the port. It
+  answers a signed-in account of any role, `ADMIN_TOKEN`, or a `METRICS_TOKEN` bearer — a dedicated scrape
+  credential that reaches this one path and nothing else, so scraping never means handing Prometheus a
+  token with root permissions. Opening it with `METRICS_PUBLIC=1` for a private network or behind a proxy
+  that already guards the path is a deployment's decision to make; a way to read `/metrics` **without**
+  one of those four is a vulnerability. No metric names a project, a document or a query.
+- **The IP recorded beside an audit event is not evidence of who acted.** Every state-changing admin
+  request that succeeds is recorded in `audit_events` with the account that made it, and `actor_ip`
+  is stored next to that account. Fastify runs with `trustProxy: true`, so the value is the left-most
+  `X-Forwarded-For` — **which the client writes whenever the server is reachable directly**, exactly as
+  the sign-in rate limit's key is (see the threat table in `.ssot/SECURITY.md`, T7). The actor is the
+  account the policy layer resolved from a session cookie or a bearer credential; the address is a hint
+  beside it. Pinning `trustProxy` to the proxy in front of this instance is not something this product
+  currently exposes, and that is a known limit rather than scheduled work.
 - **`/mcp/*` is not rate-limited**, and `ADMIN_TOKEN` has no lockout. Both rely on the entropy of the
   credential and on the network boundary. Sign-in to the dashboard *is* limited, per account and per IP.
 - **`ADMIN_TOKEN` acts with root permissions and bypasses every membership.** That is what it is for —
@@ -86,4 +102,6 @@ vulnerabilities, and a report about one of them will be closed with a link back 
 
 Everything else — path escapes, archive extraction escaping its directory, a credential recoverable from a
 database dump, cross-project leakage, a route that skips the policy table, a webhook accepted without a
-valid signature, a session that outlives its revocation — is a vulnerability. Report it.
+valid signature, a session that outlives its revocation, a state-changing admin request that leaves no
+audit row or leaves one naming the wrong account, user content reaching a column of `audit_events` — is a
+vulnerability. Report it.
