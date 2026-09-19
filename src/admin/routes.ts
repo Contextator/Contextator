@@ -16,12 +16,14 @@ import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { listProjectsForUser, membershipMap } from '../services/auth/memberships.js';
 import { ConflictError, NotFoundError, ValidationError, createProject, deleteProject, getProjectById, listProjects } from '../services/projects.js';
 import { countSourcesByProject, createSource, slugifySourceName } from '../services/sources.js';
+import { ImportRefusedError } from '../services/transfer/manifest.js';
 import { scanFrom, selectionFrom } from '../services/vector-store.js';
 import { authRoutes } from './auth-routes.js';
 import { mcpRoutes } from './mcp-routes.js';
 import { memberRoutes } from './members-routes.js';
 import { queriesRoutes } from './queries-routes.js';
 import { sourceRoutes } from './sources-routes.js';
+import { transferRoutes } from './transfer-routes.js';
 import { usersRoutes } from './users-routes.js';
 
 const CreateProjectBody = z.object({
@@ -86,6 +88,13 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     }
     if (err instanceof NotFoundError) return reply.code(404).send({ error: 'not_found', message: err.message });
     if (err instanceof ConflictError) return reply.code(409).send({ error: 'conflict', message: err.message });
+    // A refused import is a `409` and not a `400` ([ADR-0051](../../.ssot/ADR.md#adr-0051)): the request
+    // is well formed and the file is intact, and what is wrong is that this instance is not the right
+    // home for it. The code and the message both travel, because the message is what an operator acts on.
+    if (err instanceof ImportRefusedError) {
+      req.log.warn({ code: err.code }, 'refused a project import');
+      return reply.code(409).send({ error: err.code, message: err.message });
+    }
     if (err instanceof SearchUnavailableError) return reply.code(409).send({ error: err.code, message: err.message });
     const e = err as { statusCode?: number; message?: string };
     const status = typeof e.statusCode === 'number' ? e.statusCode : 500;
@@ -370,4 +379,5 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
   await app.register(mcpRoutes, { ctx });
   await app.register(queriesRoutes, { ctx });
   await app.register(sourceRoutes, { ctx });
+  await app.register(transferRoutes, { ctx });
 };

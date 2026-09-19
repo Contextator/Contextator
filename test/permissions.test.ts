@@ -87,6 +87,26 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'GET', url: '/api/projects/:id/queries/export', actor: as('member'), membership: null, allowed: false },
   { method: 'GET', url: '/api/projects/:id/queries/export', actor: as('admin'), membership: null, allowed: true },
 
+  // Export and import ([ADR-0051](../.ssot/ADR.md#adr-0051)). Neither is an editor's act.
+  //
+  // The export is a `GET` and a `manager`'s anyway: a viewer can read any one document through the
+  // dashboard, and the whole corpus in one downloadable file is a different act from reading a page of
+  // it. The negative rows are the ones that matter here, because `requiredProjectAccess` falls to
+  // `viewer` on a GET by default and the row is the only thing standing between those two answers.
+  { method: 'GET', url: '/api/projects/:id/export', actor: as('member'), membership: 'viewer', allowed: false },
+  { method: 'GET', url: '/api/projects/:id/export', actor: as('member'), membership: 'editor', allowed: false },
+  { method: 'GET', url: '/api/projects/:id/export', actor: as('member'), membership: null, allowed: false },
+  { method: 'GET', url: '/api/projects/:id/export', actor: as('admin'), membership: null, allowed: true },
+  { method: 'GET', url: '/api/projects/:id/export', actor: as('root'), membership: null, allowed: true },
+  { method: 'GET', url: '/api/projects/:id/export', actor: token, membership: null, allowed: true },
+  // The import has no project to be a member of, so it is an *instance* rule: the same `admin` that
+  // creating a project has needed since ADR-0028, because that is what an import does.
+  { method: 'POST', url: '/api/projects/import', actor: as('member'), membership: null, allowed: false },
+  { method: 'POST', url: '/api/projects/import', actor: as('member'), membership: 'editor', allowed: false },
+  { method: 'POST', url: '/api/projects/import', actor: as('admin'), membership: null, allowed: true },
+  { method: 'POST', url: '/api/projects/import', actor: as('root'), membership: null, allowed: true },
+  { method: 'POST', url: '/api/projects/import', actor: token, membership: null, allowed: true },
+
   // Membership: anyone on the project sees who else is; only root/admin change it.
   { method: 'GET', url: '/api/projects/:id/members', actor: as('member'), membership: 'viewer', allowed: true },
   { method: 'PUT', url: '/api/projects/:id/members/:userId', actor: as('member'), membership: 'editor', allowed: false },
@@ -154,6 +174,29 @@ describe('the query log and the panel over it', () => {
     expect(requiredProjectAccess('PATCH', '/api/projects/:id/query-log')).toBe(requiredProjectAccess('PATCH', '/api/projects/:id/mcp-auth'));
     // And not in the class the default would have put it in, which is the whole reason for the row.
     expect(requiredProjectAccess('PATCH', '/api/projects/:id/anything-else')).toBe('editor');
+  });
+});
+
+/**
+ * The two transfer routes ([ADR-0051](../.ssot/ADR.md#adr-0051)), asserted as rules rather than only
+ * as rows, because each of them is a *departure* from a default that would otherwise have answered.
+ */
+describe('moving a project between instances', () => {
+  it('reads the whole project at the same access that decides who may reach it at all', () => {
+    expect(requiredProjectAccess('GET', '/api/projects/:id/export')).toBe('manager');
+    expect(requiredProjectAccess('GET', '/api/projects/:id/export')).toBe(requiredProjectAccess('PATCH', '/api/projects/:id/mcp-auth'));
+    // And not what the default would have said, which is the whole reason the row exists.
+    expect(requiredProjectAccess('GET', '/api/projects/:id/anything-else')).toBe('viewer');
+  });
+
+  it('asks the instance, not a membership, for the right to create a project by importing one', () => {
+    expect(requiredRole('POST', '/api/projects/import')).toBe('admin');
+    expect(requiredRole('POST', '/api/projects/import')).toBe(requiredRole('POST', '/api/projects'));
+    // It is not project-scoped, which is what makes the instance rule the only rule that runs: there
+    // is no membership to resolve for a project that does not exist yet.
+    expect(isProjectScoped('/api/projects/import')).toBe(false);
+    // A GET of the same path is not a thing, and must not inherit the POST's rule.
+    expect(requiredRole('GET', '/api/projects/import')).toBeNull();
   });
 });
 

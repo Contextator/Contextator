@@ -91,6 +91,13 @@ describe('every /api route is covered by the policy', () => {
     for (const url of PUBLIC_ROUTES) expect(urls.has(url)).toBe(true);
   });
 
+  /**
+   * **The one `GET` that is not a viewer's is named here rather than allowed by a widened rule**
+   * ([ADR-0051](../.ssot/ADR.md#adr-0051)). The shape of this assertion is the point: relaxing it to
+   * "a GET needs viewer *or* manager" would have let the next read-everything route arrive unargued.
+   */
+  const MANAGER_READS = new Set(['/api/projects/:id/export']);
+
   it('requires an editor for every write under a project, and a viewer for every read', async () => {
     const app = await buildApi();
     const table = routeTable(app.printRoutes({ commonPrefix: false }));
@@ -98,8 +105,16 @@ describe('every /api route is covered by the policy', () => {
 
     for (const [method, url] of table.filter(([m, u]) => isProjectScoped(u) && m !== 'HEAD' && m !== 'OPTIONS')) {
       const need = requiredProjectAccess(method, url);
-      if (method === 'GET') expect(need).toBe('viewer');
+      if (method === 'GET') expect(need).toBe(MANAGER_READS.has(url) ? 'manager' : 'viewer');
       else expect(['editor', 'manager']).toContain(need);
     }
+  });
+
+  it('registers every route named in the manager-read exception list', async () => {
+    const app = await buildApi();
+    const urls = new Set(routeTable(app.printRoutes({ commonPrefix: false })).map(([, url]) => url));
+    await app.close();
+    // An exception for a route that does not exist is an exception that would silently outlive it.
+    for (const url of MANAGER_READS) expect(urls.has(url)).toBe(true);
   });
 });

@@ -25,6 +25,11 @@ export function requiredRole(method: string, url: string): UserRole | null {
   if (url.startsWith('/api/users')) return 'admin';
   // Creating and deleting a project is instance lifecycle: a new /mcp/<name> surface, disk, CPU.
   if (url === '/api/projects' && method === 'POST') return 'admin';
+  // An import creates a project, so it is the same decision — and it is stated here rather than in
+  // `PROJECT_ROUTE_OVERRIDES` because **there is no project to be a member of yet**
+  // ([ADR-0051](../../.ssot/ADR.md#adr-0051)). It also writes into DATA_DIR from a file somebody
+  // uploaded, which is a second reason and not the deciding one.
+  if (url === '/api/projects/import' && method === 'POST') return 'admin';
   return null;
 }
 
@@ -52,6 +57,12 @@ const PROJECT_ROUTE_OVERRIDES: ReadonlyArray<{ method: string; url: string; need
   // `requiredProjectAccess` is a lookup — a row matching no route costs nothing and refuses nothing.
   { method: 'PATCH', url: '/api/projects/:id/query-log', need: 'manager' },
   { method: 'DELETE', url: '/api/projects/:id/query-log', need: 'manager' },
+  // The project export ([ADR-0051](../../.ssot/ADR.md#adr-0051)). **A `GET`, and deliberately not a
+  // viewer's.** A viewer can already read any one document, any excerpt and every source's settings
+  // through the dashboard, which is the argument the `GET` default makes — and what the default cannot
+  // see is that the entire corpus in one downloadable file is a different act from reading a page of
+  // it. It is the `mcp-auth` class of decision: who may have this project's content, and where.
+  { method: 'GET', url: '/api/projects/:id/export', need: 'manager' },
 ];
 
 /**

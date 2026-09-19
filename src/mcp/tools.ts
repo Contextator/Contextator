@@ -25,7 +25,6 @@ import {
   selectionFrom,
   type SearchHit,
 } from '../services/vector-store.js';
-import { readIndexedFileFromDisk } from './legacy-file-read.js';
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
 
@@ -430,22 +429,34 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
    * The whole document, out of `documents.content` — the flavor-transformed text the chunker was given,
    * so what this returns is what `search_docs` quoted excerpts of, down to the character.
    *
-   * The filesystem branch below is the migration window and nothing else, and it is the only reason any
-   * of `mcp/` still knows what a path on disk is.
+   * **There is no filesystem branch any more** ([ADR-0051](../../.ssot/ADR.md#adr-0051) deleted
+   * `mcp/legacy-file-read.ts`, on the schedule [ADR-0043](../../.ssot/ADR.md#adr-0043) set). `mcp/`
+   * now knows nothing about `docRoot()`, containment or `ENOENT`, and the only thing this tool can
+   * serve is text that was indexed.
+   *
+   * `content IS NULL` is still reachable and is still not an error in the code: it is a document
+   * written before that column existed, on an installation that has not re-indexed since. It is
+   * answered with a sentence rather than with a file, and the sentence names the two ways out — a
+   * re-index, or a sectional read, which has never needed this column because it is served from the
+   * chunks.
    */
   async function readWholeDocument(doc: DocumentRow, maxTokens: number, count: (text: string) => number): Promise<{ text: string } | string> {
     const notes: string[] = [];
-    let content = doc.content;
+    const content = doc.content;
 
     if (content === null) {
-      const fallback = await readIndexedFileFromDisk({ db, log, config }, doc);
-      if (typeof fallback === 'string') return fallback;
-      content = fallback.content;
       log.info(
         { tool: 'read_document', project: project.name, file: doc.relativePath },
-        'served a document from the filesystem because its stored text predates ADR-0043; it will stop needing this at its next index run',
+        'a document has no stored text; it predates the column and the project has not been re-indexed since',
       );
-    } else if (doc.contentTruncated) {
+      return (
+        `"${doc.relativePath}" was indexed before this version stored document text, so there is no text on it to return. ` +
+        'Re-index the project from the Contextator dashboard and it will be readable — after that, a document stays readable ' +
+        `whatever happens to its file. Until then, ask for one of its ${doc.chunkCount} chunk${doc.chunkCount === 1 ? '' : 's'} ` +
+        'with heading: or from:/to:, which are served from the index and work now.'
+      );
+    }
+    if (doc.contentTruncated) {
       notes.push(
         `[this document was larger than MAX_STORED_DOCUMENT_BYTES (${config.MAX_STORED_DOCUMENT_BYTES}) when it was indexed, so only its ` +
           'first part is stored. search_docs reaches every part of it; read_document does not.]',

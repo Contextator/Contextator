@@ -57,7 +57,8 @@ export function cleanEntryPath(raw: string, flavor: Flavor): string | null {
 
 export class ArchiveLimitError extends ValidationError {}
 
-async function withScratch<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+/** Runs `fn` with a fresh scratch directory that is removed however `fn` ends. */
+export async function withScratch<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'contextator-extract-'));
   try {
     return await fn(dir);
@@ -149,7 +150,17 @@ async function unpackZip(archive: string, scratch: string, limits: ImportLimits)
   }
 }
 
-async function unpackTar(archive: string, scratch: string, limits: ImportLimits): Promise<void> {
+/**
+ * Unpacks a `.tar`/`.tar.gz` into a scratch directory with the entry and size caps applied *during*
+ * the walk, so an archive that lies about its size is stopped while it is being read rather than after.
+ *
+ * **Exported since [ADR-0051](../../.ssot/ADR.md#adr-0051)**, which is the project import: a tarball
+ * an operator uploads is the largest untrusted-input surface this product has, and the second
+ * implementation of an extractor is the one that gets the traversal check wrong. The import unpacks
+ * with this and then hands the document trees inside it to `importTree`, which is where the extension
+ * filter, the dot-directory skip, the Windows-portable names and the `isInside` containment live.
+ */
+export async function unpackTar(archive: string, scratch: string, limits: ImportLimits): Promise<void> {
   let count = 0;
   let total = 0;
   await tar.extract({

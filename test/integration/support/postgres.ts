@@ -55,6 +55,22 @@ export async function startPostgres(): Promise<RunningPostgres> {
     // PGDATA on a tmpfs. This data is disposable by definition — it lives exactly as long as the
     // container — so writing it through to a disk buys nothing and costs most of the suite's runtime.
     .withTmpFs({ '/var/lib/postgresql/data': 'rw' })
+    /**
+     * **Docker's default `/dev/shm` is 64 MB, and one thing in this suite asks for 61 MB of it.**
+     *
+     * `backup-restore.itest.ts` restores a 10 048-chunk fixture, and 72 % of that restore is the one
+     * `CREATE INDEX … USING hnsw` ([ADR-0046](../../../.ssot/ADR.md#adr-0046) measured it). A parallel
+     * build of that index asks for a dynamic shared memory segment of **63 999 808 bytes** — 190 KB
+     * under the default — so the suite has been passing on a margin of a fifth of a percent, and any
+     * file added beside it that holds a second database is enough to turn that into
+     * `could not resize shared memory segment … No space left on device` on roughly one run in three.
+     * That was found by adding one ([ADR-0051](../../../.ssot/ADR.md#adr-0051)); it was not caused by it.
+     *
+     * 256 MB, because the number to size against is the index build's request and not the current
+     * shortfall: a margin that is 4× the largest known allocation is one the next fixture does not
+     * have to think about, and `/dev/shm` is allocated on demand — an unused tmpfs page costs nothing.
+     */
+    .withSharedMemorySize(256 * 1024 * 1024)
     .start();
 
   return {

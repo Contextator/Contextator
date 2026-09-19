@@ -204,9 +204,10 @@ beforeAll(async () => {
   await seed(database.db, project.id, source.id, 'handbook/manual.md', MANUAL, { store: true });
   // Written before the column existed, and its file *is* on disk: the fallback's happy path.
   await seed(database.db, project.id, source.id, 'handbook/legacy.md', GUIDE, { store: false });
+  // Its file is still on disk, and since [ADR-0051](../../.ssot/ADR.md#adr-0051) that makes no
+  // difference at all — which is the assertion, not a leftover.
   await writeFile(path.join(root, 'legacy.md'), GUIDE, 'utf8');
-  // Written before the column existed and its file is gone: the fallback's failure, which has to be a
-  // readable sentence and not a stack trace.
+  // The same row with no file beside it. Both answer the same sentence now.
   await seed(database.db, project.id, source.id, 'handbook/vanished.md', GUIDE, { store: false });
 
   for (let i = 0; i < 12; i++) {
@@ -330,27 +331,40 @@ describe('read_document max_tokens', () => {
   });
 });
 
-describe('the content IS NULL fallback', () => {
-  it('reads the file, and logs that it had to', async () => {
+/**
+ * **`content IS NULL` after the fallback was deleted** ([ADR-0051](../../.ssot/ADR.md#adr-0051),
+ * on the schedule [ADR-0043](../../.ssot/ADR.md#adr-0043) set).
+ *
+ * These three cases are the same three the fallback had, and two of their answers changed. The one
+ * that matters is the first: `handbook/legacy.md` has its file sitting on disk, readable, right where
+ * the deleted code would have found it — and the tool does not read it. That is what makes this a test
+ * of the deletion rather than of a missing file.
+ */
+describe('a document written before the text was stored', () => {
+  it('does not read the file, even when the file is right there', async () => {
     fx.logs.length = 0;
     const answer = await call('read_document', { path: 'handbook/legacy.md', max_tokens: 20000 });
-    expect(answer.isError).toBe(false);
-    expect(answer.text).toContain('Delivery guide');
-    const line = fx.logs.find((l) => l.message.includes('served a document from the filesystem'));
+    // The file under `legacy.md` holds GUIDE, whose body contains this sentence. Nothing returns it.
+    expect(answer.text).not.toContain('Run the published image with the compose file');
+    expect(answer.text).toContain('was indexed before this version stored document text');
+    expect(answer.text).toContain('Re-index');
+    expect(fx.logs.some((l) => l.message.includes('served a document from the filesystem'))).toBe(false);
+    const line = fx.logs.find((l) => l.message.includes('no stored text'));
     expect(line?.level).toBe('info');
     expect(line?.fields).toMatchObject({ tool: 'read_document', file: 'handbook/legacy.md' });
   });
 
-  it('answers a sentence, not a stack trace, when the file is gone too', async () => {
+  it('answers the same sentence when there is no file either', async () => {
     const answer = await call('read_document', { path: 'handbook/vanished.md' });
-    expect(answer.isError).toBe(true);
-    expect(answer.text).toContain('no longer on disk');
+    expect(answer.text).toContain('was indexed before this version stored document text');
+    // It points at the two ways out: a re-index, and the sectional read that works right now.
     expect(answer.text).toContain('Re-index');
+    expect(answer.text).toContain('heading:');
   });
 
   it('serves a section out of the chunks even while the stored text is missing', async () => {
     // The whole point of resolving `heading` against `chunks.heading_path`: the chunks were always
-    // there, so a sectional read needs no migration and no filesystem.
+    // there, so a sectional read needs no migration and never needed the filesystem.
     fx.logs.length = 0;
     const answer = await call('read_document', { path: 'handbook/vanished.md', heading: 'Delivery guide > Tuning' });
     expect(answer.isError).toBe(false);
