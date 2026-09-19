@@ -2,7 +2,6 @@ import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { AuthorizationCodeStore, redirectUriRegistered, s256Challenge } from '../src/services/auth/oauth.js';
 import type { OauthClientRow } from '../src/db/schema.js';
-import type { McpGrant, RefreshGrant } from '../src/services/auth/mcp-tokens.js';
 
 /**
  * The parts of the authorization server that are a decision rather than a query
@@ -109,22 +108,5 @@ describe('the redirect URI comparison', () => {
     ]) {
       expect(redirectUriRegistered(client, uri)).toBe(false);
     }
-  });
-});
-
-/**
- * The three things `revokeMcpCredentialsOfGrant` is addressed by, asserted as a shape rather than left
- * implicit. Every caller of it — the RFC 7009 revocation, the reuse detection and the rotation race —
- * builds this object out of a row it just read, and a fourth caller that built it out of something
- * narrower would be revoking less than a grant without anything saying so.
- */
-describe('what identifies a grant', () => {
-  it('is the client, the account and the project together, and never fewer', () => {
-    const grant: McpGrant = { clientId: 'ctxc_a', userId: 'u', projectId: 'p' };
-    expect(Object.keys(grant).sort()).toEqual(['clientId', 'projectId', 'userId']);
-    // A refresh credential resolves to its own row *and* to that grant: the id is what the rotation
-    // races on, the other three are what comes down when the race is lost.
-    const refresh: RefreshGrant = { ...grant, id: 'row' };
-    expect(Object.keys(refresh).sort()).toEqual(['clientId', 'id', 'projectId', 'userId']);
   });
 });

@@ -18,7 +18,7 @@ import {
   revokeMcpCredentialsOfGrant,
   revokeMcpTokenById,
   verifyRefreshToken,
-  withRefreshRotationLock,
+  withRotationTransaction,
 } from '../services/auth/mcp-tokens.js';
 import { SlidingWindow } from '../services/rate-limit.js';
 import {
@@ -117,12 +117,26 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
   const codes = new AuthorizationCodeStore();
   /**
    * Per-host budget for the one unauthenticated write this plugin has
-   * ([ADR-0054](../../.ssot/ADR.md#adr-0054)). `MCP_OAUTH_MAX_CLIENTS` bounds the table; nothing
-   * bounded the **rate** at which one host could walk it to the ceiling, and a ceiling reached by a
-   * script is a lockout of every honest connector until the sweep catches up. Its own instance rather
-   * than `ctx.loginLimiter`, because a burst of registrations must not spend a host's sign-in budget.
+   * ([ADR-0054](../../.ssot/ADR.md#adr-0054)). Its own instance rather than `ctx.loginLimiter`,
+   * because a burst of registrations must not spend a host's sign-in budget.
+   *
+   * **What it is and is not worth.** `req.ip` under `trustProxy: true` is the left-most value of
+   * `X-Forwarded-For`, which the client writes, so a single script rotating that header is a different
+   * "host" on every request and walks straight past this. That is a property of the instance's proxy
+   * configuration and it is older than this plugin — `ctx.loginLimiter` rests on the same `req.ip` —
+   * so this is a limit on *ordinary* traffic and on unsophisticated abuse, not a defence against
+   * somebody who has read this comment. The thing that actually bounds the damage is the sweep:
+   * a client that registers and never connects is dropped within a day, whatever address it claimed.
+   *
+   * It is also bounded in itself. Nothing external sweeps it — `ctx.loginLimiter` rides the session
+   * reaper and this instance is not reachable from `server.ts` — and its keys are chosen by the
+   * caller, so an unbounded map behind a header is the same denial of service one layer in. It is swept
+   * when it grows, and if sweeping does not bring it back under the bound then this endpoint is closed
+   * until it does: refusing registrations is a far smaller failure than exhausting the process.
    */
   const registerLimiter = new SlidingWindow(OAUTH_REGISTER_MAX_PER_HOST, OAUTH_REGISTER_WINDOW_MS);
+  /** Live buckets this limiter may hold. Each is at most `OAUTH_REGISTER_MAX_PER_HOST` timestamps. */
+  const REGISTER_LIMITER_MAX_KEYS = 5_000;
 
   const shell = await fs.readFile(new URL('_auth-shell.html', PAGES_DIR), 'utf8');
   const consentBody = await fs.readFile(new URL('authorize.html', PAGES_DIR), 'utf8');
@@ -210,6 +224,14 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
 
   // ---- RFC 7591: dynamic client registration ----
   app.post('/oauth/register', async (req, reply) => {
+    if (registerLimiter.size >= REGISTER_LIMITER_MAX_KEYS) registerLimiter.sweep();
+    if (registerLimiter.size >= REGISTER_LIMITER_MAX_KEYS) {
+      log.warn({ keys: registerLimiter.size }, 'oauth client registration is closed: the rate limiter is at its key bound');
+      return reply
+        .code(429)
+        .header('retry-after', '3600')
+        .send(oauthError('temporarily_unavailable', 'Client registration is busy; try again later'));
+    }
     const retryAfter = registerLimiter.hit(req.ip || 'unknown');
     if (retryAfter > 0) {
       log.warn({ ip: req.ip }, 'rate limited an oauth client registration');
@@ -329,6 +351,12 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     }
     // From here on the client and its URI are known good, so a refusal may travel back to it.
     if (params.scope !== undefined) {
+      // Loud, because the person on the other end of this sees a raw `invalid_scope` in a connector's
+      // error box and has nothing to act on. An operator reading the log does.
+      log.warn(
+        { clientId: params.client_id, scope: params.scope },
+        'refused an authorization request that asked for a scope; this server issues none',
+      );
       await backToClient(reply, params.redirect_uri, {
         error: 'invalid_scope',
         error_description: 'This server issues no scopes; an account-backed credential reaches exactly what its account may read',
@@ -498,19 +526,15 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     if (body.grant_type === 'refresh_token') {
       if (!body.refresh_token) return reply.code(400).send(oauthError('invalid_request', 'refresh_token is required'));
 
-      // The read, the claim and the two inserts, serialised per token.
+      // The read, the claim and the two inserts, in one transaction — which is the whole mechanism.
       //
-      // Without the lock the two exchanges interleave: the loser revokes the grant *as it was a moment
-      // ago*, and the winner commits its new pair afterwards — so the reuse is detected and the
-      // credentials the detection was supposed to take down survive it. That was observed as a flaky
-      // assertion before this lock existed, not reasoned about. With it, the loser cannot read the row
-      // until the winner has committed, so what comes down includes what the winner just minted, and
-      // the loser reaches the `spent` branch below rather than the claim.
-      //
-      // The claim's row count therefore becomes the **second** door rather than the first. It is kept
-      // and is asserted directly in `test/integration/mcp-oauth.itest.ts`, because a second door
-      // nothing tests is a second door that quietly stops being one.
-      const outcome = await withRefreshRotationLock(db, body.refresh_token, async (tx) => {
+      // Statement by statement, the loser's family revoke runs in the gap between the winner's claim
+      // and the winner's inserts, and misses the pair the winner is about to write: the reuse is
+      // detected and the credentials the detection exists to take down survive it. In one transaction
+      // the loser's `UPDATE` waits on the winner's row lock until the winner **commits**, so by the
+      // time it is answered `0 rows` and takes the reuse branch, the winner's pair is already visible
+      // to it and comes down with the rest.
+      const outcome = await withRotationTransaction(db, async (tx) => {
         const grant = await verifyRefreshToken(tx, body.refresh_token as string);
         if (!grant) {
           /**

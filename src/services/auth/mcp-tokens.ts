@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { and, asc, eq, isNull, lt, not, or, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { mcpTokens, projects, type McpAuthMode, type McpTokenKind, type McpTokenRow } from '../../db/schema.js';
 import { NotFoundError } from '../projects.js';
@@ -279,25 +279,26 @@ export async function verifyMcpToken(db: Db, projectId: string, raw: string): Pr
 }
 
 /**
- * Serialises the exchanges of **one** refresh token ([ADR-0054](../../../.ssot/ADR.md#adr-0054)).
+ * Runs one refresh-token rotation — the read, the claim and the two inserts — as **one transaction**
+ * ([ADR-0054](../../../.ssot/ADR.md#adr-0054)).
  *
- * The rotation is a read (is this live?), a write (claim it) and two inserts (the new pair), and the
- * row-count gate on the claim is what keeps two concurrent exchanges from both succeeding. It is not
- * enough on its own: the loser revokes the grant as it knew it a moment ago, and the winner can commit
- * its **new** pair after that — so the reuse is detected and the credentials it was supposed to take
- * down outlive the detection. Under this lock the loser cannot read the row until the winner's whole
- * transaction has committed, so what it revokes includes what the winner just minted.
+ * The transaction is the whole mechanism and nothing else is needed. Under READ COMMITTED, a second
+ * exchange of the same token issues its `UPDATE … WHERE revoked_at IS NULL` against a row the first
+ * has locked; it waits there until the first **commits**, then re-evaluates the predicate, matches
+ * nothing, and takes the reuse branch — with a fresh statement snapshot that already contains the pair
+ * the winner just inserted. So the grant that comes down includes what the winner minted, rather than
+ * racing it.
  *
- * Keyed on the token's own hash rather than on the grant, because the token is the contended thing and
- * it is known before any lookup. Two different grants never wait for each other.
+ * **There was an advisory lock here and it was removed.** It made the losing exchange wait before its
+ * first `SELECT` instead of at its `UPDATE`, which changed which branch the loser fell down and
+ * nothing about the outcome — and it took that lock on `hashtext` of a string **the caller chose**, on
+ * an endpoint that is unauthenticated and unthrottled. Twenty concurrent requests naming one invented
+ * token queued on one key, each holding a pooled connection while it waited, and the pool is ten
+ * (`src/db/client.ts`): a denial of service introduced by a fix, defending against a race the
+ * transaction already settles.
  */
-const REFRESH_LOCK_CLASS = 7213003; // after the bootstrap's 7213001 and registration's 7213002
-
-export async function withRefreshRotationLock<T>(db: Db, raw: string, run: (tx: Db) => Promise<T>): Promise<T> {
-  return db.transaction(async (tx) => {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(${REFRESH_LOCK_CLASS}, hashtext(${hashMcpToken(raw)}))`);
-    return run(tx as unknown as Db);
-  });
+export async function withRotationTransaction<T>(db: Db, run: (tx: Db) => Promise<T>): Promise<T> {
+  return db.transaction(async (tx) => run(tx as unknown as Db));
 }
 
 /** A refresh credential resolved to its own row and to the grant it belongs to. */
@@ -315,7 +316,7 @@ export async function verifyRefreshToken(db: Db, raw: string): Promise<RefreshGr
 }
 
 /**
- * The same row when it is **not** live — already revoked, or expired. This is the reuse signal.
+ * The same row when it has been **revoked** — which is to say, spent. This is the reuse signal.
  *
  * OAuth 2.1 §4.3.1 asks an authorization server that rotates refresh tokens to detect one being
  * presented twice and to revoke the descendants of that grant, and this is the lookup that makes the
@@ -323,20 +324,30 @@ export async function verifyRefreshToken(db: Db, raw: string): Promise<RefreshGr
  * `invalid_grant` to the client, and two very different events to the server. Without it the theft
  * case runs silently — the thief redeems first, the owner's client redeems next, is told only to
  * re-authorize, does so, and the thief's family lives on beside the new one.
+ *
+ * **An expired token is deliberately not this.** The first version asked for "not live", which put
+ * `revoked_at IS NOT NULL` and `expires_at <= now()` in one bucket — so an honest connector left
+ * closed for thirty-one days came back, was answered `invalid_grant` as it should be, and produced a
+ * log line saying a spent refresh token had been presented again and the grant had been revoked. That
+ * sentence is defined as a theft signal in the README and in the ADR, and a signal that fires on the
+ * ordinary case is not a signal. Expiry is its own outcome: refused, nothing revoked, nothing warned.
  */
 export async function findSpentRefreshToken(db: Db, raw: string): Promise<RefreshGrant | null> {
-  return findRefreshToken(db, raw, 'spent');
+  return findRefreshToken(db, raw, 'revoked');
 }
 
-async function findRefreshToken(db: Db, raw: string, state: 'live' | 'spent'): Promise<RefreshGrant | null> {
+async function findRefreshToken(db: Db, raw: string, state: 'live' | 'revoked'): Promise<RefreshGrant | null> {
   if (!raw.startsWith(PREFIXES.refresh)) return null;
-  // One predicate, used as itself or negated, so "live" and "spent" cannot drift apart into two
-  // definitions that between them accept or reject a row twice.
-  const live = sql`(${mcpTokens.revokedAt} is null and (${mcpTokens.expiresAt} is null or ${mcpTokens.expiresAt} > now()))`;
+  // Three states and not two: live, revoked, expired. `not(live)` would fold the last two together,
+  // and only the middle one means somebody presented a credential this server had already spent.
+  const predicate =
+    state === 'live'
+      ? sql`(${mcpTokens.revokedAt} is null and (${mcpTokens.expiresAt} is null or ${mcpTokens.expiresAt} > now()))`
+      : sql`${mcpTokens.revokedAt} is not null`;
   const rows = await db
     .select({ id: mcpTokens.id, projectId: mcpTokens.projectId, userId: mcpTokens.userId, clientId: mcpTokens.clientId })
     .from(mcpTokens)
-    .where(and(eq(mcpTokens.tokenHash, hashMcpToken(raw)), eq(mcpTokens.kind, 'refresh'), state === 'live' ? live : not(live)))
+    .where(and(eq(mcpTokens.tokenHash, hashMcpToken(raw)), eq(mcpTokens.kind, 'refresh'), predicate))
     .limit(1);
   const row = rows[0];
   if (!row?.userId || !row.clientId) return null;

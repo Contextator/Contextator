@@ -42,9 +42,25 @@ export interface RegisterClientInput {
  * registrations both read `199` and both insert. The window is small and the endpoint is
  * unauthenticated, which is exactly the combination somebody would widen on purpose, so the count and
  * the insert happen inside one transaction behind an advisory lock. Registration is rare — a connector
- * does it once, ever — so the contention this creates is a queue of one.
+ * does it once per instance it connects to — so the contention this creates is a queue of one.
+ *
+ * **The whole single-argument advisory-lock inventory of this repository**, because the first version
+ * of this constant was chosen by adding one to the only key its author had seen and collided with the
+ * one it had not:
+ *
+ * | Key | Where | Scope |
+ * |-----|-------|-------|
+ * | `7213001` | `src/db/bootstrap.ts`, and the frozen ladder in `test/integration/fixtures/ensure-schema-v5.ts` | session |
+ * | `7213002` | `ADVISORY_LOCK_SETUP` in `src/admin/auth-routes.ts` — the first-run account | transaction |
+ * | `7213003` | this one | transaction |
+ *
+ * `7213002` put every `/oauth/register` behind whichever `POST /api/setup` was in flight and every
+ * setup behind a registration — two unrelated unauthenticated endpoints silently serialising each
+ * other. Nothing corrupted; it was simply not what either lock was for. Adding a key here means adding
+ * a row above, and the two-argument form of `pg_advisory_xact_lock` is a **different space** again and
+ * shares nothing with this table.
  */
-const REGISTER_LOCK_KEY = 7213002; // one past the bootstrap's, which is 7213001
+const REGISTER_LOCK_KEY = 7213003;
 
 /**
  * RFC 7591 dynamic client registration, which is how a browser-based MCP connector introduces itself:

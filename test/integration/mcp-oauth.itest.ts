@@ -6,18 +6,24 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { UnauthorizedError, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
 import type { OAuthClientInformationFull, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { SESSION_COOKIE } from '../../src/auth/cookies.js';
 import { mcpTokens, oauthClients, projects, type ProjectRow, type UserRow } from '../../src/db/schema.js';
-import { issueMcpCredential, revokeMcpTokenById } from '../../src/services/auth/mcp-tokens.js';
+import {
+  findSpentRefreshToken,
+  issueMcpCredential,
+  revokeMcpCredentialsOfGrant,
+  revokeMcpTokenById,
+  verifyRefreshToken,
+  withRotationTransaction,
+} from '../../src/services/auth/mcp-tokens.js';
 import { setMemberRole } from '../../src/services/auth/memberships.js';
 import { ClientLimitError, registerOauthClient, sweepStaleOauthClients } from '../../src/services/auth/oauth.js';
 import { createSession } from '../../src/services/auth/sessions.js';
 import { createUser } from '../../src/services/auth/users.js';
-import { OAUTH_REGISTER_MAX_PER_HOST, OAUTH_REGISTER_WINDOW_MS } from '../../src/config.js';
-import { SlidingWindow } from '../../src/services/rate-limit.js';
+import { OAUTH_REGISTER_MAX_PER_HOST } from '../../src/config.js';
 import { applySchema, createTestDatabase, dropTestDatabase, type TestDatabase } from './support/postgres.js';
 import { seedProject, startMcpInstance, type LiveInstance } from './support/mcp-instance.js';
 
@@ -195,6 +201,13 @@ function callbackParams(res: Response): URLSearchParams {
  * The whole connector flow, from "no credential at all" to a live MCP session, driven by the SDK.
  * Returns the connected client and the provider holding the tokens it was issued.
  */
+/**
+ * **It spends the loopback budget, one registration per call.** The SDK does its own dynamic
+ * registration with its own `fetch`, so — unlike `registerClient` above — it cannot present a chosen
+ * address and every flow in this file registers as `127.0.0.1`. `OAUTH_REGISTER_MAX_PER_HOST` is what
+ * that budget is; a file that drove more flows than that would start failing inside the SDK with an
+ * opaque error rather than at an assertion, so the count is worth keeping in view.
+ */
 async function connectThroughOAuth(cookie?: string): Promise<{ client: Client; provider: TestClientProvider }> {
   const provider = new TestClientProvider();
   const url = new URL(`${live.origin}/mcp/${project.name}`);
@@ -371,12 +384,59 @@ describe('a browser-based MCP client', () => {
   });
 
   /**
+   * **The transaction around the rotation, and what happens without it.**
+   *
+   * The rotation is a read, a claim and two inserts. Statement by statement the loser's family revoke
+   * lands in the gap between the winner's claim and the winner's inserts and misses the pair the
+   * winner is about to write — the reuse is detected and the credentials the detection exists to take
+   * down survive it. The gap is normally microseconds, so this test opens it with a `pg_sleep` and
+   * drives the two halves by hand through the same functions the route calls. Drop the `db.transaction`
+   * out of `withRotationTransaction` and the last assertion here answers `200`.
+   */
+  it('takes down the pair the winner minted, not the pair it had a moment ago', async () => {
+    const client = await registerClient({ client_name: 'racer', redirect_uris: [REDIRECT_URI] }).then((r) => r.json());
+    const grant = { projectId: project.id, userId: member.id, clientId: client.client_id };
+    const original = await issueMcpCredential(database.db, { ...grant, kind: 'refresh', name: 'oauth race', ttlMs: 60_000 });
+
+    // The winner: claim the refresh token, dawdle, then mint the new pair — all inside the wrapper.
+    const winner = withRotationTransaction(database.db, async (tx) => {
+      const live = await verifyRefreshToken(tx, original.token);
+      expect(await revokeMcpTokenById(tx, (live as { id: string }).id)).toBe(true);
+      await tx.execute(sql`SELECT pg_sleep(0.5)`);
+      return issueMcpCredential(tx, { ...grant, kind: 'access', name: 'oauth race', ttlMs: 60_000 });
+    });
+
+    // The loser, arriving in the middle of that — the route's refresh branch by hand, both arms of it,
+    // because which arm it lands on is exactly what the transaction changes. In one transaction the
+    // winner's claim is invisible, so the loser verifies a live token and loses at the `UPDATE`, which
+    // waits for the commit. Statement by statement the claim is already committed, so the loser finds
+    // nothing live and takes the reuse arm — *while the winner is still between its claim and its
+    // inserts*. Either way it revokes the grant; only one of the two has the new pair in it yet.
+    const loser = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return withRotationTransaction(database.db, async (tx) => {
+        const live = await verifyRefreshToken(tx, original.token);
+        if (!live) {
+          const spent = await findSpentRefreshToken(tx, original.token);
+          expect(spent).not.toBeNull();
+          return revokeMcpCredentialsOfGrant(tx, spent as NonNullable<typeof spent>);
+        }
+        expect(await revokeMcpTokenById(tx, live.id)).toBe(false);
+        return revokeMcpCredentialsOfGrant(tx, live);
+      });
+    })();
+
+    const [minted] = await Promise.all([winner, loser]);
+    expect((await initializeWith(minted.token)).status).toBe(401);
+  });
+
+  /**
    * **The claim the rotation races on, on its own.** `revokeMcpTokenById` carries
    * `revoked_at IS NULL` in its `WHERE` and reports its own row count, so exactly one caller can ever
-   * be the one that revoked a given credential. The advisory lock around the rotation means this gate
-   * is now the second door rather than the first — which is precisely why it is asserted here instead
-   * of being left to a race to express: a second door nothing tests is a second door that quietly
-   * stops being one.
+   * be the one that revoked a given credential. It is asserted directly rather than through a race,
+   * because a race that happens to serialise proves nothing and a race that does not is a flake: the
+   * contract is "exactly one caller can be the one that revoked this", and that is a claim about two
+   * sequential calls.
    */
   it('lets exactly one caller claim a credential, however many ask', async () => {
     const client = await registerClient({ client_name: 'claimant', redirect_uris: [REDIRECT_URI] }).then((r) => r.json());
@@ -390,6 +450,27 @@ describe('a browser-based MCP client', () => {
     });
     expect(await revokeMcpTokenById(database.db, issued.id)).toBe(true);
     expect(await revokeMcpTokenById(database.db, issued.id)).toBe(false);
+  });
+
+  /**
+   * **An expired refresh token is not a stolen one.** A connector left closed for longer than
+   * `MCP_OAUTH_REFRESH_TTL_DAYS` comes back and is refused, which is right — but the first cut asked
+   * for "not live" and so put expiry and revocation in one bucket, which meant that ordinary return
+   * revoked the grant and logged the sentence the README defines as a theft signal. A signal that
+   * fires on the ordinary case is not a signal. Expiry is refused, revokes nothing, and warns nobody.
+   */
+  it('refuses an expired refresh token without calling it reuse', async () => {
+    const client = await registerClient({ client_name: 'long absent', redirect_uris: [REDIRECT_URI] }).then((r) => r.json());
+    const grant = { projectId: project.id, userId: member.id, clientId: client.client_id };
+    const stale = await issueMcpCredential(database.db, { ...grant, kind: 'refresh', name: 'oauth stale', ttlMs: -60_000 });
+    const alive = await issueMcpCredential(database.db, { ...grant, kind: 'access', name: 'oauth stale', ttlMs: 60_000 });
+
+    const refused = await tokenRequest({ grant_type: 'refresh_token', refresh_token: stale.token });
+    expect(refused.status).toBe(400);
+    expect((await refused.json()).error).toBe('invalid_grant');
+
+    // Nothing else of that grant came down with it, which is the difference between the two readings.
+    expect((await initializeWith(alive.token)).status).toBe(200);
   });
 
   it('revokes nothing when a refresh token it never issued is presented', async () => {
@@ -718,11 +799,19 @@ describe('registering a client', () => {
       const idle = await make('used once, long ago');
       const working = await make('still connected');
       const fresh = await make('registered a moment ago');
+      // **The fixture that tells the two windows apart.** Two days old and never used: it survives the
+      // month-long window the first cut had and falls to the day-long one this entry added, so a
+      // regression to a single window turns this test red instead of leaving it quietly green.
+      const twoDaysUnused = await make('registered the day before yesterday');
 
       const longAgo = new Date(Date.now() - 2 * long);
       await isolated.db.update(oauthClients).set({ createdAt: longAgo }).where(eq(oauthClients.clientId, neverUsed.clientId));
       await isolated.db.update(oauthClients).set({ createdAt: longAgo, lastUsedAt: longAgo }).where(eq(oauthClients.clientId, idle.clientId));
       await isolated.db.update(oauthClients).set({ createdAt: longAgo, lastUsedAt: longAgo }).where(eq(oauthClients.clientId, working.clientId));
+      await isolated.db
+        .update(oauthClients)
+        .set({ createdAt: new Date(Date.now() - 2 * day) })
+        .where(eq(oauthClients.clientId, twoDaysUnused.clientId));
 
       // The one thing that exempts a client whatever its age: it is holding a live credential.
       const [aProject] = await isolated.db.insert(projects).values({ name: 'swept', embeddingModel: 'x' }).returning();
@@ -737,7 +826,7 @@ describe('registering a client', () => {
       });
 
       const dropped = await sweepStaleOauthClients(isolated.db, { unusedMs: day, staleMs: long });
-      expect(dropped).toBe(2);
+      expect(dropped).toBe(3);
       const left = (await isolated.db.select().from(oauthClients)).map((c) => c.clientId).sort();
       expect(left).toEqual([working.clientId, fresh.clientId].sort());
     } finally {
@@ -746,15 +835,72 @@ describe('registering a client', () => {
   });
 
   /**
-   * The rate limit, which is the other half of what makes the ceiling survivable: the cap bounds the
-   * table and this bounds how fast one host can walk it there. Its own instance rather than the
-   * sign-in limiter, so a burst of registrations cannot spend a host's sign-in budget.
+   * **The rate limit, driven through the route.** An earlier version of this test built its own
+   * `SlidingWindow` and beat on that, which asserted that the class works and nothing about whether
+   * `/oauth/register` uses it: deleting the limiter from the route left every test green. This one
+   * spends a real host's budget against the real endpoint.
    */
-  it('limits how fast one host may register, without touching the sign-in budget', async () => {
-    const limiter = new SlidingWindow(OAUTH_REGISTER_MAX_PER_HOST, OAUTH_REGISTER_WINDOW_MS);
-    for (let i = 0; i < OAUTH_REGISTER_MAX_PER_HOST; i++) expect(limiter.hit('10.0.0.1')).toBe(0);
-    expect(limiter.hit('10.0.0.1')).toBeGreaterThan(0);
-    // Per host, so one noisy client does not close the door on everybody else.
-    expect(limiter.hit('10.0.0.2')).toBe(0);
+  it('answers 429 with a retry-after once one host has spent its budget', async () => {
+    const host = '203.0.113.7'; // its own address, so it spends nobody else's budget in this file
+    for (let i = 0; i < OAUTH_REGISTER_MAX_PER_HOST; i++) {
+      const allowed = await registerClient({ client_name: `burst ${i}`, redirect_uris: [REDIRECT_URI] }, host);
+      expect(allowed.status).toBe(201);
+    }
+    const refused = await registerClient({ client_name: 'one too many', redirect_uris: [REDIRECT_URI] }, host);
+    expect(refused.status).toBe(429);
+    expect(Number(refused.headers.get('retry-after'))).toBeGreaterThan(0);
+    expect((await refused.json()).error).toBe('temporarily_unavailable');
+
+    // Per host, so one noisy address does not close the door on everybody else.
+    const elsewhere = await registerClient({ client_name: 'a different office', redirect_uris: [REDIRECT_URI] }, '203.0.113.8');
+    expect(elsewhere.status).toBe(201);
+  });
+
+  /**
+   * **A grant is scoped to a project as well as to a client and an account.** One person, one
+   * connector, two projects is the ordinary shape of this — they approved it twice — and revoking one
+   * must not disconnect the other. Drop `projectId` from `revokeMcpCredentialsOfGrant`'s `WHERE` and
+   * the second assertion fails.
+   */
+  it('takes down one project\u2019s grant without touching the same client\u2019s grant on another', async () => {
+    const other = await seedProject(database.db, 'second-project', { path: 'handbook/guide.md', body: HANDBOOK });
+    await setMemberRole(database.db, other.id, member.id, 'viewer', null);
+    // **`account`, or this test asserts nothing.** A seeded project is `open`, and an `open` project
+    // answers a revoked credential exactly as it answers no credential at all — so the surviving-token
+    // assertion below would read `200` whether or not the revocation had reached it.
+    await database.db.update(projects).set({ mcpAuth: 'account' }).where(eq(projects.id, other.id));
+    const client = await registerClient({ client_name: 'two projects', redirect_uris: [REDIRECT_URI] }).then((r) => r.json());
+
+    const here = await issueMcpCredential(database.db, {
+      projectId: project.id,
+      userId: member.id,
+      clientId: client.client_id,
+      kind: 'access',
+      name: 'oauth here',
+      ttlMs: 60_000,
+    });
+    const there = await issueMcpCredential(database.db, {
+      projectId: other.id,
+      userId: member.id,
+      clientId: client.client_id,
+      kind: 'access',
+      name: 'oauth there',
+      ttlMs: 60_000,
+    });
+
+    await revokeMcpCredentialsOfGrant(database.db, { clientId: client.client_id, userId: member.id, projectId: project.id });
+
+    expect((await initializeWith(here.token)).status).toBe(401);
+    const stillThere = await fetch(`${live.origin}/mcp/${other.name}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${there.token}` },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'p', version: '0' } },
+      }),
+    });
+    expect(stillThere.status).toBe(200);
   });
 });

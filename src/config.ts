@@ -178,12 +178,18 @@ export const OAUTH_CLIENT_UNUSED_MS = 24 * 60 * 60_000;
  * same reason: `MCP_OAUTH_MAX_CLIENTS` bounds the *table*, and nothing bounded the **rate** at which a
  * single host could walk it to its ceiling.
  *
- * Ten an hour is far more than any host legitimately needs — a connector registers once, ever, and a
- * developer retrying a broken flow does it a handful of times — and it turns filling two hundred rows
- * from one script into twenty hours of sustained traffic from twenty hosts, against a sweep that drops
- * the unused ones every day.
+ * **Sixty an hour, and the number is about NAT rather than about connectors.** One connector registers
+ * once per instance it connects to, so ten looked generous — until the thirty people behind one office
+ * address set theirs up on the morning the operator announced it, and the eleventh was answered `429`
+ * for an hour with nothing in the message to tell them why. A "host" here is an address, not a person,
+ * and the common deployment puts a department behind one.
+ *
+ * It is deliberately **not** the thing that bounds abuse: `req.ip` is the left-most `X-Forwarded-For`
+ * under `trustProxy: true` and a script can write it. What bounds abuse is
+ * `OAUTH_CLIENT_UNUSED_MS` — a row that never connects is gone within a day, whatever address claimed
+ * it — and this is what keeps ordinary traffic and ordinary mistakes from reaching the ceiling at all.
  */
-export const OAUTH_REGISTER_MAX_PER_HOST = 10;
+export const OAUTH_REGISTER_MAX_PER_HOST = 60;
 export const OAUTH_REGISTER_WINDOW_MS = 60 * 60_000;
 
 /** Exported for the tests: the cross-field rules are the only part of this file that has behaviour. */

@@ -45,10 +45,11 @@ export async function resolveMcpCredential(
   // A credential whose account is gone or switched off is not a lesser credential, it is no credential:
   // falling back to `bearer` here would turn "we disabled that person" into "their agent keeps reading".
   //
-  // A password reset suspends it too, and that is the same rule the dashboard applies rather than a new
-  // one: `mustChangePassword` is set by an administrator who has just handed somebody a temporary
-  // password, and an hour-long access token that outlived that moment would be the one credential of
-  // that account the reset did not reach.
+  // A pending password change suspends it too, and this is now the **second** door rather than the
+  // mechanism. Both password routes revoke this account's OAuth credentials outright, because the one
+  // that matters most — a person changing their own password because they think it leaked — clears
+  // `mustChangePassword` and would have walked straight through a check that was the only gate. What
+  // is left for this line to catch is a credential minted while a temporary password stands.
   if (!account?.isActive || account.mustChangePassword) return { credential: { kind: 'unknown' }, tokenId: token.id };
 
   const principal: Principal = {
