@@ -8,7 +8,7 @@ import { belowRelevanceFloor } from './relevance.js';
 import { getSourceByName, listSources } from './sources.js';
 import type { TextSearchConfig } from './text-search.js';
 import type { Reranker } from './reranker.js';
-import { type HnswScan, listDocumentVersions, type ResultSelection, searchChunks, type SearchHit } from './vector-store.js';
+import { documentVersionExists, type HnswScan, listDocumentVersions, type ResultSelection, searchChunks, type SearchHit } from './vector-store.js';
 
 /**
  * The one search path in the product (ROADMAP Item 3) — hybrid since
@@ -167,8 +167,15 @@ export async function searchProject(
   let version: string | undefined;
   if (input.version !== undefined) {
     const requested = input.version.trim();
-    const available = await listDocumentVersions(db, project.id, project.liveGeneration);
-    if (!available.includes(requested)) return { status: 'unknown_version', project, requested: input.version, available };
+    // **The existence check first, and the catalogue only when it fails.** The list is what the
+    // *refusal* is built from; asking for it on every search would make a successful one pay for an
+    // error message it does not produce. `version` carries no index, deliberately (ADR-0058), so the
+    // difference is a scan that stops at the first matching document against one that reads every
+    // document of the generation to fold them.
+    if (!(await documentVersionExists(db, project.id, project.liveGeneration, requested))) {
+      const available = await listDocumentVersions(db, project.id, project.liveGeneration);
+      return { status: 'unknown_version', project, requested: input.version, available };
+    }
     version = requested;
   }
 
