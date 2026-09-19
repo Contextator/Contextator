@@ -1,0 +1,20 @@
+# Build the image from source instead of pulling it. docker-compose.yml pulls contextator/contextator
+# by default so that file works curled on its own into an empty directory; this override only makes
+# sense with the repository checked out beside it, so it stays a separate file rather than a flag on
+# the base one. Layer it on top with a second -f:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# The `image` tag is overridden here too, deliberately, rather than left to inherit the base file's
+# `contextator/contextator:${CONTEXTATOR_TAG:-latest}`. Compose's default `pull_policy` is `missing` —
+# it only pulls a tag it does not already have locally — so a shared tag would let the two workflows
+# clobber each other silently: build once, then a plain `docker compose up -d` keeps running your old
+# local build under the "latest" name instead of pulling the real one; or `docker compose pull`
+# replaces your local build with the published image without saying so. A separate tag keeps the two
+# images, and the two mental models, apart.
+#
+# Everything else — volumes, environment, ports — stays exactly what docker-compose.yml defines.
+services:
+  contextator:
+    build: .
+    image: contextator/contextator:source

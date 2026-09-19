@@ -1,0 +1,47 @@
+# `DOCKERHUB.md` is what Docker Hub shows on the repository page; nothing in `release.yml` touches
+# it. Deliberately decoupled: a typo in this file is a documentation fix, not a release, and waiting
+# for a `v*` tag to correct it — or worse, cutting one just to correct it — would be backwards.
+name: Docker Hub description
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - DOCKERHUB.md
+      - .github/workflows/dockerhub-description.yml
+  # Manual re-run for the case this is meant to recover from: Docker Hub's copy drifting from this
+  # file for a reason that had nothing to do with a push here (an edit made on Docker Hub directly,
+  # or a run that failed after this file last changed).
+  workflow_dispatch:
+
+# Two pushes to `main` touching this file in quick succession are two runs racing to set the same
+# description; the one that lands second is the one Docker Hub keeps regardless of which started
+# first, so let the second push cancel the first's now-pointless run rather than have them fight.
+concurrency:
+  group: "dockerhub-description-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    name: Push DOCKERHUB.md to Docker Hub
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # This is the one place `peter-evans/dockerhub-description` runs, and the one place
+      # `DOCKERHUB_TOKEN` needs more than the read/write a plain image push would: overwriting a
+      # repository's description and short description is a delete-and-recreate against Docker Hub's
+      # own API, which is why the token backing it carries the read/write/delete scope end to end.
+      # Pinned to a commit rather than a tag for the same reason `release.yml`'s `docker/login-action`
+      # is: this token's write access is not delegated to a third party's next commit. Resolve
+      # `v5.0.0` again to move this, and read the diff first.
+      - uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        with:
+          username: "${{ secrets.DOCKERHUB_USERNAME }}"
+          password: "${{ secrets.DOCKERHUB_TOKEN }}"
+          repository: contextator/contextator
+          readme-filepath: DOCKERHUB.md
+          short-description: "Self-hosted, multi-tenant MCP documentation server: PostgreSQL + pgvector in one container."

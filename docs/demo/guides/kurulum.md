@@ -12,9 +12,12 @@ modeli uygulama konteynerinin içinde CPU üzerinde çalışır; ilk açılışt
 ## Docker ile kurulum
 
 ```bash
+mkdir contextator && cd contextator
+curl -fsSLO https://raw.githubusercontent.com/Contextator/Contextator/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/Contextator/Contextator/main/.env.example
 cp .env.example .env
 docker compose up -d
-docker compose logs -f app
+docker compose logs -f
 ```
 
 Günlükte `embedding model ready` satırını gördüğünüzde sunucu hazırdır. Panel

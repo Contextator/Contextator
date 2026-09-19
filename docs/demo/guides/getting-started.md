@@ -14,9 +14,12 @@ embedding model runs on the CPU inside the app container and is downloaded on fi
 ## Start the stack
 
 ```bash
+mkdir contextator && cd contextator
+curl -fsSLO https://raw.githubusercontent.com/Contextator/Contextator/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/Contextator/Contextator/main/.env.example
 cp .env.example .env
 docker compose up -d
-docker compose logs -f app
+docker compose logs -f
 ```
 
 Wait for the log line `embedding model ready`. The first start downloads the model
@@ -27,8 +30,9 @@ Wait for the log line `embedding model ready`. The first start downloads the mod
 Open `http://localhost:3444/` in a browser. Fill in the form:
 
 1. **Project name**: lowercase letters, digits, `-` or `_`. It becomes the URL segment.
-2. **Documentation directory**: a path inside the container, for example `/docs/demo`.
-   The host folder configured as `DOCS_HOST_PATH` is mounted at `/docs`.
+2. **Documentation directory**: a path inside the container, under `/docs` — the host folder
+   configured as `DOCS_HOST_PATH` is mounted there. Point it at one of your own subfolders (e.g.
+   `/docs/handbook`), or leave it empty and add sources afterwards.
 3. Leave **Index now** checked and press **Create**.
 
 The status pill turns from `indexing` to `idle` and shows how many documents and chunks were indexed.

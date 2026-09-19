@@ -33,7 +33,7 @@ http://localhost:3444/mcp/<project-name>
   reads a Word file or a PDF the way it reads a page of documentation. See [File types](#file-types).
 
 Stack: TypeScript · Node.js 22+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/sdk` · `@huggingface/transformers` · `unpdf` / `mammoth` / `turndown`.
-Ships as **one Docker container** (`contextator`) that holds both the database and the app.
+Ships as **one Docker container**, published as `contextator/contextator`, that holds both the database and the app.
 Free software under the **AGPL-3.0-or-later** ([why](#license)), with a commercial license available.
 
 ---
@@ -42,14 +42,18 @@ Free software under the **AGPL-3.0-or-later** ([why](#license)), with a commerci
 
 Everything runs in a single container named `contextator`: PostgreSQL 16 + pgvector and the Node.js
 app, started and stopped together by a small entrypoint script. Data lives in Docker volumes and
-survives container removal (see [Data and persistence](#data-and-persistence)).
+survives container removal (see [Data and persistence](#data-and-persistence)). The published image
+is `contextator/contextator`; `docker compose up -d` pulls it, so the two files below — not the whole
+repository — are all a fresh install needs.
 
 ```bash
-git clone https://github.com/Contextator/Contextator.git contextator && cd contextator
+mkdir contextator && cd contextator
+curl -fsSLO https://raw.githubusercontent.com/Contextator/Contextator/main/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/Contextator/Contextator/main/.env.example
 cp .env.example .env
 # in .env, pick the code that /setup will ask for once:
 #   SETUP_CODE=whatever-you-like
-# optional: DOCS_HOST_PATH=/path/to/your/docs  (defaults to ./docs, which contains a demo)
+# optional: point DOCS_HOST_PATH at your own docs (it defaults to ./docs, created empty if missing)
 docker compose up -d
 docker compose logs -f            # wait for "embedding model ready"
 ```
@@ -72,11 +76,14 @@ docker compose logs -f            # wait for "embedding model ready"
    └─────────────────────────────────────────────────────────────────────────┘
    ```
 2. Sign in at **http://localhost:3444/**.
-3. Press **New project** (or `n`): name `demo`, directory `/docs/demo` (the host folder from `DOCS_HOST_PATH` is mounted at `/docs`).
-   Leaving the directory empty creates an empty project; add its sources afterwards with **Add source**.
+3. Press **New project** (or `n`): name it `demo`, and for the directory point at one of your own
+   subfolders under `/docs` — the host folder from `DOCS_HOST_PATH` is mounted there, so `docs/handbook`
+   on the host is `/docs/handbook` here. Leaving the directory empty creates an empty project;
+   add its sources afterwards with **Add source**.
 4. Watch the project's status go `indexing → idle` in the list; the **Document sources** panel shows every
    source with its document count, last sync and any error.
-5. Use the **Connect an agent** tabs (Claude Code, Cursor, Claude Desktop, legacy SSE) for copy-paste snippets, or run the bundled smoke test:
+5. Use the **Connect an agent** tabs (Claude Code, Cursor, Claude Desktop, legacy SSE) for copy-paste snippets. From
+   a source checkout, the bundled smoke test does the same thing from the command line:
 
 ```bash
 npm install && npm run smoke -- http://localhost:3444/mcp/demo "how do I re-index"
@@ -89,14 +96,22 @@ fp32 model, ~235 MB with `EMBEDDING_DTYPE=fp16`, ~120 MB with `EMBEDDING_DTYPE=q
 Without Compose:
 
 ```bash
-docker build -t contextator .
 docker run -d --name contextator -p 3444:3444 \
+  -e SETUP_CODE=whatever-you-like \
   -v contextator-pgdata:/var/lib/postgresql/data \
   -v contextator-models:/app/.cache/models \
   -v contextator-data:/data \
   -v /path/to/your/docs:/docs:ro \
-  contextator
+  contextator/contextator
 ```
+
+Building the image from source instead of pulling it:
+[wiki/Installation#build-the-image-yourself](https://github.com/Contextator/Contextator/wiki/Installation#build-the-image-yourself).
+
+**Tags.** `latest` is the newest stable release; `0.1` tracks the latest patch inside the `0.1.x`
+line; `0.1.0` is one exact, immutable release. Pin a versioned tag for anything you upgrade
+deliberately by setting `CONTEXTATOR_TAG` in `.env` (e.g. `CONTEXTATOR_TAG=0.1.0`) and running
+`docker compose up -d` — this reads at every start, not only the first.
 
 ## Document sources
 
@@ -449,8 +464,8 @@ authenticating proxy.
 | Materialised sources: uploaded files, git checkouts, Notion pulls | `/data` | `contextator-data` | `CONTEXTATOR_DATA_VOLUME` or `CONTEXTATOR_DATA_PATH` |
 | Your documentation (read-only) | `/docs` | – | `DOCS_HOST_PATH` (default `./docs`) |
 
-`docker compose down`, `docker compose up --build`, image upgrades and `docker rm contextator` all keep
-the volumes. Only `docker compose down -v` or `docker volume rm` deletes them. Examples:
+`docker compose down`, `docker compose pull && docker compose up -d`, and `docker rm contextator` all
+keep the volumes. Only `docker compose down -v` or `docker volume rm` deletes them. Examples:
 
 ```bash
 CONTEXTATOR_PGDATA_PATH=/srv/contextator/pgdata     # Linux server: keep the database on a chosen disk
@@ -1103,6 +1118,7 @@ scripts/cla/run.ts            the gate wired up: read the event, record a signat
 scripts/cla/main.ts           what the workflow runs — the environment, the two tokens and the exit code, and no decision at all
 test/*.test.ts                unit suite — pure functions, no database, no Docker (`npm test`)
 test/cla-*.test.ts            the licence gate: its judgements, the whole flow against fakes, and the GitHub clients against an injected fetch
+test/dockerhub-description.test.ts  DOCKERHUB.md fits Docker Hub's limit, its links are absolute, and it names the image
 test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
 test/integration/fixtures/    a pre-v3 `0.1` schema derived from history, and the frozen DDL ladder the migrations replaced
@@ -1122,11 +1138,15 @@ docs/demo/                    sample documentation (English, Turkish, MDX)
 Dockerfile                    one image: postgres:16 + pgvector + Node 22 + the app
 docker/entrypoint.sh          starts PostgreSQL, then the app; stops both in order on SIGTERM
 docker-compose.yml            the `contextator` container and its volumes
+docker-compose.build.yml      overlay for docker-compose.yml that builds the image from source instead of pulling it
 docker-compose.dev.yml        PostgreSQL only, for `npm run dev`
+DOCKERHUB.md                  what Docker Hub shows on the repository page; not this README, which is well past its 25,000-character limit
 biome.jsonc                   the one formatter and linter, and why each rule is set as it is
 tsconfig.test.json            typechecks test/ and scripts/, which the build's tsconfig cannot see
 .github/workflows/ci.yml      the gate on every pull request: lint, typecheck, tests, image build
 .github/workflows/cla.yml     the licence grant: the `Licence grant` required check, and the lock on a merged thread
+.github/workflows/release.yml on a `v*` tag: verify the image, then build and push it to Docker Hub for both architectures
+.github/workflows/dockerhub-description.yml pushes DOCKERHUB.md to Docker Hub's description whenever it changes
 .github/PULL_REQUEST_TEMPLATE.md   the FR/ADR reference, the checks, and the documented claims a change touches
 .github/ISSUE_TEMPLATE/       bug report, feature request, and the links the issue chooser offers first
 .git-blame-ignore-revs        commits that only reformatted; `git blame` should look through them
@@ -1149,8 +1169,8 @@ creates or alters a table, and `npm run db:check` — a step in CI — fails if 
 migrations stop agreeing.
 
 Nothing is asked of the operator. `src/db/bootstrap.ts` runs `migrate()` at startup, under a
-session-scoped advisory lock, with `drizzle/*.sql` baked into the image: upgrading is still
-`docker compose up -d` and there is still no migration command to forget. An installation that
+session-scoped advisory lock, with `drizzle/*.sql` baked into the image: upgrading is
+`docker compose pull && docker compose up -d` and there is still no migration command to forget. An installation that
 predates the migrations is adopted on its first start — its schema is already the baseline, so a row
 is written to drizzle's journal saying so and nothing is applied.
 
@@ -1223,7 +1243,7 @@ text, on every pull request, against a real server.
 | Every search answers *no good match* | `SEARCH_SCORE_FLOOR` is a cosine similarity measured against the default embedding model. If you changed `EMBEDDING_MODEL`, the startup log says so — re-measure the floor with `npm run eval` against your corpus, or set `SEARCH_SCORE_FLOOR=0`. |
 | An agent is told *no good match* for something that **is** documented | The floor refused a question it should not have. The server logs every gated query at `info` with the score it saw; compare that against `SEARCH_SCORE_FLOOR` and lower it, or set it to `0`. |
 | Answers got longer after upgrading | Each excerpt now carries the chunk either side of it. `SEARCH_NEIGHBOR_CONTEXT=0` restores the old shape, and `SEARCH_MAX_RESULT_CHARS` caps the whole answer. |
-| `Could not load the sharp module` in the container | Regenerate `package-lock.json` on Linux or run `npm install --os=linux --cpu=x64 sharp` before building. |
+| `Could not load the sharp module` in the container | Only when building from source: regenerate `package-lock.json` on Linux or run `npm install --os=linux --cpu=x64 sharp` before building. |
 | I missed the first-run setup code | Set `SETUP_CODE` in `.env` to something you choose and restart — it is read on every start until the first account exists. Or just restart and read the fresh code the server prints: `docker compose restart contextator && docker compose logs -f`. |
 | I forgot my password | Any root or admin can reset it from **Users → Reset password**, which hands them a temporary one for you. |
 | Nobody can sign in any more | `docker compose exec contextator npm run reset-password -- <username>` — the tool ships in the image and has to run there, because the container's PostgreSQL is published nowhere. From a source checkout the same command runs against `DATABASE_URL`. It prints a new temporary password and ends that account's sessions. With `ADMIN_TOKEN` set, `curl -XPOST -H "Authorization: Bearer $ADMIN_TOKEN" http://localhost:3444/api/users/<id>/password` does the same. |

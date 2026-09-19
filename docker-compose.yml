@@ -1,8 +1,14 @@
 # Contextator: one container with PostgreSQL 16 + pgvector and the app.
 #
-#   docker compose up -d          start (builds the image on first run)
+#   docker compose up -d          start (pulls contextator/contextator on first run)
 #   docker compose logs -f        follow logs
 #   docker compose down           stop and remove the container; data stays in the volumes below
+#
+# This pulls the published image rather than building it, so this one file works on its own —
+# curled into an empty directory, with nothing else from the repository beside it. Pin a version
+# with CONTEXTATOR_TAG instead of tracking latest (see .env.example). Building from source is still
+# there, just not the default: layer docker-compose.build.yml on top to build instead of pull —
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 #
 # Persistent data lives in Docker volumes named contextator-pgdata (database), contextator-models
 # (downloaded embedding models) and contextator-data (uploaded files, git checkouts, Notion pulls).
@@ -12,8 +18,7 @@ name: contextator
 
 services:
   contextator:
-    build: .
-    image: contextator:latest
+    image: contextator/contextator:${CONTEXTATOR_TAG:-latest}
     container_name: contextator
     restart: unless-stopped
     ports:
