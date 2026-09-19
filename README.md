@@ -1097,7 +1097,12 @@ scripts/smoke-mcp.ts          end-to-end MCP client check
 scripts/reset-password.ts     last-resort password reset straight against the database; ships in the image and runs there
 scripts/eval.ts               `npm run eval` — indexes eval/corpus, asks eval/golden.jsonl, prints recall@1, recall@5, MRR
 scripts/eval-scoring.ts       the scoring arithmetic and the report, with no database or model in it, so it can be unit-tested
+scripts/cla/rules.ts          the licence gate's judgements — who authored a pull request, who may sign, what the record says — with no I/O in them
+scripts/cla/github.ts         the two GitHub surfaces it is handed: this repository, and the signatures repository behind its own narrow token
+scripts/cla/run.ts            the gate wired up: read the event, record a signature, judge, ask once, re-run the pull request's check
+scripts/cla/main.ts           what the workflow runs — the environment, the two tokens and the exit code, and no decision at all
 test/*.test.ts                unit suite — pure functions, no database, no Docker (`npm test`)
+test/cla-*.test.ts            the licence gate: its judgements, the whole flow against fakes, and the GitHub clients against an injected fetch
 test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
 test/integration/fixtures/    a pre-v3 `0.1` schema derived from history, and the frozen DDL ladder the migrations replaced
@@ -1121,6 +1126,7 @@ docker-compose.dev.yml        PostgreSQL only, for `npm run dev`
 biome.jsonc                   the one formatter and linter, and why each rule is set as it is
 tsconfig.test.json            typechecks test/ and scripts/, which the build's tsconfig cannot see
 .github/workflows/ci.yml      the gate on every pull request: lint, typecheck, tests, image build
+.github/workflows/cla.yml     the licence grant: the `Licence grant` required check, and the lock on a merged thread
 .github/PULL_REQUEST_TEMPLATE.md   the FR/ADR reference, the checks, and the documented claims a change touches
 .github/ISSUE_TEMPLATE/       bug report, feature request, and the links the issue chooser offers first
 .git-blame-ignore-revs        commits that only reformatted; `git blame` should look through them

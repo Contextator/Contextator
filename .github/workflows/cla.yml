@@ -1,20 +1,19 @@
 # The door on the licence grant. ADR-0025 put a commercial licence beside AGPL-3.0-or-later, and that
 # offer holds only while the copyright is held in full: one outside contribution merged without a grant
 # removes the ability to licence that code commercially, permanently, and reverting the commit does not
-# undo it. ADR-0030 wrote the condition down and left the enforcing to a machine that did not exist. This
-# is that machine.
+# undo it. ADR-0030 wrote the condition down and left the enforcing to a machine that did not exist.
+# This is that machine, and since ADR-0061 it is ours.
 #
-# It is CLA Assistant *Lite* — a GitHub Action, not the hosted GitHub App. The difference is where the
-# signature lives: the Action writes it as JSON into a repository this organisation owns, and the hosted
-# service keeps it in a database somebody else runs. ADR-0025's whole argument rests on that record, so it
-# is not rented.
+# It used to be `contributor-assistant/github-action`, pinned. That Action was archived in March 2026 —
+# read-only, thirty-eight open issues, an `action.yml` still declaring `node20` that will never be
+# corrected, and no maintained fork (the most-starred has four stars and none is on node24). A legal
+# position that cannot be undone was being held by a frozen dependency, so ADR-0061 moved the logic here
+# and the decisions into `scripts/cla/`, where they are unit-tested.
 #
-# The signature is a pull request comment. The Action reads the comment, appends the signatory to the JSON
-# file, and re-runs the pull request's own workflow run so that the check on the pull request goes green —
-# which is why the job needs `actions: write` and why the `issue_comment` trigger is here at all.
-#
-# Read before changing anything below: the upstream Action is pinned, and several of the settings here are
-# shaped by defects in it rather than by preference. Each one says which.
+# **There is no logic in this file.** It decides when a runner starts, and it hands the script two tokens
+# and nothing else; the script reads the event as JSON from `GITHUB_EVENT_PATH`. That is deliberate: a
+# pull request title, a branch name and a comment body are all text a stranger chooses, and none of it
+# reaches a shell or a `${{ }}` expression here.
 name: CLA
 
 on:
@@ -32,128 +31,98 @@ on:
 permissions:
   contents: read
 
-# Two signature comments in the same pull request would otherwise race for the same JSON file and one
-# would land on a stale blob SHA. What actually prevents a lost signature is that every run re-reads the
-# whole comment thread from scratch, so a signature is found again on the next run whatever happened to
-# this one; serialising is what stops two runs writing the same file from two different base SHAs.
+# Two signatures arriving in the same minute are two runs that both read the signature file and both
+# write it back, and the second one's write is against a blob SHA that has moved. `scripts/cla/run.ts`
+# handles that properly — it re-reads and appends again — and this serialises the common case so the
+# retry is the exception rather than the norm. `cancel-in-progress: false` because a cancelled run is a
+# signature that was never recorded.
 concurrency:
   group: "cla-${{ github.event.issue.number || github.event.pull_request.number }}"
   cancel-in-progress: false
 
 jobs:
-  # This job's name is what appears in the pull request's checks and what `main`'s branch protection has
-  # to list as a required status check. Renaming it silently un-protects the branch.
+  # **This job's name is `Licence grant`, it is registered as a required status check on `main` with
+  # `enforce_admins` on, and it must not be renamed here alone.** A required check that stops being
+  # reported does not fail open — it never reports at all, every pull request stays pending forever and
+  # nothing can be merged. Changing it means changing the branch protection in the same breath.
   #
-  # The condition is on the job and not on the step, so an ordinary issue comment never allocates a
+  # The condition is on the job and not on a step, so an ordinary issue comment never allocates a
   # runner. It deliberately does *not* exclude the `closed` action: a job skipped by its own `if` is
   # reported as **skipped**, and GitHub counts a skipped job as a *passing* required check. A run that
-  # concludes nothing must therefore never produce a check run by this name, which means on every
-  # `pull_request_target` this job runs for real. Locking a merged thread is the other job's business,
-  # and it carries a different name for exactly this reason.
+  # concludes nothing must therefore never produce a check run by this name — so on every
+  # `pull_request_target`, `closed` included, this job runs and the script judges for real. Locking a
+  # merged thread is the other job's business and it carries a different name for exactly this reason.
+  #
+  # The comment body is not tested here. It was, under the old Action, and the cost was a guard in YAML
+  # that had to agree with a matcher in TypeScript about what counts as a signature; they disagree
+  # silently and the contributor is the one who finds out. The script is the only matcher now, and every
+  # comment on a pull request gets a run that genuinely verifies.
   cla:
     name: Licence grant
-    # `contains` rather than an equality test, because the Action's own matcher is
-    # `/^.*i \s*have \s*read \s*the \s*cla \s*document \s*and \s*i \s*hereby \s*sign \s*the \s*cla.*$/`
-    # against the lower-cased comment: a trailing full stop still signs. An equality test here would
-    # leave that contributor with no run at all and no feedback. GitHub's string comparisons are
-    # case-insensitive, which matches the lower-casing the Action does.
-    #
-    # Every continuation line sits at the same indentation on purpose: YAML folds those into spaces, and
-    # an extra indent would keep the newline and hand the expression parser a broken line.
-    if: >-
-      github.event_name == 'pull_request_target' ||
-      (github.event.issue.pull_request != null &&
-      (github.event.comment.body == 'recheck' ||
-      contains(github.event.comment.body, 'I have read the CLA Document and I hereby sign the CLA')))
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request != null
     runs-on: ubuntu-latest
     permissions:
-      # Re-running the pull request's workflow run after a signature lands — the step that turns the
-      # check green without asking the contributor to push an empty commit. The Action does this with the
-      # job's own `GITHUB_TOKEN`, not with the token below, which is why that one can stay narrow.
+      # Re-running the pull request's own workflow run once a signature lands — the step that turns the
+      # check green without asking the contributor to push an empty commit. This is the job's own
+      # `GITHUB_TOKEN`, not the signatures token, which is why that one can stay narrow.
       actions: write
-      # `read`, not `write`: the signatures are in a different repository, reached with the token below.
+      # `read`, not `write`: the signatures are in a different repository, reached with the other token.
       # Nothing here writes to this repository.
       contents: read
       # Posting the "please sign" comment and reading the thread the signature arrives in.
       pull-requests: write
+    env:
+      # Mirrors ci.yml. onnxruntime-node's postinstall fetches optional GPU binaries; nothing in this
+      # job embeds anything, and a licence gate has no business downloading a CUDA runtime.
+      ONNXRUNTIME_NODE_INSTALL: skip
     steps:
-      # `pull_request_target` checks out nothing and runs no code from the fork; the Action is the only
-      # thing that executes. Keep it that way — a checkout of `github.event.pull_request.head.sha` in this
-      # workflow would hand a stranger the write-scoped tokens above.
+      # `pull_request_target` checks out the **base** repository at the base commit, which is this
+      # repository's own code — `github.event.pull_request.head.sha` and `head.ref` appear nowhere in
+      # this file and must not. A checkout of the fork's head here would hand a stranger the
+      # write-scoped tokens above and then run their `npm ci`.
+      # **Pinned to commits, and `ci.yml`'s `@v7` is not a precedent this file follows.** The Action that
+      # used to run here was pinned to a SHA on a stated principle — a tag is a name its owner can move,
+      # and the gate on the project's licensing position is not delegated to a third party's next commit.
+      # That principle did not stop applying because the third party changed to GitHub: this job holds
+      # `CLA_SIGNATURES_TOKEN` and `actions: write`, which is a blast radius `ci.yml`'s jobs do not have.
+      # These are the commits `v7.0.1` and `v7.0.0` point at; move them by resolving the tag again, and
+      # read the diff first.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in this job talks to git. Leaving a credential in `.git/config` for the length of
+          # the run buys nothing and is one more thing a step could be tricked into using.
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # The same floor as ci.yml and the image: ADR-0056. Unlike the Action this replaced, which
+          # declared a runtime GitHub had already stopped honouring, this number is ours to move.
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
       - name: Check the licence grant
-        # Pinned to the commit `v2.6.1` points at, not to the tag and not to `v2`. A tag is a name its
-        # owner can move; this is the gate on the project's licensing position, and it is not delegated to
-        # a third party's next commit. Read the diff before moving this line.
-        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        run: npx tsx scripts/cla/main.ts
         env:
+          # This repository's side: the commits of the pull request, the thread, and the re-run.
           GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-          # A **fine-grained** token scoped to `Contextator/cla-signatures` alone, with Contents: Read and
-          # write and nothing else. That is the whole of what it is used for — reading and writing one
-          # JSON file in one repository. A classic `repo`-scoped token would work and is what the
-          # upstream README asks for, on the strength of a comment claiming the re-run API needs it; that
-          # is not true of this configuration, where the re-run goes through the job's `GITHUB_TOKEN` and
-          # the `actions: write` above. Holding an organisation-wide token in the environment of a
-          # `pull_request_target` workflow is a blast radius bought for nothing.
+          # A **fine-grained** token scoped to `Contextator/cla-signatures` alone, with Contents: Read
+          # and write and nothing else — verified to be refused 403 against this repository. That is the
+          # whole of what it does: read and write one JSON file in one repository.
           #
           # Fine-grained tokens expire. When it does, this step fails, the check goes red and nothing
           # merges — the failure lands on the safe side, but put the expiry in a calendar anyway.
-          PERSONAL_ACCESS_TOKEN: "${{ secrets.CLA_SIGNATURES_TOKEN }}"
-        with:
-          # The record, and the reason this mechanism was chosen over the hosted one. `Contextator/
-          # cla-signatures` is private and owned by this organisation.
-          #
-          # **`signatures/v1/cla.json` has to exist before the first pull request**, holding exactly
-          # `{"signedContributors": []}`. The upstream README says the Action creates it; it does not.
-          # `setupClaCheck.ts` compares `error.status === "404"` — a string — against an Octokit status
-          # that is the number `404`, so the create branch is unreachable and a missing file surfaces as
-          # `Could not retrieve repository contents. Status: 404`, thrown before any explanatory comment
-          # reaches the thread (upstream issue #155, open). Create the file by hand, once.
-          remote-organization-name: Contextator
-          remote-repository-name: cla-signatures
-          path-to-signatures: signatures/v1/cla.json
-          # The Action commits straight to this branch, so it must stay unprotected — which is the second
-          # reason the signatures are not in this repository: `main` here is about to require a check that
-          # a bot commit could never satisfy.
-          branch: main
-          # What the contributor is agreeing to. An absolute link, because the comment the Action posts is
-          # read on github.com and a relative path would resolve against the fork.
-          path-to-document: https://github.com/Contextator/Contextator/blob/main/CLA.md
-          #
-          # **`<none>` is not an allowlist entry and nobody is exempt here. Do not add a username to this
-          # line.** `checkAllowList.ts` compares each entry against `login || name`, and `graphql.ts`
-          # falls back to `name` — the free text in a commit's author field — whenever that commit's
-          # e-mail belongs to no GitHub account. So *every* entry, an exact username as much as a
-          # wildcard, is a string an outsider can set as their own git author name to walk past this gate
-          # with no account and no signature. Wildcards are worse again: the pattern is compiled
-          # unanchored, so `bot*` matches `Abbott` and `sabotage`. Nobody is lost by exempting nobody —
-          # `github-actions[bot]` is already dropped by user id in `graphql.ts`, Dependabot is switched
-          # off for this repository, and a maintainer signing once is one comment against a whole class
-          # of bypass.
-          #
-          # The value is here because *empty* is not empty: the Action splits this input on commas
-          # unconditionally, so `""` becomes the one-element list `[""]` and any committer whose resolved
-          # name is the empty string matches it. `<none>` is filler that consumes that slot. It can never
-          # equal a committer name — `<` and `>` are forbidden in a git ident and absent from every
-          # GitHub login — and it carries no `*`, so it stays on the plain `pattern === committer` branch
-          # rather than being compiled into a regex.
-          allowlist: "<none>"
-          #
-          # Locking a merged thread is the `lock` job below; here it must be off, or this job would lock
-          # instead of checking whenever a pull request closes.
-          lock-pullrequest-aftermerge: "false"
-          # `$pullRequestNo` is not substituted — the `.replace` for it is commented out in
-          # `persistence.ts` — so it is not in this template. `$contributorName`, `$owner` and `$repo`
-          # are.
-          signed-commit-message: "$contributorName signed the CLA in $owner/$repo"
+          CLA_SIGNATURES_TOKEN: "${{ secrets.CLA_SIGNATURES_TOKEN }}"
 
   # Locking is hygiene, not evidence: the signature of record is the row in `signatures/v1/cla.json`, and
   # `issues.lock` only stops *new* comments — it does not stop anyone deleting the comment they left. The
   # thread is locked so that a merged pull request stops being an editable surface, and for no stronger
   # reason than that.
   #
-  # It is a separate job with a different name because the upstream Action, given a `closed` event and
-  # locking switched on, locks and returns **without checking anything** — a green job that verified
-  # nothing. Under the job name that branch protection requires, that is a hole. Under this name it is
+  # It is a separate job with a different name because the Action this replaced, given a `closed` event
+  # and locking switched on, locked and returned **without checking anything** — a green job that
+  # verified nothing. Under the name branch protection requires, that is a hole. Under this name it is
   # what it says it is. `merged == true` keeps it off a pull request the author closed to tidy up, who
   # would otherwise come back to a thread they can no longer sign in.
   lock:
@@ -165,12 +134,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
+      # Locking a pull request conversation goes through the issues API, and `pull-requests: write`
+      # alone does not reach it.
+      issues: write
     steps:
+      # No checkout and no install: `gh` is on the runner. The two values interpolated are GitHub's own
+      # — this repository's full name and an integer — and neither is text a contributor writes.
       - name: Lock the conversation
-        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
-          # No `PERSONAL_ACCESS_TOKEN`: this path returns before it touches the signatures repository.
-          GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-        with:
-          lock-pullrequest-aftermerge: "true"
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          REPOSITORY: "${{ github.repository }}"
+          NUMBER: "${{ github.event.pull_request.number }}"
+        run: gh api --silent --method PUT "repos/$REPOSITORY/issues/$NUMBER/lock" -f lock_reason=resolved
