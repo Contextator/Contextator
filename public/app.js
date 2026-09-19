@@ -1041,6 +1041,9 @@ function setKind(kind) {
   }
   // A viewer may read a source's settings but not its secrets, its files or the save button.
   $('#webhook-box').hidden = !(editing && meta.type === 'git') || srcUi.readOnly;
+  // The Notion box is the same affordance with the secret coming the other way: Notion generates the
+  // token, the product captures it inside a window, and the operator carries it back into Notion.
+  $('#notion-webhook-box').hidden = !(editing && meta.type === 'notion') || srcUi.readOnly;
   $('#dropzone').hidden = srcUi.readOnly;
   $('#upload-mode-row').hidden = $('#upload-mode-row').hidden || srcUi.readOnly;
   $('#source-submit').hidden = srcUi.readOnly;
@@ -1083,6 +1086,7 @@ function openSourceDialog(project, source) {
   (source ? srcForm.elements.label : srcForm.elements.name).focus();
 
   if (source?.type === 'git' && !srcUi.readOnly) renderWebhook(project, source);
+  if (source?.type === 'notion' && !srcUi.readOnly) renderNotionWebhook(project, source);
   if (source?.type === 'upload' && !srcUi.readOnly) void loadSourceFiles(project, source);
 }
 
@@ -1163,6 +1167,48 @@ function renderWebhook(project, source) {
       toast(err.message);
     }
   };
+}
+
+/**
+ * The Notion webhook box. It exists because Notion's verification does not end at the endpoint: the
+ * token it POSTs has to be read *here* and pasted back into Notion's own modal, or the subscription
+ * stays "pending verification" and nothing is ever delivered. A capture the operator never sees is a
+ * source that looks configured and receives nothing.
+ */
+function renderNotionWebhook(project, source) {
+  const url = `${location.origin}/api/webhooks/notion/${source.id}`;
+  $('#notion-webhook-url').textContent = url;
+  $('#notion-webhook-copy-url').onclick = () => copyText(url);
+  $('#notion-webhook-copy-token').onclick = () =>
+    source.webhookSecret ? copyText(source.webhookSecret) : toast('No verification token has been captured yet');
+  $('#notion-webhook-token-row').hidden = !source.webhookSecret;
+  $('#notion-webhook-token').textContent = source.webhookSecret || '';
+  $('#notion-webhook-status').textContent = notionWebhookStatus(source);
+  $('#notion-webhook-open').onclick = async () => {
+    try {
+      const opened = await api(`/api/projects/${project.id}/sources/${source.id}/webhook-verification`, { method: 'POST' });
+      const minutes = Math.max(1, Math.round((new Date(opened.webhookVerificationExpiresAt).getTime() - Date.now()) / 60_000));
+      toast(`Window open for ${minutes} min \u2014 create the subscription in Notion now, then reopen this dialog for the token`);
+      srcUi.editing = { ...source, webhookVerificationExpiresAt: opened.webhookVerificationExpiresAt };
+      renderNotionWebhook(project, srcUi.editing);
+      await loadSources(true);
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+}
+
+/** Three states, and "expired without a token" is not one of the broken ones. */
+function notionWebhookStatus(source) {
+  const open = source.webhookVerificationExpiresAt && new Date(source.webhookVerificationExpiresAt).getTime() > Date.now();
+  if (open) {
+    const minutes = Math.max(1, Math.round((new Date(source.webhookVerificationExpiresAt).getTime() - Date.now()) / 60_000));
+    return `Window open for about ${minutes} min. Create the subscription in Notion with the URL above; the token it sends appears here, and you paste it back into Notion and press Verify subscription.`;
+  }
+  if (source.webhookSecret || source.hasWebhookSecret) {
+    return 'A verification token is stored. Paste it into Notion\u2019s Webhooks tab and press Verify subscription \u2014 until that is done, Notion delivers nothing. Pressing Resend token in Notion needs a new window here first.';
+  }
+  return 'Not verified. This source syncs on its interval, which is not an error \u2014 open a window when you are ready to create the subscription in Notion.';
 }
 
 const extensionsFromForm = () => [...srcForm.querySelectorAll('input[name="ext"]:checked')].map((b) => b.value);

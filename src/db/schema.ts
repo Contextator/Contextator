@@ -191,6 +191,35 @@ export const documentSources = pgTable(
      * entire reason a run that outlives its own interval cannot turn the tick into a probe loop.
      */
     nextSyncAt: timestamp('next_sync_at', { withTimezone: true }),
+    /**
+     * The open Notion webhook verification window ([ADR-0049](../../.ssot/ADR.md#adr-0049)): while this
+     * is in the future, a `verification_token` POSTed to the source's webhook URL is stored as
+     * `webhook_secret`. NULL or in the past means the token is refused and **nothing is written**.
+     *
+     * It is cleared by the statement that stores the token, which is what makes the window one-shot,
+     * and it is a column rather than a `config` key because `updateSource` validates `config` against
+     * the type's schema and strips what that schema does not name — an unrelated "Save changes" would
+     * otherwise delete the window at the exact moment the operator is using it.
+     */
+    webhookVerificationExpiresAt: timestamp('webhook_verification_expires_at', { withTimezone: true }),
+    /**
+     * A **claim** left by a webhook delivery that arrived inside the source's minimum inter-run
+     * interval: the earliest moment a run may happen for it.
+     *
+     * Every delivery in the same window computes the same value from `last_synced_at` and that
+     * minimum, so a burst of two hundred is two hundred idempotent updates and one run. The tick
+     * clears it whenever the source is considered — invariant 19's reason, one column along — and a row
+     * taken because of a claim is enqueued **without being probed**, since the Notion probe reads the
+     * newest `last_edited_time` and a deletion moves nobody's.
+     */
+    webhookDueAt: timestamp('webhook_due_at', { withTimezone: true }),
+    /**
+     * Minutes between two webhook-triggered runs of this source. **NULL means the instance's
+     * `WEBHOOK_MIN_INTERVAL_MINUTES`**, read live — not "never", which is what NULL means one column
+     * up in `sync_interval_minutes`. The asymmetry is deliberate: an interval is a schedule somebody
+     * chose per source, a debounce is a limit the instance imposes.
+     */
+    webhookMinIntervalMinutes: integer('webhook_min_interval_minutes'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -201,6 +230,10 @@ export const documentSources = pgTable(
     // and due, oldest first. Partial on `sync_interval_minutes IS NOT NULL` because an instance that
     // schedules nothing — every source of an upgraded installation — then carries an empty index.
     index('document_sources_due_idx').on(t.nextSyncAt.asc().nullsFirst()).where(sql`sync_interval_minutes is not null`),
+    // The other half of that query since [ADR-0049](../../.ssot/ADR.md#adr-0049): a source a delivery
+    // claimed is due whether or not it is scheduled at all. Partial for the same reason — on an
+    // installation with no Notion webhook it matches nothing and costs a catalogue row.
+    index('document_sources_webhook_due_idx').on(t.webhookDueAt).where(sql`webhook_due_at is not null`),
   ],
 );
 

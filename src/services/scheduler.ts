@@ -57,28 +57,53 @@ export interface SyncTickResult {
   busy: number;
   /** Probes that threw. Counted, logged, and treated as "run it" — never as "skip it". */
   failed: number;
+  /** Sources taken because a webhook delivery claimed them, and therefore run without a probe. */
+  claimed: number;
 }
 
-const EMPTY_TICK: SyncTickResult = { due: 0, considered: 0, probed: 0, unchanged: 0, enqueued: 0, busy: 0, failed: 0 };
+const EMPTY_TICK: SyncTickResult = { due: 0, considered: 0, probed: 0, unchanged: 0, enqueued: 0, busy: 0, failed: 0, claimed: 0 };
 
 /**
- * The sources that are switched on and whose time has come, oldest first, capped.
+ * When a row is claiming this tick's attention: the earlier of its schedule and a webhook's claim.
  *
- * `next_sync_at IS NULL` counts as due and sorts first: that is a source whose interval was set by
- * hand in SQL, or one restored from a dump taken before the column was written. Ordering by
- * `next_sync_at` ascending is what makes the per-tick cap a queue rather than a lottery — the sources
- * the cap left behind are, by construction, the oldest due ones next time.
+ * `least` ignores NULLs, and the `case` is what keeps an unscheduled source out of the schedule half —
+ * a source with no interval has no due time to be early. `next_sync_at IS NULL` on a *scheduled* source
+ * counts as the oldest claim there is: that is a source whose interval was set by hand in SQL, or one
+ * restored from a dump taken before the column was written.
+ */
+const claimTime = sql`least(
+  case when ${documentSources.syncIntervalMinutes} is not null then coalesce(${documentSources.nextSyncAt}, '-infinity'::timestamptz) end,
+  ${documentSources.webhookDueAt})`;
+
+/**
+ * The sources whose time has come, **for either reason**, oldest first, capped.
+ *
+ * Two halves since [ADR-0049](../../.ssot/ADR.md#adr-0049): a scheduled source that is due, and a
+ * source a Notion delivery claimed. The second half is not a nicety — without it a claim written on a
+ * source whose `sync_interval_minutes` is NULL would be written and never read, which is a webhook that
+ * works until somebody sets *Sync every* to "never" and then silently does not.
+ *
+ * Each half has its own partial index (`document_sources_due_idx`, `document_sources_webhook_due_idx`),
+ * so the `OR` is a bitmap over two indexes rather than a sequential scan. The honest cost is that it
+ * cannot also *return* them in order, so this sorts what it found — bounded by the number of sources
+ * actually due, which is tens of rows on an installation with hundreds of sources.
  */
 async function dueSources(db: Db, limit: number): Promise<DocumentSourceRow[]> {
   return (
     db
       .select()
       .from(documentSources)
-      .where(and(isNotNull(documentSources.syncIntervalMinutes), or(isNull(documentSources.nextSyncAt), sql`${documentSources.nextSyncAt} <= now()`)))
-      // `NULLS FIRST` is not PostgreSQL's default for an ascending column, so it is said here and said
-      // the same way on `document_sources_due_idx` — otherwise the one query this index exists for
-      // would sort instead of scanning it.
-      .orderBy(sql`${documentSources.nextSyncAt} asc nulls first`)
+      .where(
+        or(
+          and(isNotNull(documentSources.syncIntervalMinutes), or(isNull(documentSources.nextSyncAt), sql`${documentSources.nextSyncAt} <= now()`)),
+          and(isNotNull(documentSources.webhookDueAt), sql`${documentSources.webhookDueAt} <= now()`),
+        ),
+      )
+      // `NULLS FIRST` is not PostgreSQL's default for an ascending column, and a scheduled source with
+      // no due time yet is the oldest claim there is — so it is said here and said the same way on
+      // `document_sources_due_idx`. Ordering this way is what makes the per-tick cap a queue rather
+      // than a lottery: the sources the cap left behind are, by construction, the oldest next time.
+      .orderBy(sql`${claimTime} asc nulls first`)
       .limit(limit)
   );
 }
@@ -120,6 +145,39 @@ async function advanceDueTimes(db: Db, sources: DocumentSourceRow[]): Promise<vo
 }
 
 /**
+ * Takes the webhook claims of the rows this tick is considering, and returns whose they were
+ * ([ADR-0049](../../.ssot/ADR.md#adr-0049)).
+ *
+ * **A claim is cleared whenever the source is considered**, for the same reason `next_sync_at` advances
+ * above: a claim that outlived its own consideration would leave the row permanently due, which is that
+ * bug with a different column in it.
+ *
+ * The `<= now()` is what keeps it safe against a delivery landing mid-tick. A route only ever writes a
+ * claim that is in the *future* — it enqueues directly when the run is already owed — so a claim written
+ * between the `SELECT` and this statement is not cleared here, and the next tick takes it.
+ *
+ * `RETURNING` is what makes the answer exact: the rows that come back are the rows whose claim *this*
+ * statement took, which is the only version of "this row was asked for by a delivery" that cannot race.
+ */
+async function takeWebhookClaims(db: Db, sources: DocumentSourceRow[]): Promise<Set<string>> {
+  const taken = await db
+    .update(documentSources)
+    .set({ webhookDueAt: null })
+    .where(
+      and(
+        inArray(
+          documentSources.id,
+          sources.map((s) => s.id),
+        ),
+        isNotNull(documentSources.webhookDueAt),
+        sql`${documentSources.webhookDueAt} <= now()`,
+      ),
+    )
+    .returning({ id: documentSources.id });
+  return new Set(taken.map((row) => row.id));
+}
+
+/**
  * One pass of the scheduler, separated from the timer so that a test can drive it without waiting a
  * minute and without a clock to stub. Never throws: a tick that fails is a tick, not an outage.
  */
@@ -137,6 +195,8 @@ export async function runSyncTick(deps: SchedulerDeps): Promise<SyncTickResult> 
 
   // Before anything can decide not to, and before the first probe can be slow.
   await advanceDueTimes(db, batch);
+  const claimed = await takeWebhookClaims(db, batch);
+  result.claimed = claimed.size;
 
   const enqueued = new Set<string>();
   for (const source of batch) {
@@ -145,6 +205,20 @@ export async function runSyncTick(deps: SchedulerDeps): Promise<SyncTickResult> 
     // optimisation — it is what keeps a long run from being shadowed by a probe per minute.
     if (indexer.isBusy(source.projectId)) {
       result.busy++;
+      continue;
+    }
+
+    // **A delivery outranks the probe** ([ADR-0049](../../.ssot/ADR.md#adr-0049)), and this is the one
+    // branch that makes a deletion visible at all. The Notion probe is the newest `last_edited_time`,
+    // and a deleted page moves nobody's — so probing a row that a `page.deleted` delivery claimed would
+    // answer "unchanged" and swallow exactly the event being reported. The delivery names an entity and
+    // an event; the probe infers from a maximum. It also saves the outbound request.
+    if (claimed.has(source.id)) {
+      if (!enqueued.has(source.projectId)) {
+        enqueued.add(source.projectId);
+        indexer.enqueue(source.projectId, { trigger: 'webhook' });
+      }
+      log.info({ source: source.name, sourceId: source.id, projectId: source.projectId }, 'webhook delivery queued a run');
       continue;
     }
 

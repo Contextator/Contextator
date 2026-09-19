@@ -50,6 +50,10 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   // "Test connection" reaches the network with a stored token, so it is an editor's call.
   { method: 'POST', url: '/api/projects/:id/sources/:sid/test', actor: as('member'), membership: 'viewer', allowed: false },
   { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: 'editor', allowed: true },
+  // Opening the Notion verification window is what authenticates the unauthenticated webhook route
+  // ([ADR-0049](../.ssot/ADR.md#adr-0049)), so a viewer must not be able to open one.
+  { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-verification', actor: as('member'), membership: 'editor', allowed: true },
+  { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-verification', actor: as('member'), membership: 'viewer', allowed: false },
 
   // MCP tokens: reading the list is a viewer's, minting and revoking an editor's, and deciding
   // whether the endpoint is public at all is a manager's.

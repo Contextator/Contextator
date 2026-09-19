@@ -203,6 +203,20 @@
               <textarea name="rootIds" rows="2" placeholder="Page or database ids or URLs, one per line. Empty = everything shared with the integration."></textarea>
               <span class="field-hint">Have a Notion “Export → Markdown &amp; CSV” zip instead? Use <strong>Upload files</strong> with content type <em>Notion export</em>.</span>
             </label>
+            <div id="notion-webhook-box" class="webhook-box" hidden>
+              <span class="field-label">Notion webhook <span class="muted">— optional</span></span>
+              <span class="field-hint">Edits, deletions and moves reach the index in seconds instead of waiting for the interval. It does not notice a page <em>unshared</em> from the integration — Notion sends no event for that — so keep the interval switched on. The endpoint has to be reachable from the internet over HTTPS.</span>
+              <div class="webhook-row">
+                <code id="notion-webhook-url"></code>
+                <button type="button" class="ghost small" id="notion-webhook-copy-url">Copy URL</button>
+                <button type="button" class="ghost small" id="notion-webhook-open">Open verification window</button>
+              </div>
+              <p class="field-hint" id="notion-webhook-status"></p>
+              <div class="webhook-row" id="notion-webhook-token-row" hidden>
+                <code id="notion-webhook-token"></code>
+                <button type="button" class="ghost small" id="notion-webhook-copy-token">Copy token</button>
+              </div>
+            </div>
           </div>
 
           <div class="kind-only" data-kind="obsidian">

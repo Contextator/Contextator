@@ -44,6 +44,25 @@ export function verifyWebhook(headers: WebhookHeaders, rawBody: Buffer, secret: 
   return { ok: false, provider: 'unknown' };
 }
 
+/**
+ * Notion's signature ([ADR-0049](../../.ssot/ADR.md#adr-0049)):
+ * `X-Notion-Signature: sha256=<hex hmac>` over the **raw** body, keyed with the `verification_token`
+ * Notion generated and this product captured.
+ *
+ * **Deliberately not a fifth branch of `verifyWebhook`.** That function dispatches across providers by
+ * header, so a Notion branch inside it would teach `/api/webhooks/git/:id` to accept
+ * `X-Notion-Signature` — a header whose secret arrives *inbound*, on a route whose secret does not.
+ * The two share `hmacMatches` and nothing else.
+ *
+ * The raw body is the whole point and Notion's own documentation says so: re-serialised JSON produces
+ * different bytes and fails, which is why the route hands the buffer Fastify parsed nothing out of.
+ */
+export function verifyNotionSignature(headers: WebhookHeaders, rawBody: Buffer, secret: string): boolean {
+  const provided = header(headers, 'x-notion-signature');
+  if (provided === undefined) return false;
+  return hmacMatches(rawBody, secret, provided);
+}
+
 /** Branch names a push payload touches (empty when the payload shape is unknown → treat as "any"). */
 export function pushedBranches(payload: unknown): string[] {
   if (!payload || typeof payload !== 'object') return [];

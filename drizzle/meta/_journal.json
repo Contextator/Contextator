@@ -50,6 +50,13 @@
       "when": 1789787912940,
       "tag": "0006_scheduled_sync",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789789693549,
+      "tag": "0007_notion_webhook",
+      "breakpoints": true
     }
   ]
 }

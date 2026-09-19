@@ -112,10 +112,24 @@ export interface SourceView {
   flavor: Flavor;
   config: Record<string, unknown>;
   hasSecret: boolean;
-  /** Git only: shared secret the provider signs webhook deliveries with. Editors only. */
+  /**
+   * Git and Notion: the shared secret a delivery to this source is signed with. Editors only.
+   *
+   * **The same field for two provenances** ([ADR-0049](../../.ssot/ADR.md#adr-0049)). For git it is
+   * the secret this product generated and the operator copies into the repository settings; for Notion
+   * it is the `verification_token` Notion generated, which the operator has to copy **back** into
+   * Notion's own modal — without which the subscription stays pending and nothing is ever delivered.
+   * Showing it is therefore not a convenience there, it is the step that completes the flow.
+   */
   webhookSecret: string | null;
   /** So a viewer's dashboard can say a webhook is configured without showing its secret. */
   hasWebhookSecret: boolean;
+  /** Notion only: the open capture window, `null` when none is open ([ADR-0049](../../.ssot/ADR.md#adr-0049)). */
+  webhookVerificationExpiresAt: Date | null;
+  /** Notion only: a delivery waiting for the minimum inter-run interval, `null` when none is. */
+  webhookDueAt: Date | null;
+  /** Minutes between two webhook-triggered runs; `null` means the instance's `WEBHOOK_MIN_INTERVAL_MINUTES`. */
+  webhookMinIntervalMinutes: number | null;
   status: string;
   lastSyncedAt: Date | null;
   lastError: string | null;
@@ -126,6 +140,9 @@ export interface SourceView {
   nextSyncAt: Date | null;
   createdAt: Date;
 }
+
+/** The two source types whose deliveries are signed, whichever side generated the secret. */
+const HAS_WEBHOOK = new Set<string>(['git', 'notion']);
 
 export interface SourceViewOptions {
   /** A project viewer may read a source's settings but not the secret a push webhook signs with. */
@@ -143,8 +160,11 @@ export function toSourceView(row: DocumentSourceRow, opts: SourceViewOptions = {
     flavor: row.flavor as Flavor,
     config: row.config,
     hasSecret: Boolean(row.secretEnc),
-    webhookSecret: reveal && row.type === 'git' ? row.webhookSecret : null,
-    hasWebhookSecret: row.type === 'git' && Boolean(row.webhookSecret),
+    webhookSecret: reveal && HAS_WEBHOOK.has(row.type) ? row.webhookSecret : null,
+    hasWebhookSecret: HAS_WEBHOOK.has(row.type) && Boolean(row.webhookSecret),
+    webhookVerificationExpiresAt: row.type === 'notion' ? row.webhookVerificationExpiresAt : null,
+    webhookDueAt: row.type === 'notion' ? row.webhookDueAt : null,
+    webhookMinIntervalMinutes: row.webhookMinIntervalMinutes,
     status: row.status,
     lastSyncedAt: row.lastSyncedAt,
     lastError: row.lastError,
@@ -317,6 +337,8 @@ export interface UpdateSourceInput {
   secret?: string | null;
   /** Minutes between scheduled syncs; `null` switches scheduling off. Omitted leaves it alone. */
   syncIntervalMinutes?: number | null;
+  /** Minutes between webhook-triggered runs; `null` returns the source to the instance default. */
+  webhookMinIntervalMinutes?: number | null;
 }
 
 export async function updateSource(
@@ -363,6 +385,11 @@ export async function updateSource(
     // a due time up to a day out, and one moved the other way would fire straight away. Off clears
     // the due time so that switching it back on is indistinguishable from creating it.
     patch.nextSyncAt = input.syncIntervalMinutes === null ? null : firstSyncDueAt(input.syncIntervalMinutes);
+  }
+  // No re-jitter and no claim to move: a debounce is a limit rather than a schedule, and the claim that
+  // may be outstanding was computed from the last sync, which this does not touch.
+  if (input.webhookMinIntervalMinutes !== undefined && input.webhookMinIntervalMinutes !== existing.webhookMinIntervalMinutes) {
+    patch.webhookMinIntervalMinutes = input.webhookMinIntervalMinutes;
   }
   if (Object.keys(patch).length === 0) return existing;
   const [row] = await db.update(documentSources).set(patch).where(eq(documentSources.id, sourceId)).returning();

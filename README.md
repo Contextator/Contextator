@@ -728,7 +728,8 @@ src/admin/routes.ts           REST API for the dashboard
 src/services/scheduler.ts     the sync schedule: which sources are due, the cheap per-driver check, and the run it queues
 src/admin/sources-routes.ts   source CRUD, sync, test, webhook secret
 src/admin/upload-routes.ts    multipart upload sessions (the only multipart-parsing plugin)
-src/admin/webhooks.ts         push webhooks, verified with the per-source secret
+src/admin/webhooks.ts         push webhooks, verified with the per-source secret — git's generated here, Notion's captured from them
+src/services/notion-webhook.ts which Notion deliveries mean a run, the window a captured token may be stored in, and the debounce before the queue
 src/admin/auth-routes.ts      /api/auth/* and /api/setup/*
 src/admin/users-routes.ts     /api/users/*
 src/admin/members-routes.ts   /api/projects/:id/members/*

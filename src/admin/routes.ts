@@ -2,7 +2,7 @@ import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { installAuth } from '../auth/plugin.js';
 import type { Principal } from '../auth/types.js';
-import { MAX_SEARCH_LIMIT, SYNC_MAX_INTERVAL_MINUTES, SYNC_MIN_INTERVAL_MINUTES } from '../config.js';
+import { MAX_SEARCH_LIMIT, SYNC_MAX_INTERVAL_MINUTES, SYNC_MIN_INTERVAL_MINUTES, WEBHOOK_VERIFICATION_WINDOW_MINUTES } from '../config.js';
 import type { AppContext } from '../context.js';
 import { pingDb } from '../db/client.js';
 import type { ProjectRow } from '../db/schema.js';
@@ -189,6 +189,11 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         defaultIntervalMinutes: config.SYNC_DEFAULT_INTERVAL_MINUTES || null,
         minIntervalMinutes: SYNC_MIN_INTERVAL_MINUTES,
         maxIntervalMinutes: SYNC_MAX_INTERVAL_MINUTES,
+        // What a Notion source's webhook is debounced by when it names no minimum of its own, so that
+        // the source dialog can say the number rather than "the instance default"
+        // ([ADR-0049](../../.ssot/ADR.md#adr-0049)).
+        webhookMinIntervalMinutes: config.WEBHOOK_MIN_INTERVAL_MINUTES,
+        webhookVerificationWindowMinutes: WEBHOOK_VERIFICATION_WINDOW_MINUTES,
       },
     };
     if (principal.role === 'member') return detail;

@@ -127,6 +127,21 @@ export const LIST_TOPICS_MAX_LIMIT = 1_000;
 export const SYNC_MIN_INTERVAL_MINUTES = 5;
 export const SYNC_MAX_INTERVAL_MINUTES = 30 * 24 * 60;
 
+/**
+ * How long a Notion webhook verification window stays open
+ * ([ADR-0049](../.ssot/ADR.md#adr-0049)), in minutes.
+ *
+ * **A constant and not a setting**, for the reason the band above is one: it is the API's contract and
+ * it is what [OPERATIONS.md](../.ssot/OPERATIONS.md) §5.19 tells an operator to expect, and an instance
+ * where this means something different is an instance whose runbook no longer describes it.
+ *
+ * Fifteen minutes covers the operator's real path — switch to Notion, find the connection, paste the
+ * URL, create the subscription, come back — plus one **Resend token** if the first delivery went
+ * missing, while staying far shorter than the interval over which somebody who learned the URL could
+ * plausibly be waiting to post a token of their own.
+ */
+export const WEBHOOK_VERIFICATION_WINDOW_MINUTES = 15;
+
 /** Exported for the tests: the cross-field rules are the only part of this file that has behaviour. */
 export const EnvSchema = z
   .object({
@@ -394,6 +409,23 @@ export const EnvSchema = z
      * unlikely in the first place.
      */
     SYNC_PROBES_PER_TICK: z.coerce.number().int().min(1).max(1000).default(10),
+    /**
+     * The minimum number of minutes between two **webhook-triggered** runs of one source
+     * ([ADR-0049](../.ssot/ADR.md#adr-0049)), when the source itself does not name one.
+     *
+     * A delivery that arrives to a source whose last sync is older than this queues a run at once, in
+     * the interactive lane; one that arrives sooner writes the earliest permitted moment and lets the
+     * scheduler's tick take it, so two hundred deliveries from a bulk edit collapse into one run.
+     *
+     * Five minutes, because a Notion run is a pull of somebody else's API and the deliveries that make
+     * this matter arrive in bursts rather than steadily. `0` means no minimum at all — every delivery
+     * queues immediately, which is only sane on a small workspace and is the reason it is expressible.
+     *
+     * Unlike `SYNC_DEFAULT_INTERVAL_MINUTES` this is read **live**: a source's own
+     * `webhook_min_interval_minutes` being NULL means "whatever the instance currently says", because a
+     * debounce is a limit the instance imposes rather than a schedule somebody chose per source.
+     */
+    WEBHOOK_MIN_INTERVAL_MINUTES: z.coerce.number().int().min(0).max(SYNC_MAX_INTERVAL_MINUTES).default(5),
   })
   .superRefine((c, ctx) => {
     if (c.EMBEDDING_PROVIDER === 'openai' && !c.OPENAI_API_KEY) {

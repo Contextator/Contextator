@@ -139,6 +139,9 @@ const source = (id: string, projectId: string): DocumentSourceRow =>
     documentCount: 0,
     syncIntervalMinutes: null,
     nextSyncAt: null,
+    webhookVerificationExpiresAt: null,
+    webhookDueAt: null,
+    webhookMinIntervalMinutes: null,
     createdAt: new Date(),
   }) as DocumentSourceRow;
 

@@ -1,9 +1,11 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import { SYNC_MAX_INTERVAL_MINUTES } from '../config.js';
 import type { AppContext } from '../context.js';
 import { removeSourceDir } from '../services/data-dir.js';
 import { FLAVORS } from '../services/flavors.js';
-import { ConflictError, NotFoundError, getProjectById } from '../services/projects.js';
+import { ConflictError, NotFoundError, ValidationError, getProjectById } from '../services/projects.js';
+import { openVerificationWindow } from '../services/notion-webhook.js';
 import { driverFor, isDriverAvailable } from '../services/sources/driver.js';
 import {
   SOURCE_TYPES,
@@ -49,6 +51,12 @@ const UpdateBody = z.object({
   secret: z.string().max(4096).nullable().optional(),
   /** `null` switches scheduling off; omitted leaves it as it is. */
   syncIntervalMinutes: SyncIntervalMinutes.optional(),
+  /**
+   * Minutes between two webhook-triggered runs of this source
+   * ([ADR-0049](../../.ssot/ADR.md#adr-0049)); `null` returns it to the instance's
+   * `WEBHOOK_MIN_INTERVAL_MINUTES`. `0` is "no minimum", which is the same thing the setting means.
+   */
+  webhookMinIntervalMinutes: z.number().int().min(0).max(SYNC_MAX_INTERVAL_MINUTES).nullable().optional(),
 });
 
 /** `/api/projects/:id/sources/*` — registered inside adminRoutes so the ADMIN_TOKEN hook applies. */
@@ -147,6 +155,27 @@ export const sourceRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     } catch (err) {
       return { ok: false, message: err instanceof Error ? err.message : String(err) };
     }
+  });
+
+  /**
+   * Opens the window during which `POST /api/webhooks/notion/:sourceId` will store a
+   * `verification_token` ([ADR-0049](../../.ssot/ADR.md#adr-0049)).
+   *
+   * **This route is the authentication of the unauthenticated one.** Notion's first delivery is
+   * unsigned, arrives at a URL that was never a secret, and carries the secret every later delivery is
+   * signed with — so the product accepts one only inside a quarter of an hour that an editor asked
+   * for, through the admin API, with the policy table's default `editor` rule applying because it is a
+   * `POST` under `/api/projects/:id`.
+   */
+  app.post('/api/projects/:id/sources/:sid/webhook-verification', async (req, reply) => {
+    const { id, sid } = SourceParams.parse(req.params);
+    await requireProject(id);
+    const source = await getSource(db, id, sid);
+    if (!source) throw new NotFoundError('Source not found');
+    if (source.type !== 'notion') throw new ValidationError('Only Notion sources capture a verification token');
+    const expiresAt = await openVerificationWindow(db, sid);
+    log.info({ sourceId: sid, expiresAt }, 'notion webhook verification window opened');
+    return reply.code(202).send({ webhookVerificationExpiresAt: expiresAt });
   });
 
   app.post('/api/projects/:id/sources/:sid/webhook-secret', async (req) => {
