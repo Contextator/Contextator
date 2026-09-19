@@ -158,6 +158,16 @@ export interface SearchRequest {
    * growing a setting nobody has justified (ADR-0041).
    */
   textSearchConfig?: TextSearchConfig;
+  /**
+   * A cross-encoder that reorders the fused pool before the cap and the limit are applied
+   * ([ROADMAP.md](../../.ssot/ROADMAP.md) Item 12). Absent — which is the default and what the product
+   * ships — and this function is exactly the one statement it has always been.
+   *
+   * It is a **function of strings**, not a model, for the reason `queryEmbedding` is a vector rather
+   * than a provider: the model belongs at the edge, and the query path stays testable without one.
+   * `services/reranker.ts` is what builds it.
+   */
+  rerank?: (query: string, passages: readonly string[]) => Promise<number[]>;
 }
 
 /** One row of the fused statement below, in PostgreSQL's spelling. */
@@ -224,7 +234,7 @@ interface HybridRow extends Record<string, unknown> {
  * index run's writes. `SET LOCAL` outside a transaction is a silent no-op.
  */
 export async function searchChunks(db: Db, request: SearchRequest): Promise<SearchHit[]> {
-  const { projectId, generation, queryEmbedding, queryText, limit, sourceId, pathPrefix } = request;
+  const { projectId, generation, queryEmbedding, queryText, limit, sourceId, pathPrefix, rerank } = request;
   const scan = request.scan ?? DEFAULT_HNSW_SCAN;
   const selection = request.selection ?? DEFAULT_RESULT_SELECTION;
   const textSearchConfig = request.textSearchConfig ?? QUERY_TEXT_SEARCH_CONFIG;
@@ -268,16 +278,19 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
   // one for display.
   const vector = sql`${JSON.stringify(queryEmbedding)}::vector`;
 
-  const result = await db.transaction(async (tx) => {
-    // One statement, so the whole of the setup costs a single round trip. The integers travel as
-    // parameters — `set_config` takes text and pgvector parses it — rather than being interpolated,
-    // which is the reason this is not three `SET LOCAL`s.
-    await tx.execute(sql`select
-      set_config('hnsw.ef_search', ${String(scan.efSearch)}, true),
-      set_config('hnsw.iterative_scan', ${scan.iterativeScan}, true),
-      set_config('hnsw.max_scan_tuples', ${String(scan.maxScanTuples)}, true)`);
+  // The page's ordering, and the *whole* of it. Under a rerank the model's score is prepended to these
+  // three rather than replacing them: a cross-encoder returns equal logits often enough — two excerpts
+  // of one section, a duplicated table — that a rerank with no tie-break underneath it would hand the
+  // ordering back to the row order, which is the defect ADR-0041 spent a change removing.
+  const fusedOrdering = sql`fused_score desc, dense_rank asc nulls last, id asc`;
 
-    return tx.execute<HybridRow>(sql`
+  /**
+   * Everything down to the fused list. It is shared by both paths verbatim, which is the property that
+   * matters most about this whole change: with no reranker the statement below is assembled into
+   * exactly the text it was before Item 12, so the gated `eval` job measures the plan ADR-0040 and
+   * ADR-0041 measured and not a rearrangement of it.
+   */
+  const fusedCandidates = sql`
       with ${documentScope}
       corpus as (
         -- How many chunks the question is being asked of, and therefore what "this word is everywhere"
@@ -371,7 +384,34 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
           l.rank as lexical_rank,
           coalesce(1.0 / (${RRF_K} + d.rank), 0) + coalesce(1.0 / (${RRF_K} + l.rank), 0) as fused_score
         from dense d full outer join lexical l on l.id = d.id
-      ),
+      )`;
+
+  /**
+   * The tail that turns the fused list into a page, unchanged: the cap, the limit, the cosine score for
+   * display and the two neighbour lookups. `orderedPage` is the `page` CTE, which is the only thing the
+   * two paths disagree about.
+   */
+  const pageToHits = (orderedPage: ReturnType<typeof sql>, ordering: ReturnType<typeof sql>) => sql`${orderedPage}
+      select
+        (1 - (c.embedding <=> ${vector}))::float8 as score,
+        p.fused_score::float8 as fused_score,
+        p.dense_rank::int as dense_rank,
+        p.lexical_rank::int as lexical_rank,
+        doc.relative_path as file,
+        doc.title as title,
+        c.heading_path as heading_path,
+        c.content as content,
+        c.chunk_index as chunk_index,
+        ${neighbors(-1)} as context_before,
+        ${neighbors(1)} as context_after
+      from page p
+      join chunks c on c.id = p.id
+      join documents doc on doc.id = c.document_id
+      order by ${ordering}`;
+
+  /** The shipped path: one statement, the cap and the limit in SQL, exactly as ADR-0042 left it. */
+  const singleStatement = pageToHits(
+    sql`${fusedCandidates},
       capped as (
         -- The per-document cap (ADR-0042), as a window over the fused ordering rather than as a pass
         -- in Node: refilling from the candidates below a capped excerpt is what row_number() <= n
@@ -394,26 +434,35 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
         -- discard all but a page of the work.
         select * from capped
         where per_document <= ${selection.maxPerDocument}
-        order by fused_score desc, dense_rank asc nulls last, id asc
+        order by ${fusedOrdering}
         limit ${limit}
-      )
-      select
-        (1 - (c.embedding <=> ${vector}))::float8 as score,
-        p.fused_score::float8 as fused_score,
-        p.dense_rank::int as dense_rank,
-        p.lexical_rank::int as lexical_rank,
-        doc.relative_path as file,
-        doc.title as title,
-        c.heading_path as heading_path,
-        c.content as content,
-        c.chunk_index as chunk_index,
-        ${neighbors(-1)} as context_before,
-        ${neighbors(1)} as context_after
-      from page p
-      join chunks c on c.id = p.id
-      join documents doc on doc.id = c.document_id
-      order by p.fused_score desc, p.dense_rank asc nulls last, p.id asc`);
-  });
+      )`,
+    sql`p.fused_score desc, p.dense_rank asc nulls last, p.id asc`,
+  );
+
+  const scanSettings = sql`select
+      set_config('hnsw.ef_search', ${String(scan.efSearch)}, true),
+      set_config('hnsw.iterative_scan', ${scan.iterativeScan}, true),
+      set_config('hnsw.max_scan_tuples', ${String(scan.maxScanTuples)}, true)`;
+
+  const result = rerank
+    ? await rerankedPage(db, {
+        scanSettings,
+        fusedCandidates,
+        pageToHits,
+        rerank,
+        queryText,
+        limit,
+        maxPerDocument: selection.maxPerDocument,
+        generation,
+      })
+    : await db.transaction(async (tx) => {
+        // One statement, so the whole of the setup costs a single round trip. The integers travel as
+        // parameters — `set_config` takes text and pgvector parses it — rather than being interpolated,
+        // which is the reason this is not three `SET LOCAL`s.
+        await tx.execute(scanSettings);
+        return tx.execute<HybridRow>(singleStatement);
+      });
 
   return result.rows.map((row) => ({
     score: row.score,
@@ -428,6 +477,107 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
     contextBefore: row.context_before,
     contextAfter: row.context_after,
   }));
+}
+
+/** One fused candidate as the rerank sees it: enough to score it, to cap it and to find it again. */
+interface CandidateRow extends Record<string, unknown> {
+  id: string;
+  document_id: string;
+  content: string;
+  fused_score: number;
+  dense_rank: number | null;
+  lexical_rank: number | null;
+}
+
+interface RerankedPageArgs {
+  scanSettings: ReturnType<typeof sql>;
+  fusedCandidates: ReturnType<typeof sql>;
+  pageToHits: (orderedPage: ReturnType<typeof sql>, ordering: ReturnType<typeof sql>) => ReturnType<typeof sql>;
+  rerank: (query: string, passages: readonly string[]) => Promise<number[]>;
+  queryText: string;
+  limit: number;
+  maxPerDocument: number;
+  generation: number;
+}
+
+/**
+ * The reranked path, and it is **two round trips rather than one**, which is the first thing it costs
+ * and the reason `SEARCH_RERANK` defaults to `off`.
+ *
+ * ADR-0041 refused to ship a hundred chunk texts to Node and throw ninety away. A cross-encoder scores
+ * the question against the passage *text*, so the refusal cannot hold here: the texts are exactly what
+ * the model needs, and the only question is where the cap and the limit then happen. They happen in
+ * Node, over the reranked ordering, because `row_number() <= n` cannot be computed in SQL over a score
+ * SQL has not got.
+ *
+ * **The rerank is deliberately outside the transaction.** A forward pass over up to a hundred pairs is
+ * hundreds of milliseconds at best; holding the search's transaction open across it would pin a pooled
+ * connection for the duration on a server whose indexer is already competing for the same pool. So the
+ * candidate statement commits, the model runs, and the page is fetched by id — which is safe here for
+ * the same reason a generation is a value rather than a sub-select (ADR-0039): the ids belong to a
+ * generation that is published and immutable until a swap replaces it wholesale.
+ */
+async function rerankedPage(db: Db, args: RerankedPageArgs): Promise<{ rows: HybridRow[] }> {
+  const { scanSettings, fusedCandidates, pageToHits, rerank, queryText, limit, maxPerDocument, generation } = args;
+
+  const candidates = await db.transaction(async (tx) => {
+    await tx.execute(scanSettings);
+    return tx.execute<CandidateRow>(sql`${fusedCandidates}
+      select
+        f.id,
+        f.dense_rank::int as dense_rank,
+        f.lexical_rank::int as lexical_rank,
+        f.fused_score::float8 as fused_score,
+        c.document_id,
+        c.content
+      from fused f
+      join chunks c on c.id = f.id
+      order by f.fused_score desc, f.dense_rank asc nulls last, f.id asc`);
+  });
+  if (candidates.rows.length === 0) return { rows: [] };
+
+  const scores = await rerank(
+    queryText,
+    candidates.rows.map((row) => row.content),
+  );
+
+  // The fused position is the tie-break, not the score: equal logits are common between two excerpts of
+  // one section, and falling back to the order the rows arrived in would be falling back to the fused
+  // order anyway — but by accident rather than by decision.
+  const reordered = candidates.rows
+    .map((row, fusedPosition) => ({ row, fusedPosition, score: scores[fusedPosition] ?? Number.NEGATIVE_INFINITY }))
+    .sort((a, b) => b.score - a.score || a.fusedPosition - b.fusedPosition);
+
+  // The per-document cap and the limit, exactly as the SQL does them: count per document over the new
+  // ordering, skip what is over the cap, and stop at `limit`. Skipping rather than stopping is what
+  // "refilled from below" means, and it is the whole behaviour ADR-0042 measured.
+  const perDocument = new Map<string, number>();
+  const chosen: typeof reordered = [];
+  for (const candidate of reordered) {
+    const seen = (perDocument.get(candidate.row.document_id) ?? 0) + 1;
+    perDocument.set(candidate.row.document_id, seen);
+    if (seen > maxPerDocument) continue;
+    chosen.push(candidate);
+    if (chosen.length === limit) break;
+  }
+  if (chosen.length === 0) return { rows: [] };
+
+  const values = sql.join(
+    chosen.map(
+      (candidate, ordinal) =>
+        sql`(${candidate.row.id}::uuid, ${ordinal}::int, ${candidate.row.fused_score}::float8, ${candidate.row.dense_rank}::int, ${candidate.row.lexical_rank}::int)`,
+    ),
+    sql`, `,
+  );
+  // `fused_score` and the two ranks travel back out rather than being recomputed: `SearchHit` promises
+  // what the *fusion* thought, and a rerank changes the order of the page without changing what either
+  // retriever said about a chunk. A caller reading `lexicalRank` is asking which half found this.
+  const page = sql`with page as (
+        select v.id, v.ord, v.fused_score, v.dense_rank, v.lexical_rank, c.document_id, c.chunk_index
+        from (values ${values}) as v(id, ord, fused_score, dense_rank, lexical_rank)
+        join chunks c on c.id = v.id and c.index_generation = ${generation}
+      )`;
+  return db.execute<HybridRow>(pageToHits(page, sql`p.ord asc`));
 }
 
 export interface DocumentSummary {

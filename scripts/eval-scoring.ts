@@ -417,6 +417,13 @@ export interface RunContext {
    * run that did not print them is a run nobody can compare.
    */
   resultSelection: string;
+  /**
+   * The cross-encoder that reordered the fused pool, or `off` — which is the default and what the
+   * product ships ([ROADMAP.md](../../.ssot/ROADMAP.md) Item 12). Here for `hnswScan`'s reason and
+   * more sharply: a reranked run and a plain one are not the same measurement, and a report that did
+   * not say which it was would be the one line that lets a spike be quoted as the product.
+   */
+  rerank: string;
   documents: number;
   chunks: number;
   startedAt: string;
@@ -540,7 +547,7 @@ function configurationSummary(c: RunContext, tick = ''): string {
   return (
     `${v(c.providerId)} · ${v(`CHUNK_MAX_TOKENS=${c.chunkMaxTokens}`)} · ${v(`CHUNK_OVERLAP_TOKENS=${c.chunkOverlapTokens}`)} · ` +
     `${c.documents} documents, ${c.chunks} chunks · ${c.hnswScan} · ${v(`to_tsvector('${c.textSearchConfig}', …)`)} · ` +
-    `${c.resultSelection} · commit ${v(c.commit)}`
+    `${c.resultSelection} · rerank ${v(c.rerank)} · commit ${v(c.commit)}`
   );
 }
 
@@ -602,6 +609,7 @@ export function formatText(report: Report): string {
   out.push(`  HNSW scan           ${c.hnswScan}`);
   out.push(`  text search config  ${c.textSearchConfig} (both sides — the corpus and the questions)`);
   out.push(`  result selection    ${c.resultSelection}`);
+  out.push(`  rerank              ${c.rerank}`);
   out.push(
     `  timing              ${seconds(c.totalMs)} total — model ${seconds(c.modelLoadMs)}, index ${seconds(c.indexMs)}, search ${seconds(c.searchMs)}`,
   );

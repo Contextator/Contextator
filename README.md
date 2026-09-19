@@ -513,6 +513,44 @@ accepts it, so the version that varies the query side needs no migration and no 
 offered in the dashboard, because until that version ships a source indexed with stemming is matched by
 a `simple` query *less* well, not better.
 
+### Cross-lingual search is a known limit, and it is not being fixed
+
+**Ask a question in the language of the documentation that answers it.** A Turkish question will find a
+Turkish page and an English question will find an English one; a question that has to cross the boundary
+mostly will not be answered, and this is a property of the embedding model rather than a setting you can
+turn on.
+
+The measurement is in [`eval/BASELINE.md`](eval/BASELINE.md) and it is not close. Thirty questions ask
+about a page written in the other language — fifteen in each direction, written from the corpus before
+anything was run. Four of the thirty are answered in the top five. Twenty-seven of the thirty return, at
+rank 1, a page in the language of the *question*: the model is not failing to understand what was asked,
+it is ranking the language of the asking above the answer to it. Both directions fail equally, so there
+is no "good" direction to prefer.
+
+**Identifiers are the exception, and they are the useful one.** `HALYARD_DISPATCH_TIMEOUT`, `HLY-4015`,
+`X-Halyard-Signature` — a string is the same string in both languages, and the keyword half of search
+finds it whatever surrounds it. Of the nine cross-lingual questions in the set that name an identifier,
+four are answered; of the twenty-one that are phrased as ordinary questions, none is. So an agent that
+quotes the identifier it is looking for will cross the language boundary, and one that describes the
+concept will not.
+
+**What to do instead of waiting for a fix.** Keep each language in its own source and let an agent scope
+its search with `source` or `path_prefix` — `search_docs` takes both. Two sources that each answer well
+are worth more than one collection that answers either language badly, and an agent told which source to
+ask is not relying on the encoder to bridge anything.
+
+**Both remedies have been built and measured, which is why this is written down as a limit rather than
+as a backlog item.** Hybrid search was the first: it recovered cross-lingual *identifier* retrieval and
+not one natural-language question. A multilingual cross-encoder rerank over the fused candidates was the
+second, behind `SEARCH_RERANK` — it took cross-lingual `recall@5` from 13.3 % to 33.3 %, which is still
+below the 42.9 % the embedding model *before* this one managed, while costing thirteen ordinary
+questions their rank-1 answer and taking a search from 12 ms to 1.2 s. It is off by default and should
+stay off. What would actually fix this is a second, translation-trained encoder as an additional index —
+roughly four times the download, a second vector column, and a full re-index on every installation — and
+that price is not worth paying for a documentation server. If your corpus is genuinely bilingual and
+cross-language search is essential to you, that is a reason to choose a different tool rather than a
+reason to wait for this one.
+
 ## Configuration
 
 Everything is an environment variable; see [`.env.example`](.env.example) for the full annotated list.

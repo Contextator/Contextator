@@ -7,6 +7,7 @@ import type { QueryLogSink } from './query-log.js';
 import { belowRelevanceFloor } from './relevance.js';
 import { getSourceByName, listSources } from './sources.js';
 import type { TextSearchConfig } from './text-search.js';
+import type { Reranker } from './reranker.js';
 import { type HnswScan, type ResultSelection, searchChunks, type SearchHit } from './vector-store.js';
 
 /**
@@ -65,6 +66,13 @@ export interface SearchDeps {
    * of the log.**
    */
   queryLog?: QueryLogSink;
+  /**
+   * The cross-encoder that reorders the fused pool before it is truncated
+   * ([ROADMAP.md](../../.ssot/ROADMAP.md) Item 12). Optional, and **unset it is off** — the convention
+   * every field above already follows, and here it is also what the product ships: `SEARCH_RERANK`
+   * defaults to `off`, so the server passes nothing unless an operator asked for it.
+   */
+  rerank?: Reranker;
 }
 
 export interface SearchInput {
@@ -110,7 +118,7 @@ export type SearchOutcome =
   | { status: 'model_mismatch'; project: ProjectRow; indexedWith: string; serverUses: string };
 
 export async function searchProject(
-  { db, embeddings, scan, textSearchConfig, selection, scoreFloor, queryLog }: SearchDeps,
+  { db, embeddings, scan, textSearchConfig, selection, scoreFloor, queryLog, rerank }: SearchDeps,
   input: SearchInput,
 ): Promise<SearchOutcome> {
   const startedAt = Date.now();
@@ -170,6 +178,9 @@ export async function searchProject(
     scan,
     selection,
     textSearchConfig,
+    // `rerank.score` and not the reranker: `searchChunks` takes a function of strings for the reason
+    // it takes a vector rather than a provider, and binding it here is what keeps the model out of it.
+    rerank: rerank ? (query, passages) => rerank.score(query, passages) : undefined,
   });
   const belowFloor = belowRelevanceFloor(input.query, hits, scoreFloor ?? 0);
 

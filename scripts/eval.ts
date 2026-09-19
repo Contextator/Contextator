@@ -11,6 +11,7 @@ import { projects, searchQueries } from '../src/db/schema.js';
 import { chunkReserveTokens } from '../src/services/chunk-budget.js';
 import { chunkMarkdown, embeddingText } from '../src/services/chunker.js';
 import { createEmbeddingProvider, type EmbeddingProvider } from '../src/services/embeddings/index.js';
+import { createReranker } from '../src/services/reranker.js';
 import { readAndHash } from '../src/services/fs-scan.js';
 import { belowRelevanceFloor } from '../src/services/relevance.js';
 import { searchProject } from '../src/services/search.js';
@@ -382,6 +383,15 @@ async function run(options: Options): Promise<GateVerdict> {
   await embeddings.warmup();
   const modelLoadMs = Date.now() - modelStart;
 
+  // The second model, and only when an operator asked for one (ROADMAP.md Item 12). It is warmed up
+  // here rather than on the first question so that its load does not land inside `searchMs` and read
+  // as latency every search pays.
+  const reranker = createReranker(config, evalLogger);
+  if (reranker) {
+    step(`eval: loading ${reranker.id} (a first run downloads it, which takes minutes)`);
+    await reranker.warmup();
+  }
+
   const provided = process.env.EVAL_DATABASE_URL ?? process.env.DATABASE_URL;
   let container: RunningPostgres | null = null;
   let database: TestDatabase | null = null;
@@ -445,7 +455,7 @@ async function run(options: Options): Promise<GateVerdict> {
      */
     const ask = async (id: string, query: string): Promise<{ hits: ScoredHit[]; refused: boolean }> => {
       const outcome = await searchProject(
-        { db, embeddings, scan, textSearchConfig, selection, scoreFloor: 0 },
+        { db, embeddings, scan, textSearchConfig, selection, scoreFloor: 0, rerank: reranker ?? undefined },
         { projectId: project.id, query, limit: SEARCH_LIMIT },
       );
       if (outcome.status !== 'ok') {
@@ -508,6 +518,7 @@ async function run(options: Options): Promise<GateVerdict> {
       textSearchConfig,
       resultSelection:
         `max_per_document=${selection.maxPerDocument}, neighbor_context=${selection.neighborContext}, ` + `score_floor=${config.SEARCH_SCORE_FLOOR}`,
+      rerank: reranker ? `${reranker.id}, max_tokens=${config.SEARCH_RERANK_MAX_TOKENS}, batch=${config.SEARCH_RERANK_BATCH}` : 'off',
       documents: indexed.documents,
       chunks: indexed.chunks,
       startedAt: startedAt.toISOString(),

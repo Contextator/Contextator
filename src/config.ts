@@ -354,6 +354,37 @@ export const EnvSchema = z
      */
     SEARCH_SCORE_FLOOR: z.coerce.number().min(0).max(1).default(0.82),
 
+    /**
+     * The cross-encoder rerank of ROADMAP.md Item 12, between the fusion and the truncation, over the
+     * fused candidate pool. **`off` is the default and `off` is what the product ships.**
+     *
+     * Off by default is not timidity, it is what keeps the gated `eval` job measuring the
+     * configuration an operator actually runs: a spike that was on by default would quietly become the
+     * thing the floors were set against, and the floors would then be defending an experiment. It also
+     * costs a second model — another few hundred megabytes resident and a forward pass per candidate —
+     * on the CPU the single indexing queue is already competing for, against NFR-02's sub-second budget.
+     *
+     * Turning it on changes the query path as well as the ranking: the fused set has to come back to
+     * Node to be scored, so one round trip becomes two. `searchChunks` says what that costs.
+     */
+    SEARCH_RERANK: z.enum(['off', 'on']).default('off'),
+    /**
+     * Which cross-encoder, when it is on. `Xenova/bge-reranker-base` because it is the only
+     * transformers.js-shaped multilingual reranker that loads with no artefact work of ours — the
+     * cheaper `mmarco-mMiniLMv2-L12-H384-v1` has no `Xenova/` build, does not use the file names the
+     * dtype selection reads, and was not trained on Turkish.
+     */
+    SEARCH_RERANK_MODEL: z.string().default('Xenova/bge-reranker-base'),
+    /** `q8` is 279 MB against fp32's 1 112 MB, and this is a rerank rather than a retrieval score. */
+    SEARCH_RERANK_DTYPE: z.enum(['fp32', 'fp16', 'q8']).default('q8'),
+    /**
+     * Where a (question, passage) pair is cut. 128 is not a saving: a chunk is `CHUNK_MAX_TOKENS`, 96
+     * by default, so a pair is a question plus ninety-six tokens and a longer window would pad.
+     */
+    SEARCH_RERANK_MAX_TOKENS: z.coerce.number().int().min(32).max(512).default(128),
+    /** Pairs per forward pass. The pool is at most a hundred, so this is about peak memory. */
+    SEARCH_RERANK_BATCH: z.coerce.number().int().min(1).max(100).default(16),
+
     // The query log (ADR-0047): what agents asked, and what they got. Two switches, and the per-project
     // one is deliberately not here — it is `projects.query_log_enabled`, so that it travels with a
     // `pg_dump` and with a project export instead of reverting to the new host's environment.

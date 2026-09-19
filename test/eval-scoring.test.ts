@@ -196,6 +196,7 @@ const context: RunContext = {
   hnswScan: 'ef_search=100, iterative_scan=relaxed_order, max_scan_tuples=20000',
   textSearchConfig: 'simple',
   resultSelection: 'max_per_document=2, neighbor_context=1, score_floor=0.82',
+  rerank: 'off',
   documents: 3,
   chunks: 9,
   startedAt: '2026-09-18T03:00:00.000Z',

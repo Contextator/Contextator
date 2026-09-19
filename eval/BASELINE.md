@@ -1029,3 +1029,149 @@ npm run eval -- --min-recall5=0.855                        # exits 2: the old fl
 
 The second line is the one to run before reading anything above. It fails, and it should: the floor it
 names was argued against sixty-four questions and there are eighty-four now.
+
+---
+
+# What a multilingual cross-encoder rerank did to it
+
+[ROADMAP.md](../../.ssot/ROADMAP.md) Item 12, stage 2 — the time-boxed spike the first stage's ceiling
+said was worth one try. It is **off by default and it stays off**: `SEARCH_RERANK=off` is what the gated
+`eval` job measures and what the product ships, and the numbers below are why that is not going to
+change.
+
+| | |
+|---|---|
+| Date | 2026-09-19 |
+| Rerank | `local-rerank:Xenova/bge-reranker-base:q8`, `max_tokens=128`, `batch=16` |
+| On disk | 296 MB — `onnx/model_quantized.onnx` 279.3 MB plus a 17.1 MB tokenizer |
+| Where | between the fusion and the truncation, over the fused candidate pool (50–94 chunks, mean 73.4) |
+| Everything else | the run above, unchanged: 26 documents, 577 chunks, 84 questions, `e5-small` at 96/24 |
+
+**The shipped path is byte-identical with the rerank off.** The statement is assembled from the same
+fragment it always was, and a run with `SEARCH_RERANK=off` after this change reproduces the run before
+it — every question, every rank, every one of the ten hits, every score to six decimal places. That is
+the first thing to check about a change that adds a branch to the one search path.
+
+## The three numbers it was judged on
+
+| | rerank off | rerank on | |
+|---|--:|--:|---|
+| `cross-lingual` (30) `recall@5` | 13.3 % (4) | **33.3 %** (10) | the number to beat is 42.9 % |
+| the other 54, `recall@5` | **100.0 %** (54) | 96.3 % (52) | FR-254 |
+| the other 54, `recall@1` | **87.0 %** (47) | 68.5 % (37) | |
+| the other 54, `heading@5` | **96.3 %** | 87.0 % | |
+| overall `recall@1` / `@5` | 59.5 / 69.0 | 48.8 / **73.8** | |
+| overall `MRR` | **0.638** | 0.589 | |
+| wall clock per search | **11.6 ms** | **1 242.6 ms** | NFR-02 is sub-second |
+
+**It is a real effect and it is not enough.** Twenty points of cross-lingual `recall@5` is six questions
+and far outside anything a thirty-question slice calls noise — the whole reason stage 1 built the slice
+was so that a movement this size would mean something. It means something, and what it means is that the
+rerank lands under the model this product already had. See the next section, which measures that rather
+than quoting it.
+
+**It fails FR-254 outright, and that is a rejection rather than a trade.** Natural-language retrieval
+was perfect on the other fifty-four questions and is not any more: two lose the top five altogether
+(`en-api-02`, 410 Gone, rank 1 → 6; `tr-gunluk-02`, the log level at runtime, rank 2 → 9) and **thirteen
+lose rank 1** — six English questions and seven Turkish ones, so the damage is not a property of either
+language. A rerank that buys six cross-lingual questions with thirteen rank-1 answers and two documents
+has moved the failure, which is the outcome FR-254 names and refuses in advance.
+
+**And it misses NFR-02 by two orders of magnitude.** 1 242.6 ms per search against 11.6 ms today, on an
+idle laptop with no indexing run competing for the core. Seventy-three pairs through a 278 M-parameter
+XLM-R cross-encoder is simply what that costs; the arithmetic in ROADMAP.md Item 12 predicted ~1 090
+GFLOP for this class and the measurement is consistent with it. Quality failed first, so this number
+decides nothing — but it forecloses the obvious repair, because the only way to buy the latency back is
+a smaller pool or a smaller model, and both take quality away from a figure that is already short.
+
+## The direction split, which is the finding worth keeping
+
+The rerank does not improve cross-lingual retrieval. It improves **one direction** of it.
+
+| | n | off | on | gained | lost |
+|---|--:|--:|--:|--:|--:|
+| `xl-en-tr` — English question, Turkish page | 15 | 13.3 % | **53.3 %** (8) | 6 | 0 |
+| `xl-tr-en` — Turkish question, English page | 15 | 13.3 % | **13.3 %** (2) | 1 | 1 |
+
+Fifteen Turkish questions about English pages, and the rerank nets **zero** — one identifier question
+gained (`x-tr-en-02`, `HLY-4015`) and one identifier question lost (`x-tr-en-05`, `HALYARD_PAYLOAD_MAX`,
+rank 3 → 10). Every one of the six clean gains is an English question about a Turkish page.
+
+Stage 1 refuted the *encoder's* direction asymmetry — `multilingual-e5-small` fails both directions
+equally. This is a different asymmetry belonging to a different model: the cross-encoder can judge an
+English question against a Turkish passage and cannot judge a Turkish question against an English one.
+The likeliest reading is the one on the model card — `bge-reranker-base`'s training is weighted towards
+English and Chinese, so a Turkish *query* is the case it has seen least — and this run cannot prove
+causation, only that the split is there and is fifteen questions wide on each side.
+
+It matters more than the headline, because the direction this rerank does nothing for is the one the
+product's own audience is in. A Turkish operator asking a Turkish question of English reference
+documentation is the case Item 12 exists for, and it is exactly the case that did not move.
+
+## The natural-language slice, which is what the item is about
+
+| the 30 cross-lingual questions | n | off | on |
+|---|--:|--:|--:|
+| natural language | 21 | 0 % (0) | 14.3 % (3) |
+| identifier-shaped | 9 | 44.4 % (4) | 77.8 % (7) |
+
+Three of twenty-one. The rerank is best at exactly what the lexical half was already best at — the
+identifier row nearly doubles — and moves three of the twenty-one questions that nothing else has ever
+moved. Stage 1 measured that at most eight of those twenty-one are reachable at all, because the biased
+encoder never puts the other thirteen in the pool. The rerank found three of the eight.
+
+## The number to beat, measured on the same thirty questions
+
+42.9 % is `paraphrase-multilingual-MiniLM-L12-v2` on **seven** questions at its own best budget
+([ADR-0037](../../.ssot/ADR.md#adr-0037)). Comparing a figure over thirty questions to a figure over
+seven is the denominator mistake this whole item is about, so the previous default was re-run on the
+enlarged set — same corpus, same questions, its own 112/28 budget, no prefixes, nothing else changed.
+
+| | MiniLM 112/28 | `e5-small` 96/24 | `e5-small` + rerank |
+|---|--:|--:|--:|
+| the original 7 cross-lingual | **42.9 %** (3) | 14.3 % (1) | 28.6 % (2) |
+| `cross-lingual`, all 30 | **40.0 %** (12) | 13.3 % (4) | 33.3 % (10) |
+|   `xl-en-tr` (15) | **60.0 %** (9) | 13.3 % (2) | 53.3 % (8) |
+|   `xl-tr-en` (15) | **20.0 %** (3) | 13.3 % (2) | 13.3 % (2) |
+|   natural language (21) | **19.0 %** (4) | 0 % (0) | 14.3 % (3) |
+| the other 54, `recall@5` | 94.4 % (51) | **100.0 %** (54) | 96.3 % (52) |
+| the other 54, `heading@5` | 92.6 % | **96.3 %** | 87.0 % |
+| the old 64, `recall@5` | **89.1 %** | 87.5 % | 87.5 % |
+| all 84, `recall@5` | **75.0 %** | 69.0 % | 73.8 % |
+
+**The harness reproduces ADR-0037's 42.9 % exactly**, which is the control this comparison needed: the
+old model gets three of the original seven, as it did a year of changes ago.
+
+**And 42.9 % was not a small-sample artefact.** On thirty questions the old model measures **40.0 %**.
+So the rerank — a second model, 296 MB, and a hundredfold latency — recovers less cross-lingual
+retrieval than the encoder this product replaced does with nothing bolted on at all. That is the
+sentence the spike was run to be able to write, and it is the end of the candidate.
+
+**Two things in that table must not be misread.**
+
+*The overall row is not an argument for reverting the model.* MiniLM's 75.0 % against 69.0 % over all
+eighty-four is real arithmetic and a bad reason to act: this question set deliberately over-weights one
+known defect, thirty of eighty-four, which is not what a corpus looks like. On the sixty-four questions
+that predate the slice the two are within one question of each other, and on the fifty-four that are not
+cross-lingual `e5-small` is clearly ahead — 100 % against 94.4 %, `heading@5` 96.3 % against 92.6 %.
+ADR-0037's decision stands on the evidence it was taken on; what has changed is the size of the price,
+not the sign of the trade. **Read the slice rows, not the overall row** — the overall row is now a
+weighted average whose weights were chosen to make one defect visible.
+
+*Nothing works for a Turkish question about an English page.* MiniLM 20 %, `e5-small` 13.3 %, the rerank
+13.3 %. Three configurations, one of them carrying an extra model, and the direction the product's own
+audience is in does not move in any of them. Every cross-lingual gain anyone has measured on this corpus
+— the old model's, the lexical half's, this rerank's — is in the other direction or is an identifier.
+
+## Reproducing it
+
+```bash
+SEARCH_RERANK=on npm run eval                 # 48.8 / 73.8 / 0.589 / 66.7 — 148 s, of which 104 s is searching
+npm run eval                                  # the shipped path, unchanged — 5.8 s
+EMBEDDING_MODEL=Xenova/paraphrase-multilingual-MiniLM-L12-v2 \
+  CHUNK_MAX_TOKENS=112 CHUNK_OVERLAP_TOKENS=28 npm run eval   # the previous default, on this set
+```
+
+Two reranked runs over freshly carved databases return identical hits for all eighty-four questions at
+full precision, so this measurement has the same zero variance as every other one in this file and the
+twenty points are not a sampling artefact.
