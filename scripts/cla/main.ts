@@ -37,7 +37,10 @@ function report(outcome: GateOutcome): void {
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (summaryPath === undefined || summaryPath === '') return;
   const heading = outcome.passed ? '## Licence grant: signed' : '## Licence grant: not signed';
-  appendFileSync(summaryPath, `${heading}\n\n${outcome.lines.map((line) => `- ${line}\n`).join('')}\n`);
+  const footer = outcome.gating
+    ? ''
+    : '\nThis run reports on a comment; the check branch protection reads is the pull request\u2019s own, re-run separately.\n';
+  appendFileSync(summaryPath, `${heading}\n\n${outcome.lines.map((line) => `- ${line}\n`).join('')}${footer}\n`);
 }
 
 const [owner, repo] = required('GITHUB_REPOSITORY').split('/');
@@ -69,4 +72,11 @@ try {
 }
 
 report(outcome);
-process.exit(outcome.passed ? 0 : 1);
+
+// `gating` and not `passed` alone. Only a `pull_request_target` run's check is attached to the pull
+// request's head commit; an `issue_comment` run's lands on the default branch's tip, so exiting
+// non-zero there would mark `main` red because somebody commented under an unsigned pull request. The
+// comment run has still judged in full, and what it judged is in the log and the run summary above —
+// see `GateOutcome.gating`. A *thrown* failure above is still non-zero whatever the event, because a
+// licence gate that cannot run is a repository-level problem and is meant to be loud.
+process.exit(outcome.gating && !outcome.passed ? 1 : 0);

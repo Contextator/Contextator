@@ -19,21 +19,25 @@ import { z } from 'zod';
 export const SIGNATURE_SENTENCE = 'I have read the CLA Document and I hereby sign the CLA';
 
 /**
- * Internal spacing is flexible because a comment box reflows, and the leading/trailing text is not,
- * because `CONTRIBUTING.md` promises that a sentence buried in a longer comment is not read. The
- * surrounding contract is in `readCommentIntent`: a body carrying a line break is never a signature.
+ * **Anchored at both ends.** Internal spacing is flexible because a comment box reflows and a trailing
+ * full stop is allowed because people write one, but nothing may sit either side of the sentence.
+ *
+ * An unanchored match is not a smaller version of this — it is a different rule, and a wrong one. A
+ * single-line reply reading `> I have read the CLA Document and I hereby sign the CLA — did that work?`
+ * contains the sentence, and under an unanchored match the person asking the question has just signed a
+ * licence grant without knowing it. `\s` matches a newline, so the line-break check in
+ * `readCommentIntent` is load-bearing beside these anchors rather than redundant with them.
  */
-const SIGNATURE_RE = /i\s+have\s+read\s+the\s+cla\s+document\s+and\s+i\s+hereby\s+sign\s+the\s+cla/;
+const SIGNATURE_RE = /^i\s+have\s+read\s+the\s+cla\s+document\s+and\s+i\s+hereby\s+sign\s+the\s+cla[.!]*$/;
 
 export type CommentIntent = 'signature' | 'recheck' | 'none';
 
 /**
  * What a pull request comment is asking for.
  *
- * A signature has to be a comment of its own — one line, nothing wrapped around it. That is not
- * fussiness: a quoted reply ("> I have read the CLA Document and I hereby sign the CLA — did that
- * work?") would otherwise sign on behalf of whoever is being quoted, and the person quoting has no
- * idea they just made a legal statement. `CONTRIBUTING.md` step 3 says so in the same words.
+ * A signature has to be a comment of its own — one line, and that line nothing but the sentence. That
+ * is not fussiness: a quotation or a question wrapped around it would otherwise sign on behalf of
+ * whoever is being quoted, and `CONTRIBUTING.md` step 3 promises the same rule in the same words.
  */
 export function readCommentIntent(body: string): CommentIntent {
   const trimmed = body.trim();
@@ -70,31 +74,49 @@ export type UnlinkedCommit = {
 };
 
 export type Authors = {
-  /** One entry per distinct account id, in first-seen order. Bots included; `mustSign` drops them. */
+  /**
+   * The account GitHub says opened the pull request. **The only identity in this record that GitHub
+   * verified** — it is the session that pressed the button, not a field in a commit. It is always the
+   * first entry of `accounts` as well, because it always has to sign.
+   */
+  opener: Account;
+  /** One entry per distinct account id, opener first. Bots included; `mustSign` drops them. */
   accounts: Account[];
   /** Every commit that resolved to no account at all. */
   unlinked: UnlinkedCommit[];
 };
 
 /**
- * Who authored this pull request.
+ * Who this pull request has to be signed for.
  *
- * **Identity here is the GitHub account and nothing else.** The Action this replaced resolved a
- * committer as `login || name`, where `name` is the free text in the commit object — text an outsider
- * chooses with `git commit --author="Someone <unlinked@example.invalid>"`. Every comparison downstream
- * of that fallback was a comparison against a string the contributor wrote, which is the whole of the
- * bypass: pick a name that is already in the signature file, or already on an allowlist, and walk
- * through. `CommitRecord.commit.author` is carried into `UnlinkedCommit.email` so the contributor can
- * be told *which* commit to fix, and it reaches no other function in this file.
+ * **The account that opened the pull request is the identity this gate rests on, and a commit author
+ * is best effort beside it.** That sentence is an admission and it is deliberate. GitHub resolves
+ * `commit.author` from the commit's **e-mail address**, and the address
+ * `<id>+<login>@users.noreply.github.com` can be derived from any account's public id and public
+ * login — so `git commit --author="whoever <104234499+someone@users.noreply.github.com>"` produces a
+ * commit that GitHub attributes to `someone`, with `someone` having written nothing and agreed to
+ * nothing. That was measured against the live API, not reasoned about.
  *
- * The **author** is checked and not the committer. The author is who wrote the code and therefore who
- * holds the copyright the grant is about; the committer of a rebased or a web-edited commit is often
- * `web-flow` or whoever pressed the button, and asking them to licence somebody else's work would be
- * asking the wrong person.
+ * It is the same class of flaw as the one this gate was rebuilt to close. The Action it replaced fell
+ * back to `login || name` — free text; refusing that fallback was necessary and **it was not
+ * sufficient**, because the `login` it falls back *to* is itself derived from an address the commit's
+ * writer chose. There is no field in a commit that GitHub authenticates, so there is no version of
+ * this function that closes the hole: what is available is the opener, whose account GitHub
+ * authenticated when the pull request was created.
+ *
+ * So the grant binds the **opener**, always, and every commit author GitHub resolves is asked as well
+ * — defence in depth, and the thing that makes a colleague's commit in somebody's branch visible. A
+ * commit resolving to no account at all is still fatal: it names nobody, and an address naming nobody
+ * cannot be a party to anything. `CommitRecord.commit.author` is carried into `UnlinkedCommit.email`
+ * so the contributor can be told *which* commit to fix, and it reaches no decision anywhere.
+ *
+ * The commit **author** is read and not the committer: the author is who wrote the code and therefore
+ * who holds the copyright the grant is about, where the committer of a rebased or web-edited commit is
+ * often `web-flow` or whoever pressed the button.
  */
-export function collectAuthors(commits: readonly CommitRecord[]): Authors {
-  const accounts: Account[] = [];
-  const seen = new Set<number>();
+export function collectAuthors(opener: Account, commits: readonly CommitRecord[]): Authors {
+  const accounts: Account[] = [opener];
+  const seen = new Set<number>([opener.id]);
   const unlinked: UnlinkedCommit[] = [];
 
   for (const commit of commits) {
@@ -107,7 +129,7 @@ export function collectAuthors(commits: readonly CommitRecord[]): Authors {
     accounts.push(commit.author);
   }
 
-  return { accounts, unlinked };
+  return { opener, accounts, unlinked };
 }
 
 /**
@@ -221,11 +243,11 @@ export function judge(authors: Authors, record: SignatureRecord): Verdict {
  * May this comment record a signature for this account?
  *
  * Two conditions, and the second is the one that matters. The signature is written against the account
- * that left the comment — never against a name inside it — and it only counts when that account
- * actually authored one of the commits. Without the second condition anybody who can comment on a pull
- * request could sign for its author, which is a licence grant made by somebody with no rights to
- * grant. `CLA.md` §3 says nobody can sign on somebody else's behalf; this is the sentence that makes
- * it true.
+ * that left the comment — never against a name inside it — and it only counts when that account is one
+ * this pull request is being asked to sign: its opener, or an account GitHub resolved a commit to.
+ * Without that, anybody who can comment could sign for somebody else, which is a licence grant made by
+ * a party with nothing to grant. `CLA.md` §3 says nobody can sign on somebody else's behalf; this is
+ * the sentence that makes it true.
  */
 export function maySignFor(commenter: Account, authors: Authors): boolean {
   if (isBot(commenter)) return false;
@@ -276,14 +298,16 @@ export function renderComment(context: CommentContext): string {
       lines.push(`- @${account.login}`);
     }
     lines.push('');
-    lines.push('Each of them posts this as a comment of its own on this pull request, from their own account:');
+    lines.push(
+      'That list is the account that opened this pull request — which signs in every case — together with every account GitHub resolves one of its commits to. Each of them posts this as a comment of its own on this pull request, from their own account, with nothing else in the comment:',
+    );
     lines.push('');
     lines.push('```');
     lines.push(SIGNATURE_SENTENCE);
     lines.push('```');
     lines.push('');
     lines.push(
-      'Capitalisation does not matter and a trailing full stop is fine; the sentence inside a longer or multi-line comment is not read. Nobody can sign for anybody else.',
+      'Capitalisation does not matter and a trailing full stop is fine; the sentence with anything else around it — a quotation, a question, a second line — is not read. Nobody can sign for anybody else.',
     );
   }
 

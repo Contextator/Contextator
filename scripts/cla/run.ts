@@ -89,8 +89,23 @@ export type GateDeps = {
 };
 
 export type GateOutcome = {
-  /** What the **Licence grant** check concludes. False is a red check and a refused merge. */
+  /** What the gate concluded. On a `pull_request_target` run, false is a red check and a refused merge. */
   passed: boolean;
+  /**
+   * Whether this run's **exit code** is the verdict.
+   *
+   * Only a `pull_request_target` run's check is attached to the pull request's head commit, which is
+   * what branch protection reads. An `issue_comment` run's check lands on the **default branch's tip**
+   * — measured: the comment run of pull request #3 reported against `eb842ba`, `main`'s head, while the
+   * `pull_request_target` runs reported against the pull request's own `84f42b2`. So a comment run that
+   * exited non-zero would paint a red commit status on `main` over somebody having typed "LGTM" under
+   * an unsigned pull request: it blocks nothing, and it lies to everything that reads commit status.
+   *
+   * The comment run still judges in full — that is what the log and the run summary say, and it is what
+   * decides whether a signature is recorded and whether the pull request's own run is asked again. It
+   * just does not pretend its exit code is a gate on a commit it has nothing to do with.
+   */
+  gating: boolean;
   /** Why, in the words the run summary shows. */
   lines: string[];
   /** True when this run recorded a new row in the signature file. */
@@ -107,6 +122,7 @@ export type GateOutcome = {
  */
 const NOT_A_PULL_REQUEST: GateOutcome = {
   passed: true,
+  gating: false,
   lines: ['This comment is not on a pull request; there is nothing to check.'],
   recorded: false,
 };
@@ -140,8 +156,23 @@ export async function runGate(deps: GateDeps): Promise<GateOutcome> {
 
   const pull = await product.getPullRequest(pullNumber);
   const commits = await product.listCommits(pullNumber);
-  const authors = collectAuthors(commits);
-  log(`#${pullNumber}: ${commits.length} commit(s), ${authors.accounts.length} account(s), ${authors.unlinked.length} unlinked commit(s).`);
+
+  // **The one place the 250-commit cap is caught.** `GET /pulls/{n}/commits` stops at 250 and says
+  // nothing about it — no header, no flag, a shorter list — so a guard inside the client comparing the
+  // length it received against its own limit can never fire. GitHub reports the real count on the pull
+  // request itself, and any disagreement between the two means this gate is looking at a prefix of the
+  // commits. Judging a prefix would be answering "everybody has signed" about part of a pull request,
+  // so it refuses instead.
+  if (commits.length !== pull.commits) {
+    throw new Error(
+      `#${pullNumber} reports ${pull.commits} commit(s) and the API listed ${commits.length}; the authors of this pull request cannot be enumerated, so it is not judged`,
+    );
+  }
+
+  const authors = collectAuthors(pull.user, commits);
+  log(
+    `#${pullNumber}: opened by @${pull.user.login}, ${commits.length} commit(s), ${authors.accounts.length} account(s), ${authors.unlinked.length} unlinked commit(s).`,
+  );
 
   let record = await readRecord(store);
   let recorded = false;
@@ -153,7 +184,9 @@ export async function runGate(deps: GateDeps): Promise<GateOutcome> {
       // No comment is posted in answer. The one already on the thread names who has to sign, and
       // saying "you are not one of them" to whoever wandered past is noise on somebody else's pull
       // request. The refusal is in the log, where the maintainer looking at a red check will find it.
-      log(`@${comment.user.login} signed but authored none of the commits here; nothing recorded — nobody signs on somebody else's behalf.`);
+      log(
+        `@${comment.user.login} is neither the author of this pull request nor of a commit in it; nothing recorded — nobody signs on somebody else's behalf.`,
+      );
     } else if (hasSigned(record, comment.user.id)) {
       log(`@${comment.user.login} has already signed; the record is unchanged.`);
     } else {
@@ -192,7 +225,7 @@ export async function runGate(deps: GateDeps): Promise<GateOutcome> {
     }
   }
 
-  return { passed: verdict.passed, lines: summarise(verdict), recorded };
+  return { passed: verdict.passed, gating: eventName === 'pull_request_target', lines: summarise(verdict), recorded };
 }
 
 async function readRecord(store: SignatureStore): Promise<SignatureRecord> {
@@ -256,7 +289,11 @@ async function recordSignature(deps: GateDeps, signature: Signature, message: st
  * so this only ever edits its own.
  */
 async function ensureComment(product: ProductRepo, pullNumber: number, body: string, log: (line: string) => void): Promise<void> {
-  const existing = (await product.listComments(pullNumber)).find((entry) => entry.body.includes(COMMENT_MARKER));
+  // **Both conditions.** The marker alone is an invisible HTML comment anybody can paste into a reply,
+  // and a gate that edits whatever carries it would try to `PATCH` a stranger's comment, be refused
+  // `403` by its own token, and fail the check with an API error — leaving the contributor with a red
+  // check and no instructions at all. Only a comment posted by a bot account can be this gate's own.
+  const existing = (await product.listComments(pullNumber)).find((entry) => entry.user?.type === 'Bot' && entry.body.includes(COMMENT_MARKER));
   if (existing === undefined) {
     await product.createComment(pullNumber, body);
     log(`asked for a signature on #${pullNumber}.`);
@@ -274,10 +311,18 @@ async function ensureComment(product: ProductRepo, pullNumber: number, body: str
  * Re-run the pull request's own `pull_request_target` run, so the check attached to its head commit is
  * evaluated again against the record this run just changed.
  *
- * The filter is `event=pull_request_target`, which is also what keeps this from re-running the comment
- * run it is executing inside. A run that is still going cannot be re-run, so this waits for it; when it
- * never becomes re-runnable the gate says so and stops — the signature is recorded either way, and
- * `recheck` is the documented way to ask again.
+ * **The filter is `event=pull_request_target` and the pull request's own head SHA, and that pairing was
+ * measured rather than reasoned about.** Inside a `pull_request_target` run `GITHUB_SHA` is the *base*
+ * branch's commit, which makes it easy to assume the run object is keyed there too — it is not. Against
+ * the live API, the two `pull_request_target` runs of pull request #3 both carry `head_sha`
+ * `84f42b2`, the pull request's own head, with `head_branch` the pull request's branch; the
+ * `issue_comment` run carries `eb842ba`, `main`'s tip. So this lookup finds the run whose check branch
+ * protection is reading, and the `event` filter is also what stops it re-running the comment run it is
+ * executing inside.
+ *
+ * A run that is still going cannot be re-run, so this waits for it; when it never becomes re-runnable
+ * the gate says so and stops — the signature is recorded either way, and `recheck` is the documented way
+ * to ask again.
  */
 async function rerun(deps: GateDeps, headSha: string): Promise<void> {
   const { product, config, log, sleep } = deps;

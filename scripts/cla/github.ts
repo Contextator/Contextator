@@ -18,7 +18,11 @@ import type { Account, CommitRecord } from './rules.js';
 /** Everything the gate needs from the repository the pull request is against. */
 export interface ProductRepo {
   getPullRequest(number: number): Promise<PullRequestInfo>;
-  /** Every commit of the pull request, or a refusal — see `MAX_COMMITS`. */
+  /**
+   * The commits of the pull request, **as many as the API will give** — at most `MAX_COMMITS`, with no
+   * signal when that truncates. `run.ts` compares the length against `PullRequestInfo.commits` and
+   * refuses on a mismatch, which is where truncation is actually caught.
+   */
   listCommits(number: number): Promise<CommitRecord[]>;
   listComments(number: number): Promise<IssueComment[]>;
   createComment(number: number, body: string): Promise<void>;
@@ -32,7 +36,15 @@ export type PullRequestInfo = {
   number: number;
   state: 'open' | 'closed';
   headSha: string;
-  /** How many commits GitHub says it has, used to notice the cap below rather than silently pass it. */
+  /**
+   * The account that opened it. GitHub authenticated this one; nothing inside a commit is
+   * authenticated, which is why `collectAuthors` rests on it.
+   */
+  user: Account;
+  /**
+   * How many commits GitHub says it has. Read by `run.ts` against the length of `listCommits`, which is
+   * the only way the 250-commit cap below is noticed rather than silently passed.
+   */
   commits: number;
 };
 
@@ -81,20 +93,34 @@ export class GitHubError extends Error {
 
 /**
  * `GET /repos/{o}/{r}/pulls/{n}/commits` returns at most 250 commits however hard it is paged, and
- * says nothing when it truncates. A pull request past that cap is one this gate cannot enumerate the
- * authors of, so it refuses instead of judging a prefix: "some of the authors have signed" is not a
- * fact this mechanism is allowed to round up.
+ * says nothing when it truncates — no header, no flag, just a shorter list. **Nothing here can detect
+ * that**, which is why the detection is not here: `run.ts` compares what came back against
+ * `PullRequestInfo.commits`, the count GitHub reports for the pull request itself, and refuses when
+ * they differ. A guard written as `received > MAX_COMMITS` would never fire, because the cap is
+ * exactly what the API stops at.
  */
 export const MAX_COMMITS = 250;
-
-export class TooManyCommitsError extends Error {}
 
 const API = 'https://api.github.com';
 
 type Json = Record<string, unknown>;
 
-async function request(token: string, method: string, path: string, body?: Json): Promise<{ status: number; json: unknown }> {
-  const response = await fetch(`${API}${path}`, {
+/**
+ * The one function that makes a request, injected rather than reached for.
+ *
+ * `test/cla-github.test.ts` passes its own, which is what makes the paging, the conflict mapping and
+ * the base64 decoding below testable at all — they are the half of this gate that is shaped by another
+ * system's answers, and the half the unit suite would otherwise never execute.
+ */
+export type FetchLike = (
+  url: string,
+  init: { method: string; headers: Record<string, string>; body?: string },
+) => Promise<{ status: number; text(): Promise<string> }>;
+
+const realFetch: FetchLike = (url, init) => fetch(url, init);
+
+async function request(fetchImpl: FetchLike, token: string, method: string, path: string, body?: Json): Promise<{ status: number; json: unknown }> {
+  const response = await fetchImpl(`${API}${path}`, {
     method,
     headers: {
       accept: 'application/vnd.github+json',
@@ -112,24 +138,31 @@ async function request(token: string, method: string, path: string, body?: Json)
   return { status: response.status, json };
 }
 
-async function ok(token: string, method: string, path: string, body?: Json): Promise<unknown> {
-  const { status, json } = await request(token, method, path, body);
+async function ok(fetchImpl: FetchLike, token: string, method: string, path: string, body?: Json): Promise<unknown> {
+  const { status, json } = await request(fetchImpl, token, method, path, body);
   if (status >= 200 && status < 300) return json;
   const message = json !== null && typeof json === 'object' && 'message' in json ? String((json as Json).message) : '';
   throw new GitHubError(`${method} ${path} failed: ${status}${message === '' ? '' : ` ${message}`}`, status);
 }
 
 /** Pages a list endpoint to exhaustion, or up to `limit` items. */
-async function paged(token: string, path: string, limit: number): Promise<unknown[]> {
+async function paged(fetchImpl: FetchLike, token: string, path: string, limit: number): Promise<unknown[]> {
   const items: unknown[] = [];
   for (let page = 1; items.length < limit; page += 1) {
     const separator = path.includes('?') ? '&' : '?';
-    const batch = await ok(token, 'GET', `${path}${separator}per_page=100&page=${page}`);
+    const batch = await ok(fetchImpl, token, 'GET', `${path}${separator}per_page=100&page=${page}`);
     if (!Array.isArray(batch)) throw new GitHubError(`GET ${path} did not answer with a list`, 200);
     items.push(...batch);
     if (batch.length < 100) break;
   }
   return items;
+}
+
+/** The opener is not optional: a pull request this gate cannot name the author of is one it refuses. */
+function mustBeAccount(value: unknown, message: string): Account {
+  const account = asAccount(value);
+  if (account === null) throw new GitHubError(message, 200);
+  return account;
 }
 
 function asAccount(value: unknown): Account | null {
@@ -139,25 +172,23 @@ function asAccount(value: unknown): Account | null {
   return { login: raw.login, id: raw.id, type: raw.type };
 }
 
-export function createProductRepo(token: string, owner: string, repo: string): ProductRepo {
+export function createProductRepo(token: string, owner: string, repo: string, fetchImpl: FetchLike = realFetch): ProductRepo {
   const base = `/repos/${owner}/${repo}`;
   return {
     async getPullRequest(number) {
-      const raw = (await ok(token, 'GET', `${base}/pulls/${number}`)) as Json;
+      const raw = (await ok(fetchImpl, token, 'GET', `${base}/pulls/${number}`)) as Json;
       const head = raw.head as Json;
       return {
         number,
         state: raw.state === 'open' ? 'open' : 'closed',
         headSha: String(head.sha),
-        commits: typeof raw.commits === 'number' ? raw.commits : 0,
+        user: mustBeAccount(raw.user, `GET ${base}/pulls/${number} named no author`),
+        commits: typeof raw.commits === 'number' ? raw.commits : -1,
       };
     },
 
     async listCommits(number) {
-      const raw = await paged(token, `${base}/pulls/${number}/commits`, MAX_COMMITS + 1);
-      if (raw.length > MAX_COMMITS) {
-        throw new TooManyCommitsError(`this pull request has more than ${MAX_COMMITS} commits, which is more than the API will enumerate`);
-      }
+      const raw = await paged(fetchImpl, token, `${base}/pulls/${number}/commits`, MAX_COMMITS);
       return raw.map((item) => {
         const entry = item as Json;
         const commit = entry.commit as Json;
@@ -171,7 +202,7 @@ export function createProductRepo(token: string, owner: string, repo: string): P
     },
 
     async listComments(number) {
-      const raw = await paged(token, `${base}/issues/${number}/comments`, 1000);
+      const raw = await paged(fetchImpl, token, `${base}/issues/${number}/comments`, 1000);
       return raw.map((item) => {
         const entry = item as Json;
         return { id: Number(entry.id), body: typeof entry.body === 'string' ? entry.body : '', user: asAccount(entry.user) };
@@ -179,15 +210,16 @@ export function createProductRepo(token: string, owner: string, repo: string): P
     },
 
     async createComment(number, body) {
-      await ok(token, 'POST', `${base}/issues/${number}/comments`, { body });
+      await ok(fetchImpl, token, 'POST', `${base}/issues/${number}/comments`, { body });
     },
 
     async updateComment(commentId, body) {
-      await ok(token, 'PATCH', `${base}/issues/comments/${commentId}`, { body });
+      await ok(fetchImpl, token, 'PATCH', `${base}/issues/comments/${commentId}`, { body });
     },
 
     async listWorkflowRuns(workflowFile, headSha) {
       const raw = (await ok(
+        fetchImpl,
         token,
         'GET',
         `${base}/actions/workflows/${encodeURIComponent(workflowFile)}/runs?event=pull_request_target&head_sha=${encodeURIComponent(headSha)}&per_page=20`,
@@ -200,16 +232,23 @@ export function createProductRepo(token: string, owner: string, repo: string): P
     },
 
     async rerunWorkflowRun(runId) {
-      await ok(token, 'POST', `${base}/actions/runs/${runId}/rerun`);
+      await ok(fetchImpl, token, 'POST', `${base}/actions/runs/${runId}/rerun`);
     },
   };
 }
 
-export function createSignatureStore(token: string, owner: string, repo: string, path: string, branch: string): SignatureStore {
+export function createSignatureStore(
+  token: string,
+  owner: string,
+  repo: string,
+  path: string,
+  branch: string,
+  fetchImpl: FetchLike = realFetch,
+): SignatureStore {
   const url = `/repos/${owner}/${repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}`;
   return {
     async readFile() {
-      const { status, json } = await request(token, 'GET', `${url}?ref=${encodeURIComponent(branch)}`);
+      const { status, json } = await request(fetchImpl, token, 'GET', `${url}?ref=${encodeURIComponent(branch)}`);
       if (status === 404) return null;
       if (status < 200 || status >= 300) throw new GitHubError(`GET ${url} failed: ${status}`, status);
       const raw = json as Json;
@@ -220,7 +259,7 @@ export function createSignatureStore(token: string, owner: string, repo: string,
     },
 
     async writeFile({ content, sha, message }) {
-      const { status, json } = await request(token, 'PUT', url, {
+      const { status, json } = await request(fetchImpl, token, 'PUT', url, {
         message,
         content: Buffer.from(content, 'utf8').toString('base64'),
         sha,

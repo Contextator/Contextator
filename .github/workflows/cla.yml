@@ -80,13 +80,20 @@ jobs:
       # repository's own code — `github.event.pull_request.head.sha` and `head.ref` appear nowhere in
       # this file and must not. A checkout of the fork's head here would hand a stranger the
       # write-scoped tokens above and then run their `npm ci`.
-      - uses: actions/checkout@v7
+      # **Pinned to commits, and `ci.yml`'s `@v7` is not a precedent this file follows.** The Action that
+      # used to run here was pinned to a SHA on a stated principle — a tag is a name its owner can move,
+      # and the gate on the project's licensing position is not delegated to a third party's next commit.
+      # That principle did not stop applying because the third party changed to GitHub: this job holds
+      # `CLA_SIGNATURES_TOKEN` and `actions: write`, which is a blast radius `ci.yml`'s jobs do not have.
+      # These are the commits `v7.0.1` and `v7.0.0` point at; move them by resolving the tag again, and
+      # read the diff first.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Nothing in this job talks to git. Leaving a credential in `.git/config` for the length of
           # the run buys nothing and is one more thing a step could be tricked into using.
           persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           # The same floor as ci.yml and the image: ADR-0056. Unlike the Action this replaced, which
           # declared a runtime GitHub had already stopped honouring, this number is ours to move.

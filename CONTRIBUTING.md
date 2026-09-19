@@ -196,8 +196,8 @@ Asking is not a maintainer remembering to; it is [`.github/workflows/cla.yml`](.
 and the script in [`scripts/cla/`](scripts/cla) it runs on every pull request. You do not sign anything
 before opening one, and there is no form to fill in anywhere else.
 
-1. **Open the pull request.** A check named **Licence grant** runs. If every commit author in it has
-   already signed, it is green and you are done — nothing is posted and there is nothing to read.
+1. **Open the pull request.** A check named **Licence grant** runs. If you and every commit author in it
+   have already signed, it is green and you are done — nothing is posted and there is nothing to read.
 2. **If somebody has not**, the workflow leaves a comment on the pull request naming them and linking
    [`CLA.md`](CLA.md). The check is red, and a red one cannot be merged.
 3. **Read `CLA.md`, then post this as a pull request comment**, on one line and nothing else in it:
@@ -208,13 +208,22 @@ before opening one, and there is no form to fill in anywhere else.
 
    The comment *is* the signature — the workflow reads it, records it, and re-runs the pull request's own
    check, which then goes green. It takes a minute or so. Capitalisation does not matter and a full stop
-   at the end is fine; a sentence buried in a longer, multi-line comment is not read. **If nothing
-   happens within a couple of minutes, comment `recheck`** — that is the recovery path for a signature
-   the workflow did not pick up, and for a check left stale by anything else.
-4. **Every commit author signs**, not just whoever opened the pull request. If your branch carries a
-   commit written by a colleague, they comment too, from their own account, and the account has to be the
-   one the commit's e-mail belongs to. Bots are exempt; they cannot agree to anything. There is no
-   allowlist — maintainers sign this like everybody else.
+   at the end is fine; **the sentence with anything else around it is not read** — not a quotation of
+   it, not a question about it, not a second line under it. That is deliberate: otherwise somebody
+   quoting the sentence back would have signed a licence grant without meaning to. **If nothing happens
+   within a couple of minutes, comment `recheck`** — that is the recovery path for a signature the
+   workflow did not pick up, and for a check left stale by anything else.
+4. **Whoever opens the pull request always signs, and so does every commit author in it.** If your
+   branch carries a commit written by a colleague, they comment too, from their own account. Bots are
+   exempt; they cannot agree to anything. There is no allowlist — maintainers sign this like everybody
+   else.
+
+   The opener is asked in every case because **that is the only account GitHub authenticated here**. A
+   commit's author is resolved from the e-mail address written into the commit, and an address of the
+   form `<id>+<login>@users.noreply.github.com` can be composed from anybody's public profile — so a
+   commit can carry a resolved account that had nothing to do with writing it. Asking each resolved
+   commit author as well is worth doing and is not a guarantee; asking the person who opened the pull
+   request is.
 5. **A commit whose e-mail belongs to no GitHub account cannot be signed for at all**, by anybody. The
    check names it and stays red, because an address that names no account is a licence nobody can grant.
    Add the address to your account under Settings → Emails, or rewrite the commit with one that is
@@ -246,11 +255,9 @@ collected under a document still saying "do not treat anything in this document 
 entered into" would have been worth nothing, and the window between them is closed by ordering rather
 than by hoping it is short.
 
-What is not yet in place is **branch protection** — the setting that makes a red **Licence grant** a
-refusal rather than a warning. Until it is, the check still runs and still names anybody who has not
-signed, but a maintainer could merge past it. That is a gap in enforcement and not in the grant: signing
-is what binds you, and protection is only what stops the merge. It is the next thing to switch on, and
-this paragraph goes when it does.
+**Branch protection is on.** `main` requires the **Licence grant** check and `enforce_admins` is set, so
+a red one is a refusal rather than a warning, and it is a refusal for maintainers too. Signing is what
+binds you and protection is only what stops the merge — but there is no longer a gap between them.
 
 If that is not something you are willing to grant, say so early. Opening an issue that describes the
 problem and lets a maintainer implement it is a perfectly good contribution and needs none of this.

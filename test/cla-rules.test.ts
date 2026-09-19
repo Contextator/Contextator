@@ -31,6 +31,16 @@ import {
 
 const account = (over: Partial<Account> = {}): Account => ({ login: 'octo', id: 1, type: 'User', ...over });
 
+/**
+ * The account that opened the pull request. GitHub authenticated this one; nothing in a commit is
+ * authenticated, which is the subject of the whole "who authored a pull request" block below. A
+ * distinct id from every commit author here, so that the two are never confused in an assertion.
+ */
+const OPENER: Account = { login: 'opener', id: 90, type: 'User' };
+
+/** The account already in the live record, used as the opener wherever a test's subject is the commits. */
+const SIGNED_OPENER: Account = { login: 'muhammetsafak', id: 104234499, type: 'User' };
+
 const commit = (over: Partial<CommitRecord> = {}): CommitRecord => ({
   sha: 'a'.repeat(40),
   author: account(),
@@ -71,12 +81,12 @@ describe('the signature record already in the repository', () => {
 
   it('lets the account that signed through, and nobody else', () => {
     const record = parseSignatureRecord(LIVE_RECORD);
-    const authors = collectAuthors([commit({ author: account({ login: 'muhammetsafak', id: 104234499 }) })]);
+    const authors = collectAuthors(SIGNED_OPENER, [commit({ author: SIGNED_OPENER })]);
     expect(judge(authors, record).passed).toBe(true);
 
     // The same login, a different account. A login is released when an account is deleted and can be
     // claimed by somebody else; the id cannot, which is why the id is what is matched.
-    const impostor = collectAuthors([commit({ author: account({ login: 'muhammetsafak', id: 999 }) })]);
+    const impostor = collectAuthors({ login: 'muhammetsafak', id: 999, type: 'User' }, []);
     expect(judge(impostor, record).passed).toBe(false);
   });
 
@@ -102,6 +112,16 @@ describe('what counts as a signature comment', () => {
     expect(readCommentIntent(`> ${SIGNATURE_SENTENCE}\n\nDid that work?`)).toBe('none');
   });
 
+  it('does not read a sentence buried in a longer comment that fits on one line', () => {
+    // The line-break check alone does not cover these, and an unanchored match reads every one of them
+    // as a licence grant. The last two are the ones that matter: somebody quoting or asking about the
+    // sentence has signed nothing and must not be recorded as having signed.
+    expect(readCommentIntent(`not sure, but: ${SIGNATURE_SENTENCE}`)).toBe('none');
+    expect(readCommentIntent(`${SIGNATURE_SENTENCE} — is that right?`)).toBe('none');
+    expect(readCommentIntent(`> ${SIGNATURE_SENTENCE}`)).toBe('none');
+    expect(readCommentIntent(`@someone please write "${SIGNATURE_SENTENCE}" below`)).toBe('none');
+  });
+
   it('reads the recovery word', () => {
     expect(readCommentIntent('recheck')).toBe('recheck');
     expect(readCommentIntent('  Recheck\n')).toBe('recheck');
@@ -114,6 +134,36 @@ describe('what counts as a signature comment', () => {
   });
 });
 
+describe('the account that opened the pull request', () => {
+  it('always has to sign, because it is the only identity GitHub authenticated', () => {
+    // The admission FR-482 makes. GitHub resolves `commit.author` from the commit's **e-mail**, and
+    // `<id>+<login>@users.noreply.github.com` is derivable from any account's public id and public
+    // login — so a commit written by a stranger can carry another account's resolved identity. Below,
+    // every commit resolves to the account already in the record, and the gate still refuses, because
+    // the account that opened the pull request has granted nothing.
+    const authors = collectAuthors(OPENER, [commit({ author: SIGNED_OPENER }), commit({ sha: 'b'.repeat(40), author: SIGNED_OPENER })]);
+    const verdict = judge(authors, parseSignatureRecord(LIVE_RECORD));
+    expect(verdict.passed).toBe(false);
+    expect(verdict.mustSign.map((entry) => entry.login)).toEqual(['opener']);
+  });
+
+  it('is first in the list and is never counted twice when it also authored a commit', () => {
+    const authors = collectAuthors(OPENER, [
+      commit({ author: OPENER }),
+      commit({ sha: 'b'.repeat(40), author: account({ login: 'other', id: 91 }) }),
+    ]);
+    expect(authors.opener).toEqual(OPENER);
+    expect(authors.accounts.map((entry) => entry.id)).toEqual([90, 91]);
+  });
+
+  it('may sign, and so may a commit author, and nobody else may', () => {
+    const authors = collectAuthors(OPENER, [commit({ author: account({ login: 'author', id: 5 }) })]);
+    expect(maySignFor(OPENER, authors)).toBe(true);
+    expect(maySignFor(account({ login: 'author', id: 5 }), authors)).toBe(true);
+    expect(maySignFor(account({ login: 'passer-by', id: 6 }), authors)).toBe(false);
+  });
+});
+
 describe('who authored a pull request', () => {
   it('is the GitHub account, and never the name inside the commit', () => {
     // `git commit --author="muhammetsafak <unlinked@example.invalid>"` is free text an outsider picks.
@@ -123,8 +173,9 @@ describe('who authored a pull request', () => {
       author: null,
       commit: { author: { name: 'muhammetsafak', email: 'unlinked@example.invalid' } },
     });
-    const authors = collectAuthors([forged]);
-    expect(authors.accounts).toEqual([]);
+    const authors = collectAuthors(SIGNED_OPENER, [forged]);
+    // The opener is there because the opener always is; the commit contributed no account at all.
+    expect(authors.accounts).toEqual([SIGNED_OPENER]);
     expect(authors.unlinked).toEqual([{ sha: 'a'.repeat(40), email: 'unlinked@example.invalid' }]);
 
     // And it fails the gate against the record that already carries that very name.
@@ -134,12 +185,12 @@ describe('who authored a pull request', () => {
   });
 
   it('counts each account once, in the order they first appear', () => {
-    const authors = collectAuthors([
+    const authors = collectAuthors(OPENER, [
       commit({ sha: '1'.repeat(40), author: account({ login: 'one', id: 1 }) }),
       commit({ sha: '2'.repeat(40), author: account({ login: 'two', id: 2 }) }),
       commit({ sha: '3'.repeat(40), author: account({ login: 'one', id: 1 }) }),
     ]);
-    expect(authors.accounts.map((entry) => entry.login)).toEqual(['one', 'two']);
+    expect(authors.accounts.map((entry) => entry.login)).toEqual(['opener', 'one', 'two']);
   });
 });
 
@@ -157,20 +208,24 @@ describe('who is exempt', () => {
     expect(isBot(account({ login: 'github-actions[bot]', id: 701, type: 'User' }))).toBe(false);
     expect(isBot(account({ login: 'not-a-bot-bot', id: 702, type: 'User' }))).toBe(false);
 
-    const authors = collectAuthors([commit({ author: account({ login: 'dependabot[bot]', id: 700, type: 'User' }) })]);
+    const authors = collectAuthors(SIGNED_OPENER, [commit({ author: account({ login: 'dependabot[bot]', id: 700, type: 'User' }) })]);
     const verdict = judge(authors, parseSignatureRecord(LIVE_RECORD));
     expect(verdict.passed).toBe(false);
     expect(verdict.mustSign.map((entry) => entry.login)).toEqual(['dependabot[bot]']);
   });
 
   it('lets a real bot through without a signature', () => {
-    const authors = collectAuthors([commit({ author: account({ login: 'dependabot[bot]', id: 49699333, type: 'Bot' }) })]);
+    const authors = collectAuthors(SIGNED_OPENER, [commit({ author: account({ login: 'dependabot[bot]', id: 49699333, type: 'Bot' }) })]);
     expect(judge(authors, parseSignatureRecord(LIVE_RECORD)).passed).toBe(true);
+
+    // And a bot that opened the pull request is exempt for the same reason and by the same field.
+    const botOpened = collectAuthors({ login: 'dependabot[bot]', id: 49699333, type: 'Bot' }, []);
+    expect(judge(botOpened, parseSignatureRecord(LIVE_RECORD)).passed).toBe(true);
   });
 });
 
 describe('who may sign', () => {
-  const authors = collectAuthors([commit({ author: account({ login: 'author', id: 5 }) })]);
+  const authors = collectAuthors(OPENER, [commit({ author: account({ login: 'author', id: 5 }) })]);
 
   it('is an account that authored a commit in this pull request', () => {
     expect(maySignFor(account({ login: 'author', id: 5 }), authors)).toBe(true);
@@ -185,7 +240,7 @@ describe('who may sign', () => {
   });
 
   it('is not a bot', () => {
-    const botAuthors = collectAuthors([commit({ author: account({ login: 'bot[bot]', id: 8, type: 'Bot' }) })]);
+    const botAuthors = collectAuthors(OPENER, [commit({ author: account({ login: 'bot[bot]', id: 8, type: 'Bot' }) })]);
     expect(maySignFor(account({ login: 'bot[bot]', id: 8, type: 'Bot' }), botAuthors)).toBe(false);
   });
 });
@@ -223,7 +278,7 @@ describe('appending a signature', () => {
 
 describe('the comment left on an unsigned pull request', () => {
   it('names who has to sign, quotes the sentence, and carries the marker that stops a second one', () => {
-    const verdict = judge(collectAuthors([commit({ author: account({ login: 'someone', id: 3 }) })]), parseSignatureRecord(LIVE_RECORD));
+    const verdict = judge(collectAuthors(OPENER, [commit({ author: account({ login: 'someone', id: 3 }) })]), parseSignatureRecord(LIVE_RECORD));
     const body = renderComment({ verdict, documentUrl: 'https://example.invalid/CLA.md' });
     expect(body).toContain(COMMENT_MARKER);
     expect(body).toContain('@someone');
@@ -233,7 +288,7 @@ describe('the comment left on an unsigned pull request', () => {
 
   it('says what an unlinked commit is, by its own name', () => {
     const verdict = judge(
-      collectAuthors([
+      collectAuthors(OPENER, [
         commit({ sha: `deadbeef${'0'.repeat(32)}`, author: null, commit: { author: { name: 'X', email: 'unlinked@example.invalid' } } }),
       ]),
       parseSignatureRecord(LIVE_RECORD),
@@ -248,7 +303,7 @@ describe('the comment left on an unsigned pull request', () => {
     // The address comes out of a commit object, which is free text a stranger writes. It reaches no
     // decision anywhere in this gate, but it does reach a comment body, so it is flattened first.
     const verdict = judge(
-      collectAuthors([commit({ author: null, commit: { author: { name: 'X', email: '`](https://evil.invalid)\n\n## Merged\n\n`' } } })]),
+      collectAuthors(OPENER, [commit({ author: null, commit: { author: { name: 'X', email: '`](https://evil.invalid)\n\n## Merged\n\n`' } } })]),
       parseSignatureRecord(LIVE_RECORD),
     );
     const body = renderComment({ verdict, documentUrl: 'https://example.invalid/CLA.md' });

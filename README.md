@@ -1102,6 +1102,7 @@ scripts/cla/github.ts         the two GitHub surfaces it is handed: this reposit
 scripts/cla/run.ts            the gate wired up: read the event, record a signature, judge, ask once, re-run the pull request's check
 scripts/cla/main.ts           what the workflow runs — the environment, the two tokens and the exit code, and no decision at all
 test/*.test.ts                unit suite — pure functions, no database, no Docker (`npm test`)
+test/cla-*.test.ts            the licence gate: its judgements, the whole flow against fakes, and the GitHub clients against an injected fetch
 test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
 test/integration/fixtures/    a pre-v3 `0.1` schema derived from history, and the frozen DDL ladder the migrations replaced
