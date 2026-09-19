@@ -981,6 +981,45 @@ The direction tags `xl-tr-en` and `xl-en-tr` were also added to the ten cross-li
 predate this change. That is a tag on an existing row and nothing else — no question's text, file or
 heading moved, which is why the sixty-four reproduce exactly.
 
+## What a rerank could reach, before one is built
+
+A rerank reorders the fused pool; it cannot add to it. So the number that prices ROADMAP.md Item 12's
+second stage is not how good a cross-encoder is — it is **how often the right page is in the pool at
+all**, and that is answerable today. The same eighty-four questions, the same index, the result window
+opened from ten to fifty and the per-document cap raised to its maximum so the page is as close to the
+fused pool as the product's own settings allow:
+
+| | in the top 5 | in the top 50 |
+|---|--:|--:|
+| all 84 questions | 69.0 % (58) | 81.0 % (68) |
+| `cross-lingual`, all 30 | 13.3 % (4) | **46.7 % (14)** |
+| `cross-lingual`, natural language (21) | 0 % (0) | **28.6 % (6)** |
+| `cross-lingual`, identifier-shaped (9) | 44.4 % (4) | 88.9 % (8) |
+
+**46.7 % is the ceiling on the whole of stage 2's first candidate.** Sixteen of the thirty cross-lingual
+questions have no chunk of the right page anywhere in fifty results, so no reranker reaches them at any
+price; the ten that are in the pool and outside the top five sit at ranks 10, 11, 12, 13, 20, 25, 26,
+26, 27 and 43. A perfect rerank — the right chunk first every time it is present — measures 46.7 %.
+A rerank that recovers half of what is reachable measures about 30 %.
+
+Two things follow, and they point opposite ways, which is the useful part.
+
+**The ceiling clears the number to beat, and by four points.** `paraphrase-multilingual-MiniLM-L12-v2`
+managed 42.9 % before [ADR-0037](../../.ssot/ADR.md#adr-0037) replaced it. So a rerank is not
+arithmetically doomed — but it has to be very nearly perfect over a fifty-deep list to beat a model this
+product already had, and anything short of that lands underneath it.
+
+**The half the product most needs is the half least reachable.** Of the twenty-one natural-language
+cross-lingual questions a perfect rerank rescues six, and fifteen stay unanswerable because the encoder
+that builds the pool never puts their page in it. Those fifteen are the questions Item 12 exists for.
+The identifier-shaped row is the mirror image and says the same thing about the same mechanism: 88.9 %
+of them are in the pool because the lexical half put them there.
+
+This measurement was taken with a throwaway edit to `SEARCH_LIMIT` in `scripts/eval.ts` and
+`SEARCH_MAX_PER_DOCUMENT=20`, and nothing about it shipped. It is recorded here because it is the
+cheapest thing that could have priced the rerank out, and because a spike that does not check it first
+would spend its time box discovering it.
+
 ## Reproducing it
 
 ```bash
