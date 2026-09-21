@@ -283,6 +283,29 @@
           </div>
 
           <label class="field">
+            <span class="field-label">Language <span class="muted">— optional</span></span>
+            <select name="language">
+              <option value="">Not set — no stemming (recommended for reference material)</option>
+              <option value="danish">Danish</option>
+              <option value="dutch">Dutch</option>
+              <option value="english">English</option>
+              <option value="finnish">Finnish</option>
+              <option value="french">French</option>
+              <option value="german">German</option>
+              <option value="hungarian">Hungarian</option>
+              <option value="italian">Italian</option>
+              <option value="norwegian">Norwegian</option>
+              <option value="portuguese">Portuguese</option>
+              <option value="romanian">Romanian</option>
+              <option value="russian">Russian</option>
+              <option value="spanish">Spanish</option>
+              <option value="swedish">Swedish</option>
+              <option value="turkish">Turkish</option>
+            </select>
+            <span class="field-hint">Which language the keyword half of search reads this source in. Set it and PostgreSQL stems the words, so a question asking about <code>anahtarı</code> finds a page that says <code>anahtarın</code> — which is the difference between working and not working in a language that inflects heavily. Leave it unset for reference material full of identifiers: unstemmed, <code>HLY-4015</code> and <code>X-Halyard-Signature</code> survive into the index exactly as written. Each source is read in its own language and one search still reaches all of them. Changing it re-indexes this source.</span>
+          </label>
+
+          <label class="field">
             <span class="field-label">Version <span class="muted">— optional</span></span>
             <input name="version" placeholder="v3" maxlength="64" autocomplete="off" spellcheck="false" />
             <span class="field-hint">Stamped on every document this source indexes, so an agent can ask <code>search_docs</code> for one release instead of getting two mixed together. Free text, matched exactly, and several sources may share one version — <code>api-v3</code> and <code>sdk-v3</code> are one release. Changing it re-indexes this source.</span>

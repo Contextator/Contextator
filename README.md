@@ -734,13 +734,21 @@ all. `recall@1` falls from 78.1 % to 75.0 %, which is the trade rank fusion make
 half alone cannot outrank a chunk found respectably by both. Cross-lingual retrieval, which a hybrid
 search was expected to help, **did not improve** on the questions that measure it.
 
-The keyword half indexes every source in PostgreSQL's `simple` configuration — words as written, no
-stemming — and asks its questions in the same one. That is the honest default here: PostgreSQL has no
-Turkish configuration at all, a project is routinely two languages, and an unstemmed index returns an
-identifier as the string it is. A per-source `language` exists in the source config and the admin API
-accepts it, so the version that varies the query side needs no migration and no re-index; it is not
-offered in the dashboard, because until that version ships a source indexed with stemming is matched by
-a `simple` query *less* well, not better.
+The keyword half indexes a source in PostgreSQL's `simple` configuration — words as written, no
+stemming — unless the source **names its language**, and it asks each question in every configuration
+the project's index actually holds. `simple` is still the default and it is the right one for
+reference material: unstemmed, `HALYARD_DISPATCH_TIMEOUT`, `X-Halyard-Signature` and `HLY-4015` survive
+into the index as the strings they are. Naming a language is what a body of prose wants instead —
+PostgreSQL then stems it, so a Turkish question asking about `anahtarı` finds a page that says
+`anahtarın`, which under `simple` are two unrelated strings that never match. The two live in one
+project without interfering: each source is read in its own configuration and a single search reaches
+all of them, each configuration contributing its own ranked list to the fusion.
+
+Set it per source on the **Language** field of the source form; changing it re-indexes that source.
+Earlier versions of this README said PostgreSQL has no Turkish configuration and that the field was
+deliberately not offered in the dashboard. Both were true of the version that spoke one configuration
+for the whole instance, and the first was never measured and is simply wrong: `turkish` is in
+`pg_ts_config` on the image this product ships.
 
 ### Cross-lingual search is a known limit, and it is not being fixed
 

@@ -405,9 +405,12 @@ export interface RunContext {
    */
   hnswScan: string;
   /**
-   * The text search configuration the lexical half of retrieval ran in, on both sides
-   * ([ADR-0041](../../.ssot/ADR.md#adr-0041)). Here for `hnswScan`'s reason: two runs at different
-   * configurations are not comparable, and without this line nothing would say so.
+   * The text search configuration **the corpus was indexed with** ([ADR-0041](../../.ssot/ADR.md#adr-0041),
+   * amended by [ADR-0064](../../.ssot/ADR.md#adr-0064)) — one name, or one per corpus language when
+   * the run stamped each of them the way an operator would. It is no longer "on both sides": the
+   * query side asks the index which configurations it holds and speaks all of them, so this line
+   * describes the only half a run can still choose. Here for `hnswScan`'s reason: two runs at
+   * different configurations are not comparable, and without this line nothing would say so.
    */
   textSearchConfig: string;
   /**
@@ -546,7 +549,7 @@ function configurationSummary(c: RunContext, tick = ''): string {
   const v = (value: string): string => `${tick}${value}${tick}`;
   return (
     `${v(c.providerId)} · ${v(`CHUNK_MAX_TOKENS=${c.chunkMaxTokens}`)} · ${v(`CHUNK_OVERLAP_TOKENS=${c.chunkOverlapTokens}`)} · ` +
-    `${c.documents} documents, ${c.chunks} chunks · ${c.hnswScan} · ${v(`to_tsvector('${c.textSearchConfig}', …)`)} · ` +
+    `${c.documents} documents, ${c.chunks} chunks · ${c.hnswScan} · ${v(`to_tsvector(${c.textSearchConfig}, …)`)} · ` +
     `${c.resultSelection} · rerank ${v(c.rerank)} · commit ${v(c.commit)}`
   );
 }
@@ -607,7 +610,7 @@ export function formatText(report: Report): string {
   out.push(`  corpus              ${c.documents} documents, ${c.chunks} chunks`);
   out.push(`  search limit        ${c.searchLimit} (MRR is MRR@${c.searchLimit})`);
   out.push(`  HNSW scan           ${c.hnswScan}`);
-  out.push(`  text search config  ${c.textSearchConfig} (both sides — the corpus and the questions)`);
+  out.push(`  text search config  ${c.textSearchConfig} (the corpus; the query side speaks every one the index holds)`);
   out.push(`  result selection    ${c.resultSelection}`);
   out.push(`  rerank              ${c.rerank}`);
   out.push(

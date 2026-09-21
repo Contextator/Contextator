@@ -10,6 +10,13 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Added
+
+- A source's **Language** setting is back on the dashboard, and `turkish` is one of the values it
+  offers. Naming a source's language makes PostgreSQL stem it, so a Turkish question asking about
+  `anahtarı` now finds a page that says `anahtarın`. Changing the setting re-indexes that source, as
+  changing its content type already did.
+
 ### Changed
 
 - **A new project's MCP endpoint requires a token.** Creating a project now mints that project's
@@ -21,6 +28,22 @@ ships, that stops.
   `CONTEXTATOR_BIND=0.0.0.0` in `.env` to publish it on the network as before, and put a
   TLS-terminating reverse proxy or a VPN in front of it when you do. `HOST` inside the container is
   unchanged at `0.0.0.0`; what moved is which host interface Docker publishes to.
+- **Keyword search now speaks every language in a project at once.** It used to parse every question
+  in one configuration chosen for the whole instance, which meant a source that named a language was
+  indexed one way and asked another, and contributed nothing to the keyword half at all. Each source
+  is now read in its own configuration and one search reaches all of them. A project that names no
+  language on any source is unaffected, down to the ordering of its results.
+
+### Fixed
+
+- **The same search over the same documentation returns the same page again.** Between two results
+  that scored identically, which one came first was decided by an internal identifier that is minted
+  fresh every time a project is re-indexed — so a project holding two languages could hand back a
+  different fifth result after a rebuild, with nothing having changed but the rebuild. Equal results
+  are now ordered by the documents themselves: the shorter excerpt first, then the document's own
+  path and the position of the passage within it.
+- Documentation said PostgreSQL has no Turkish configuration. It has one, and Turkish sources were
+  being indexed without stemming because of that claim.
 
 ### Upgrade notes
 
@@ -32,6 +55,9 @@ ships, that stops.
   another machine — a colleague's laptop, an agent running elsewhere, a proxy on another host — set
   `CONTEXTATOR_BIND=0.0.0.0` in `.env` before restarting, or it will stop answering them. Reaching
   it from the host it runs on needs nothing.
+- **Nothing is re-indexed for the keyword change.** The first start after upgrading rewrites the
+  keyword index of any source that names a language, in batches, from text already in the database —
+  no re-embedding and no rebuild. Searches keep working while it runs.
 
 ## [0.1.0] - 2026-09-19
 

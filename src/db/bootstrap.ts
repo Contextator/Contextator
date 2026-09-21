@@ -7,6 +7,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import type pg from 'pg';
 
 import type { Logger } from '../context.js';
+import { TEXT_SEARCH_CONFIGS } from '../services/text-search.js';
 import type { Db } from './client.js';
 
 export class SchemaMismatchError extends Error {
@@ -86,6 +87,7 @@ export async function bootstrapDatabase(db: Db, opts: BootstrapOptions): Promise
       await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
       await settleDimensionAndIndex(db, dims, opts);
       await backfillContentTsv(db, opts.log);
+      await reconcileTextSearchConfigs(db, opts.log);
     } finally {
       // Released explicitly rather than left to the connection: this client goes back to the pool and
       // would carry the lock with it, and the next start would wait on a lock nobody is using.
@@ -175,8 +177,10 @@ const TSV_BACKFILL_MAX_BATCHES = 50_000;
  * corpus to produce a column that is a pure function of text already in the database. The vector is
  * the expensive half; this one is `to_tsvector` over rows that are already here.
  *
- * `simple`, and not the per-source language, because the query side is `simple` in this version and
- * the two have to agree. A source that names a language gets its own configuration on its next run.
+ * `simple`, and not the per-source language, because that is what the column it fills defaults to and
+ * the two have to describe each other. `reconcileTextSearchConfigs`, the step immediately after this
+ * one, moves the rows of a source that *does* name a language — these among them — to that language
+ * and rewrites them; splitting it in two is what keeps each loop's `WHERE` a single idea.
  *
  * Batched and outside the migration's transaction: one `UPDATE` over a large `chunks` would hold row
  * locks for its whole duration and write a write-ahead log the size of the table. Idempotent by the
@@ -197,6 +201,58 @@ async function backfillContentTsv(db: Db, log: Logger): Promise<void> {
     filled += rows;
   }
   if (filled > 0) log.info({ chunks: filled }, 'filled the lexical index of chunks written before hybrid search');
+}
+
+/**
+ * Moves every chunk whose source names a language onto that language's text search configuration,
+ * and rewrites its `content_tsv` to match ([ADR-0064](../../.ssot/ADR.md#adr-0064)).
+ *
+ * **It exists because the column cannot be derived from what is already in the row.** A `tsvector`
+ * does not remember the configuration it was built with, so `0012` could only give every existing
+ * chunk the default — `simple` — and on an installation whose German source has been indexed with
+ * `german` since ADR-0041 that label is a lie the search statement would act on. Rewriting both
+ * columns together from the source's `language` is the only repair that needs no knowledge of which
+ * of the two the row actually holds, and it is affordable because it needs no model: `to_tsvector`
+ * over `heading_path || content`, both of which are already here. The vectors are not touched, so
+ * this is not a re-index and it does not go through a generation.
+ *
+ * **Only chunks whose document has a source.** A document with `source_id IS NULL` — pre-v3, or the
+ * evaluation harness — has nothing that could name a language, and its chunks keep whatever
+ * `replaceDocument` was told.
+ *
+ * Idempotent by the `IS DISTINCT FROM` guard rather than by a nullability that can only be consumed
+ * once, so it is also the path a *changed* language takes on a source whose files the indexer would
+ * otherwise skip as unchanged. Steady state is one query that matches nothing.
+ */
+async function reconcileTextSearchConfigs(db: Db, log: Logger): Promise<void> {
+  // A single text parameter split server-side, rather than a list interpolated into the statement:
+  // the set is the one `TEXT_SEARCH_CONFIGS` holds, and a source carrying a `language` this build
+  // does not know — written by a newer version, or by hand — falls to `simple` instead of reaching
+  // `::regconfig` and failing the whole loop.
+  const known = TEXT_SEARCH_CONFIGS.join(',');
+  let moved = 0;
+  for (let batch = 0; batch < TSV_BACKFILL_MAX_BATCHES; batch++) {
+    const updated = await db.execute(sql`
+      UPDATE chunks c
+      SET text_search_config = t.want,
+          content_tsv = to_tsvector(t.want::regconfig, c.heading_path || ' ' || c.content)
+      FROM (
+        SELECT c2.id, CASE WHEN s.config->>'language' = ANY (string_to_array(${known}, ','))
+                           THEN s.config->>'language' ELSE 'simple' END AS want
+        FROM chunks c2
+        JOIN documents d ON d.id = c2.document_id
+        JOIN document_sources s ON s.id = d.source_id
+        WHERE c2.text_search_config IS DISTINCT FROM
+              (CASE WHEN s.config->>'language' = ANY (string_to_array(${known}, ','))
+                    THEN s.config->>'language' ELSE 'simple' END)
+        LIMIT ${TSV_BACKFILL_BATCH}
+      ) t
+      WHERE c.id = t.id`);
+    const rows = updated.rowCount ?? 0;
+    if (rows === 0) break;
+    moved += rows;
+  }
+  if (moved > 0) log.info({ chunks: moved }, 'relexed chunks whose source names a text search configuration');
 }
 
 /** The dimension `chunks.embedding` currently carries, read out of the catalogue. */

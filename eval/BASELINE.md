@@ -493,6 +493,15 @@ takes that subset by one question at rank 1 and gives one back on the natural-la
 PostgreSQL has no Turkish configuration, a project here is routinely two languages at once, and an
 unstemmed index returns an identifier as the string it is.
 
+**Two of those three reasons were refuted on 2026-09-21, and the paragraph above is left standing
+because it is what was written at the time.** PostgreSQL *does* have a Turkish configuration — it is
+in `pg_ts_config` on `pgvector/pgvector:pg16`, the image this product ships, and `to_tsvector('turkish',
+'anahtarı anahtarın anahtarlar anahtar')` is `'anahtar':1,2,3,4`. And a project being two languages at
+once is no longer a reason for one configuration, because since
+[ADR-0064](../../.ssot/ADR.md#adr-0064) the query side speaks every configuration the index holds. The
+third reason is the one that survived and it is the one this table is about: `simple` stays the
+default for a source whose language nobody has named. The measurement is at the bottom of this file.
+
 ```bash
 npm run eval                                        # the shipped default
 EVAL_TEXT_SEARCH_CONFIG=english npm run eval        # the same run, stemmed on both sides
@@ -1233,3 +1242,201 @@ EMBEDDING_MODEL=Xenova/paraphrase-multilingual-MiniLM-L12-v2 \
 Two reranked runs over freshly carved databases return identical hits for all eighty-four questions at
 full precision, so this measurement has the same zero variance as every other one in this file and the
 twenty points are not a sampling artefact.
+
+---
+
+# The lexical half, spoken per chunk (2026-09-21)
+
+[ADR-0064](../../.ssot/ADR.md#adr-0064). The query side stops being one configuration for the whole
+instance and becomes one `@@` per configuration the index holds; `turkish` joins the list; the `tr/`
+half of this corpus is indexed with it, the way an operator would set the source it stands for.
+
+**The premise that kept `turkish` off the list was never measured and is false.** On
+`pgvector/pgvector:pg16`, the image every run in this file uses:
+
+```
+select to_tsvector('turkish', 'anahtarı anahtarın anahtarlar anahtar');   → 'anahtar':1,2,3,4
+select to_tsvector('turkish', 'API anahtarını nereden alırım')
+         @@ plainto_tsquery('turkish', 'api anahtarı');                   → t
+select to_tsvector('simple',  'API anahtarını nereden alırım')
+         @@ plainto_tsquery('simple',  'api anahtarı');                   → f
+```
+
+## The numbers
+
+92 questions: the 84 of the enlarged set plus eight Turkish questions written for this change, each
+asking about a word the page carries in another inflection. "Before" is `EVAL_TEXT_SEARCH_CONFIG=simple`,
+which is the shipped configuration of [ADR-0041](../../.ssot/ADR.md#adr-0041) exactly.
+
+| group | n | `recall@5` before | after | `heading@5` before | after |
+|---|--:|--:|--:|--:|--:|
+| all | 92 | 66 | 66 | 63 | **64** |
+| lang `en` | 41 | 28 | 28 | 26 | 26 |
+| lang `tr` | 51 | 38 | 38 | 37 | **38** |
+| `cross-lingual` | 30 | 4 | 4 | 4 | 4 |
+| the other 62 | 62 | 62 | 62 | 59 | **60** |
+| the original 54 | 54 | **54** | **54** | 52 | 52 |
+| `inflection` (new) | 8 | 8 | 8 | 7 | **8** |
+
+**Nothing regressed.** The fifty-four questions ADR-0041 and ADR-0052 gate on are 54 of 54 before and
+after, and no question anywhere falls out of the top five or the top five headings. With a single
+configuration present the statement is byte-equivalent in behaviour: `EVAL_TEXT_SEARCH_CONFIG=simple`
+on this branch returns an *identical rank for all eighty-four* of the original questions, which is the
+control this change needed and the reason the table above has a trustworthy "before" column.
+
+**`recall@5` does not move, and on this corpus it cannot.** Every one of the thirteen Turkish
+`recall@5` misses is cross-lingual — a Turkish question whose answer is an English page — which is the
+limit [ADR-0052](../../.ssot/ADR.md#adr-0052) closed and which this change does not touch, and none of
+them moves. Within-Turkish `recall@5` was **36 of 36 before the change**. Eleven Turkish documents is
+not enough for within-Turkish file-level retrieval to fail, so this corpus cannot price a Turkish
+retrieval change at `recall@5`. It can price it one level down, where the metric is the right
+*section*: the Turkish question about `serileştirme` against a page that says `serileştirmesinden` goes
+from not returning the right section in ten results to returning it first.
+
+### The ceiling, measured rather than asserted
+
+`eval/probes/turkish-ceiling-2026-09-21.jsonl` holds **46 further Turkish questions** written against
+this corpus while looking for headroom: full sentences, short keyword fragments of the kind an agent
+actually sends, and questions deliberately seeded with vocabulary from a competing Turkish page. Every
+one of them asks about a word the page carries in another inflection.
+
+**They are not in `eval/golden.jsonl` and must not be**, because adding questions moves every
+denominator in this file and the numbers above would stop being comparable with the runs before them
+(ADR-0034, ADR-0044). To reproduce, append them for one run and put the file back:
+
+```bash
+cp eval/golden.jsonl /tmp/golden.keep
+cat eval/probes/turkish-ceiling-2026-09-21.jsonl >> eval/golden.jsonl
+EVAL_TEXT_SEARCH_CONFIG=simple npm run eval   # before
+npm run eval                                  # after
+cp /tmp/golden.keep eval/golden.jsonl
+```
+
+| the 46 probe questions | before | after |
+|---|--:|--:|
+| `recall@5` | **46 / 46** | 45 / 46 |
+| answered at rank 1 | 44 | 41 |
+| `heading@5` | 45 / 46 | 45 / 46 |
+
+**Forty-six of forty-six inside the top five before anything changed, forty-four of them first.** That
+is the ceiling, and it is why this change cannot be priced at `recall@5` here — not an argument, a run.
+
+**And one of them gets worse, which is recorded because it is the only negative signal anywhere in this
+change.** `probe-p10` — *"Bir kapsamın diğerini kapsamadığı durum hangisi?"* — falls from the second
+result to the seventh. Three others lose a single place — `probe-p08`, `probe-p12` and `probe-p24`,
+each from first to second — and one gains a single place, `probe-p05` from third to second. This is
+weak evidence and is not treated as more: these questions were written in a batch to hunt for headroom
+rather than to the standard `eval/README.md` sets for the golden set, and one question over a set of 46
+is inside the noise band this file has documented twice. It is all here so that the next person to
+touch the lexical half starts from it rather than rediscovering it.
+
+## The mutation, which is what prices the query side
+
+Revert the query side to ADR-0041's — one configuration for the instance, matched against every chunk
+regardless of what its `tsvector` was built with — and leave the corpus indexed exactly as above. That
+is the configuration a source is in *today* if it names a language.
+
+| | shipped | mutated |
+|---|--:|--:|
+| all 92 `recall@5` | **66** | 65 |
+| all 92 `heading@5` | **64** | 60 |
+| `tr` `heading@5` | **38** | 35 |
+| the other 62, `recall@5` | **62** | 61 |
+| the other 62, `heading@5` | **60** | 56 |
+
+**Three** of the nine cases in `test/integration/lexical-configurations.itest.ts` turn red with it — the
+Turkish inflection case, the one that asserts a single search reaches a `turkish` source and a `simple`
+source at once, and the one that asserts the start-up reconciliation makes a question answerable. A
+wider mutation that *also* stops `replaceDocument` recording the configuration turns a fourth red, the
+case that asserts the column is written at all. Those are the two variants and those are their counts;
+an earlier draft of this section said six, which was a count taken from a third, botched mutation that
+had broken the `simple` half as well and was not the mutation described here.
+
+## One thing got less deterministic, and it is this change's doing
+
+**Runs of the shipped configuration over freshly carved databases are no longer identical, and the set
+that differs is not the same set twice.** Over six runs, **13 of the 92 questions** return a
+ten-result page that is not identical in all of them: `en-api-01`, `en-api-02`, `en-env-01`,
+`en-env-02`, `en-env-03`, `en-errors-01`, `en-obs-01`, `en-trouble-01`, `tr-saklama-02`, `x-en-tr-08`,
+`x-en-tr-11`, `x-en-tr-14`, `x-tr-en-14`. Any two of those runs differ on between **4 and 12** of them,
+and which ones differ changes with the pair — so a single before/after comparison sees a sample of
+this and not its size. Three runs at `EVAL_TEXT_SEARCH_CONFIG=simple` — one configuration, everything
+else equal — are identical to the question, so this is the multi-configuration path and not the
+harness.
+
+**For four of the thirteen it is not a swap inside the page: a different document is on it.**
+`en-api-01`, `en-api-02`, `en-trouble-01` and `tr-saklama-02` each have two sections that drift in and
+out of the ten between runs — for `tr-saklama-02`, the Turkish page on `HLY-5030` and the English
+*Testing a restore* trade the tenth position. In every one of the four the pair that trades is one
+Turkish chunk against one English chunk, which is the mechanism below showing its face.
+
+The mechanism is the uuid backstop [ADR-0041](../../.ssot/ADR.md#adr-0041) left in the fused ordering,
+reached through a door this change opened. Ranks are now assigned *within* a configuration, so two
+chunks in different configurations can hold the same lexical rank; at that depth neither carries a
+dense rank, so their `fused_score` is identical — `1/(60 + n)` on both — and `fused_score desc,
+dense_rank asc nulls last, id asc` falls through to `id`, which is `gen_random_uuid()` and fresh in
+every database. Before this change two chunks could not share a lexical rank, so the tie could not
+arise.
+
+**Every number in this file is reproducible, and that is not the same as the product being
+deterministic.** Across the six runs `recall@1` is 58, `recall@5` is 66, `heading@1` is 57,
+`heading@5` is 64 and the floor refuses one question — every one of them identical in all six. The
+metrics are stable because the movement is mostly below the window they measure.
+
+**It is not, however, below the window the product serves.** `en-errors-01` — *What does HLY-4019
+mean?* — returns a different **fifth** result depending on the run: a Turkish `HLY-3001 ve HLY-3002`
+section in three of the six, an English *Threat model* section in the other three. `DEFAULT_SEARCH_LIMIT`
+is 5, so that is a row an agent is handed by default; `MAX_SEARCH_LIMIT` is 20, so positions six to ten
+— where the other twelve move — are served to any caller that asks for them. The narrow statement is
+the right one: **no metric this product measures moves, and the page it returns does.** FR-262 says
+the same question against the same corpus returns the same answer, and for a project holding two
+configurations that is now true only down to the point where the two ranked lists meet.
+
+Fixing it means giving the fused ordering a corpus property to break on before the uuid — the same
+correction FR-262 made one level down, applied to the fusion rather than to the candidate lists. That
+is a change to the ordering mechanism [ADR-0041](../../.ssot/ADR.md#adr-0041) fixed and
+[ADR-0064](../../.ssot/ADR.md#adr-0064) deliberately did not touch, so it was recorded here and put to
+the operator rather than slipped in.
+
+### Fixed, 2026-09-21 ([ADR-0067](../../.ssot/ADR.md#adr-0067))
+
+**Everything above this heading stands as what was measured, and the defect it describes is gone.**
+The fused ordering is now `fused_score desc, dense_rank asc nulls last, content_length asc,
+relative_path asc, chunk_index asc, id asc` — the lexical candidate list's own tie-break lifted one
+level, with the uuid kept as a backstop that `(relative_path, chunk_index)` being unique inside a
+project and generation makes unreachable.
+
+**Six runs over freshly carved databases now return the same ten results, in the same order, for all
+92 questions** — compared pair by pair and page by page, which is the bar the defect itself set: one
+before/after comparison samples this and does not size it.
+
+| six runs, after the fix | |
+|---|---|
+| questions whose ten-result page differs in any of the six | **0 of 92** |
+| `recall@1` / `recall@5` | 58 / 66 in all six |
+| `heading@1` / `heading@5` | 57 / 64 in all six |
+| questions the floor refuses | 1 in all six |
+
+No gate metric moved, and ADR-0041's control still holds: `EVAL_TEXT_SEARCH_CONFIG=simple` returns an
+identical rank and heading rank for all eighty-four of the original questions. One question's rank
+differs from the *arbitrary* value a pre-fix run happened to produce — `x-en-tr-08`, one of the
+thirteen that was a coin toss anyway, now settles at the sixth result. `en-errors-01` returns the same
+fifth result every time.
+
+The section above is kept in full rather than replaced. Nothing in the suite caught this before, which
+is how it was introduced; `test/integration/lexical-configurations.itest.ts` now manufactures the tie
+across six freshly created projects and asserts the order the corpus implies, because asserting
+stability alone cannot catch it — within one database the uuids do not move and the same query twice
+returns the same page either way.
+
+## Reproducing it
+
+```bash
+npm run eval                                  # the shipped default: en/ simple, tr/ turkish
+EVAL_TEXT_SEARCH_CONFIG=simple npm run eval   # ADR-0041's run, question for question
+EVAL_TEXT_SEARCH_CONFIG=english npm run eval  # the whole corpus stemmed as English
+```
+
+`EVAL_TEXT_SEARCH_CONFIG` now names the configuration the **corpus** is indexed with and no longer
+touches the query side, because it no longer can: every chunk records what it was built with and the
+search reads the index.
