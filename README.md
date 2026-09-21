@@ -1107,9 +1107,11 @@ public/members.js             a project's Members panel
 public/mcp.js                 a project's MCP access panel and its tokens
 public/search.js              a project's search box and the hits it renders, scores and all
 public/auth-page.js           /login, /setup and /change-password — imports nothing from the dashboard
+public/product-facts.json     generated: the numbers and identifiers this product can be quoted on, for the site in the other repository to check its prose against
 public/pages/                 body of each product/legal page + the shell they share, and the OAuth approval page
 scripts/smoke-mcp.ts          end-to-end MCP client check
 scripts/reset-password.ts     last-resort password reset straight against the database; ships in the image and runs there
+scripts/build-product-facts.ts `npm run build:facts` — writes public/product-facts.json by reading the declarations, never by restating them
 scripts/eval.ts               `npm run eval` — indexes eval/corpus, asks eval/golden.jsonl, prints recall@1, recall@5, MRR
 scripts/eval-scoring.ts       the scoring arithmetic and the report, with no database or model in it, so it can be unit-tested
 scripts/cla/rules.ts          the licence gate's judgements — who authored a pull request, who may sign, what the record says — with no I/O in them
@@ -1119,6 +1121,7 @@ scripts/cla/main.ts           what the workflow runs — the environment, the tw
 test/*.test.ts                unit suite — pure functions, no database, no Docker (`npm test`)
 test/cla-*.test.ts            the licence gate: its judgements, the whole flow against fakes, and the GitHub clients against an injected fetch
 test/dockerhub-description.test.ts  DOCKERHUB.md fits Docker Hub's limit, its links are absolute, and it names the image
+test/product-facts.test.ts    public/product-facts.json is still what the generator produces from today's code
 test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
 test/integration/fixtures/    a pre-v3 `0.1` schema derived from history, and the frozen DDL ladder the migrations replaced

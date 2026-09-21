@@ -19,6 +19,7 @@
     "test:integration": "vitest run --project integration",
     "test:all": "vitest run",
     "smoke": "tsx scripts/smoke-mcp.ts",
+    "build:facts": "tsx scripts/build-product-facts.ts",
     "eval": "tsx scripts/eval.ts",
     "warm-model": "tsx scripts/warm-model.ts",
     "reset-password": "tsx scripts/reset-password.ts",
