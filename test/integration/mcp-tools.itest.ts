@@ -584,14 +584,27 @@ describe("a source's language on list_topics", () => {
       .values({ projectId: project.id, type: 'local', name: 'other-docs', config: { path: fx.root, extensions: ['md'] } })
       .returning();
     await seed(fx.database.db, project.id, unset.id, 'other-docs/guide.md', '# Guide\n\nWhere to find your key.\n', { store: true });
+
+    // `language: 'simple'` set explicitly — not the same shape as `unset` above, and the one the
+    // guard in `namedLanguageOf` exists for: a source that *names* `simple` still gets no `language:`
+    // segment, because `simple` is the configuration for a corpus whose language is not known, not a
+    // language name. Without a fixture that actually holds this value, a test asserting silence for it
+    // passes vacuously.
+    const [simpleNamed] = await fx.database.db
+      .insert(documentSources)
+      .values({ projectId: project.id, type: 'local', name: 'simple-docs', config: { path: fx.root, extensions: ['md'], language: 'simple' } })
+      .returning();
+    await seed(fx.database.db, project.id, simpleNamed.id, 'simple-docs/notes.md', '# Notes\n\nWhere to find your key.\n', { store: true });
   });
 
-  it('names the language of a source that has one, and says nothing for a source that has none', async () => {
+  it('names the language of a source that has one, and says nothing for a source that has none or names simple', async () => {
     const answer = await call('list_topics', {}, multilingual);
     expect(answer.isError).toBe(false);
     expect(answer.text).toContain('tr-docs (local, language: turkish)');
     expect(answer.text).toContain('other-docs (local)');
     expect(answer.text).not.toContain('other-docs (local, language');
+    expect(answer.text).toContain('simple-docs (local)');
+    expect(answer.text).not.toContain('simple-docs (local, language');
     expect(answer.text).not.toMatch(/language: unknown/i);
     expect(answer.text).not.toMatch(/language: simple/i);
   });
