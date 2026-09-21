@@ -62,10 +62,17 @@ export class WebDriver implements SourceDriver {
    * The client this call uses, built once per driver.
    *
    * **Once per driver and not once per process**, which is what makes the time budget mean what it
-   * says: the clock starts at a client's first request, a driver is constructed fresh for every sync
-   * and every probe (`driverFor`), and so `sync()` and the `probe()` that follows it are two separate
-   * budgets. Sharing one would hand an exhausted budget to the probe that exists to make the *next*
-   * run cheap — the source would stop minting tokens exactly when it most needed one.
+   * says: the clock starts at a client's first request and a driver is constructed fresh for every
+   * sync and every probe (`driverFor`), so two pieces of work are two budgets. The one place that is
+   * not true of is the `probe()` at the end of `sync()`, and it asks for a new budget explicitly
+   * (`renewBudget()`) rather than being handed a new client — an exhausted budget would stop the
+   * source minting tokens exactly when cheap scheduling is worth most, and a new *client* would
+   * throw away the pacing owed to the site along with it.
+   *
+   * **Nothing else the driver relies on lives here.** The crawl scope and the host check are computed
+   * per call from `entryUrl`, the depth counters are locals inside the two walkers, `RunState` is
+   * per-sync, and `robots.txt` is not cached at all — so a client that is reused across the sync→probe
+   * boundary carries the pacing, and only the pacing, across it.
    */
   private client(): WebClient {
     if (this.injectedClient) return this.injectedClient;
@@ -260,12 +267,19 @@ export class WebDriver implements SourceDriver {
     // `probe()` itself rather than a token computed from what was just listed, so that both sides of
     // the scheduler's comparison are the same function of the same source.
     //
-    // **On a fresh client, which is what makes `client()`'s "two separate budgets" true here.** That
-    // holds by construction when the scheduler probes — a driver is built per call — and did not hold
-    // for this one call, the only place a probe follows a sync inside one driver. The run that most
-    // needs a token is the long one, and a long one is exactly the run whose budget is gone: sharing
-    // it meant the source stopped minting tokens at the moment cheap scheduling was worth most.
-    this.built = undefined;
+    // **On a new budget and the same client**, which is what makes `client()`'s "two separate budgets"
+    // true here. It holds by construction when the scheduler probes — a driver is built per call — and
+    // did not hold for this one call, the only place a probe follows a sync inside one driver. The run
+    // that most needs a token is the long one, and a long one is exactly the run whose budget is gone:
+    // sharing it meant the source stopped minting tokens at the moment cheap scheduling was worth most.
+    //
+    // **It is `renewBudget()` and not a fresh client, and the difference is a promise to the site.**
+    // Replacing the object was the first attempt and it reset the pacing with the budget: the request
+    // on this boundary went out 8 ms after the previous one against a site whose `robots.txt` had
+    // asked for 5 000. The budget is this instance's promise to itself and renews per unit of work;
+    // `lastRequestAt` and the site's `Crawl-delay` are owed to the host and survive every boundary
+    // inside this process.
+    client.renewBudget();
     const token = await this.probe().catch((err: unknown) => {
       this.ctx.log.warn({ err, source: this.source.name }, 'web probe failed after a successful sync; the next scheduled run will not be skipped');
       return null;
@@ -479,7 +493,13 @@ export class WebDriver implements SourceDriver {
   }
 
   /**
-   * How fresh the site is, in one request — but only when the site is in a position to say.
+   * How fresh the site is, without walking the site — but only when the site is in a position to say.
+   *
+   * **Two requests, not one**, and the second sentence of this comment used to say one: `robots.txt`
+   * and then the sitemap. `robots.txt` is re-read rather than carried over from the sync, because a
+   * site that adds a `Disallow` between two runs would otherwise be crawled under rules this product
+   * read once and kept — the wrong way round for the one file whose purpose is to be re-read. Two
+   * requests to decide whether a hundred thousand pages need fetching is still the whole point.
    *
    * **`null` for two of the three entry formats, and that is the honest answer rather than a gap.** The
    * interface's first rule is that `null` means "run it" and that every uncertainty resolves toward the

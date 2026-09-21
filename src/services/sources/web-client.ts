@@ -45,6 +45,23 @@ export interface WebClient {
    * `WEB_REQUEST_DELAY_MS`, which is this product's own promise rather than the site's.
    */
   raiseDelayTo(ms: number): void;
+  /**
+   * Start a new `WEB_CRAWL_BUDGET_MS` at the next request, **and change nothing else.**
+   *
+   * The two kinds of state this client holds are not the same kind of thing and this method is the
+   * line between them. A **budget** is this instance's promise to itself — that one `sync()` will not
+   * hold the project's mutex for eleven hours — and a `probe()` that follows a `sync()` is a second
+   * piece of work that is entitled to its own. **Pacing is a promise to the site**: `lastRequestAt`
+   * and the `Crawl-delay` the site asked for in its own `robots.txt` belong to the host, not to the
+   * unit of work, and no boundary inside this process is a reason to break them.
+   *
+   * It exists because the first attempt at the separate budget was `this.built = undefined` — a fresh
+   * client — which threw away both at once: the request on the sync→probe boundary went out with no
+   * wait at all, 8 ms after the previous one, against a site whose `robots.txt` had asked for 5 000.
+   * Renewing one field rather than replacing the object is the whole of the fix, and the reason this
+   * is a method on the interface rather than something a caller does to a reference it holds.
+   */
+  renewBudget(): void;
   /** Requests made so far, for the run's note. */
   readonly requestCount: number;
 }
@@ -122,6 +139,14 @@ export class HttpWebClient implements WebClient {
 
   raiseDelayTo(ms: number): void {
     if (ms > this.delayMs) this.delayMs = ms;
+  }
+
+  /**
+   * A new budget at the next request. `lastRequestAt`, `delayMs` and `count` are deliberately left
+   * exactly as they are — see the interface for why those three are a different kind of state.
+   */
+  renewBudget(): void {
+    this.deadlineAt = 0;
   }
 
   /** What is left of the run's budget, in milliseconds; `Infinity` before the first request. */

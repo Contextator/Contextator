@@ -530,6 +530,41 @@ describe('the time budget and the pacing, on the client that actually makes the 
     await expect(client.get('https://docs.example.com/b')).rejects.toBeInstanceOf(WebBudgetExhaustedError);
   });
 
+  /**
+   * **A new budget must not be a new promise to the site**, which is the defect this pair of cases
+   * exists for. The separate budget for the probe that follows a sync was first built by replacing
+   * the client, and that dropped `lastRequestAt` and the site's own `Crawl-delay` along with the
+   * deadline: the request on the boundary went out 8 ms after the previous one against a site that
+   * had asked for 5 000. Nothing bound it — the driver's tests inject a stub, so the line could be
+   * deleted with all 823 of them still green, which is why these two are at this level.
+   */
+  it('keeps the pacing and the Crawl-delay across a budget renewal', async () => {
+    const at: number[] = [];
+    const fetchImpl: FetchLike = async () => {
+      at.push(Date.now());
+      return answer();
+    };
+    const client = new HttpWebClient({ delayMs: 5, budgetMs: 10_000 }, fetchImpl);
+    await client.get('https://docs.example.com/a');
+    // What a site's `robots.txt` asked for, raised above the instance's own.
+    client.raiseDelayTo(60);
+    client.renewBudget();
+    await client.get('https://docs.example.com/b');
+
+    expect(at[1] - at[0]).toBeGreaterThanOrEqual(55);
+    // The renewal is not a reason to forget how many requests were made either.
+    expect(client.requestCount).toBe(2);
+  });
+
+  it('starts the clock again on a renewal, which is the thing the renewal is for', async () => {
+    const client = new HttpWebClient({ delayMs: 0, budgetMs: 40 }, async () => answer());
+    await client.get('https://docs.example.com/a');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    // Without the renewal this is the `WebBudgetExhaustedError` the case above this one asserts.
+    client.renewBudget();
+    await expect(client.get('https://docs.example.com/b')).resolves.toMatchObject({ status: 200 });
+  });
+
   it('sends the validator it was given, which is the whole of the incremental path', async () => {
     let seen: Record<string, string> = {};
     const client = new HttpWebClient({ delayMs: 0, budgetMs: 10_000 }, async (_url, init) => {
@@ -560,6 +595,22 @@ describe('what a second run costs, and what the probe decides', () => {
     const { web } = driver(site());
     const result = await web.sync();
     expect(result.configPatch).toEqual({ syncProbeToken: 'pages=2;lastmod=2026-09-12' });
+  });
+
+  it('asks the client for a new budget at the sync→probe boundary, and not for a new client', async () => {
+    const { web, stub } = driver({
+      ...site(),
+      // A site that asked for more room than the instance configured. Whatever the driver does at the
+      // boundary, this is what it still owes the host on the other side of it.
+      'https://docs.example.com/robots.txt': { contentType: 'text/plain', body: 'User-agent: *\nCrawl-delay: 5\n' },
+    });
+    await web.sync();
+
+    // Exactly one renewal: the probe that closes the run, and nothing else in a sync renews anything.
+    expect(stub.budgetRenewals).toBe(1);
+    // And the promise to the site survived it. A driver that replaced the client instead would have
+    // handed the probe a client back at the instance default, which is the defect in one number.
+    expect(stub.delayMs).toBe(5000);
   });
 
   it('answers "unchanged" from one listing, without fetching a single page', async () => {

@@ -40,8 +40,22 @@ export class StubWeb implements WebClient {
     return this.requests.map((r) => r.url);
   }
 
+  /**
+   * How many times a new budget was asked for, and — just as much — the fact that `delayMs` is not
+   * touched here.
+   *
+   * A stub that quietly reset the pacing alongside the budget would agree with the defect this pair
+   * of fields exists to catch: the driver's first attempt at a separate budget for the trailing probe
+   * replaced the whole client, which dropped the site's `Crawl-delay` with it.
+   */
+  budgetRenewals = 0;
+
   raiseDelayTo(ms: number): void {
     if (ms > this.delayMs) this.delayMs = ms;
+  }
+
+  renewBudget(): void {
+    this.budgetRenewals++;
   }
 
   async get(url: string, validators: Validators = {}): Promise<WebResponse> {

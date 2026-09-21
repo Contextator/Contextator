@@ -249,9 +249,15 @@ sync rather than being treated as permission. A 404 is permission: a site with n
 disallowed nothing. `WEB_RESPECT_ROBOTS=0` exists for one case, an operator crawling a staging site they
 own that disallows everything to keep it out of search engines.
 
-Only a `sitemap.xml` can be checked for freshness in one request, so only that entry format takes part
-in the cheap scheduled check below; an `llms.txt` source and a crawl source re-fetch on every scheduled
-run, which is a reason to prefer a sitemap where the site publishes one.
+Only a `sitemap.xml` can be checked for freshness without walking the site, so only that entry format
+takes part in the cheap scheduled check below; an `llms.txt` source and a crawl source re-fetch on every
+scheduled run, which is a reason to prefer a sitemap where the site publishes one.
+
+The check costs **two** requests, not one: `robots.txt` and then the sitemap. `robots.txt` is
+deliberately **not** cached between a sync and the check that follows it, or between checks — a site
+that adds a `Disallow` would otherwise keep being crawled under rules this product read once and kept,
+which is the wrong way round for a file whose whole purpose is to be re-read. Two requests against a
+site of a hundred thousand pages is still the point of the mechanism.
 
 ### Keeping a source fresh on its own
 
@@ -266,7 +272,7 @@ index run only happens when the answer moved since the last successful sync:
 | Git | `git ls-remote` on the tracked branch — one ref advertisement, no objects | A fetch |
 | Notion | One `search`, newest edit first, one result | A page read per page, 350 ms apart |
 | Confluence | One CQL search over the same spaces the run indexes: how many pages there are, and when the newest was touched | A listing plus a body read per page |
-| Documentation site | One request for the `sitemap.xml`: how many URLs it lists, and the newest `<lastmod>` among them | A conditional GET per page |
+| Documentation site | Two requests — `robots.txt`, then the `sitemap.xml`: how many URLs it lists, and the newest `<lastmod>` among them | A conditional GET per page |
 | Local, Upload | The file count and the newest modification time | Reading and hashing every file |
 
 A check that cannot answer — a directory that has gone, a rate-limited API, a network that is down —
