@@ -112,7 +112,49 @@ jobs:
       # starts pgvector/pgvector:pg16 itself, waits for it and stops it afterwards — which is the same
       # code path a contributor runs locally. A service container would work only here, and the two
       # paths would drift until the one that is harder to run stopped being run (ADR-0031).
-      - run: npm run test:integration
+      #
+      # `test:integration:report` is `test:integration` plus two reporters and nothing else — same
+      # project, same timeouts, same file parallelism, same container — because ADR-0031 owns what this
+      # suite runs and this change is only about keeping what it printed. The suite has flaked twice
+      # (2026-09-19: `1 failed | 296 passed`; 2026-09-21: `1 failed | 322 passed`) and both times the
+      # name of the failing test was gone before anybody went looking: the log had scrolled out of the
+      # run and neither run left a file behind. Vitest's default reporter writes to stdout and nowhere
+      # else, so there was nothing to keep.
+      #
+      # Both halves are kept, because they fail differently. The JSON reporter is the machine-readable
+      # one — it names every test, its file and its failure message — but it is written by a reporter
+      # at the end of the run, so a run that dies with a worker crash or a global-setup failure never
+      # produces it. `tee` holds the raw stdout and stderr whatever happens. `pipefail` so the pipe
+      # does not swallow vitest's exit code and turn a red suite green.
+      #
+      # Deliberately not a retry, and deliberately not `continue-on-error`: ADR-0029 rules both out —
+      # a retry does not fix a flake, it only stops anybody being able to see it. The suite still
+      # fails exactly when it failed before; this step only makes the failure readable afterwards.
+      - name: Integration suite, keeping its output
+        id: integration
+        run: |
+          set -o pipefail
+          npm run test:integration:report 2>&1 | tee integration-output.log
+
+      # Only on a failure of the step above — `failure()` alone would also fire for a broken `npm ci`,
+      # which has no suite output to keep. Named for the run and the attempt so a re-run does not
+      # collide with the artifact of the attempt it is re-running, and so the zip still says which run
+      # it came from once it is sitting in somebody's downloads folder. Ninety days rather than the
+      # repository default: the two sightings so far were two days apart and neither repeated inside a
+      # fortnight of re-runs, so an artifact that expires in a week expires before the third sighting
+      # makes it comparable.
+      - name: Keep the failing suite's output
+        if: failure() && steps.integration.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-failure-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            integration-output.log
+            integration-report.json
+          retention-days: 90
+          # The log is always there; the JSON is not, for the reason given above. Warn rather than
+          # fail, so a crashed run still uploads the half that survived.
+          if-no-files-found: warn
 
   image:
     name: Build the image
