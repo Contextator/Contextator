@@ -128,7 +128,7 @@ part you can do.
 
 ## The pairs that are kept in sync
 
-Three places in this repository hold one statement in two files. Each has a check that fails when the two
+Four places in this repository hold one statement in two files. Each has a check that fails when the two
 stop agreeing, because none of them is something a compiler or a formatter can see.
 
 **`src/db/schema.ts` ↔ `drizzle/`**, guarded by `npm run db:check` (its own step in CI). The schema file
@@ -154,6 +154,21 @@ in `src/auth/policy.ts`, applied by one hook, and a route declares no permission
 viewer's and any other method an editor's unless the table says otherwise. The test walks the server's own
 route table and fails if a route is neither listed as public nor covered by a rule. **Adding a route
 therefore means deciding who may call it**, and the suite will not let you forget.
+
+**The code ↔ `public/product-facts.json`**, guarded by `test/product-facts.test.ts`. The marketing site
+lives in a separate repository and states this product's numbers in prose — how many source types there
+are, which extensions are indexed, what the score floor is, what a tool's parameters are called. That
+prose used to be checked by somebody remembering; now the site checks itself against this file. It is
+generated, never edited: run `npm run build:facts` and commit what it writes, the same way `drizzle/` is
+committed. The generator reads each value out of the declaration that governs it — a zod default, an
+`as const` tuple, the table's check constraint, the tool registration itself — so a value it cannot read
+is deliberately *absent* from the facts and listed under `notMachineReadable` instead, with the reason.
+Never hand-write one in; an unbacked number here is worse than no number, because the site would then
+report it as verified.
+
+**Which release the gate looks at:** the file committed here, at the version in its own `productVersion`
+field — so cutting a release means regenerating it in that release's commit, and the site picks it up
+from the released tag. A running instance also serves its own copy at `/product-facts.json`.
 
 ## Commits and pull requests
 

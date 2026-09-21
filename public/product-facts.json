@@ -1,0 +1,86 @@
+{
+  "generator": "scripts/build-product-facts.ts",
+  "productVersion": "0.1.0",
+  "sourceTypes": ["local", "git", "upload", "notion", "confluence"],
+  "sourceFlavors": ["plain", "obsidian", "notion-export", "openapi"],
+  "fileExtensions": {
+    "document": ["md", "mdx", "txt", "html", "htm", "csv", "docx", "pdf"],
+    "flavorOnly": ["yaml", "yml", "json"],
+    "archive": ["zip", "tar", "tgz", "tar.gz", "rar"]
+  },
+  "mcpAuthModes": ["open", "token", "account"],
+  "scoreFloorDefault": 0.82,
+  "embeddingModel": "Xenova/multilingual-e5-small",
+  "embeddingDimensions": 384,
+  "tools": [
+    {
+      "name": "search_docs",
+      "title": "Search documentation",
+      "parameters": [
+        {
+          "name": "query",
+          "required": true
+        },
+        {
+          "name": "limit",
+          "required": false
+        },
+        {
+          "name": "source",
+          "required": false
+        },
+        {
+          "name": "path_prefix",
+          "required": false
+        },
+        {
+          "name": "version",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "list_topics",
+      "title": "List documentation topics",
+      "parameters": [
+        {
+          "name": "cursor",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "required": false
+        }
+      ]
+    },
+    {
+      "name": "read_document",
+      "title": "Read a documentation file",
+      "parameters": [
+        {
+          "name": "path",
+          "required": true
+        },
+        {
+          "name": "heading",
+          "required": false
+        },
+        {
+          "name": "from",
+          "required": false
+        },
+        {
+          "name": "to",
+          "required": false
+        },
+        {
+          "name": "max_tokens",
+          "required": false
+        }
+      ]
+    }
+  ],
+  "notMachineReadable": {
+    "languageCount": "No declaration in this repository states one. \"100 languages\" is a property of the EMBEDDING_MODEL default published by its authors; verify it against that model card, not against this file."
+  }
+}
