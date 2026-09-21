@@ -15,6 +15,7 @@ import { searchProject } from '../../src/services/search.js';
 import { recountSources } from '../../src/services/sources.js';
 import { recountProject, searchChunks, sweepGenerations } from '../../src/services/vector-store.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
+import { WEB_LIMIT_DEFAULTS } from '../../src/config.js';
 
 /**
  * [ADR-0039](../../.ssot/ADR.md#adr-0039), which is a claim about what a client sees **while** a
@@ -121,6 +122,7 @@ const embeddings: EmbeddingProvider = {
 
 /** Each file is one chunk at these settings, so one `embedPassages` call is one document. */
 const indexerConfig = {
+  ...WEB_LIMIT_DEFAULTS,
   ALLOWED_DOC_ROOTS: [] as string[],
   IGNORE_GLOBS: [] as string[],
   CHUNK_MAX_TOKENS: 512,

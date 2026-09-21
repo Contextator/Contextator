@@ -1,5 +1,5 @@
 import { and, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
-import type { Config } from '../config.js';
+import type { Config, WebLimits } from '../config.js';
 import type { Logger } from '../context.js';
 import type { Db } from '../db/client.js';
 import { documentSources, type DocumentSourceRow } from '../db/schema.js';
@@ -35,7 +35,7 @@ export interface SchedulerDeps {
   db: Db;
   indexer: SchedulerIndexer;
   log: Logger;
-  config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'IGNORE_GLOBS' | 'SYNC_PROBES_PER_TICK'>;
+  config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'IGNORE_GLOBS' | 'SYNC_PROBES_PER_TICK'> & WebLimits;
 }
 
 /** How often the timer fires. A minute is the resolution a per-source interval is stated in. */

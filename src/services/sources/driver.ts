@@ -1,4 +1,4 @@
-import type { Config } from '../../config.js';
+import type { Config, WebLimits } from '../../config.js';
 import type { Logger } from '../../context.js';
 import type { Db } from '../../db/client.js';
 import type { DocumentSourceRow } from '../../db/schema.js';
@@ -10,7 +10,7 @@ import { UploadDriver } from './upload.js';
 export interface DriverContext {
   db: Db;
   log: Logger;
-  config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'IGNORE_GLOBS'>;
+  config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'IGNORE_GLOBS'> & WebLimits;
 }
 
 export interface SyncResult {

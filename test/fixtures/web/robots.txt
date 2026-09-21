@@ -1,0 +1,12 @@
+# Example Docs
+User-agent: BadBot
+Disallow: /
+
+User-agent: *
+Crawl-delay: 2
+Disallow: /internal/
+Disallow: /guide/draft
+Allow: /internal/public/
+Disallow: /*.pdf$
+
+Sitemap: https://docs.example.com/sitemap.xml

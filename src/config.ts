@@ -14,6 +14,31 @@ const csv = (value: string): string[] =>
 const flag = (value: string): boolean => value === '1' || value.toLowerCase() === 'true';
 
 /**
+ * The shipped values of the five ceilings the `web` driver is held to
+ * ([ADR-0070](../.ssot/ADR.md#adr-0070)), as one object rather than five literals inside the schema.
+ *
+ * **It exists because something other than the schema has to be able to state them.** Widening
+ * `DriverContext` with `WebLimits` made every hand-built config in the test suite — a Notion driver's,
+ * a local driver's, the scheduler's — incomplete, and the alternative to a shared default was either
+ * twenty-four copies of five numbers or making the ceilings optional and defaulting them a second time
+ * inside the driver. A ceiling with two defaults is a ceiling that eventually has two values, and this
+ * connector's whole argument is that its limits are the one thing that must not drift.
+ *
+ * **It is not annotated `WebLimits`**, and cannot be: that type is a `Pick` of `Config`, `Config` is
+ * inferred from the schema below, and the schema takes its defaults from here — annotating it would
+ * close the loop and leave `Config` circularly referencing itself. A sixth ceiling missing from this
+ * object is still caught at compile time, by every hand-built `DriverContext` in the test suite that
+ * spreads it and must then satisfy `WebLimits` whole.
+ */
+export const WEB_LIMIT_DEFAULTS = {
+  WEB_MAX_PAGES: 1000,
+  WEB_MAX_DEPTH: 10,
+  WEB_REQUEST_DELAY_MS: 500,
+  WEB_CRAWL_BUDGET_MS: 15 * 60_000,
+  WEB_RESPECT_ROBOTS: true,
+} as const;
+
+/**
  * The three subnet names `proxy-addr` — the library behind Fastify's `trustProxy` — understands, and
  * the only entries in `TRUST_PROXY` that are not a literal address. `loopback` is the one a
  * single-container deployment with a proxy on the host actually wants.
@@ -512,6 +537,104 @@ export const EnvSchema = z
       .min(1024)
       .default(1024 * 1024 * 1024),
 
+    // What a web source may do to a site it does not own ([ADR-0070](../.ssot/ADR.md#adr-0070))
+    /**
+     * The most pages one web source will **fetch** in a run.
+     *
+     * **Fetched, not indexed.** A page that was refused — a JavaScript-rendered shell with no text in
+     * it, a 404 from a stale sitemap, a connection that failed — was served by somebody's web server
+     * all the same, and this counted only the pages the product *kept* until that was measured: at a
+     * ceiling of three, a site of twenty refusable pages was fetched in full and the run reported no
+     * ceiling at all, because by its own counting it had never reached one. A ceiling that only counts
+     * successes bounds a badly behaved site least, which is backwards. A URL that never left this
+     * process — one `robots.txt` disallowed, one on another host — is not charged.
+     *
+     * It bounds the nested sitemaps a `<sitemapindex>` names as well, and deliberately with the same
+     * number rather than a sixth setting: `WEB_MAX_DEPTH` bounds that tree's height and nothing bounded
+     * its width, so an index naming fifty thousand children is fifty thousand requests before a single
+     * page URL exists for the page ceiling to charge. A source allowed to fetch N pages may read at
+     * most N listings to find them.
+     *
+     * **A ceiling before a feature.** The `web` driver is the first one that walks a host this product
+     * does not own, on a timer, with no account and no quota to stop it; every other source type is
+     * bounded by something outside this process — a repository's size, a wiki's page count, what
+     * somebody uploaded. A crawler is bounded by nothing at all. So the five values in this group are
+     * written before the driver rather than added to it after the first complaint, and every one of
+     * them is enforced in `services/sources/web.ts` rather than being advice.
+     *
+     * 1 000 is a large documentation site — the Kubernetes reference is about 800 pages, Stripe's about
+     * 600 — and it is deliberately below the 5 000 the Notion and Confluence drivers carry, because
+     * those numbers count reads against an API that rate-limits its own callers and this one counts
+     * requests against somebody's web server. **Reaching it is said out loud** on the run, for the
+     * reason `MAX_PAGES` in `sources/confluence.ts` states at length: a site that looks indexed and is
+     * two thirds indexed produces "not in the documentation" about pages that exist.
+     */
+    WEB_MAX_PAGES: z.coerce.number().int().min(1).max(50_000).default(WEB_LIMIT_DEFAULTS.WEB_MAX_PAGES),
+
+    /**
+     * How far from the entry point a link may be followed.
+     *
+     * It bounds the one entry shape that has no list to read from — a single start URL, walked
+     * breadth-first — and the nesting of a `<sitemapindex>`, which is a tree and can be a cyclic one.
+     * A `sitemap.xml` or an `llms.txt` is a flat list and is not depth-limited by anything but itself.
+     *
+     * 10 is far past any documentation site's own structure. Notion's published ceiling is 25 levels
+     * and is the recorded precedent for this order of magnitude; the lower default is here because a
+     * crawl discovers its depth from links, and a calendar, a pagination widget or a diff view
+     * generates depth without generating documents.
+     */
+    WEB_MAX_DEPTH: z.coerce.number().int().min(0).max(25).default(WEB_LIMIT_DEFAULTS.WEB_MAX_DEPTH),
+
+    /**
+     * The minimum gap between two requests to the same site, in milliseconds.
+     *
+     * **Serial by construction and paced on top of it.** The driver never has two requests in flight,
+     * so this is the whole of the load one source puts on a host: at the default, two requests a
+     * second, which is below what any documentation site notices and far below what its CDN would
+     * rate-limit. The Confluence client's own `MIN_INTERVAL_MS` is the same idea against an API that
+     * publishes a quota; here there is no quota, and being a good guest is the only thing standing
+     * between this product and an operator's site being knocked over by their own documentation server.
+     *
+     * A `Crawl-delay` in the site's `robots.txt` **raises** this when it is larger; it never lowers it.
+     */
+    WEB_REQUEST_DELAY_MS: z.coerce.number().int().min(0).max(60_000).default(WEB_LIMIT_DEFAULTS.WEB_REQUEST_DELAY_MS),
+
+    /**
+     * How long one web source's `sync()` may spend fetching, in milliseconds, measured from its first
+     * request.
+     *
+     * **The other four ceilings are all counts, and a count cannot bound a clock.** A thousand pages
+     * behind a server that answers in forty seconds each is eleven hours of a run holding the project's
+     * mutex; no page limit, depth limit or delay expresses that. The deadline is checked before every
+     * request and the run stops at it with what it has, saying so — the same shape as the page ceiling,
+     * and for the same reason.
+     *
+     * It is also what bounds a single hung request: the per-request timeout is the smaller of 30
+     * seconds and whatever is left of this budget, so the last request of a run cannot outlive it.
+     *
+     * 15 minutes at the default delay is roughly 1 800 requests' worth of pacing, which is more than
+     * `WEB_MAX_PAGES` needs; a site slow enough to hit this is a site to point at fewer pages.
+     */
+    WEB_CRAWL_BUDGET_MS: z.coerce.number().int().min(1000).default(WEB_LIMIT_DEFAULTS.WEB_CRAWL_BUDGET_MS),
+
+    /**
+     * Whether `robots.txt` is read and obeyed. `1` (the default) means it is.
+     *
+     * **A setting rather than a constant, and on by default rather than optional.** Obeying it is what
+     * makes this driver a crawler somebody can run without asking; the setting exists because an
+     * operator crawling **their own** staging site, which disallows everything to keep it out of search
+     * engines, otherwise has a source that can never index anything and no way to say "this site is
+     * mine". That is the only case it is for, and `.env.example` says so.
+     *
+     * When it is on, a `robots.txt` that cannot be read at all — a connection error, or a 5xx — fails
+     * the sync by name rather than being treated as permission (RFC 9309 §2.3.1.4). A 404 is permission:
+     * a site with no `robots.txt` has not disallowed anything.
+     */
+    WEB_RESPECT_ROBOTS: z
+      .string()
+      .default(WEB_LIMIT_DEFAULTS.WEB_RESPECT_ROBOTS ? '1' : '0')
+      .transform(flag),
+
     // Embeddings
     EMBEDDING_PROVIDER: z.enum(['local', 'openai']).default('local'),
     /**
@@ -832,6 +955,23 @@ export const EnvSchema = z
   });
 
 export type Config = z.infer<typeof EnvSchema>;
+
+/**
+ * The five ceilings the `web` driver is held to ([ADR-0070](../.ssot/ADR.md#adr-0070)), named once so
+ * that `DriverContext` and the two `Pick`s that have to satisfy it — `IndexerDeps` and the scheduler's
+ * own — widen together rather than one at a time.
+ *
+ * **A driver reaching config through `DriverContext` is what `sources/confluence-render.ts` warned
+ * against, and this is the case that warning explicitly does not cover.** What it refused was a driver
+ * borrowing `MAX_CONVERTED_FILE_BYTES` — an instance-wide value about *parsing*, which has a local
+ * constant's worth of meaning to a driver and would have dragged an unrelated key through three type
+ * signatures to get there. These five are the opposite: they are the driver's own policy, they have no
+ * meaning anywhere else in the product, and an operator has to be able to change them per instance —
+ * a hard-coded crawl ceiling is a crawler that cannot be made gentler on a site that needs it or wider
+ * on one that can take it. They are a type alias rather than five key names repeated three times so
+ * that a sixth, if it ever exists, is one edit.
+ */
+export type WebLimits = Pick<Config, 'WEB_MAX_PAGES' | 'WEB_MAX_DEPTH' | 'WEB_REQUEST_DELAY_MS' | 'WEB_CRAWL_BUDGET_MS' | 'WEB_RESPECT_ROBOTS'>;
 
 /**
  * Parses and validates process.env. Empty-string values are treated as unset so that

@@ -1,7 +1,8 @@
 # Contextator
 
 **Self-hosted, multi-tenant MCP documentation server.** Give a project its document sources — mounted
-folders, git repositories, uploaded archives, a Notion workspace, a Confluence Cloud site — and it
+folders, git repositories, uploaded archives, a Notion workspace, a Confluence Cloud site, a published
+documentation site — and it
 becomes its own [Model Context Protocol](https://modelcontextprotocol.io) endpoint that AI agents
 (Cursor, Claude Code, Claude Desktop, …) can search semantically:
 
@@ -13,7 +14,8 @@ http://localhost:3444/mcp/<project-name>
   vector embeddings in PostgreSQL + [pgvector](https://github.com/pgvector/pgvector). A client
   connected to `/mcp/billing` never sees `/mcp/mobile`.
 - **Many sources per project.** A local directory, a git repository (or one subdirectory of it), an
-  upload of files/folders/`.zip`/`.tar.gz`/`.rar`, a Notion workspace or a Confluence Cloud site —
+  upload of files/folders/`.zip`/`.tar.gz`/`.rar`, a Notion workspace, a Confluence Cloud site or a
+  published documentation site read from its `sitemap.xml` —
   combined into one searchable endpoint. Every source is mounted under its own name, so documents read
   as `handbook/install.md`.
 - **100 % local by default.** Embeddings are generated on the CPU with
@@ -171,6 +173,7 @@ The name is the mount point, so it cannot change after creation; everything else
 | **Upload** | Files, whole folders (structure preserved) and archives — `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.rar` — unpacked on the server. Add to the existing files or replace them all. | Nothing to sync; the files live under `DATA_DIR` |
 | **Notion** | Every page shared with an internal integration (or the configured root pages/databases and their descendants), rendered to Markdown, nested by parent page. | The Notion API, re-rendering only pages whose `last_edited_time` changed |
 | **Confluence** | **Cloud only** (see below). Every page in the chosen spaces — or in every space the account can read — rendered from Confluence's storage format to Markdown, nested the way it is in the wiki: `<name>/<space>/<parent page>/<page>.md`. | The Confluence REST API, re-rendering only pages whose version number changed |
+| **Documentation site** | **Public pages only** (see below). A published site, found through its `sitemap.xml`, its `llms.txt` or a crawl from one start URL, written under the site's own paths: `<name>/guide/install.html`, converted to Markdown by the same transform `.html` files use. | Conditional GETs against the site (`ETag`/`Last-Modified`), inside the five crawl ceilings below |
 
 Sources are synced at the start of every index run, one after another; a source that fails to sync is
 reported on its own row and the others still index. **Sync** on a row and **Re-index** in the header
@@ -236,6 +239,64 @@ so that check cannot be made; name your spaces if you want it.
 
 There is **no Confluence webhook yet**. The sync interval below is how a Confluence source stays fresh.
 
+### Documentation sites: public pages, and five ceilings
+
+A **Documentation site** source points at one of three things, and the driver reads the document rather
+than the URL to decide which it is: a `sitemap.xml` (including a `<sitemapindex>`, which is followed),
+an `llms.txt` (whose Markdown links are the pages), or **one start URL** to crawl from — staying on that
+host and at or below that path, so `https://acme.example/docs/` means the documentation and not the
+company. When the entry point is not recognisably any of the three, the source **refuses and says so**
+rather than guessing; set *Entry format* by hand to tell it which.
+
+**Public pages only. There is no login.** No credential is stored on this source type at all. A
+documentation site behind SSO, a customer portal, a staging site behind basic auth: none of them is in
+scope, and half a login flow would be a connector that fails in a way nobody can diagnose.
+
+**No headless browser, and no blank documents either.** A page a browser renders from JavaScript serves
+`<div id="root"></div>` to everything that is not a browser. Such a page is **refused by name** on the
+source's row — "no text outside its scripts and styles" — rather than indexed as a document that exists,
+matches nothing and reads as empty.
+
+**This is the only source type that reaches a host nobody here has an account with**, so five ceilings
+are enforced on every run. All five are instance settings (`WEB_*` in `.env.example`, where each one's
+default is argued), and reaching any of them **stops the run and says which** on the source's row:
+
+| Setting | Default | What it bounds |
+|---------|---------|----------------|
+| `WEB_MAX_PAGES` | 1000 | Pages one source **fetches** in a run; also nested sitemaps read |
+| `WEB_MAX_DEPTH` | 10 | Links followed from the entry point; also `<sitemapindex>` nesting |
+| `WEB_REQUEST_DELAY_MS` | 500 | Minimum gap between two requests — requests are never concurrent |
+| `WEB_CRAWL_BUDGET_MS` | 900000 | Total time one run may spend fetching |
+| `WEB_RESPECT_ROBOTS` | 1 | Whether `robots.txt` is read and obeyed |
+
+**`WEB_MAX_PAGES` counts pages fetched, not pages indexed**, and the difference is the point of the
+setting. A page that was refused — a JavaScript-rendered shell with no text in it, a 404 from a stale
+sitemap, a connection that failed — was still served by somebody's web server. Counting only what this
+product kept would mean the worse a site behaves the less the ceiling bounds, which is exactly
+backwards for the one setting that exists to protect a host nobody here has an account with. A URL that
+was never requested is never charged: one `robots.txt` disallowed, or one on another host, is a
+decision taken locally before anything leaves the process.
+
+The same number also bounds how many nested sitemaps one run may read. `WEB_MAX_DEPTH` bounds how deep
+a `<sitemapindex>` tree goes and nothing bounded how wide, so an index naming fifty thousand children is
+fifty thousand requests before a single page URL exists for the page ceiling to charge.
+
+`robots.txt` is obeyed by default, its `Crawl-delay` **raises** the pacing when it asks for more than
+the instance's, and a `robots.txt` that cannot be read at all — a 5xx, a connection error — fails the
+sync rather than being treated as permission. A 404 is permission: a site with no `robots.txt` has
+disallowed nothing. `WEB_RESPECT_ROBOTS=0` exists for one case, an operator crawling a staging site they
+own that disallows everything to keep it out of search engines.
+
+Only a `sitemap.xml` can be checked for freshness without walking the site, so only that entry format
+takes part in the cheap scheduled check below; an `llms.txt` source and a crawl source re-fetch on every
+scheduled run, which is a reason to prefer a sitemap where the site publishes one.
+
+The check costs **two** requests, not one: `robots.txt` and then the sitemap. `robots.txt` is
+deliberately **not** cached between a sync and the check that follows it, or between checks — a site
+that adds a `Disallow` would otherwise keep being crawled under rules this product read once and kept,
+which is the wrong way round for a file whose whole purpose is to be re-read. Two requests against a
+site of a hundred thousand pages is still the point of the mechanism.
+
 ### Keeping a source fresh on its own
 
 A source can carry a **sync interval** — the *Sync every* field in its dialog — and the server checks it
@@ -249,6 +310,7 @@ index run only happens when the answer moved since the last successful sync:
 | Git | `git ls-remote` on the tracked branch — one ref advertisement, no objects | A fetch |
 | Notion | One `search`, newest edit first, one result | A page read per page, 350 ms apart |
 | Confluence | One CQL search over the same spaces the run indexes: how many pages there are, and when the newest was touched | A listing plus a body read per page |
+| Documentation site | Two requests — `robots.txt`, then the `sitemap.xml`: how many URLs it lists, and the newest `<lastmod>` among them | A conditional GET per page |
 | Local, Upload | The file count and the newest modification time | Reading and hashing every file |
 
 A check that cannot answer — a directory that has gone, a rate-limited API, a network that is down —
@@ -1124,6 +1186,9 @@ src/services/sources/         one driver per type: local, git (isomorphic-git), 
 src/services/sources/confluence.ts        the Confluence Cloud driver: the page tree, the incremental skip, and the probe
 src/services/sources/confluence-client.ts the REST surface it talks to, as an interface plus an HTTPS implementation, and the one place CQL is built
 src/services/sources/confluence-render.ts storage format → the plain XHTML `doc-types/html.ts` converts; it does not convert HTML itself
+src/services/sources/web.ts               the documentation-site driver: the three entry formats, the five ceilings, and the sitemap probe
+src/services/sources/web-client.ts        its one HTTP surface — serial, paced, inside a deadline — as an interface plus an implementation
+src/services/sources/web-entry.ts         sitemap, llms.txt, robots.txt, links and URL→path, as pure functions over strings
 src/services/flavors.ts       content-type transforms (Obsidian wikilinks, Notion export ids) and which of them expand one file into many
 src/services/openapi.ts       OpenAPI/Swagger → one Markdown document per operation: $ref resolution, cycle and depth guards, derived paths
 src/services/doc-types/       one transform per file extension, all of them producing Markdown: html, docx, csv, pdf
@@ -1203,6 +1268,8 @@ test/integration/support/     the testcontainers harness, and the schema project
 test/integration/fixtures/    a pre-v3 `0.1` schema derived from history, and the frozen DDL ladder the migrations replaced
 test/fixtures/doc-types/      one real file per supported type, plus the malformed ones a refusal has to survive
 test/support/confluence-stub.ts a `ConfluenceClient` answering out of an array, shared by the unit and the integration suite so one page tree drives both
+test/support/web-stub.ts      a `WebClient` answering out of a map of URL → response, recording every request so a ceiling can be asserted by what was *not* fetched
+test/fixtures/web/            a sitemap, a sitemap index, an `llms.txt` and a `robots.txt`, each carrying the awkward case the parser has to survive
 eval/corpus/                  the fixture corpus the golden set asks about: 15 English and 11 Turkish pages, written for this
 eval/golden.jsonl             48 questions, one JSON object per line, each naming the file that answers it
 eval/README.md                what a good question is, how to add one, and why the failures are kept

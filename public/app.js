@@ -47,13 +47,14 @@ const TOOLS = [
   { name: 'read_document', text: 'Markdown of one indexed file from the database — a whole page, or one section by its heading.' },
 ];
 
-const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN', confluence: 'CNF' };
+const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN', confluence: 'CNF', web: 'WEB' };
 const SOURCE_TITLE = {
   local: 'Local directory',
   git: 'Git repository',
   upload: 'Uploaded files',
   notion: 'Notion workspace',
   confluence: 'Confluence site',
+  web: 'Documentation site',
 };
 
 /**
@@ -80,7 +81,22 @@ const SOURCE_KINDS = {
     title: 'Confluence',
     subtitle: 'Confluence Cloud. Pages in the chosen spaces are rendered to Markdown, nested the way they are in the wiki.',
   },
+  web: {
+    type: 'web',
+    title: 'Documentation site',
+    subtitle: 'A published site, read from its sitemap.xml, its llms.txt or a crawl. Public pages only — there is no login.',
+  },
 };
+
+/**
+ * The file types a kind is *for*, checked when an operator picks its tab on a new source.
+ *
+ * Same trap `syncFlavorFields` guards, from the other direction: the form opens with `.md` and `.mdx`
+ * checked, a documentation site serves `.html`, and a web source saved with the defaults would fetch
+ * every page and then drop all of them at the indexer's extension filter — reporting a successful run
+ * over an empty index.
+ */
+const KIND_EXTENSIONS = { web: ['html', 'md', 'txt'] };
 
 /**
  * The source types that hold a credential, and the form field each one's token is typed into.
@@ -91,6 +107,17 @@ const SOURCE_KINDS = {
  */
 const SECRET_FIELD = { git: 'secret', notion: 'notionSecret', confluence: 'confluenceSecret' };
 const CREDENTIALLED = new Set(Object.keys(SECRET_FIELD));
+
+/**
+ * Types whose driver has a `test()`, which is what the Test button actually calls.
+ *
+ * It used to be spelled `CREDENTIALLED`, because until the web source every testable type was one
+ * holding a token and the two sets were the same set. They are not any more: a documentation site has
+ * no credential and is the type where "does this entry point hold anything?" is the most worth asking
+ * *before* a run walks somebody else's server. Asking the same question two ways is how the button
+ * ends up offered on a type that has nothing to answer it.
+ */
+const TESTABLE = new Set([...Object.keys(SECRET_FIELD), 'web']);
 const CLEAR_SECRET_ROWS = () => ({
   git: $('#git-clear-secret-row'),
   notion: $('#notion-clear-secret-row'),
@@ -703,7 +730,7 @@ function renderSources(project, busy) {
     // `status === 'error'` hid exactly that case, which made the refusal a silent failure of its own.
     const warned = !failed && Boolean(s.lastError);
     const actions = [
-      mayEdit && CREDENTIALLED.has(s.type)
+      mayEdit && TESTABLE.has(s.type)
         ? el('button', {
             type: 'button',
             class: 'ghost small',
@@ -793,6 +820,7 @@ function sourceOrigin(s) {
   if (s.type === 'git') return c.url || '—';
   if (s.type === 'notion') return (c.rootIds || []).length ? `${c.rootIds.length} root page(s)` : 'everything shared with the integration';
   if (s.type === 'confluence') return c.baseUrl || '—';
+  if (s.type === 'web') return c.entryUrl || '—';
   return `${s.name}/`;
 }
 
@@ -1122,7 +1150,7 @@ function setKind(kind) {
   syncFlavorFields();
   $('#upload-mode-row').hidden = !(isUploadKind(kind) && editing);
   $('#index-label').textContent = isUploadKind(kind) ? 'Index after upload' : 'Index now';
-  $('#source-test').hidden = !(editing && CREDENTIALLED.has(meta.type));
+  $('#source-test').hidden = !(editing && TESTABLE.has(meta.type));
   // Clearing a token is only offered where one is actually stored.
   for (const type of CREDENTIALLED) {
     const row = clearSecretRow(type);
@@ -1215,6 +1243,10 @@ function fillSourceForm(s) {
   if (s.type === 'notion') {
     srcForm.elements.rootIds.value = (c.rootIds || []).join('\n');
     if (s.hasSecret) srcForm.elements.notionSecret.placeholder = 'unchanged — type to replace';
+  }
+  if (s.type === 'web') {
+    srcForm.elements.entryUrl.value = c.entryUrl || '';
+    srcForm.elements.entryKind.value = c.entryKind || 'auto';
   }
   if (s.type === 'confluence') {
     srcForm.elements.confluenceUrl.value = c.baseUrl || '';
@@ -1396,6 +1428,11 @@ function configForKind(kind) {
   if (type === 'notion') {
     const ids = parseNotionIds(srcForm.elements.rootIds.value);
     return { rootIds: ids, ...common };
+  }
+  if (type === 'web') {
+    const entryUrl = srcForm.elements.entryUrl.value.trim();
+    if (!entryUrl) throw new Error('An entry point URL is required');
+    return { entryUrl, entryKind: srcForm.elements.entryKind.value, ...common };
   }
   if (type === 'confluence') {
     const baseUrl = srcForm.elements.confluenceUrl.value.trim().replace(/\/+$/, '');
@@ -1579,7 +1616,14 @@ async function runUpload(project, source, mode) {
 
 // ---------- source dialog wiring ----------
 
-for (const tab of srcTabs) tab.addEventListener('click', () => setKind(tab.dataset.kind));
+for (const tab of srcTabs)
+  tab.addEventListener('click', () => {
+    setKind(tab.dataset.kind);
+    // Only on a tab the operator just pressed, and only while adding: an existing source is filled
+    // from its own stored extensions and must keep them.
+    const wanted = KIND_EXTENSIONS[tab.dataset.kind];
+    if (wanted && !srcUi.editing) for (const box of srcForm.querySelectorAll('input[name="ext"]')) box.checked = wanted.includes(box.value);
+  });
 srcForm.elements.url.addEventListener('input', updateProviderHint);
 for (const box of srcForm.querySelectorAll('input[name="ext"]')) box.addEventListener('change', () => renderQueue());
 $('#source-cancel').addEventListener('click', closeSourceDialog);

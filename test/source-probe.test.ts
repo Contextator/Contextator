@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Db } from '../src/db/client.js';
 import type { DocumentSourceRow } from '../src/db/schema.js';
 import { LocalDriver } from '../src/services/sources/local.js';
+import { WEB_LIMIT_DEFAULTS } from '../src/config.js';
 
 /**
  * **The probe has to count the files the run would index — all of them.**
@@ -39,7 +40,7 @@ function driver(extensions: string[], flavor: string): LocalDriver {
   return new LocalDriver(sourceRow(extensions, flavor), {
     db: null as unknown as Db,
     log,
-    config: { ALLOWED_DOC_ROOTS: [path.dirname(root)], DATA_DIR: root, SECRET_KEY: '0'.repeat(64), IGNORE_GLOBS: [] },
+    config: { ...WEB_LIMIT_DEFAULTS, ALLOWED_DOC_ROOTS: [path.dirname(root)], DATA_DIR: root, SECRET_KEY: '0'.repeat(64), IGNORE_GLOBS: [] },
   });
 }
 

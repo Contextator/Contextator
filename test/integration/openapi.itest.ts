@@ -12,7 +12,7 @@ import cookie from '@fastify/cookie';
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { adminRoutes } from '../../src/admin/routes.js';
-import { loadConfig } from '../../src/config.js';
+import { loadConfig, WEB_LIMIT_DEFAULTS } from '../../src/config.js';
 import type { AppContext } from '../../src/context.js';
 import { SetupGate } from '../../src/services/auth/setup.js';
 import { SlidingWindow } from '../../src/services/rate-limit.js';
@@ -113,6 +113,7 @@ function makeIndexer(db: Db, root: string, overrides: { MAX_SPEC_FILE_BYTES?: nu
     db,
     embeddings,
     config: {
+      ...WEB_LIMIT_DEFAULTS,
       ALLOWED_DOC_ROOTS: [path.dirname(root)],
       IGNORE_GLOBS: [],
       CHUNK_MAX_TOKENS: 256,
