@@ -85,6 +85,13 @@
       "when": 1789810889638,
       "tag": "0011_audit_panel_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1789994536185,
+      "tag": "0012_mcp_auth_default_token",
+      "breakpoints": true
     }
   ]
 }

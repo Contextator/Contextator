@@ -18,8 +18,8 @@ import {
   satisfies,
 } from '../src/auth/policy.js';
 import { checkRequest } from '../src/auth/authorize.js';
-import { mcpAccessDecision } from '../src/mcp/access.js';
-import type { McpAuthMode } from '../src/db/schema.js';
+import { mcpAccessDecision, mcpAccessStatus } from '../src/mcp/access.js';
+import { DEFAULT_MCP_AUTH, type McpAuthMode } from '../src/db/schema.js';
 import type { Principal, ProjectAccess } from '../src/auth/types.js';
 
 const token: Principal = { kind: 'token', role: 'root', userId: null, username: 'ADMIN_TOKEN', mustChangePassword: false };
@@ -324,6 +324,46 @@ describe('the MCP endpoint, which the table above does not cover', () => {
       expect(requiredRole('POST', url)).toBeNull();
       expect(PUBLIC_ROUTES.has(url)).toBe(false);
     }
+  });
+});
+
+/**
+ * **What a project is when nobody has decided anything about it yet**
+ * ([ADR-0065](../.ssot/ADR.md#adr-0065), PRD.md FR-510).
+ *
+ * The rows above say what each mode does; these say which of them a project is *born* in, which is a
+ * separate claim and the one that decides what an operator who reads no documentation ends up
+ * running. It is asserted through `DEFAULT_MCP_AUTH` rather than against the literal `'token'`,
+ * because the constant is what the column default and the creation path are both built from: move it
+ * and these assertions move with it, which is exactly what makes them catch the move.
+ *
+ * Both directions, because only the pair means anything. The refusal alone would pass on a build that
+ * refused everything, and the acceptance alone would pass on the previous default.
+ */
+describe('the mode a project is born in', () => {
+  it('is not the mode that answers anybody who can reach the URL', () => {
+    expect(DEFAULT_MCP_AUTH).not.toBe('open');
+  });
+
+  it('refuses a request that carries no credential, with a 401', () => {
+    const verdict = mcpAccessDecision(DEFAULT_MCP_AUTH, { kind: 'anonymous' });
+    expect(verdict).toBe('token_missing');
+    expect(mcpAccessStatus(verdict as Exclude<typeof verdict, 'ok'>)).toBe(401);
+  });
+
+  it('refuses a bearer that resolves to nothing, with a 401', () => {
+    const verdict = mcpAccessDecision(DEFAULT_MCP_AUTH, { kind: 'unknown' });
+    expect(verdict).toBe('token_invalid');
+    expect(mcpAccessStatus(verdict as Exclude<typeof verdict, 'ok'>)).toBe(401);
+  });
+
+  it('answers the first token minted with the project', () => {
+    expect(mcpAccessDecision(DEFAULT_MCP_AUTH, { kind: 'bearer' })).toBe('ok');
+  });
+
+  it('answers an account that is a member of it', () => {
+    expect(mcpAccessDecision(DEFAULT_MCP_AUTH, { kind: 'account', access: 'viewer' })).toBe('ok');
+    expect(mcpAccessDecision(DEFAULT_MCP_AUTH, { kind: 'account', access: 'none' })).toBe('not_a_member');
   });
 });
 

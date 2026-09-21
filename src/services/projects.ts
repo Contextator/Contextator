@@ -2,6 +2,7 @@ import { asc, eq } from 'drizzle-orm';
 import { PROJECT_NAME_RE } from '../config.js';
 import type { Db } from '../db/client.js';
 import { projects, type ProjectRow } from '../db/schema.js';
+import { createMcpToken, type McpTokenView } from './auth/mcp-tokens.js';
 import { resolveProjectRoot } from './fs-scan.js';
 
 export class ValidationError extends Error {
@@ -64,6 +65,44 @@ export async function createProject(db: Db, input: { name: string; rootPath?: st
     if (isUniqueViolation(err)) throw new ConflictError(`A project named "${name}" already exists`);
     throw err;
   }
+}
+
+/** The name the first token is given, so the list says where it came from without anybody typing it. */
+export const FIRST_TOKEN_NAME = 'First token';
+
+export interface CreatedProject {
+  project: ProjectRow;
+  /**
+   * The first token in the clear, or `null` when the project was born in a mode that needs none. The
+   * secret is here once and never again: the database holds its sha256, exactly as for a token minted
+   * later from the MCP access panel.
+   */
+  mcpToken: { secret: string; view: McpTokenView } | null;
+}
+
+/**
+ * The dashboard's creation path: a project, and the credential to reach it with
+ * ([ADR-0065](../../.ssot/ADR.md#adr-0065), PRD.md FR-510).
+ *
+ * A project is born `token` (`DEFAULT_MCP_AUTH` in `src/db/schema.ts`), which means it is born
+ * unreachable until somebody mints one — so the minting happens here, in the same call, rather than
+ * being a second step an operator discovers by finding their new endpoint answering `401`. The two
+ * halves are what make the new default cost nothing: the endpoint is closed from its first second, and
+ * the operator leaves the creation dialog holding the one thing that opens it.
+ *
+ * **Separate from `createProject` on purpose.** The import path restores a project's *recorded* mode
+ * from the manifest and mints nothing, because a token minted there would be a credential nobody asked
+ * for attached to a project whose real credentials live on the instance it came from.
+ */
+export async function createProjectWithFirstToken(
+  db: Db,
+  input: { name: string; rootPath?: string; createdBy: string | null },
+  allowedRoots: string[],
+): Promise<CreatedProject> {
+  const project = await createProject(db, input, allowedRoots);
+  if (project.mcpAuth !== 'token') return { project, mcpToken: null };
+  const { token, view } = await createMcpToken(db, project.id, FIRST_TOKEN_NAME, input.createdBy);
+  return { project, mcpToken: { secret: token, view } };
 }
 
 /** Deletes a project and (via ON DELETE CASCADE) all of its documents and chunks. */

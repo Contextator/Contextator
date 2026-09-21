@@ -22,7 +22,16 @@ services:
     container_name: contextator
     restart: unless-stopped
     ports:
-      - "${PORT:-3444}:3444"
+      # Published on the loopback interface only (ADR-0065). The dashboard and every MCP endpoint are
+      # reachable at http://127.0.0.1:3444 on this machine and from nowhere else — a container started
+      # on a laptop or an office server does not appear on the network it happens to be plugged into.
+      # To publish it on the network deliberately, set CONTEXTATOR_BIND=0.0.0.0 in .env (see
+      # .env.example), and put a TLS-terminating reverse proxy or a VPN in front of it.
+      #
+      # This is the *host* side of the mapping and nothing else: HOST inside the container stays
+      # 0.0.0.0 below, because a process listening only on the container's own loopback is a process
+      # Docker cannot forward a published port to at all.
+      - "${CONTEXTATOR_BIND:-127.0.0.1}:${PORT:-3444}:3444"
     env_file:
       - path: .env
         required: false

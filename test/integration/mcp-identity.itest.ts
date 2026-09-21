@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { mcpTokens, projectMembers, projects, type ProjectRow, type UserRow } from '../../src/db/schema.js';
 import { createMcpToken, issueMcpCredential } from '../../src/services/auth/mcp-tokens.js';
+import { createProjectWithFirstToken } from '../../src/services/projects.js';
 import { setMemberRole } from '../../src/services/auth/memberships.js';
 import { createUser, updateUser } from '../../src/services/auth/users.js';
 import { applySchema, createTestDatabase, dropTestDatabase, type TestDatabase } from './support/postgres.js';
@@ -269,5 +270,49 @@ describe('the query log still learns which credential asked', () => {
     // that the request resolved to *this row* at all, which is what `search_queries.mcp_token_id`
     // records ([ADR-0047](../../.ssot/ADR.md#adr-0047)).
     expect((await probe(theirs, memberToken)).status).toBe(200);
+  });
+});
+
+/**
+ * **The door a project is born behind** ([ADR-0065](../../.ssot/ADR.md#adr-0065), PRD.md FR-510).
+ *
+ * `test/permissions.test.ts` proves the rule; this proves the product. The project below is created
+ * through the call the dashboard's own `POST /api/projects` makes, and the two requests are the two
+ * an operator makes next — one with nothing, one with the string the creation dialog just showed
+ * them. Both, because only the pair says anything: the `401` alone would pass on a build that
+ * refused everybody, and the `200` alone would have passed before any of this.
+ *
+ * The third assertion is the one an existing installation depends on, and it is the negative
+ * space of the change: a project that is already `open` is not touched by any of it.
+ */
+describe('a project created the way the product creates one', () => {
+  it('is born requiring a token, and is handed that token once', async () => {
+    const created = await createProjectWithFirstToken(database.db, { name: 'born-closed', createdBy: null }, [root]);
+
+    expect(created.project.mcpAuth).toBe('token');
+    expect(created.mcpToken?.secret).toMatch(/^ctxm_[0-9a-f]{64}$/);
+    // The database kept a hash and a prefix, never the string above — the same shape as a token
+    // minted later from the panel, because it is the same code that minted it.
+    const [stored] = await database.db.select().from(mcpTokens).where(eq(mcpTokens.projectId, created.project.id));
+    expect(stored.kind).toBe('static');
+    expect(stored.prefix.startsWith(created.mcpToken?.secret.slice(0, 13) ?? 'x')).toBe(true);
+  });
+
+  it('answers 401 to a request carrying nothing, and 200 to the token it was created with', async () => {
+    const created = await createProjectWithFirstToken(database.db, { name: 'born-closed-two', createdBy: null }, [root]);
+
+    const anonymous = await probe(created.project);
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.body).toContain('requires an MCP token');
+    // RFC 6750 and RFC 9728, exactly as for any other `token` project: the refusal says what would
+    // satisfy it rather than only that it was refused.
+    expect(anonymous.challenge).toContain('Bearer realm="born-closed-two"');
+
+    expect((await probe(created.project, created.mcpToken?.secret)).status).toBe(200);
+  });
+
+  it('leaves a project that is already open answering anonymously, as its clients are configured for', async () => {
+    await setMode(theirs, 'open');
+    expect((await probe(theirs)).status).toBe(200);
   });
 });

@@ -1,0 +1,17 @@
+-- A project is born requiring a token (ADR-0065, PRD.md FR-510) — and that is the whole of this file.
+--
+-- **One line, and the line deliberately does not carry an UPDATE.** `SET DEFAULT` changes what an
+-- INSERT that names no `mcp_auth` writes, and touches no row that already exists. An installation
+-- upgraded through this migration keeps every project exactly as its operator left it: a project
+-- configured `open` answers anonymous requests after the upgrade for the same reason it did before it,
+-- because the agents configured against that project were configured against that answer. A migration
+-- that closed them would cut every one of those connections silently, in a deployment nobody asked to
+-- be a change of access — which is why the correction is to the birth value and to nothing else.
+--
+-- ADR-0003 made `open` the default for backward compatibility with installations that predated the
+-- `mcp_auth` column. That reason expired at the `0.1.0` release: there is no installed base to keep
+-- compatible, and the default is now simply the state a project spends its first minutes in.
+--
+-- The value is not written twice: `DEFAULT_MCP_AUTH` in `src/db/schema.ts` is what drizzle-kit read to
+-- emit this statement, and `npm run db:check` is what keeps the two saying the same thing.
+ALTER TABLE "projects" ALTER COLUMN "mcp_auth" SET DEFAULT 'token';

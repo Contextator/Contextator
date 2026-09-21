@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { installAuth } from '../auth/plugin.js';
+import { installAuth, requirePrincipal } from '../auth/plugin.js';
 import { METRICS_ROUTE } from '../auth/policy.js';
 import type { Principal } from '../auth/types.js';
 import { MAX_SEARCH_LIMIT, SYNC_MAX_INTERVAL_MINUTES, SYNC_MIN_INTERVAL_MINUTES, WEBHOOK_VERIFICATION_WINDOW_MINUTES } from '../config.js';
@@ -16,7 +16,15 @@ import { type MetricsSnapshot, renderPrometheus } from '../services/metrics.js';
 import { PasswordPolicyError } from '../services/passwords.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { listProjectsForUser, membershipMap } from '../services/auth/memberships.js';
-import { ConflictError, NotFoundError, ValidationError, createProject, deleteProject, getProjectById, listProjects } from '../services/projects.js';
+import {
+  ConflictError,
+  NotFoundError,
+  ValidationError,
+  createProjectWithFirstToken,
+  deleteProject,
+  getProjectById,
+  listProjects,
+} from '../services/projects.js';
 import { SOURCE_VERSION_MAX_LENGTH, countSourcesByProject, createSource, slugifySourceName } from '../services/sources.js';
 import { ImportRefusedError } from '../services/transfer/manifest.js';
 import { scanFrom, selectionFrom } from '../services/vector-store.js';
@@ -379,7 +387,14 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
 
   app.post('/api/projects', async (req, reply) => {
     const body = CreateProjectBody.parse(req.body);
-    const project = await createProject(db, { name: body.name, rootPath: body.rootPath }, config.ALLOWED_DOC_ROOTS);
+    // A project is born requiring a token ([ADR-0065](../../.ssot/ADR.md#adr-0065)) and is handed its
+    // first one in the same call — `secret` below is the only time that string exists outside the
+    // client it is about to be pasted into.
+    const { project, mcpToken } = await createProjectWithFirstToken(
+      db,
+      { name: body.name, rootPath: body.rootPath, createdBy: requirePrincipal(req).userId },
+      config.ALLOWED_DOC_ROOTS,
+    );
     if (body.rootPath) {
       // Legacy shape: the directory becomes the project's first (local) source.
       const name =
@@ -405,7 +420,13 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       );
       if (body.index) indexer.enqueue(project.id);
     }
-    return reply.code(201).send(toView(req, project, undefined, new Map([[project.id, body.rootPath ? 1 : 0]])));
+    return reply.code(201).send({
+      ...toView(req, project, undefined, new Map([[project.id, body.rootPath ? 1 : 0]])),
+      // Beside the project rather than inside it, because it is not a property of the project: it is
+      // an event that happened once, at creation, and the response is the only place it is readable.
+      // `null` when the project was born in a mode that needs no token.
+      mcpToken: mcpToken ? { token: mcpToken.view, secret: mcpToken.secret } : null,
+    });
   });
 
   app.get('/api/projects/:id/status', async (req) => {
