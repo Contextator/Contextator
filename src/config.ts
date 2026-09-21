@@ -539,7 +539,21 @@ export const EnvSchema = z
 
     // What a web source may do to a site it does not own ([ADR-0070](../.ssot/ADR.md#adr-0070))
     /**
-     * The most pages one web source will fetch in a run.
+     * The most pages one web source will **fetch** in a run.
+     *
+     * **Fetched, not indexed.** A page that was refused — a JavaScript-rendered shell with no text in
+     * it, a 404 from a stale sitemap, a connection that failed — was served by somebody's web server
+     * all the same, and this counted only the pages the product *kept* until that was measured: at a
+     * ceiling of three, a site of twenty refusable pages was fetched in full and the run reported no
+     * ceiling at all, because by its own counting it had never reached one. A ceiling that only counts
+     * successes bounds a badly behaved site least, which is backwards. A URL that never left this
+     * process — one `robots.txt` disallowed, one on another host — is not charged.
+     *
+     * It bounds the nested sitemaps a `<sitemapindex>` names as well, and deliberately with the same
+     * number rather than a sixth setting: `WEB_MAX_DEPTH` bounds that tree's height and nothing bounded
+     * its width, so an index naming fifty thousand children is fifty thousand requests before a single
+     * page URL exists for the page ceiling to charge. A source allowed to fetch N pages may read at
+     * most N listings to find them.
      *
      * **A ceiling before a feature.** The `web` driver is the first one that walks a host this product
      * does not own, on a timer, with no account and no quota to stop it; every other source type is

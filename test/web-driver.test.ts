@@ -286,12 +286,102 @@ describe('the five ceilings, each of them enforced rather than documented', () =
     };
     for (let i = 0; i < 20; i++) pages[`https://docs.example.com/p${i}`] = { body: page(`P${i}`, '<p>Body.</p>') };
 
-    const { web } = driver(pages, {}, { WEB_MAX_PAGES: 5 });
+    const { web, stub } = driver(pages, {}, { WEB_MAX_PAGES: 5 });
     const result = await web.sync();
 
     expect(await written()).toHaveLength(5);
+    expect(stub.urls.filter((u) => /\/p\d+$/.test(u))).toHaveLength(5);
     expect(result.note).toContain('STOPPED AT THE 5-PAGE CEILING (WEB_MAX_PAGES)');
-    expect(result.note).toContain('the rest are NOT indexed');
+    expect(result.note).toContain('is NOT indexed');
+  });
+
+  /**
+   * **The ceiling counts what the site served, not what this product kept — and it was measured the
+   * other way round before this case existed.**
+   *
+   * With the ceiling counting only *indexed* pages, a site whose pages this driver refuses is a site
+   * with no ceiling at all: twenty pages of a JavaScript-rendered docs app were all twenty fetched at
+   * a ceiling of three, and the run said nothing, because by its own counting it had never reached
+   * one. The worse the site behaved, the less the ceiling bounded — exactly backwards for the one
+   * setting that exists to protect a host nobody here has an account with. `.env.example` and
+   * `README.md` both say *fetch*; this is the case that holds the code to the word.
+   */
+  it('counts the pages it fetched and not the pages it kept, so a site of refusals still stops', async () => {
+    const pages: Record<string, StubPage> = {
+      'https://docs.example.com/robots.txt': { status: 404 },
+      'https://docs.example.com/sitemap.xml': {
+        contentType: 'application/xml',
+        body: `<urlset>${Array.from({ length: 20 }, (_, i) => `<url><loc>https://docs.example.com/p${i}</loc></url>`).join('')}</urlset>`,
+      },
+    };
+    // Every page is a single-page-app shell: fetched from the site, refused here, indexed never.
+    for (let i = 0; i < 20; i++) {
+      pages[`https://docs.example.com/p${i}`] = { body: '<!doctype html><html><body><div id="root"></div><script>boot()</script></body></html>' };
+    }
+
+    const { web, stub } = driver(pages, {}, { WEB_MAX_PAGES: 3 });
+    const result = await web.sync();
+
+    // Three page requests, not twenty. The whole of the claim.
+    expect(stub.urls.filter((u) => /\/p\d+$/.test(u))).toHaveLength(3);
+    // The whole run, counted: robots.txt, the sitemap, three pages, and the two the trailing probe
+    // spends. Twenty-two of the twenty-five requests the old counting would have made are not made.
+    expect(stub.requestCount).toBe(7);
+    expect(await written()).toEqual([]);
+    // And it says so, rather than stopping quietly: a run that indexed nothing and reported success
+    // hides from the operator that the site is not indexed.
+    expect(result.note).toContain('STOPPED AT THE 3-PAGE CEILING (WEB_MAX_PAGES)');
+    expect(result.note).toContain('3 page(s) were fetched, 0 of them could be indexed');
+  });
+
+  it('charges the ceiling for a page that answered 404, because the site served it too', async () => {
+    const { web, stub } = driver(
+      {
+        'https://docs.example.com/robots.txt': { status: 404 },
+        'https://docs.example.com/sitemap.xml': {
+          contentType: 'application/xml',
+          body: `<urlset>${Array.from({ length: 10 }, (_, i) => `<url><loc>https://docs.example.com/gone${i}</loc></url>`).join('')}</urlset>`,
+        },
+      },
+      {},
+      { WEB_MAX_PAGES: 2 },
+    );
+    // Nothing is registered for the ten URLs, so the stub answers 404 the way a site does for a link
+    // that rotted — a stale sitemap, which is the ordinary version of the case above.
+    const result = await web.sync();
+
+    expect(stub.urls.filter((u) => u.includes('/gone'))).toHaveLength(2);
+    expect(result.note).toContain('STOPPED AT THE 2-PAGE CEILING (WEB_MAX_PAGES)');
+  });
+
+  it('does not charge the ceiling for a URL it decided not to fetch', async () => {
+    // A robots.txt-disallowed URL and an off-site one never left this process, so spending ceiling on
+    // them would make a well-behaved run stop early — the opposite error to the one above, and just
+    // as wrong.
+    const { web, stub } = driver(
+      {
+        'https://docs.example.com/robots.txt': { contentType: 'text/plain', body: 'User-agent: *\nDisallow: /internal/\n' },
+        'https://docs.example.com/sitemap.xml': {
+          contentType: 'application/xml',
+          body:
+            '<urlset>' +
+            '<url><loc>https://docs.example.com/internal/a</loc></url>' +
+            '<url><loc>https://other.example.com/b</loc></url>' +
+            '<url><loc>https://docs.example.com/real1</loc></url>' +
+            '<url><loc>https://docs.example.com/real2</loc></url>' +
+            '</urlset>',
+        },
+        'https://docs.example.com/real1': { body: page('One', '<p>Body.</p>') },
+        'https://docs.example.com/real2': { body: page('Two', '<p>Body.</p>') },
+      },
+      {},
+      { WEB_MAX_PAGES: 2 },
+    );
+    const result = await web.sync();
+
+    expect(await written()).toEqual(['real1.html', 'real2.html']);
+    expect(stub.urls).not.toContain('https://docs.example.com/internal/a');
+    expect(result.note).not.toContain('CEILING');
   });
 
   it('does not fetch a path robots.txt disallows, and counts what it skipped', async () => {
@@ -349,6 +439,69 @@ describe('the five ceilings, each of them enforced rather than documented', () =
     // depth 0 is the entry, so a ceiling of 2 reaches p0, p1 and p2 and stops.
     expect(await written()).toEqual(['docs/p0.html', 'docs/p1.html', 'docs/p2.html']);
     expect(result.note).toContain('STOPPED AT THE 2-LEVEL DEPTH CEILING (WEB_MAX_DEPTH)');
+  });
+
+  /**
+   * **`robots.txt` covers a sitemap, and the nested-sitemap walk was the one place that did not ask.**
+   *
+   * The same class of defect the page ceiling had, in the other setting: a limit that does not cover
+   * everything it is documented to cover. A `<sitemapindex>` child is a URL on somebody's site like
+   * any other, and a site that disallows the part of its tree one sits in had it fetched anyway.
+   */
+  it('does not fetch a nested sitemap robots.txt disallows', async () => {
+    const { web, stub } = driver({
+      'https://docs.example.com/robots.txt': { contentType: 'text/plain', body: 'User-agent: *\nDisallow: /private/\n' },
+      'https://docs.example.com/sitemap.xml': {
+        contentType: 'application/xml',
+        body:
+          '<sitemapindex>' +
+          '<sitemap><loc>https://docs.example.com/private/sitemap-internal.xml</loc></sitemap>' +
+          '<sitemap><loc>https://docs.example.com/sitemap-guide.xml</loc></sitemap>' +
+          '</sitemapindex>',
+      },
+      'https://docs.example.com/private/sitemap-internal.xml': {
+        contentType: 'application/xml',
+        body: '<urlset><url><loc>https://docs.example.com/private/secret</loc></url></urlset>',
+      },
+      'https://docs.example.com/sitemap-guide.xml': {
+        contentType: 'application/xml',
+        body: '<urlset><url><loc>https://docs.example.com/guide/ok</loc></url></urlset>',
+      },
+      'https://docs.example.com/guide/ok': { body: page('OK', '<p>Body.</p>') },
+    });
+    const result = await web.sync();
+
+    expect(stub.urls).not.toContain('https://docs.example.com/private/sitemap-internal.xml');
+    expect(stub.urls).toContain('https://docs.example.com/sitemap-guide.xml');
+    expect(await written()).toEqual(['guide/ok.html']);
+    expect(result.note).toContain('skipped by robots.txt');
+  });
+
+  /**
+   * **Depth bounds a tree's height and nothing bounded its width.**
+   *
+   * A `<sitemapindex>` naming fifty thousand children at one level is fifty thousand requests before a
+   * single page URL is yielded, so the page ceiling — which only advances as pages are fetched — is
+   * never consulted. The same number is reused rather than a sixth setting: a source allowed to fetch
+   * N pages may read at most N listings to find them.
+   */
+  it('stops reading nested sitemaps at the same ceiling, and says the site was never fully listed', async () => {
+    const pages: Record<string, StubPage> = {
+      'https://docs.example.com/robots.txt': { status: 404 },
+      'https://docs.example.com/sitemap.xml': {
+        contentType: 'application/xml',
+        body: `<sitemapindex>${Array.from({ length: 30 }, (_, i) => `<sitemap><loc>https://docs.example.com/s${i}.xml</loc></sitemap>`).join('')}</sitemapindex>`,
+      },
+    };
+    // Every child is a valid but empty sitemap, so not one page URL is ever yielded and the page
+    // ceiling can never be the thing that stops this.
+    for (let i = 0; i < 30; i++) pages[`https://docs.example.com/s${i}.xml`] = { contentType: 'application/xml', body: '<urlset/>' };
+
+    const { web, stub } = driver(pages, {}, { WEB_MAX_PAGES: 4 });
+    const result = await web.sync();
+
+    expect(stub.urls.filter((u) => /\/s\d+\.xml$/.test(u))).toHaveLength(4);
+    expect(result.note).toContain('STOPPED AT THE 4-LISTING CEILING (WEB_MAX_PAGES)');
   });
 });
 
@@ -460,7 +613,7 @@ describe('what a second run costs, and what the probe decides', () => {
     const second = driver(pages);
     const result = await second.web.sync();
     expect(second.stub.requests.find((r) => r.url.endsWith('/a'))?.validators).toEqual({ etag: 'W/"a1"', lastModified: undefined });
-    expect(result.note).toContain('0 fetched, 2 unchanged');
+    expect(result.note).toContain('2 page(s) fetched, 0 written, 2 unchanged');
     expect(await written()).toEqual(['a.html', 'b.html']);
   });
 
@@ -612,7 +765,7 @@ describe('an llms.txt whose links are Markdown, which is the point of the format
 
     const result = await web.sync();
     expect(await written()).toEqual(['guide/install.md', 'guide/overview.html']);
-    expect(result.note).toContain('llms: 2 fetched');
+    expect(result.note).toContain('llms: 2 page(s) fetched, 2 written');
   });
 
   it('skips a link that points at another host, and counts it', async () => {

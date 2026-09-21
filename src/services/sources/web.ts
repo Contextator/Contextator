@@ -224,7 +224,7 @@ export class WebDriver implements SourceDriver {
 
     try {
       if (kind === 'crawl') await this.crawl(run, response, fetch);
-      else await this.fetchListing(run, this.listedUrls(kind, response), fetch);
+      else await this.fetchListing(run, this.listedUrls(kind, response, robots, run), fetch);
     } catch (err) {
       // **A spent budget stops the run; it does not fail it.** Everything already written stays, the
       // removal pass below is skipped — pages this run never reached are not deletions — and the note
@@ -259,6 +259,13 @@ export class WebDriver implements SourceDriver {
     // this source the chance to cost exactly one ([ADR-0048](../../../.ssot/ADR.md#adr-0048)). It is
     // `probe()` itself rather than a token computed from what was just listed, so that both sides of
     // the scheduler's comparison are the same function of the same source.
+    //
+    // **On a fresh client, which is what makes `client()`'s "two separate budgets" true here.** That
+    // holds by construction when the scheduler probes — a driver is built per call — and did not hold
+    // for this one call, the only place a probe follows a sync inside one driver. The run that most
+    // needs a token is the long one, and a long one is exactly the run whose budget is gone: sharing
+    // it meant the source stopped minting tokens at the moment cheap scheduling was worth most.
+    this.built = undefined;
     const token = await this.probe().catch((err: unknown) => {
       this.ctx.log.warn({ err, source: this.source.name }, 'web probe failed after a successful sync; the next scheduled run will not be skipped');
       return null;
@@ -277,7 +284,7 @@ export class WebDriver implements SourceDriver {
    * because it answers the same question a crawl's depth does: how far from the entry point this
    * source is willing to go.
    */
-  private async *listedUrls(kind: Exclude<EntryKind, 'crawl'>, entry: WebResponse): AsyncGenerator<ListedUrl> {
+  private async *listedUrls(kind: Exclude<EntryKind, 'crawl'>, entry: WebResponse, robots: RobotsRules, run: RunState): AsyncGenerator<ListedUrl> {
     const body = entry.body ?? '';
     if (kind === 'llms') {
       const listed = parseLlmsTxt(body, entry.url);
@@ -303,6 +310,26 @@ export class WebDriver implements SourceDriver {
         for (const child of doc.sitemaps) {
           if (seen.has(child.url) || new URL(child.url).host !== host) continue;
           seen.add(child.url);
+          // **A sitemap is a URL on somebody's site like any other, and `robots.txt` covers it.**
+          // Nothing else in this walk asked, so a site that disallows the part of its tree a nested
+          // sitemap sits in had that sitemap fetched anyway — the setting not covering everything it
+          // is documented to cover, which is the same defect the page ceiling had.
+          const childPath = new URL(child.url);
+          if (!robots.allows(`${childPath.pathname}${childPath.search}`)) {
+            run.skippedByRobots++;
+            continue;
+          }
+          // **The breadth of a sitemap index is bounded too, by the same number.** `WEB_MAX_DEPTH`
+          // bounds how deep the tree goes and nothing bounded how wide: an index naming fifty
+          // thousand children at one level is fifty thousand requests before a single page URL is
+          // yielded, so the page ceiling — which only advances as pages are fetched — would never be
+          // consulted. A source allowed to fetch N pages may read at most N listings to find them;
+          // that is one number to reason about rather than a sixth setting for a case nobody has met.
+          if (run.listingsRead >= run.maxListings) {
+            run.stopAtListingCeiling();
+            return;
+          }
+          run.listingsRead++;
           const response = await this.client().get(child.url);
           if (response.status === 200 && response.body && looksLikeSitemap(response.body)) next.push({ url: response.url, xml: response.body });
           else this.ctx.log.warn({ child: child.url, status: response.status }, 'nested sitemap could not be read; its pages are not indexed');
@@ -381,6 +408,10 @@ export class WebDriver implements SourceDriver {
 
     const known = previous.pages[url];
     let response: WebResponse;
+    // **Counted here and not where a page is written**, because this is the line the site pays for.
+    // A prefetched entry page counts too: it is a response this driver already took from the host,
+    // and the request that decided the entry format is the request that fetched it.
+    run.fetched++;
     if (args.prefetched) response = args.prefetched;
     else {
       // A validator is only worth sending while the file it belongs to is still on disk; otherwise a
@@ -535,6 +566,18 @@ class RunState {
   unchanged = 0;
   skippedByRobots = 0;
   offSite = 0;
+  /**
+   * Page requests this run has put to the site — **what `WEB_MAX_PAGES` actually bounds**.
+   *
+   * It counts a page that was written, a page that answered 304, a page that was refused for having
+   * no text in it, a page that answered 404 and a page whose connection failed, because every one of
+   * those is a request somebody's web server served. It does **not** count a URL `robots.txt`
+   * disallowed or one that was off-site: those are decisions taken here, before anything left the
+   * process, and charging the ceiling for them would make a well-behaved run stop early.
+   */
+  fetched = 0;
+  /** Nested sitemaps read, which is the other thing a listing walk can ask a site for without limit. */
+  listingsRead = 0;
   /** In-scope links found at the depth ceiling and therefore never queued. */
   beyondDepth = 0;
   readonly failures: string[] = [];
@@ -543,6 +586,11 @@ class RunState {
   private stopReason: string | null = null;
 
   constructor(private readonly maxPages: number) {}
+
+  /** The same number as the page ceiling, read as "listings a run may read to find its pages". */
+  get maxListings(): number {
+    return this.maxPages;
+  }
 
   /** Pages this run holds, whether it fetched them or kept them on a 304. */
   get indexed(): number {
@@ -554,8 +602,19 @@ class RunState {
     return this.stopReason !== null;
   }
 
+  /**
+   * Whether the page ceiling is reached — **measured on what was fetched, not on what was kept.**
+   *
+   * This counted `indexed` until it was measured: with the ceiling at 3, a site of twenty pages whose
+   * pages this driver refuses — a JavaScript-rendered docs site, a host answering 404 for everything
+   * a stale sitemap lists — was fetched in full, twenty pages in twenty-four requests, and the run
+   * said nothing about a ceiling because by its own counting it had never reached one. A ceiling that
+   * only counts successes is not a ceiling: the worse the site behaves, the less it bounds, which is
+   * exactly backwards. `.env.example` and `README.md` both say *fetch*, and this is the sentence they
+   * were describing.
+   */
   full(): boolean {
-    return this.indexed >= this.maxPages;
+    return this.fetched >= this.maxPages;
   }
 
   stop(reason: string): void {
@@ -569,8 +628,16 @@ class RunState {
    */
   stopAtPageCeiling(): void {
     this.stop(
-      `STOPPED AT THE ${this.maxPages}-PAGE CEILING (WEB_MAX_PAGES): this site holds more pages than that and the rest are NOT indexed. ` +
+      `STOPPED AT THE ${this.maxPages}-PAGE CEILING (WEB_MAX_PAGES): ${this.fetched} page(s) were fetched, ${this.indexed} of them could be indexed, ` +
+        'and the rest of this site is NOT indexed. ' +
         'Point this source at a narrower part of the site, split it across several sources, or raise the ceiling.',
+    );
+  }
+
+  stopAtListingCeiling(): void {
+    this.stop(
+      `STOPPED AT THE ${this.maxListings}-LISTING CEILING (WEB_MAX_PAGES): this sitemap index names more nested sitemaps than one run may read, ` +
+        'so part of this site was never even listed and is NOT indexed. Point this source at one of the nested sitemaps instead, or raise the ceiling.',
     );
   }
 
@@ -599,7 +666,13 @@ class RunState {
   }
 
   note(kind: EntryKind, removed: number, requests: number, respectsRobots: boolean): string {
-    const parts = [`${kind}: ${this.written} fetched, ${this.unchanged} unchanged, ${removed} removed, ${requests} request(s)`];
+    // `written` used to be printed as "fetched", which was the same confusion the ceiling itself was
+    // built on: a page this driver refused was fetched and did not appear in that number. The two are
+    // now separate words because they are separate quantities, and the gap between them is the thing
+    // an operator reading a run of a badly behaved site most needs to see.
+    const parts = [
+      `${kind}: ${this.fetched} page(s) fetched, ${this.written} written, ${this.unchanged} unchanged, ${removed} removed, ${requests} request(s) in all`,
+    ];
     if (this.skippedByRobots > 0) parts.push(`${this.skippedByRobots} skipped by robots.txt`);
     else if (!respectsRobots) parts.push('robots.txt not consulted (WEB_RESPECT_ROBOTS=0)');
     if (this.offSite > 0) parts.push(`${this.offSite} off-site URL(s) skipped`);

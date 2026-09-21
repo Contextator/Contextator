@@ -395,8 +395,40 @@ describe('the page ceiling, against a site that has more pages than it', () => {
       config: { ...config, WEB_MAX_PAGES: 1, WEB_REQUEST_DELAY_MS: 0 },
     });
 
+    requested = [];
     const result = await tight.sync();
     expect(result.note).toContain('STOPPED AT THE 1-PAGE CEILING (WEB_MAX_PAGES)');
-    expect(result.note).toContain('the rest are NOT indexed');
+    expect(result.note).toContain('is NOT indexed');
+
+    // **The assertion that prices the ceiling is the site's own request log, not the run's summary.**
+    // The sitemap lists four pages and the real server served exactly one of them: a ceiling asserted
+    // only through the message the driver wrote about itself would have passed while the driver
+    // fetched all four, which is precisely how this defect survived its first round of tests.
+    expect(requested.filter((p) => p.startsWith('/guide/') || p.startsWith('/internal/'))).toHaveLength(1);
+  });
+
+  it('counts a refused page against the ceiling, because the server served it either way', async () => {
+    // `/guide/app.html` is the single-page-app shell: fetched, refused, never indexed. With the
+    // ceiling at 2 and the sitemap ordered install → overview → runbook → app, a run that charged
+    // only for what it kept would walk past it and reach the end of the list.
+    const [shell] = await database.db
+      .insert(documentSources)
+      .values({
+        projectId: project.id,
+        type: 'web',
+        name: 'shell',
+        config: { entryUrl: `${origin}/sitemap.xml`, entryKind: 'sitemap', extensions: ['html'] },
+      })
+      .returning();
+
+    requested = [];
+    const result = await new WebDriver(shell, {
+      db: database.db,
+      log: silentLogger,
+      config: { ...config, WEB_MAX_PAGES: 2, WEB_REQUEST_DELAY_MS: 0 },
+    }).sync();
+
+    expect(requested.filter((p) => p.startsWith('/guide/') || p.startsWith('/internal/'))).toHaveLength(2);
+    expect(result.note).toContain('STOPPED AT THE 2-PAGE CEILING (WEB_MAX_PAGES)');
   });
 });

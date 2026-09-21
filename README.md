@@ -135,7 +135,7 @@ The name is the mount point, so it cannot change after creation; everything else
 | **Upload** | Files, whole folders (structure preserved) and archives — `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.rar` — unpacked on the server. Add to the existing files or replace them all. | Nothing to sync; the files live under `DATA_DIR` |
 | **Notion** | Every page shared with an internal integration (or the configured root pages/databases and their descendants), rendered to Markdown, nested by parent page. | The Notion API, re-rendering only pages whose `last_edited_time` changed |
 | **Confluence** | **Cloud only** (see below). Every page in the chosen spaces — or in every space the account can read — rendered from Confluence's storage format to Markdown, nested the way it is in the wiki: `<name>/<space>/<parent page>/<page>.md`. | The Confluence REST API, re-rendering only pages whose version number changed |
-| **Documentation site** | **Public pages only** (see below). A published site, found through its `sitemap.xml`, its `llms.txt` or a crawl from one start URL, written under the site's own paths: `<name>/guide/install.html`, converted to Markdown by the same transform `.html` files use. | Conditional GETs against the site (`ETag`/`Last-Modified`), inside the crawl ceilings below |
+| **Documentation site** | **Public pages only** (see below). A published site, found through its `sitemap.xml`, its `llms.txt` or a crawl from one start URL, written under the site's own paths: `<name>/guide/install.html`, converted to Markdown by the same transform `.html` files use. | Conditional GETs against the site (`ETag`/`Last-Modified`), inside the five crawl ceilings below |
 
 Sources are synced at the start of every index run, one after another; a source that fails to sync is
 reported on its own row and the others still index. **Sync** on a row and **Re-index** in the header
@@ -225,11 +225,23 @@ default is argued), and reaching any of them **stops the run and says which** on
 
 | Setting | Default | What it bounds |
 |---------|---------|----------------|
-| `WEB_MAX_PAGES` | 1000 | Pages one source fetches in a run |
+| `WEB_MAX_PAGES` | 1000 | Pages one source **fetches** in a run; also nested sitemaps read |
 | `WEB_MAX_DEPTH` | 10 | Links followed from the entry point; also `<sitemapindex>` nesting |
 | `WEB_REQUEST_DELAY_MS` | 500 | Minimum gap between two requests — requests are never concurrent |
 | `WEB_CRAWL_BUDGET_MS` | 900000 | Total time one run may spend fetching |
 | `WEB_RESPECT_ROBOTS` | 1 | Whether `robots.txt` is read and obeyed |
+
+**`WEB_MAX_PAGES` counts pages fetched, not pages indexed**, and the difference is the point of the
+setting. A page that was refused — a JavaScript-rendered shell with no text in it, a 404 from a stale
+sitemap, a connection that failed — was still served by somebody's web server. Counting only what this
+product kept would mean the worse a site behaves the less the ceiling bounds, which is exactly
+backwards for the one setting that exists to protect a host nobody here has an account with. A URL that
+was never requested is never charged: one `robots.txt` disallowed, or one on another host, is a
+decision taken locally before anything leaves the process.
+
+The same number also bounds how many nested sitemaps one run may read. `WEB_MAX_DEPTH` bounds how deep
+a `<sitemapindex>` tree goes and nothing bounded how wide, so an index naming fifty thousand children is
+fifty thousand requests before a single page URL exists for the page ceiling to charge.
 
 `robots.txt` is obeyed by default, its `Crawl-delay` **raises** the pacing when it asks for more than
 the instance's, and a `robots.txt` that cannot be read at all — a 5xx, a connection error — fails the
