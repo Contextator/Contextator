@@ -37,6 +37,27 @@ import { sourceRoutes } from './sources-routes.js';
 import { transferRoutes } from './transfer-routes.js';
 import { usersRoutes } from './users-routes.js';
 
+/**
+ * `postgres://user:secret@db.example.com:5432/contextator` → `db.example.com:5432/contextator`.
+ *
+ * Host, port and database name, so `/api/health` can say *which* database is up rather than only
+ * that one is ([ADR-0069](../../.ssot/ADR.md#adr-0069)) — and never the credential, which is in the
+ * same string and is why this is not `config.DATABASE_URL` handed out as it stands. A connection
+ * string in libpq's `host=… dbname=…` form parses as no URL at all; that is answered with `null`
+ * rather than with a guess, and `mode` beside it still says which topology this is.
+ */
+function databaseTarget(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname) return null;
+    const database = parsed.pathname.replace(/^\//, '');
+    return `${parsed.hostname}:${parsed.port || '5432'}${database ? `/${database}` : ''}`;
+  } catch {
+    return null;
+  }
+}
+
 const CreateProjectBody = z.object({
   name: z.string().min(1).max(63),
   /** Legacy convenience: creates the project with one local source pointing here. */
@@ -179,6 +200,19 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     const detail = {
       ...base,
       uptimeSec: Math.round((Date.now() - ctx.startedAt) / 1000),
+      /**
+       * Which database `db` above is reporting on ([ADR-0069](../../.ssot/ADR.md#adr-0069)). `up` is
+       * not the whole answer once an instance can be pointed somewhere else, because an operator
+       * restoring a backup, or debugging a container that came back on its own volume, is asking
+       * *which* database answered.
+       *
+       * `embedded` and `external` are read off `DATABASE_URL` because that is exactly what the
+       * entrypoint decides on: with it set, no PostgreSQL is started inside the container and this
+       * is the server named there; without it, the connection parameters are the libpq `PG*`
+       * variables the entrypoint set to the container's own PostgreSQL. A source checkout run with
+       * `npm run dev` says `external`, which is also true of it — the database is not in here.
+       */
+      database: { mode: config.DATABASE_URL ? 'external' : 'embedded' },
       embeddings: {
         /** Provider-qualified id as stored on each project (`projects.embedding_model`). */
         id: embeddings.id,
@@ -228,6 +262,9 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
 
     return {
       ...detail,
+      // The address waits for an administrator, beside the filesystem paths and for the same reason:
+      // it says where this instance's content lives. `mode` above does not, and stays at member level.
+      database: { ...detail.database, target: databaseTarget(config.DATABASE_URL) },
       allowedDocRoots: config.ALLOWED_DOC_ROOTS,
       dataDir: config.DATA_DIR,
       secretKeyConfigured: Boolean(config.SECRET_KEY),

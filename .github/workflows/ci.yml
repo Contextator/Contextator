@@ -206,6 +206,47 @@ jobs:
           printf '%s\n' "$output"
           printf '%s\n' "$output" | grep -qF 'Usage: npm run reset-password -- <username>'
 
+      # The second target of the same Dockerfile, built on every pull request rather than only on a
+      # release tag (ADR-0069). A stage that is only ever built when a version is being cut is a
+      # stage that breaks in between and is discovered by the release — and `slim` shares the `build`
+      # stage with the image above, so the marginal cost here is one runtime layer set, not a build.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: slim
+          push: false
+          load: true
+          tags: contextator:ci-slim
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The defect this forecloses is the worst one the slim image can have: started with no
+      # DATABASE_URL it must die saying what it wanted, not look for a postmaster that was never
+      # installed and not sit there waiting. Asserted by running it — with no database, no volumes
+      # and no environment, which is precisely the mistake being guarded against.
+      - name: The slim image refuses to start without a DATABASE_URL
+        run: |
+          set -euo pipefail
+          if docker run --rm contextator:ci-slim > refusal.log 2>&1; then
+            cat refusal.log
+            echo "::error::the slim image started with no DATABASE_URL instead of refusing to"
+            exit 1
+          fi
+          cat refusal.log
+          grep -qF 'no database configured' refusal.log
+          grep -qF 'DATABASE_URL=postgres://' refusal.log
+
+      # …and it is the *application* that is missing a database, not the application that is missing.
+      # `slim` assembles its /app from the same build stage the full image does, so the two
+      # assertions above this pair apply to it unchanged and are made against it here.
+      - name: The migrations and the recovery tool are inside the slim image too
+        run: |
+          set -o pipefail
+          output=$(docker run --rm --entrypoint sh contextator:ci-slim -c 'ls /app/drizzle/meta; npm run reset-password 2>&1' || true)
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep -qF '_journal.json'
+          printf '%s\n' "$output" | grep -qF 'Usage: npm run reset-password -- <username>'
+
   eval:
     name: Retrieval evaluation
     runs-on: ubuntu-latest

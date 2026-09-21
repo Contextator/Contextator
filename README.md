@@ -117,7 +117,45 @@ Building the image from source instead of pulling it:
 **Tags.** `latest` is the newest stable release; `0.1` tracks the latest patch inside the `0.1.x`
 line; `0.1.0` is one exact, immutable release. Pin a versioned tag for anything you upgrade
 deliberately by setting `CONTEXTATOR_TAG` in `.env` (e.g. `CONTEXTATOR_TAG=0.1.0`) and running
-`docker compose up -d` — this reads at every start, not only the first.
+`docker compose up -d` — this reads at every start, not only the first. Every one of those tags has
+a `-slim` twin — `latest-slim`, `0.1-slim`, `0.1.0-slim` — which is the section below.
+
+### Bringing your own PostgreSQL
+
+The single container above is the default and most installations should stay on it: there is nothing
+to provision, nothing to connect, and one thing to back up. Some installations already have a
+PostgreSQL, though — a managed service, an HA pair, a server whose backups and monitoring somebody
+else operates — and for those, **one line of `.env` moves the database out of the container**:
+
+```bash
+DATABASE_URL=postgres://user:password@db.example.com:5432/contextator
+docker compose up -d
+```
+
+The container then starts no PostgreSQL of its own. It connects to that server, creates and migrates
+its schema there at startup, and the `contextator-pgdata` volume stays empty. Nothing else changes —
+same image, same command, same everything above.
+
+For the application *without* a PostgreSQL inside the image at all, use the `-slim` tag with the
+compose file that comes with it. It carries no database, so `DATABASE_URL` is required rather than
+optional; started without one it exits and says so:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/Contextator/Contextator/main/docker-compose.slim.yml
+docker compose -f docker-compose.slim.yml up -d
+```
+
+What that server has to be, either way: **PostgreSQL 16 or newer**, with **pgvector installed or
+installable by the role in the URL** — the first start runs `CREATE EXTENSION IF NOT EXISTS vector`,
+which on a managed service usually means a role such as `rds_superuser` or `cloudsqlsuperuser`, or
+enabling the extension on the instance beforehand — and **a database of its own**, which may be
+empty.
+
+And what changes hands with it: **backups are yours.** `docker exec contextator pg_dump …` dumps the
+*embedded* database and reaches nothing else, so on this topology everything the database holds —
+projects, documents, embeddings, accounts, MCP tokens, the audit and query logs — is covered by
+whatever covers that server, and by nothing this image ships. The `contextator-data` volume needs
+backing up on both topologies: an uploaded source's content is not in the database at all.
 
 ## Document sources
 
@@ -489,6 +527,13 @@ PostgreSQL initialised and indexed fine on a `C:/…` directory. Named volumes r
 the database on Docker Desktop; if `initdb` ever reports permission errors on a host directory, switch
 that mount back to a volume.
 
+**Everything from here to the end of this section is about the embedded PostgreSQL.** On an
+installation that set `DATABASE_URL` ([Bringing your own PostgreSQL](#bringing-your-own-postgresql))
+there is no cluster in the container to dump: the three commands below reach nothing, the `pgdata`
+volume is empty, and backing that database up — and restoring it, and watching it — is whatever
+already covers the server it runs on. The two bullets below about what a dump does *not* contain
+apply on both topologies, and so does the paragraph about `/data`.
+
 PostgreSQL listens on `127.0.0.1` inside the container only and is not published. Inspect, back up and
 restore it through the container:
 
@@ -804,8 +849,8 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 |----------|---------|-------|
 | `PORT` / `HOST` | `3444` / `0.0.0.0` | |
 | `CONTEXTATOR_BIND` | `127.0.0.1` | **Which host interface `docker compose` publishes the port on** (docker-compose only; the app never reads it). The default answers on this machine and nowhere else. `0.0.0.0` publishes on every interface — do that with a reverse proxy or a VPN in front, and set `TRUST_PROXY` and `PUBLIC_BASE_URL` to match. `HOST` above stays `0.0.0.0` either way: it is the interface *inside* the container, and Docker cannot forward a published port to a process listening only on the container's own loopback |
-| `DATABASE_URL` | `postgres://contextator:contextator@localhost:5432/contextator` | Local development only. The container ignores it and talks to its embedded PostgreSQL via `PG*` variables set by the entrypoint |
-| `POSTGRES_PASSWORD` | `contextator` | Password of the embedded PostgreSQL (loopback only), applied when the cluster is first created |
+| `DATABASE_URL` | – | **Where the database is.** Empty — the shipped default — means the PostgreSQL embedded in the image, which the entrypoint starts and points the app at through the libpq `PG*` variables. Set, the container starts no PostgreSQL at all and connects to the server you named: PostgreSQL 16+, pgvector installed or installable by that role, a database that may be empty. See [Bringing your own PostgreSQL](#bringing-your-own-postgresql) — including that its backups become yours. The same line is what `npm run dev` on the host reads |
+| `POSTGRES_PASSWORD` | `contextator` | Password of the embedded PostgreSQL (loopback only), applied when the cluster is first created. Unread once `DATABASE_URL` is set |
 | `CONTEXTATOR_PGDATA_VOLUME` / `CONTEXTATOR_MODELS_VOLUME` | `contextator-pgdata` / `contextator-models` | Docker volume names (docker-compose only) |
 | `CONTEXTATOR_PGDATA_PATH` / `CONTEXTATOR_MODELS_PATH` | – | Absolute host directories used instead of the volumes (docker-compose only) |
 | `ALLOWED_DOC_ROOTS` | `/docs` | Comma-separated. Project directories **must** live inside one of these (path-escape protection). On Windows dev: `C:/path/to/docs` |
@@ -1031,6 +1076,8 @@ older than `AUDIT_LOG_RETENTION_DAYS` are swept on the same quarter-hourly timer
 ```bash
 docker compose -f docker-compose.dev.yml up -d   # PostgreSQL + pgvector only, on localhost:5432
 cp .env.example .env
+# DATABASE_URL=postgres://contextator:contextator@localhost:5432/contextator   (ships empty; the
+#   container reads the same line, so a value here would point an installation at your laptop)
 # ALLOWED_DOC_ROOTS=C:/Users/me/docs     (Windows)  or  /home/me/docs
 # DATA_DIR=.data                         (git checkouts, uploads and Notion pulls; gitignored)
 # SECRET_KEY=$(openssl rand -hex 32)     (only needed for private repositories / Notion)
@@ -1149,6 +1196,7 @@ scripts/cla/main.ts           what the workflow runs — the environment, the tw
 test/*.test.ts                unit suite — pure functions, no database, no Docker (`npm test`)
 test/cla-*.test.ts            the licence gate: its judgements, the whole flow against fakes, and the GitHub clients against an injected fetch
 test/dockerhub-description.test.ts  DOCKERHUB.md fits Docker Hub's limit, its links are absolute, and it names the image
+test/container-topology.test.ts     the packaging contract: `full` is still the default target, `slim` still carries no database, and neither compose file has gone back to forcing DATABASE_URL empty
 test/product-facts.test.ts    public/product-facts.json is still what the generator produces from today's code
 test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
@@ -1167,10 +1215,11 @@ SECURITY.md                   how to report a vulnerability, and what is documen
 CODE_OF_CONDUCT.md            Contributor Covenant 2.1
 LICENSE                       AGPL-3.0-or-later, verbatim; copied into the image and served at /license.txt
 docs/demo/                    sample documentation (English, Turkish, MDX)
-Dockerfile                    one image: postgres:16 + pgvector + Node 22 + the app
-docker/entrypoint.sh          starts PostgreSQL, then the app; stops both in order on SIGTERM
-docker-compose.yml            the `contextator` container and its volumes
+Dockerfile                    two images over one build: `full` (postgres:16 + pgvector + Node 22 + the app, the default target) and `slim` (the app alone)
+docker/entrypoint.sh          starts PostgreSQL unless DATABASE_URL names one, then the app; stops both in order on SIGTERM
+docker-compose.yml            the `contextator` container and its volumes; embedded PostgreSQL, or an external one when .env names it
 docker-compose.build.yml      overlay for docker-compose.yml that builds the image from source instead of pulling it
+docker-compose.slim.yml       the `-slim` image against a PostgreSQL you operate — a whole file rather than an overlay, because the pgdata mount has to be absent
 docker-compose.dev.yml        PostgreSQL only, for `npm run dev`
 DOCKERHUB.md                  what Docker Hub shows on the repository page; not this README, which is well past its 25,000-character limit
 biome.jsonc                   the one formatter and linter, and why each rule is set as it is
@@ -1192,6 +1241,16 @@ as in the official image. Once `pg_isready` succeeds on `127.0.0.1:5432` it star
 as the unprivileged `node` user with the libpq `PG*` variables pointing at that server. `SIGTERM` stops
 the app first and then PostgreSQL (fast shutdown); if either process dies the other is stopped and the
 container exits so `restart: unless-stopped` can bring the pair back.
+
+`DATABASE_URL` is what makes that paragraph conditional. Set, the entrypoint skips all of it: no
+postmaster is started, the `PG*` variables are deliberately left unset so the URL is the only answer
+to *where is the database*, and the container supervises one process instead of two. The startup log
+names which of the two it chose — with the credentials cut out of the connection string — and
+`/api/health` says the same thing as `database.mode` to a signed-in caller, with the host, port and
+database name beside it for an administrator. The `-slim` image is this path with the PostgreSQL
+removed from the image as well: it sets `CONTEXTATOR_EMBEDDED_POSTGRES=0`, and started without a
+`DATABASE_URL` it exits immediately naming the variable rather than searching for a database that
+was never built into it.
 
 ### How the schema evolves
 

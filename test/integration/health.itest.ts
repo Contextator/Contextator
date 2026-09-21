@@ -31,7 +31,7 @@ let app: FastifyInstance;
 let sessionToken: string;
 
 /** Everything `/api/health` reads, and hollow stand-ins for everything adminRoutes only registers. */
-async function buildApi(db: Db): Promise<FastifyInstance> {
+async function buildApi(db: Db, configOverrides: Record<string, unknown> = {}): Promise<FastifyInstance> {
   const instance = Fastify({ logger: false });
   await instance.register(cookie);
   const ctx = {
@@ -52,6 +52,9 @@ async function buildApi(db: Db): Promise<FastifyInstance> {
       ADMIN_TOKEN: 'a-token-for-a-test',
       METRICS_TOKEN: 'a-scrape-token-long-enough',
       METRICS_PUBLIC: false,
+      // Absent by default, which is the embedded topology: the entrypoint sets the libpq PG*
+      // variables instead and `DATABASE_URL` being unset is what says so ([ADR-0069](../../.ssot/ADR.md#adr-0069)).
+      ...configOverrides,
     },
     db,
     log: silentLogger,
@@ -131,6 +134,36 @@ describe('while the database answers', () => {
     const res = await app.inject({ method: 'GET', url: '/api/health' });
     expect(res.json()).not.toHaveProperty('chunkBudget');
     expect(res.json()).not.toHaveProperty('embeddings');
+  });
+
+  /**
+   * **Which database is up, not only that one is** ([ADR-0069](../../.ssot/ADR.md#adr-0069)). The
+   * two topologies differ by exactly one thing the process can see — whether `DATABASE_URL` is set,
+   * because the entrypoint starts the embedded PostgreSQL only when it is not — so both cases are
+   * asserted here rather than the shape being taken on trust from one of them.
+   */
+  describe('names the database it is talking to', () => {
+    it('says embedded when the connection came from the libpq PG* variables', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/health', cookies: { [SESSION_COOKIE]: sessionToken } });
+      expect(res.json().database).toEqual({ mode: 'embedded', target: null });
+    });
+
+    it('says external, and names host/port/database without the credential, when DATABASE_URL did', async () => {
+      const external = await buildApi(appDb.db, { DATABASE_URL: 'postgres://someone:a-secret@db.example.com:6432/contextator' });
+      try {
+        const res = await external.inject({ method: 'GET', url: '/api/health', cookies: { [SESSION_COOKIE]: sessionToken } });
+        expect(res.json().database).toEqual({ mode: 'external', target: 'db.example.com:6432/contextator' });
+        // The password is in the same string the target was derived from; it must not travel with it.
+        expect(res.payload).not.toContain('a-secret');
+      } finally {
+        await external.close();
+      }
+    });
+
+    it('keeps the topology out of the anonymous shape, beside everything else about this machine', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/health' });
+      expect(res.json()).not.toHaveProperty('database');
+    });
   });
 });
 

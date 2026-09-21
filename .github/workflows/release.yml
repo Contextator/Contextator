@@ -104,6 +104,50 @@ jobs:
           printf '%s\n' "$output"
           printf '%s\n' "$output" | grep -qF 'Usage: npm run reset-password -- <username>'
 
+      # The second image, verified on the same builder and before the same credentials arrive
+      # (ADR-0069). It shares the `build` stage with the one above, so what is built here is one more
+      # set of runtime layers over work this job has already done.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: slim
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: contextator:verify-slim
+          cache-from: type=gha
+
+      # `slim` carries no PostgreSQL, so the one thing it must never do is start anyway and wait.
+      # A published image that does that is a support case per installation; this is the gate the
+      # tag cannot be pushed past.
+      - name: The slim image refuses to start without a DATABASE_URL
+        run: |
+          set -euo pipefail
+          if docker run --rm contextator:verify-slim > refusal.log 2>&1; then
+            cat refusal.log
+            echo "::error::the slim image started with no DATABASE_URL instead of refusing to"
+            exit 1
+          fi
+          cat refusal.log
+          grep -qF 'no database configured' refusal.log
+          grep -qF 'DATABASE_URL=postgres://' refusal.log
+
+      # The three assertions above, made against the other image: same version, same migrations,
+      # same recovery tool. They are one step here rather than three because the /app tree they read
+      # is copied from the same build stage — what is being checked is that the copy happened.
+      - name: The slim image carries the same version, migrations and recovery tool
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          image_version=$(docker run --rm --entrypoint node contextator:verify-slim -p "require('/app/package.json').version")
+          echo "tag: ${GITHUB_REF_NAME} (${tag_version})  slim image: ${image_version}"
+          [ "$tag_version" = "$image_version" ]
+          output=$(docker run --rm --entrypoint sh contextator:verify-slim -c 'ls /app/drizzle /app/drizzle/meta; npm run reset-password 2>&1' || true)
+          printf '%s\n' "$output"
+          printf '%s\n' "$output" | grep -qF '0000_baseline.sql'
+          printf '%s\n' "$output" | grep -qF '_journal.json'
+          printf '%s\n' "$output" | grep -qF 'Usage: npm run reset-password -- <username>'
+
       # Only reached once every check above has passed. `docker/login-action` is pinned to a commit
       # and not a tag for the same reason `cla.yml` pins the actions in its own token-holding job: it
       # is handed `DOCKERHUB_TOKEN`, a personal access token scoped read/write/delete against the
@@ -127,6 +171,26 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
+      # The same three rules with `-slim` on the end of every one of them (ADR-0069): `0.1.0-slim`,
+      # `0.1-slim`, `latest-slim`. `suffix` with `onlatest=true` is what puts it on the raw `latest`
+      # tag as well as on the two semver ones — without it `latest` would publish the slim image
+      # under the tag a plain `docker pull contextator/contextator` resolves to, which is the one
+      # mistake in this file that would be felt by every installation at once.
+      #
+      # A pre-release is excluded from `latest-slim` by the same `contains(github.ref_name, '-')`
+      # condition, evaluated once and reused, so the two tag sets cannot drift apart on that either.
+      - name: Docker metadata (slim)
+        id: meta-slim
+        uses: docker/metadata-action@v6
+        with:
+          images: contextator/contextator
+          flavor: |
+            suffix=-slim,onlatest=true
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
       - uses: docker/build-push-action@v7
         with:
           context: .
@@ -137,22 +201,39 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Both architectures here too. A target that only ever built on the runner's own amd64 would
+      # hide an arm64 defect until somebody on an arm64 host pulled it — and this stage installs its
+      # own `gosu` and `tini` from Debian, which is exactly the kind of thing that is per-architecture.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: slim
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: "${{ steps.meta-slim.outputs.tags }}"
+          labels: "${{ steps.meta-slim.outputs.labels }}"
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Publish summary
         env:
           # Interpolated into the environment rather than straight into the script, matching the
           # standard `cla.yml` sets: a value this workflow does not fully control (here, computed by
           # an action rather than typed by a stranger) still does not reach a shell through `${{ }}`.
           TAGS: "${{ steps.meta.outputs.tags }}"
+          SLIM_TAGS: "${{ steps.meta-slim.outputs.tags }}"
         run: |
           {
             echo "## Published \`contextator/contextator\`"
             echo
             echo '```'
             printf '%s\n' "$TAGS"
+            printf '%s\n' "$SLIM_TAGS"
             echo '```'
             echo
             echo 'Pull it:'
             echo '```bash'
             echo "docker pull contextator/contextator:${GITHUB_REF_NAME#v}"
+            echo "docker pull contextator/contextator:${GITHUB_REF_NAME#v}-slim   # no embedded PostgreSQL; needs DATABASE_URL"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
