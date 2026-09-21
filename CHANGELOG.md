@@ -10,6 +10,32 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Added
+
+- A source's **Language** setting is back on the dashboard, and `turkish` is one of the values it
+  offers. Naming a source's language makes PostgreSQL stem it, so a Turkish question asking about
+  `anahtarı` now finds a page that says `anahtarın`. Changing the setting re-indexes that source, as
+  changing its content type already did.
+
+### Changed
+
+- **Keyword search now speaks every language in a project at once.** It used to parse every question
+  in one configuration chosen for the whole instance, which meant a source that named a language was
+  indexed one way and asked another, and contributed nothing to the keyword half at all. Each source
+  is now read in its own configuration and one search reaches all of them. A project that names no
+  language on any source is unaffected, down to the ordering of its results.
+
+### Fixed
+
+- Documentation said PostgreSQL has no Turkish configuration. It has one, and Turkish sources were
+  being indexed without stemming because of that claim.
+
+### Upgrading
+
+- No action, and nothing is re-indexed. The first start after upgrading rewrites the keyword index of
+  any source that names a language, in batches, from text already in the database — no re-embedding
+  and no rebuild. Searches keep working while it runs.
+
 ## [0.1.0] - 2026-09-19
 
 First published release. `0.1.0` describes what the product does, not what changed to get there.

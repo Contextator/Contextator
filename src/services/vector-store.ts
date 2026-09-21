@@ -339,11 +339,18 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
         -- below is split** ([ADR-0064](../../.ssot/ADR.md#adr-0064)). The probe has no choice: a lexeme
         -- produced by turkish is a different string from the one simple produces and can only ever
         -- match chunks written by turkish, so it has to be counted against those. The threshold does
-        -- have a choice, and dividing it too was measured and costs: with one threshold per
-        -- configuration the English half of the eval corpus is judged against half the denominator it
-        -- used to be, more of its terms are pruned as common, and en-api-01 falls from the fifth
-        -- result to the sixth — the only question either variant moves, and a loss the whole change is
-        -- gated against. sum(count(*)) over () is the project's total off this one grouped scan.
+        -- have a choice, and it is a close one rather than an obvious one, so what decided it is
+        -- written down. Dividing the threshold by configuration judges each half of a corpus against
+        -- half the denominator it used to have, and that moves 17 of the 92 eval questions — not a
+        -- rounding. It wins at rank 1 (recall@1 58 → 60, heading@1 57 → 59) and it is level at both
+        -- gated metrics (recall@5 66, heading@5 64). What it loses is elsewhere and is the reason it
+        -- is not taken: gatedWithAnswer goes 0 → 1, because x-en-tr-03 drops from the first result
+        -- to the second and under the relevance floor with it, so the product would answer "no good
+        -- match" to a question whose answer it had in hand. ADR-0045 reports that number and never
+        -- gates on it, which is exactly why a statement must not trade against it quietly. The second
+        -- reason is that LEXICAL_TERM_MAX_DOCUMENT_FREQUENCY was swept against a project's total chunk
+        -- count; halving its denominator re-tunes a measured constant without re-measuring it.
+        -- sum(count(*)) over () is the project's total off this one grouped scan.
         --
         -- What that leaves open is a term that is in every chunk of one small stemmed source inside a
         -- large project: it is under the project's threshold and survives. That is the same tolerance

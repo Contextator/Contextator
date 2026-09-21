@@ -1287,15 +1287,47 @@ control this change needed and the reason the table above has a trustworthy "bef
 **`recall@5` does not move, and on this corpus it cannot.** Every one of the thirteen Turkish
 `recall@5` misses is cross-lingual — a Turkish question whose answer is an English page — which is the
 limit [ADR-0052](../../.ssot/ADR.md#adr-0052) closed and which this change does not touch, and none of
-them moves. Within-Turkish `recall@5` was **36 of 36 before the change**. That ceiling was tested
-rather than assumed: forty-two further Turkish questions were written against this corpus while looking
-for headroom — full sentences, short keyword fragments of the kind an agent actually sends, and
-questions deliberately seeded with vocabulary from a competing Turkish page — and the dense half
-answered **every one of the forty-two at rank 1** before the change. Eleven Turkish documents is not
-enough for within-Turkish file-level retrieval to fail, so this corpus cannot price a Turkish retrieval
-change at `recall@5`. It can price it one level down, where the metric is the right *section*: the
-Turkish question about `serileştirme` against a page that says `serileştirmesinden` goes from not
-returning the right section in ten results to returning it first.
+them moves. Within-Turkish `recall@5` was **36 of 36 before the change**. Eleven Turkish documents is
+not enough for within-Turkish file-level retrieval to fail, so this corpus cannot price a Turkish
+retrieval change at `recall@5`. It can price it one level down, where the metric is the right
+*section*: the Turkish question about `serileştirme` against a page that says `serileştirmesinden` goes
+from not returning the right section in ten results to returning it first.
+
+### The ceiling, measured rather than asserted
+
+`eval/probes/turkish-ceiling-2026-09-21.jsonl` holds **46 further Turkish questions** written against
+this corpus while looking for headroom: full sentences, short keyword fragments of the kind an agent
+actually sends, and questions deliberately seeded with vocabulary from a competing Turkish page. Every
+one of them asks about a word the page carries in another inflection.
+
+**They are not in `eval/golden.jsonl` and must not be**, because adding questions moves every
+denominator in this file and the numbers above would stop being comparable with the runs before them
+(ADR-0034, ADR-0044). To reproduce, append them for one run and put the file back:
+
+```bash
+cp eval/golden.jsonl /tmp/golden.keep
+cat eval/probes/turkish-ceiling-2026-09-21.jsonl >> eval/golden.jsonl
+EVAL_TEXT_SEARCH_CONFIG=simple npm run eval   # before
+npm run eval                                  # after
+cp /tmp/golden.keep eval/golden.jsonl
+```
+
+| the 46 probe questions | before | after |
+|---|--:|--:|
+| `recall@5` | **46 / 46** | 45 / 46 |
+| answered at rank 1 | 44 | 41 |
+| `heading@5` | 45 / 46 | 45 / 46 |
+
+**Forty-six of forty-six inside the top five before anything changed, forty-four of them first.** That
+is the ceiling, and it is why this change cannot be priced at `recall@5` here — not an argument, a run.
+
+**And one of them gets worse, which is recorded because it is the only negative signal anywhere in this
+change.** `probe-p10` — *"Bir kapsamın diğerini kapsamadığı durum hangisi?"* — falls from the second
+result to the seventh. Two others move a place, in the same direction. This is weak evidence and is not
+treated as more: these questions were written in a batch to hunt for headroom rather than to the
+standard `eval/README.md` sets for the golden set, and one question over a set of 46 is inside the
+noise band this file has documented twice. It is here so that the next person to touch the lexical half
+starts from it rather than rediscovering it.
 
 ## The mutation, which is what prices the query side
 
@@ -1311,8 +1343,42 @@ is the configuration a source is in *today* if it names a language.
 | the other 62, `recall@5` | **62** | 61 |
 | the other 62, `heading@5` | **60** | 56 |
 
-Six of the nine cases in `test/integration/lexical-configurations.itest.ts` turn red with it, including
-the one that asserts a single search reaches a `turkish` source and a `simple` source at once.
+**Three** of the nine cases in `test/integration/lexical-configurations.itest.ts` turn red with it — the
+Turkish inflection case, the one that asserts a single search reaches a `turkish` source and a `simple`
+source at once, and the one that asserts the start-up reconciliation makes a question answerable. A
+wider mutation that *also* stops `replaceDocument` recording the configuration turns a fourth red, the
+case that asserts the column is written at all. Those are the two variants and those are their counts;
+an earlier draft of this section said six, which was a count taken from a third, botched mutation that
+had broken the `simple` half as well and was not the mutation described here.
+
+## One thing got less deterministic, and it is this change's doing
+
+**Two runs of the shipped configuration over freshly carved databases are no longer identical.** One
+question in ninety-two moves: `x-en-tr-08` alternates between the sixth and seventh result, where a
+Turkish chunk and an English chunk swap places. Three runs at `EVAL_TEXT_SEARCH_CONFIG=simple` — one
+configuration, everything else equal — are identical to the question, so this is the multi-configuration
+path and not the harness.
+
+The mechanism is the uuid backstop [ADR-0041](../../.ssot/ADR.md#adr-0041) left in the fused ordering,
+reached through a door this change opened. Ranks are now assigned *within* a configuration, so two
+chunks in different configurations can hold the same lexical rank; at that depth neither carries a
+dense rank, so their `fused_score` is identical — `1/(60 + n)` on both — and `fused_score desc,
+dense_rank asc nulls last, id asc` falls through to `id`, which is `gen_random_uuid()` and fresh in
+every database. Before this change two chunks could not share a lexical rank, so the tie could not
+arise.
+
+**What it costs here is nothing measurable and that is not the same as nothing.** Both positions are
+outside the top five in every run, so `recall@1`, `recall@5`, `heading@5` and the refusal counts are
+stable across runs and every number in this file is reproducible. But FR-262 says the same question
+against the same corpus returns the same answer, and for a project holding two configurations that is
+now true only down to the point where the two lists meet. On a corpus where such a pair lands at rank
+five instead of six it would move a page.
+
+Fixing it means giving the fused ordering a corpus property to break on before the uuid — the same
+correction FR-262 made one level down, applied to the fusion rather than to the candidate lists. That
+is a change to the ordering mechanism [ADR-0041](../../.ssot/ADR.md#adr-0041) fixed and
+[ADR-0064](../../.ssot/ADR.md#adr-0064) deliberately did not touch, so it is recorded here and left to
+be decided rather than slipped in.
 
 ## Reproducing it
 

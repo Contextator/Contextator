@@ -321,11 +321,17 @@ describe('a database that comes up holding a source whose language the column do
   });
 
   it('does it again as nothing, so every start does not rewrite the table', async () => {
-    const before = await upgraded.db.execute(sql`select max(id::text) as fingerprint, count(*)::int as n from chunks`);
-    await applySchema(upgraded, DIMS);
-    const after = await upgraded.db.execute(sql`select max(id::text) as fingerprint, count(*)::int as n from chunks`);
+    // `xmin` is the transaction that last wrote the row, so it is the one fingerprint an UPDATE that
+    // rewrote the same values would still move. `id` would not: it is untouched by the statement
+    // under test, so a fingerprint built on it would pass whether or not this loop is idempotent —
+    // which is the test quietly measuring nothing.
+    const fingerprint = async (): Promise<unknown> =>
+      (await upgraded.db.execute(sql`select array_agg(c.xmin::text order by c.id) as writers from chunks c`)).rows[0];
 
-    expect(after.rows[0]).toEqual(before.rows[0]);
+    const before = await fingerprint();
+    await applySchema(upgraded, DIMS);
+
+    expect(await fingerprint()).toEqual(before);
     expect(await configOf()).toEqual(['turkish']);
   });
 
