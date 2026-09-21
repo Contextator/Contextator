@@ -78,9 +78,14 @@ const opened: TestDatabase[] = [];
  * columns, its three indexes, its foreign key and its three CHECK constraints all carry that prefix —
  * which is the same breadth `^search_quer` and `^oauth_clients` were already accepted at, and for the
  * same reason. It adds no column to any existing table, so it needs no second term.
+ * `0012_lexical_configurations` ([ADR-0064](../../.ssot/ADR.md#adr-0064)) is the newest, and it is one
+ * unqualified term for `content_tsv`'s reason: `text_search_config` is not a word that could turn up
+ * on another table by accident. It needs no second term for the index it rebuilds —
+ * `chunks_project_generation_idx` gains this column and is already inside `index_generation`, which
+ * matches the columns the projection lists rather than the index's name.
  */
 const POST_BASELINE_MARKERS =
-  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events/;
+  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|text_search_config/;
 
 afterAll(async () => {
   for (const database of opened) await dropTestDatabase(baseUrl, database);

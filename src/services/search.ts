@@ -6,7 +6,6 @@ import { getProjectById } from './projects.js';
 import type { QueryLogSink } from './query-log.js';
 import { belowRelevanceFloor } from './relevance.js';
 import { getSourceByName, listSources } from './sources.js';
-import type { TextSearchConfig } from './text-search.js';
 import type { Reranker } from './reranker.js';
 import { documentVersionExists, type HnswScan, listDocumentVersions, type ResultSelection, searchChunks, type SearchHit } from './vector-store.js';
 
@@ -35,14 +34,6 @@ export interface SearchDeps {
    * operator who changes `HNSW_EF_SEARCH` changes what they measure and what an agent receives.
    */
   scan?: HnswScan;
-  /**
-   * The text search configuration the lexical half parses the question with
-   * ([ADR-0041](../../.ssot/ADR.md#adr-0041)). Optional for the same structural reason `scan` is, and
-   * unset it is `simple` — which is what the server passes, by not passing anything. The evaluation
-   * harness is the one caller that varies it, so that `simple` against stemming is a measurement
-   * rather than an opinion.
-   */
-  textSearchConfig?: TextSearchConfig;
   /**
    * The per-document cap and the neighbour context ([ADR-0042](../../.ssot/ADR.md#adr-0042)). Optional
    * for `scan`'s structural reason; unset it is the schema's own defaults.
@@ -131,7 +122,7 @@ export type SearchOutcome =
   | { status: 'model_mismatch'; project: ProjectRow; indexedWith: string; serverUses: string };
 
 export async function searchProject(
-  { db, embeddings, scan, textSearchConfig, selection, scoreFloor, queryLog, rerank }: SearchDeps,
+  { db, embeddings, scan, selection, scoreFloor, queryLog, rerank }: SearchDeps,
   input: SearchInput,
 ): Promise<SearchOutcome> {
   const startedAt = Date.now();
@@ -210,7 +201,6 @@ export async function searchProject(
     version,
     scan,
     selection,
-    textSearchConfig,
     // `rerank.score` and not the reranker: `searchChunks` takes a function of strings for the reason
     // it takes a vector rather than a provider, and binding it here is what keeps the model out of it.
     rerank: rerank ? (query, passages) => rerank.score(query, passages) : undefined,

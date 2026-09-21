@@ -493,6 +493,15 @@ takes that subset by one question at rank 1 and gives one back on the natural-la
 PostgreSQL has no Turkish configuration, a project here is routinely two languages at once, and an
 unstemmed index returns an identifier as the string it is.
 
+**Two of those three reasons were refuted on 2026-09-21, and the paragraph above is left standing
+because it is what was written at the time.** PostgreSQL *does* have a Turkish configuration — it is
+in `pg_ts_config` on `pgvector/pgvector:pg16`, the image this product ships, and `to_tsvector('turkish',
+'anahtarı anahtarın anahtarlar anahtar')` is `'anahtar':1,2,3,4`. And a project being two languages at
+once is no longer a reason for one configuration, because since
+[ADR-0064](../../.ssot/ADR.md#adr-0064) the query side speaks every configuration the index holds. The
+third reason is the one that survived and it is the one this table is about: `simple` stays the
+default for a source whose language nobody has named. The measurement is at the bottom of this file.
+
 ```bash
 npm run eval                                        # the shipped default
 EVAL_TEXT_SEARCH_CONFIG=english npm run eval        # the same run, stemmed on both sides
@@ -1233,3 +1242,86 @@ EMBEDDING_MODEL=Xenova/paraphrase-multilingual-MiniLM-L12-v2 \
 Two reranked runs over freshly carved databases return identical hits for all eighty-four questions at
 full precision, so this measurement has the same zero variance as every other one in this file and the
 twenty points are not a sampling artefact.
+
+---
+
+# The lexical half, spoken per chunk (2026-09-21)
+
+[ADR-0064](../../.ssot/ADR.md#adr-0064). The query side stops being one configuration for the whole
+instance and becomes one `@@` per configuration the index holds; `turkish` joins the list; the `tr/`
+half of this corpus is indexed with it, the way an operator would set the source it stands for.
+
+**The premise that kept `turkish` off the list was never measured and is false.** On
+`pgvector/pgvector:pg16`, the image every run in this file uses:
+
+```
+select to_tsvector('turkish', 'anahtarı anahtarın anahtarlar anahtar');   → 'anahtar':1,2,3,4
+select to_tsvector('turkish', 'API anahtarını nereden alırım')
+         @@ plainto_tsquery('turkish', 'api anahtarı');                   → t
+select to_tsvector('simple',  'API anahtarını nereden alırım')
+         @@ plainto_tsquery('simple',  'api anahtarı');                   → f
+```
+
+## The numbers
+
+92 questions: the 84 of the enlarged set plus eight Turkish questions written for this change, each
+asking about a word the page carries in another inflection. "Before" is `EVAL_TEXT_SEARCH_CONFIG=simple`,
+which is the shipped configuration of [ADR-0041](../../.ssot/ADR.md#adr-0041) exactly.
+
+| group | n | `recall@5` before | after | `heading@5` before | after |
+|---|--:|--:|--:|--:|--:|
+| all | 92 | 66 | 66 | 63 | **64** |
+| lang `en` | 41 | 28 | 28 | 26 | 26 |
+| lang `tr` | 51 | 38 | 38 | 37 | **38** |
+| `cross-lingual` | 30 | 4 | 4 | 4 | 4 |
+| the other 62 | 62 | 62 | 62 | 59 | **60** |
+| the original 54 | 54 | **54** | **54** | 52 | 52 |
+| `inflection` (new) | 8 | 8 | 8 | 7 | **8** |
+
+**Nothing regressed.** The fifty-four questions ADR-0041 and ADR-0052 gate on are 54 of 54 before and
+after, and no question anywhere falls out of the top five or the top five headings. With a single
+configuration present the statement is byte-equivalent in behaviour: `EVAL_TEXT_SEARCH_CONFIG=simple`
+on this branch returns an *identical rank for all eighty-four* of the original questions, which is the
+control this change needed and the reason the table above has a trustworthy "before" column.
+
+**`recall@5` does not move, and on this corpus it cannot.** Every one of the thirteen Turkish
+`recall@5` misses is cross-lingual — a Turkish question whose answer is an English page — which is the
+limit [ADR-0052](../../.ssot/ADR.md#adr-0052) closed and which this change does not touch, and none of
+them moves. Within-Turkish `recall@5` was **36 of 36 before the change**. That ceiling was tested
+rather than assumed: forty-two further Turkish questions were written against this corpus while looking
+for headroom — full sentences, short keyword fragments of the kind an agent actually sends, and
+questions deliberately seeded with vocabulary from a competing Turkish page — and the dense half
+answered **every one of the forty-two at rank 1** before the change. Eleven Turkish documents is not
+enough for within-Turkish file-level retrieval to fail, so this corpus cannot price a Turkish retrieval
+change at `recall@5`. It can price it one level down, where the metric is the right *section*: the
+Turkish question about `serileştirme` against a page that says `serileştirmesinden` goes from not
+returning the right section in ten results to returning it first.
+
+## The mutation, which is what prices the query side
+
+Revert the query side to ADR-0041's — one configuration for the instance, matched against every chunk
+regardless of what its `tsvector` was built with — and leave the corpus indexed exactly as above. That
+is the configuration a source is in *today* if it names a language.
+
+| | shipped | mutated |
+|---|--:|--:|
+| all 92 `recall@5` | **66** | 65 |
+| all 92 `heading@5` | **64** | 60 |
+| `tr` `heading@5` | **38** | 35 |
+| the other 62, `recall@5` | **62** | 61 |
+| the other 62, `heading@5` | **60** | 56 |
+
+Six of the nine cases in `test/integration/lexical-configurations.itest.ts` turn red with it, including
+the one that asserts a single search reaches a `turkish` source and a `simple` source at once.
+
+## Reproducing it
+
+```bash
+npm run eval                                  # the shipped default: en/ simple, tr/ turkish
+EVAL_TEXT_SEARCH_CONFIG=simple npm run eval   # ADR-0041's run, question for question
+EVAL_TEXT_SEARCH_CONFIG=english npm run eval  # the whole corpus stemmed as English
+```
+
+`EVAL_TEXT_SEARCH_CONFIG` now names the configuration the **corpus** is indexed with and no longer
+touches the query side, because it no longer can: every chunk records what it was built with and the
+search reads the index.

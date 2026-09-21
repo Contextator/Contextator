@@ -17,6 +17,11 @@ import {
   uuid,
   vector,
 } from 'drizzle-orm/pg-core';
+// Type-only, and the only import this file makes beyond drizzle itself: `TextSearchConfig` is the
+// closed set `chunks.text_search_config` may hold, and a column typed `string` would let a caller
+// write a configuration name no server has. `services/text-search.ts` imports nothing, so there is
+// no cycle and nothing of it survives compilation.
+import type { TextSearchConfig } from '../services/text-search.js';
 
 /**
  * The Drizzle schema, and — since [ADR-0033](../../.ssot/ADR.md#adr-0033) — the only description of the
@@ -407,6 +412,29 @@ export const chunks = pgTable(
      */
     contentTsv: tsvector('content_tsv'),
     /**
+     * **Which configuration the `tsvector` beside this one was built with**
+     * ([ADR-0064](../../.ssot/ADR.md#adr-0064)). A `tsvector` does not carry that, and a query parsed
+     * in another configuration silently matches none of it — so before this column existed the only
+     * way to keep the two sides agreeing was for the whole instance to speak one configuration, which
+     * is what ADR-0041 did and what kept Turkish sources out of the lexical half entirely.
+     *
+     * With it, the search statement asks the project which configurations it actually holds and
+     * builds one `@@` per configuration, so a project whose German source is stemmed and whose
+     * reference manual is `simple` gets both halves of its own index rather than whichever one the
+     * instance was set to.
+     *
+     * **`NOT NULL DEFAULT 'simple'`, and that is the upgrade path**, as `content_tsv` was: the column
+     * is catalogue-only to add, every existing row reads `simple`, and `reconcileTextSearchConfigs`
+     * in `src/db/bootstrap.ts` moves the rows of a source that names a language to that language at
+     * the next start — rewriting `content_tsv` with them, since the two must describe each other and
+     * only one of them can be read back.
+     *
+     * Denormalised off the source for `version`'s reason, two tables up: it is resolved inside the
+     * search statement, and a join to `document_sources` there would put a second relation between
+     * pgvector and the predicate both candidate lists depend on.
+     */
+    textSearchConfig: text('text_search_config').notNull().default('simple').$type<TextSearchConfig>(),
+    /**
      * Denormalised from the owning document, deliberately ([ADR-0039](../../.ssot/ADR.md#adr-0039)).
      * `searchChunks` has to apply the generation as a plain column predicate on this table with no
      * join, because that predicate is what pgvector's iterative scan will be given to work against.
@@ -429,7 +457,14 @@ export const chunks = pgTable(
     // one answer rather than a query that trusts the writer. A generation predicate is not needed
     // beside it: a document row belongs to exactly one generation, so its id already carries one.
     unique('chunks_document_chunk_index_uq').on(t.documentId, t.chunkIndex),
-    index('chunks_project_generation_idx').on(t.projectId, t.indexGeneration),
+    // **Three columns since [ADR-0064](../../.ssot/ADR.md#adr-0064), and the third one is free.** The
+    // first two are the predicate every search already carries; the search's `corpus` CTE has always
+    // counted this project's chunks through this index, and with `text_search_config` on the end that
+    // same index-only scan also yields which configurations the project holds and how many chunks
+    // each of them has — which is what the per-configuration commonness threshold is computed from.
+    // Nothing that used the two-column prefix changes: a leading-column lookup does not care what
+    // follows it.
+    index('chunks_project_generation_idx').on(t.projectId, t.indexGeneration, t.textSearchConfig),
     // Unlike `chunks_embedding_hnsw_idx` above, this one *is* declared here and *is* generated. A GIN
     // index over a `tsvector` needs no fixed dimension and blocks no `ALTER COLUMN … TYPE`, so none of
     // the reasons that keep the HNSW index in the bootstrap apply to it.

@@ -1187,6 +1187,7 @@ function fillSourceForm(s) {
   srcForm.elements.label.value = s.label || '';
   srcForm.elements.flavor.value = s.flavor || 'plain';
   syncFlavorFields();
+  srcForm.elements.language.value = c.language || '';
   srcForm.elements.version.value = c.version || '';
   setSyncIntervalField(s.syncIntervalMinutes);
   $('#src-next-sync').textContent = syncScheduleLabel(s);
@@ -1358,14 +1359,16 @@ function configForKind(kind) {
   const { type } = SOURCE_KINDS[kind];
   const extensions = extensionsFromForm();
   if (extensions.length === 0) throw new Error('Pick at least one file type');
-  // `language` is deliberately absent: the form no longer offers it (ADR-0041's consequence — setting it
-  // makes a source worse until the query side varies), and the PATCH merges over the stored config, so
-  // leaving the key out preserves whatever an operator set through the API.
+  // `language` and `version` are both always sent, empty string included (ADR-0058, ADR-0064): the
+  // form offers both, and because the PATCH merges over the stored config, a cleared field that was
+  // simply omitted would leave the old value on the source with nothing on screen to say so. The
+  // server normalises `''` to unset for each of them.
   //
-  // `version` is the other way round and always sent, empty string included (ADR-0058): the form does
-  // offer it, and because the PATCH merges, a cleared field that was simply omitted would leave the
-  // old label on the source with nothing on screen to say so. The server normalises `''` to unset.
-  const common = { extensions, version: srcForm.elements.version.value.trim() };
+  // `language` was deliberately absent until ADR-0064, because ADR-0041 left the query side speaking
+  // one configuration for the whole instance and setting this only made a source worse. The query
+  // side now reads every configuration the index holds, so the field is a control an operator can
+  // use rather than a way to quietly lose the lexical half of one source.
+  const common = { extensions, language: srcForm.elements.language.value, version: srcForm.elements.version.value.trim() };
   if (type === 'local') {
     const rest = $('#src-path')
       .value.trim()

@@ -9,7 +9,7 @@ import {
 import type { Db } from '../db/client.js';
 import { chunks, documents, type DocumentRow } from '../db/schema.js';
 import { RRF_K } from './rrf.js';
-import { DEFAULT_TEXT_SEARCH_CONFIG, QUERY_TEXT_SEARCH_CONFIG, type TextSearchConfig } from './text-search.js';
+import { DEFAULT_TEXT_SEARCH_CONFIG, type TextSearchConfig } from './text-search.js';
 
 /**
  * Every query in this file is scoped by a **project and a generation**
@@ -102,7 +102,15 @@ export interface SearchHit {
   fusedScore: number;
   /** 1-based rank in the dense candidate list, or `null` when only the lexical half returned it. */
   denseRank: number | null;
-  /** 1-based rank in the lexical candidate list, or `null` when only the dense half returned it. */
+  /**
+   * 1-based rank in the lexical candidate list, or `null` when only the dense half returned it.
+   *
+   * Since [ADR-0064](../../.ssot/ADR.md#adr-0064) that list is **the one for this chunk's own text
+   * search configuration**, and a project holding two of them has two chunks at rank 1. They are not
+   * competing for one position: each configuration is its own ranked list into the fusion, which is
+   * what RRF is defined over and the only combination that does not require comparing `ts_rank_cd`
+   * scores that were computed against different term frequencies.
+   */
   lexicalRank: number | null;
   file: string;
   title: string;
@@ -162,12 +170,6 @@ export interface SearchRequest {
   /** The per-document cap and the neighbour context. Unset is `DEFAULT_RESULT_SELECTION`. */
   selection?: ResultSelection;
   /**
-   * The text search configuration the query is parsed with. `simple` in this version, everywhere; it
-   * is a parameter so that the evaluation harness can measure stemming against it without the product
-   * growing a setting nobody has justified (ADR-0041).
-   */
-  textSearchConfig?: TextSearchConfig;
-  /**
    * A cross-encoder that reorders the fused pool before the cap and the limit are applied
    * ([ROADMAP.md](../../.ssot/ROADMAP.md) Item 12). Absent — which is the default and what the product
    * ships — and this function is exactly the one statement it has always been.
@@ -212,6 +214,18 @@ interface HybridRow extends Record<string, unknown> {
  * how well. `string_agg` over no lexemes is NULL, and `content_tsv @@ NULL` is not true, so a query
  * of pure punctuation quietly contributes no lexical candidates instead of erroring.
  *
+ * **And "the same configuration the column was built with" is now per chunk, not per instance**
+ * ([ADR-0064](../../.ssot/ADR.md#adr-0064)). One search spans every source of a project and those
+ * sources may name different languages; until that entry the query side was the constant `simple`,
+ * so a source that named a language was indexed in a configuration the question never spoke and
+ * contributed nothing to the lexical half at all. `chunks.text_search_config` records what each
+ * chunk was built with, the statement asks the project which configurations it holds, and there is
+ * one `@@` per configuration present — joined to the chunks that speak it, cut to its own
+ * `LEXICAL_CANDIDATES`, and ranked within itself, because `ts_rank_cd` scores from two
+ * configurations are not comparable and RRF consumes positions rather than scores. With a single
+ * configuration present, which is every default installation, the statement degenerates to exactly
+ * the one ADR-0041 measured.
+ *
  * **It is one statement, and the reason is not elegance.** Fusion needs both rank lists, so doing it
  * in Node means shipping a hundred chunk texts across the wire to discard ninety of them. The two
  * candidate lists are CTEs, the fusion is a `FULL OUTER JOIN` — full, because a chunk may be on
@@ -246,7 +260,6 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
   const { projectId, generation, queryEmbedding, queryText, limit, sourceId, pathPrefix, version, rerank } = request;
   const scan = request.scan ?? DEFAULT_HNSW_SCAN;
   const selection = request.selection ?? DEFAULT_RESULT_SELECTION;
-  const textSearchConfig = request.textSearchConfig ?? QUERY_TEXT_SEARCH_CONFIG;
 
   // A filtered search is a different statement, not the same statement with a predicate that is
   // sometimes true: an unfiltered search must keep exactly the plan ADR-0040 and ADR-0041 measured,
@@ -309,19 +322,41 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
   const fusedCandidates = sql`
       with ${documentScope}
       corpus as (
-        -- How many chunks the question is being asked of, and therefore what "this word is everywhere"
-        -- means for this project. Served by chunks_project_generation_idx.
+        -- **One row per text search configuration this project's index actually holds**
+        -- ([ADR-0064](../../.ssot/ADR.md#adr-0064)), and for each of them how many chunks the question
+        -- is being asked of — which is what "this word is everywhere" means for that half of the
+        -- corpus. Served by chunks_project_generation_idx as an index-only scan, which is the reason
+        -- text_search_config was appended to it: this CTE already counted the project's chunks
+        -- through that index and now groups the same scan instead.
         --
         -- **Deliberately the whole project, filters or not** (ADR-0042). How much a term says about
         -- which chunk is a property of the corpus, not of the slice somebody asked about; counting it
         -- over a filtered subset would make the same question mean different things under different
         -- filters, and a filter narrow enough to matter would fall under the floor below and drop
         -- nothing at all.
-        select greatest(
-                 ceil(count(*) * ${LEXICAL_TERM_MAX_DOCUMENT_FREQUENCY}::float8),
-                 ${LEXICAL_TERM_MIN_DOCUMENT_FLOOR}::float8
-               )::int as common_at
+        --
+        -- **A configuration is such a slice, so the threshold stays the project's and only the probe
+        -- below is split** ([ADR-0064](../../.ssot/ADR.md#adr-0064)). The probe has no choice: a lexeme
+        -- produced by turkish is a different string from the one simple produces and can only ever
+        -- match chunks written by turkish, so it has to be counted against those. The threshold does
+        -- have a choice, and dividing it too was measured and costs: with one threshold per
+        -- configuration the English half of the eval corpus is judged against half the denominator it
+        -- used to be, more of its terms are pruned as common, and en-api-01 falls from the fifth
+        -- result to the sixth — the only question either variant moves, and a loss the whole change is
+        -- gated against. sum(count(*)) over () is the project's total off this one grouped scan.
+        --
+        -- What that leaves open is a term that is in every chunk of one small stemmed source inside a
+        -- large project: it is under the project's threshold and survives. That is the same tolerance
+        -- LEXICAL_TERM_MIN_DOCUMENT_FLOOR already grants a small project, not a new hole, and it will
+        -- be a measurement rather than an argument the day a corpus shows it.
+        select
+          c.text_search_config as config,
+          greatest(
+            ceil(sum(count(*)) over () * ${LEXICAL_TERM_MAX_DOCUMENT_FREQUENCY}::float8),
+            ${LEXICAL_TERM_MIN_DOCUMENT_FLOOR}::float8
+          )::int as common_at
         from chunks c where c.project_id = ${projectId} and c.index_generation = ${generation}
+        group by c.text_search_config
       ),
       question as materialized (
         -- The question's lexemes, quoted as tsquery literals and OR-ed — minus the ones that are in so
@@ -329,18 +364,33 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
         -- makes this safe as well as correct: tsquery's quoting rule for a lexeme is SQL's, so a term
         -- carrying an apostrophe survives instead of ending the literal.
         --
+        -- **One question per configuration, parsed the way that configuration's chunks were written.**
+        -- The same sentence becomes different lexemes in each — "anahtarını" is 'anahtar' under
+        -- turkish and 'anahtarını' under simple — and each of those only ever meets the chunks
+        -- that speak it, because the config travels with the row into the join below. The cast is of
+        -- a *column* to regconfig, which is a catalogue lookup and not string interpolation; the
+        -- values come from chunks.text_search_config, which only replaceDocument writes and only
+        -- from a TextSearchConfig.
+        --
+        -- A configuration all of whose lexemes were dropped as too common produces **no row** here
+        -- rather than a NULL one, and a configuration for which the question has no lexemes at all —
+        -- pure punctuation — does the same. Either way that half contributes no lexical candidates,
+        -- which is what the single string_agg over nothing used to achieve by returning NULL.
+        --
         -- The count is capped by the LIMIT: this asks "are there at least common_at of them", not "how
         -- many are there", so a word that is genuinely everywhere costs the same as one that is not.
-        select string_agg(quote_literal(t.lexeme), ' | ')::tsquery as q
-        from unnest(to_tsvector(${textSearchConfig}::regconfig, ${queryText})) t, corpus
+        select corpus.config, string_agg(quote_literal(t.lexeme), ' | ')::tsquery as q
+        from corpus, unnest(to_tsvector(corpus.config::regconfig, ${queryText})) t
         where (
           select count(*) from (
             select 1 from chunks c
             where c.project_id = ${projectId} and c.index_generation = ${generation}
+              and c.text_search_config = corpus.config
               and c.content_tsv @@ quote_literal(t.lexeme)::tsquery
             limit corpus.common_at
           ) probe
         ) < corpus.common_at
+        group by corpus.config
       ),
       dense_candidates as materialized (
         -- c.chunk_index is carried for the tie-break below and for nothing else. It is a column of the
@@ -373,24 +423,52 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
         -- ordering is decided by whatever the tie-break is, which was a random uuid. Measured: five
         -- runs of one configuration over the golden set spread recall@1 across nine points, because a
         -- fresh database mints fresh uuids and the lexical top-twenty came out in a different order.
-        select
-          c.id,
-          ts_rank_cd(c.content_tsv, question.q, 1) as rank_score,
-          length(c.content) as content_length,
-          c.chunk_index
-        from chunks c, question
-        where c.project_id = ${projectId} and c.index_generation = ${generation} ${withinScope}
-          and c.content_tsv @@ question.q
-        -- What is left of the ties is broken by properties of the corpus rather than of the database:
-        -- the shorter chunk first, then the earlier one in its document. c.id stays as a backstop so
-        -- the ordering is total, and it should now almost never be reached.
-        order by ts_rank_cd(c.content_tsv, question.q, 1) desc, length(c.content) asc, c.chunk_index asc, c.id
-        limit ${LEXICAL_CANDIDATES}
+        --
+        -- **LEXICAL_CANDIDATES per configuration, taken inside a lateral, and not one list of fifty
+        -- cut by ts_rank_cd** ([ADR-0064](../../.ssot/ADR.md#adr-0064)). ts_rank_cd divides by term
+        -- frequencies of the configuration it was computed in, so a turkish 0.09 and a simple 0.09
+        -- are not the same evidence and neither is larger than the other. Sorting the two together and
+        -- keeping the top fifty would silently let whichever configuration happens to score higher on
+        -- this corpus evict the other's best chunks before anything downstream could see them.
+        -- Truncating each configuration's own list is the one cut that needs no comparison between
+        -- them. With a single configuration present — which is every installation that has set no
+        -- source language — this is one lateral over one row and the same fifty rows in the same
+        -- order the statement has always produced.
+        select l.id, l.config, l.rank_score, l.content_length, l.chunk_index
+        from question q
+        join lateral (
+          select
+            c.id,
+            q.config as config,
+            ts_rank_cd(c.content_tsv, q.q, 1) as rank_score,
+            length(c.content) as content_length,
+            c.chunk_index
+          from chunks c
+          where c.project_id = ${projectId} and c.index_generation = ${generation} ${withinScope}
+            and c.text_search_config = q.config
+            and c.content_tsv @@ q.q
+          -- What is left of the ties is broken by properties of the corpus rather than of the database:
+          -- the shorter chunk first, then the earlier one in its document. c.id stays as a backstop so
+          -- the ordering is total, and it should now almost never be reached.
+          order by ts_rank_cd(c.content_tsv, q.q, 1) desc, length(c.content) asc, c.chunk_index asc, c.id
+          limit ${LEXICAL_CANDIDATES}
+        ) l on true
       ),
       lexical as (
+        -- **A rank within its own configuration**, for the reason the candidate list is cut per
+        -- configuration: the number this produces is what RRF consumes, and RRF is positional, so a
+        -- rank is comparable across configurations exactly where the score it was derived from is not.
+        -- Each configuration present is therefore its own ranked list in the fusion below — which is
+        -- what reciprocal rank fusion is defined over — rather than an attempt to reduce incomparable
+        -- scores to one ordering.
+        --
+        -- A chunk carries exactly one configuration, so it appears in exactly one partition: no chunk
+        -- can collect two lexical contributions, and fused_score stays in the range and the shape
+        -- ADR-0041 measured. With one configuration present the partition is the whole list and this
+        -- is the window it has always been.
         select
           id,
-          row_number() over (order by rank_score desc, content_length asc, chunk_index asc, id) as rank
+          row_number() over (partition by config order by rank_score desc, content_length asc, chunk_index asc, id) as rank
         from lexical_candidates
       ),
       fused as (
@@ -901,6 +979,11 @@ export async function replaceDocument(
           // halves seeing the same text is the property; `embeddingText`'s blank line is not, so
           // this does not reach for it and pretend the two strings are one thing.
           contentTsv: sql`to_tsvector(${textSearchConfig}::regconfig, ${`${c.headingPath} ${c.content}`})`,
+          // **Written in the same statement as the vector it describes, and never apart from it**
+          // ([ADR-0064](../../.ssot/ADR.md#adr-0064)). A `tsvector` cannot be asked what it was built
+          // with, so this column is the only record of it; a path that wrote one without the other
+          // would leave a row that answers the wrong question and looks perfectly well-formed.
+          textSearchConfig,
         })),
       );
     }

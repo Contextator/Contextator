@@ -244,10 +244,17 @@ exception, and it is the exception because nothing else could resolve it: the cr
 were deliberately grown from seven to thirty so that a change to them is a measurement rather than a
 rounding.
 
-`EVAL_TEXT_SEARCH_CONFIG=english npm run eval` runs the lexical half of retrieval in another PostgreSQL
-text search configuration — the corpus indexed with it and the questions parsed with it, because running
-the two sides apart measures nothing at all. Default `simple`, which is what the product ships
-([ADR-0041](../../.ssot/ADR.md#adr-0041)).
+`EVAL_TEXT_SEARCH_CONFIG=english npm run eval` indexes the **whole corpus** in one PostgreSQL text
+search configuration. It no longer also sets the query side, and it no longer can: since
+[ADR-0064](../../.ssot/ADR.md#adr-0064) every chunk records which configuration its `tsvector` was
+built with and the search statement asks the index, so the two halves cannot be put out of step even
+deliberately. What is left to choose is the corpus.
+
+Unset — the default — each corpus language directory is stamped the way an operator would set its
+source: `en/` is `simple` and `tr/` is `turkish`. That is the configuration under test, and it also
+means every run exercises the multi-configuration query path rather than leaving it to a test.
+`EVAL_TEXT_SEARCH_CONFIG=simple` reproduces the uniform run [ADR-0041](../../.ssot/ADR.md#adr-0041)
+was decided on, question for question.
 
 Two runs are comparable only if `EMBEDDING_MODEL`, `EMBEDDING_DTYPE`, `CHUNK_MAX_TOKENS`,
 `CHUNK_OVERLAP_TOKENS` and the text search configuration were the same. The report prints all four, and the run's `provider.id` with them —

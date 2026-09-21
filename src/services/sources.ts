@@ -49,9 +49,10 @@ function checkExtensions(flavor: Flavor, config: Record<string, unknown>): void 
  * setting: `updateSource` merges a patch over the stored config, so a key the form simply omitted
  * would keep whatever was there, and there would be no way back to unset.
  *
- * **Turkish is not an option, because PostgreSQL has no Turkish configuration**, and `simple` is what
- * a Turkish source gets. The four schemas below each carry the key rather than sharing a base object,
- * because each one is also the documentation of its type in `DATA-MODEL.md` §1.
+ * **`turkish` is an option since [ADR-0064](../../.ssot/ADR.md#adr-0064)**, and the sentence that
+ * used to stand here — "PostgreSQL has no Turkish configuration" — was never measured and is false on
+ * the image this product ships. The schemas below each carry the key rather than sharing a base
+ * object, because each one is also the documentation of its type in `DATA-MODEL.md` §1.
  */
 const Language = z
   .enum(TEXT_SEARCH_CONFIGS)
@@ -572,6 +573,15 @@ export async function setSourceStatus(
  * The same applies to `language` since [ADR-0041](../../.ssot/ADR.md#adr-0041): the text search
  * configuration is spent inside `replaceDocument`, on a document the run would otherwise have skipped
  * as unchanged.
+ *
+ * **And that is the whole of what changing a source's language costs an operator**
+ * ([ADR-0064](../../.ssot/ADR.md#adr-0064)): the route that calls this also enqueues a run, so the
+ * source re-indexes itself the way a changed content type or a changed version already does. There is
+ * no button to find and no generation swap — a language is not a different corpus, only a different
+ * reading of one. The cheaper repair, rewriting `content_tsv` in place from text the database already
+ * holds, is what `reconcileTextSearchConfigs` does at start-up for the rows an upgrade left behind; it
+ * is deliberately not a second path here, because one route that always ends in a run is worth more
+ * than the embeddings a rare edit re-computes.
  */
 export async function invalidateSourceDocuments(db: Db, sourceId: string): Promise<void> {
   await db.update(documents).set({ contentHash: '' }).where(eq(documents.sourceId, sourceId));

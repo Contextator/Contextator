@@ -16,7 +16,7 @@ import { createReranker } from '../src/services/reranker.js';
 import { readAndHash } from '../src/services/fs-scan.js';
 import { belowRelevanceFloor } from '../src/services/relevance.js';
 import { searchProject } from '../src/services/search.js';
-import { isTextSearchConfig, QUERY_TEXT_SEARCH_CONFIG, TEXT_SEARCH_CONFIGS, type TextSearchConfig } from '../src/services/text-search.js';
+import { DEFAULT_TEXT_SEARCH_CONFIG, isTextSearchConfig, TEXT_SEARCH_CONFIGS, type TextSearchConfig } from '../src/services/text-search.js';
 import {
   getExistingDocuments,
   replaceDocument,
@@ -114,21 +114,58 @@ const SEARCH_LIMIT = 10;
 const PROJECT_NAME = 'eval';
 
 /**
- * Which PostgreSQL text search configuration the lexical half runs in, on **both** sides — the corpus
- * is indexed with it and the questions are parsed with it ([ADR-0041](../.ssot/ADR.md#adr-0041)).
+ * What an operator would set on a source holding each language directory of the corpus
+ * ([ADR-0064](../.ssot/ADR.md#adr-0064)).
  *
- * A harness knob, like `EVAL_DATABASE_URL`, and deliberately not a product setting: the recommendation
- * is `simple` and the evidence for it is this variable being swept, not a paragraph. Running the two
- * sides in different configurations would measure nothing at all, which is why there is one variable
- * and not two.
+ * The corpus is two bodies of documentation in one project, which is the shape this product is for,
+ * and `eval/corpus/tr` is a Turkish source: an operator would name its language and PostgreSQL would
+ * stem it. Stamping that here is what makes the run measure the configuration being proposed rather
+ * than a uniform one nobody would choose — and it is also what puts two configurations in one index,
+ * so the multi-configuration query path is exercised by every run instead of by a test alone.
+ *
+ * `en` is `simple` and not `english` deliberately: ADR-0041 measured the two on this corpus and
+ * `simple` won, because an English question about `HLY-4015` is mostly identifiers and a stemmer
+ * costs more on them than it earns on the prose. A language whose morphology is the problem — Turkish
+ * is agglutinative — is the case the stemmer is for.
  */
-function evalTextSearchConfig(): TextSearchConfig {
+const CORPUS_TEXT_SEARCH_CONFIGS: Readonly<Record<string, TextSearchConfig>> = { en: 'simple', tr: 'turkish' };
+
+/** How a run decides what each corpus file is indexed with, and the one line the report prints about it. */
+interface CorpusTextSearchConfigs {
+  /** For a corpus-relative posix path such as `tr/sss.md`. */
+  forFile(relativePath: string): TextSearchConfig;
+  /** Rendered into the report's configuration line, because two runs at different values are not comparable. */
+  describe: string;
+}
+
+/**
+ * Which PostgreSQL text search configuration the lexical half **indexes** with
+ * ([ADR-0041](../.ssot/ADR.md#adr-0041), amended by [ADR-0064](../.ssot/ADR.md#adr-0064)).
+ *
+ * It is no longer "on both sides", and that is the change ADR-0064 made: the query side reads
+ * `chunks.text_search_config` and speaks every configuration the index holds, so a run can no longer
+ * put the two halves out of step even by trying. What is left to choose is the corpus, and by default
+ * each language directory gets the configuration its operator would.
+ *
+ * `EVAL_TEXT_SEARCH_CONFIG` overrides that to one configuration for the whole corpus, which is what
+ * keeps the sweep this variable exists for — and what reproduces ADR-0041's own measurement exactly,
+ * with `EVAL_TEXT_SEARCH_CONFIG=simple`.
+ */
+function evalTextSearchConfigs(): CorpusTextSearchConfigs {
   const value = process.env.EVAL_TEXT_SEARCH_CONFIG;
-  if (value === undefined || value === '') return QUERY_TEXT_SEARCH_CONFIG;
-  if (!isTextSearchConfig(value)) {
-    throw new Error(`EVAL_TEXT_SEARCH_CONFIG=${JSON.stringify(value)} is not one of: ${TEXT_SEARCH_CONFIGS.join(', ')}`);
+  if (value !== undefined && value !== '') {
+    if (!isTextSearchConfig(value)) {
+      throw new Error(`EVAL_TEXT_SEARCH_CONFIG=${JSON.stringify(value)} is not one of: ${TEXT_SEARCH_CONFIGS.join(', ')}`);
+    }
+    return { forFile: () => value, describe: `${value} (EVAL_TEXT_SEARCH_CONFIG, the whole corpus)` };
   }
-  return value;
+  const mapped = Object.entries(CORPUS_TEXT_SEARCH_CONFIGS);
+  return {
+    // The first path segment, which is the corpus's language directory. Anything outside one of them
+    // is `simple`, which is what a source that names no language gets.
+    forFile: (relativePath) => CORPUS_TEXT_SEARCH_CONFIGS[relativePath.split('/')[0]] ?? DEFAULT_TEXT_SEARCH_CONFIG,
+    describe: mapped.map(([dir, config]) => `${dir}/ → ${config}`).join(', '),
+  };
 }
 
 interface OutputTarget {
@@ -157,8 +194,10 @@ const USAGE = `Usage: npm run eval [-- <options>]
 
   EVAL_DATABASE_URL, or DATABASE_URL, points at a PostgreSQL to carve a throwaway database out of.
   With neither, a pgvector container is started for the run and stopped at the end.
-  EVAL_TEXT_SEARCH_CONFIG names the text search configuration the lexical half indexes and queries
-  with, on both sides. Default "simple"; "english" is the comparison ADR-0041 was decided on.
+  EVAL_TEXT_SEARCH_CONFIG names one text search configuration for the whole corpus. Unset, each
+  corpus language directory is indexed the way its operator would set it (en/ simple, tr/ turkish);
+  the query side is never told and reads the index instead (ADR-0064). "simple" reproduces the
+  uniform run ADR-0041 was decided on, and "english" is the comparison it was decided against.
   SEARCH_MAX_PER_DOCUMENT, SEARCH_NEIGHBOR_CONTEXT and SEARCH_SCORE_FLOOR are read from the
   environment like every other setting, so measuring what the cap or the floor costs is running this
   twice with one of them changed rather than a flag this file has to grow.
@@ -290,7 +329,7 @@ async function indexCorpus(
   projectId: string,
   generation: number,
   files: readonly string[],
-  textSearchConfig: TextSearchConfig,
+  textSearchConfigs: CorpusTextSearchConfigs,
 ): Promise<IndexOutcome> {
   // A fresh database cannot hold a previous run's documents, so this map is expected to be empty. It is
   // read anyway: the guard below is what makes "unchanged, skipped" impossible to reach silently, and a
@@ -362,7 +401,10 @@ async function indexCorpus(
         ...storedDocumentContent(content, config.MAX_STORED_DOCUMENT_BYTES),
       },
       rows,
-      textSearchConfig,
+      // Per file, because the corpus is two sources in one project and each of them is indexed the way
+      // its operator would set it (ADR-0064). This is the only place in the harness that names a
+      // configuration; the query side is handed none and reads the index instead.
+      textSearchConfigs.forFile(relativePath),
     );
     chunkCount += rows.length;
   }
@@ -380,7 +422,7 @@ async function run(options: Options): Promise<GateVerdict> {
   const startedAt = new Date();
   const totalStart = Date.now();
   const config = loadEvalConfig();
-  const textSearchConfig = evalTextSearchConfig();
+  const textSearchConfigs = evalTextSearchConfigs();
 
   const files = await corpusFiles();
   const golden = parseGoldenSet(await fs.readFile(GOLDEN_PATH, 'utf8'), new Set(files));
@@ -431,7 +473,7 @@ async function run(options: Options): Promise<GateVerdict> {
 
     step('eval: indexing the corpus');
     const indexStart = Date.now();
-    const indexed = await indexCorpus(db, embeddings, config, project.id, project.liveGeneration, files, textSearchConfig);
+    const indexed = await indexCorpus(db, embeddings, config, project.id, project.liveGeneration, files, textSearchConfigs);
     const indexMs = Date.now() - indexStart;
 
     // `searchProject` re-reads the project and refuses one with no chunks or a model it does not run,
@@ -467,7 +509,7 @@ async function run(options: Options): Promise<GateVerdict> {
      */
     const ask = async (id: string, query: string): Promise<{ hits: ScoredHit[]; refused: boolean }> => {
       const outcome = await searchProject(
-        { db, embeddings, scan, textSearchConfig, selection, scoreFloor: 0, rerank: reranker ?? undefined },
+        { db, embeddings, scan, selection, scoreFloor: 0, rerank: reranker ?? undefined },
         { projectId: project.id, query, limit: SEARCH_LIMIT },
       );
       if (outcome.status !== 'ok') {
@@ -527,7 +569,7 @@ async function run(options: Options): Promise<GateVerdict> {
       chunkOverlapTokens: config.CHUNK_OVERLAP_TOKENS,
       searchLimit: SEARCH_LIMIT,
       hnswScan: `ef_search=${scan.efSearch}, iterative_scan=${scan.iterativeScan}, max_scan_tuples=${scan.maxScanTuples}`,
-      textSearchConfig,
+      textSearchConfig: textSearchConfigs.describe,
       resultSelection:
         `max_per_document=${selection.maxPerDocument}, neighbor_context=${selection.neighborContext}, ` + `score_floor=${config.SEARCH_SCORE_FLOOR}`,
       rerank: reranker ? `${reranker.id}, max_tokens=${config.SEARCH_RERANK_MAX_TOKENS}, batch=${config.SEARCH_RERANK_BATCH}` : 'off',
