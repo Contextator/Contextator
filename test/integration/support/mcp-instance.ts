@@ -92,9 +92,19 @@ export async function seedDocument(db: Db, projectId: string, sourceId: string, 
   );
 }
 
-/** A project with one `local` source and one indexed page, ready to be searched. */
+/**
+ * A project with one `local` source and one indexed page, ready to be searched.
+ *
+ * **`mcpAuth` is pinned to `open` here and not left to the column's default.** Since
+ * [ADR-0065](../../../.ssot/ADR.md#adr-0065) a project is born `token`, and the suites this helper
+ * serves — the tools, the audit log, the OAuth flow — are about what an endpoint *does* once a caller
+ * is past its door, not about the door. Each of them then opens or closes it explicitly for the
+ * assertion it is making. The birth default is a claim of its own and is proved where it belongs:
+ * `test/permissions.test.ts` for the rule, `mcp-identity.itest.ts` for a real request against a
+ * project created the way the product creates one, and `schema.itest.ts` for the column.
+ */
 export async function seedProject(db: Db, name: string, page: { path: string; body: string }): Promise<ProjectRow> {
-  const [project] = await db.insert(projects).values({ name, embeddingModel: STUB_MODEL_ID }).returning();
+  const [project] = await db.insert(projects).values({ name, embeddingModel: STUB_MODEL_ID, mcpAuth: 'open' }).returning();
   const [source] = await db
     .insert(documentSources)
     .values({ projectId: project.id, type: 'local', name: 'handbook', config: { path: '/docs', extensions: ['md'] } })

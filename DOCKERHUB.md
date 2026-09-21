@@ -29,7 +29,7 @@ Full documentation, configuration reference and source:
 ## Quick start
 
 ```bash
-docker run -d --name contextator -p 3444:3444 \
+docker run -d --name contextator -p 127.0.0.1:3444:3444 \
   -e SETUP_CODE=whatever-you-like \
   -v contextator-pgdata:/var/lib/postgresql/data \
   -v contextator-models:/app/.cache/models \
@@ -49,6 +49,15 @@ curl -fsSLO https://raw.githubusercontent.com/Contextator/Contextator/main/.env.
 cp .env.example .env
 docker compose up -d
 ```
+
+**The port is published on `127.0.0.1` only** — with Compose and in the `docker run` above — so a
+default installation answers on the machine it runs on and nowhere else. To publish it on the
+network deliberately, set `CONTEXTATOR_BIND=0.0.0.0` in `.env` (Compose) or drop the `127.0.0.1:`
+from `-p`, and put a TLS-terminating reverse proxy or a VPN in front of it.
+
+**A new project's MCP endpoint requires a token.** Creating a project mints its first one and shows
+it once; make the endpoint **open** from the project page if its documents should be readable by
+anyone who can reach the URL.
 
 Full walkthrough — what to set in `.env` before the first start, and what each line of that command
 does: [wiki/Installation](https://github.com/Contextator/Contextator/wiki/Installation).

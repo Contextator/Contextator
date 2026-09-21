@@ -7,6 +7,7 @@ import { readMigrationFiles } from 'drizzle-orm/migrator';
 import { afterAll, describe, expect, inject, it } from 'vitest';
 
 import { MIGRATIONS_FOLDER, SchemaMismatchError } from '../../src/db/bootstrap.js';
+import { DEFAULT_MCP_AUTH } from '../../src/db/schema.js';
 import { ensureSchema } from './fixtures/ensure-schema-v5.js';
 import {
   applySchema,
@@ -213,16 +214,19 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     // ([ADR-0054](../../../.ssot/ADR.md#adr-0054)) and `0009_document_versions`
     // ([ADR-0058](../../../.ssot/ADR.md#adr-0058)) and `0010_audit_events`
     // ([ADR-0055](../../../.ssot/ADR.md#adr-0055)), whose whole table is named by one anchored term
-    // for the reason `^search_quer` and `^oauth_clients` are. So the claim is no
-    // longer "nothing changed": it is that nothing changed *except* what those migrations say they
-    // change, and the lines that moved are checked by name rather than counted.
+    // for the reason `^search_quer` and `^oauth_clients` are, and `0012_mcp_auth_default_token`
+    // ([ADR-0065](../../../.ssot/ADR.md#adr-0065)), whose term names `projects.mcp_auth` by its table
+    // and its column position — the first here that is about a column's *default* rather than about a
+    // line appearing, so the projection shows the old default leaving and the new one arriving. So the
+    // claim is no longer "nothing changed": it is that nothing changed *except* what those migrations
+    // say they change, and the lines that moved are checked by name rather than counted.
     await applySchema(database);
     const changed = snapshotDifference(afterLadder, await captureSchema(db));
     expect(changed).not.toHaveLength(0);
     expect(
       changed.filter(
         (line) =>
-          !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events/.test(
+          !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|projects \| \d+ \| mcp_auth \|/.test(
             line,
           ),
       ),
@@ -277,8 +281,22 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     ]);
 
     // v5: an upgraded project stays reachable by whatever was already configured against it.
+    //
+    // This line now carries [ADR-0065](../../.ssot/ADR.md#adr-0065) as well, and it is the assertion
+    // that entry's migration was written around: `0012` moves the column *default* and nothing else,
+    // so an instance that has been through the upgrade still answers every agent already configured
+    // against this project. A migration that had closed it would have cut those connections in a
+    // deployment nobody asked to be a change of access.
     const upgraded = await db.execute(sql`SELECT mcp_auth FROM projects WHERE id = ${projectId}`);
     expect((upgraded.rows[0] as { mcp_auth: string }).mcp_auth).toBe('open');
+
+    // The other half of the same claim, on the same upgraded database: what the migration *did*
+    // change is what the next project is born as. Inserted with no `mcp_auth`, the way every creation
+    // path inserts it.
+    const born = await db.execute(sql`INSERT INTO projects (name) VALUES ('born-after-upgrade') RETURNING mcp_auth`);
+    expect((born.rows[0] as { mcp_auth: string }).mcp_auth).toBe(DEFAULT_MCP_AUTH);
+    expect(DEFAULT_MCP_AUTH).not.toBe('open');
+    await db.execute(sql`DELETE FROM projects WHERE name = 'born-after-upgrade'`);
 
     const version = await db.execute(sql`SELECT value FROM settings WHERE key = 'schema_version'`);
     expect((version.rows[0] as { value: string }).value).toBe('5');

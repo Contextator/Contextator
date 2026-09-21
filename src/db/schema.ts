@@ -65,6 +65,20 @@ const tsvector = customType<{ data: string; driverData: string }>({
 
 export const projectStatus = pgEnum('project_status', ['idle', 'indexing', 'error']);
 
+/**
+ * What `projects.mcp_auth` is when nobody says ([ADR-0065](../../.ssot/ADR.md#adr-0065)).
+ *
+ * A constant rather than a literal in the column, because three readers have to agree on it and only
+ * one of them is this file: the generated migration carries it into every database, the creation path
+ * in `src/services/projects.ts` mints a first token when it is `token`, and the tests assert the value
+ * a project is born with. Moving it here moves all three.
+ *
+ * **It is the birth value and nothing else.** No migration and no code path rewrites an existing row:
+ * a project already configured `open` stays `open` through the upgrade, because the clients configured
+ * against it are configured against that answer.
+ */
+export const DEFAULT_MCP_AUTH: McpAuthMode = 'token';
+
 export const projects = pgTable(
   'projects',
   {
@@ -81,17 +95,20 @@ export const projects = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     /**
      * Who may talk to this project's MCP endpoint. `open` is the historical behaviour — anyone who can
-     * reach the URL — and stays the default so an upgrade breaks no configured client.
+     * reach the URL — and it stays one of the three values an operator can choose.
      *
      * Since [ADR-0054](../../.ssot/ADR.md#adr-0054) there is a third value, `account`: the caller has
      * to present a credential that names a **user**, and that user's membership of this project is
      * what decides. `token` still accepts a static `ctxm_…` bearer, which is the credential every CLI
      * install in the field is configured with.
      *
+     * The **default** is `token` since [ADR-0065](../../.ssot/ADR.md#adr-0065) — see `DEFAULT_MCP_AUTH`
+     * below, which is the one place it is written and the one place a migration reads it from.
+     *
      * Last, after `created_at`, because v5 added it with an `ALTER TABLE … ADD COLUMN` and that is
      * where it physically sits in every database that has been through the ladder.
      */
-    mcpAuth: text('mcp_auth').notNull().default('open').$type<McpAuthMode>(),
+    mcpAuth: text('mcp_auth').notNull().default(DEFAULT_MCP_AUTH).$type<McpAuthMode>(),
     /**
      * Which generation of `documents`/`chunks` is the published index of this project
      * ([ADR-0039](../../.ssot/ADR.md#adr-0039)). A rebuild writes generation `live_generation + 1`

@@ -73,14 +73,22 @@ const opened: TestDatabase[] = [];
  * `settings` being the obvious places. Its second column needs no term at all: that migration's
  * `search_queries.filter_version` is already inside `^search_quer`, which anchors the *table* rather
  * than the column, and is exactly the breadth that entry accepted for its own two tables.
- * `0010_audit_events` ([ADR-0055](../../.ssot/ADR.md#adr-0055)) is the last one, and it is a single
+ * `0012_mcp_auth_default_token` ([ADR-0065](../../.ssot/ADR.md#adr-0065)) is the last one, and it is
+ * the only term here about a column's *default* rather than about a line appearing or disappearing:
+ * `SET DEFAULT 'token'` rewrites the default in `projects.mcp_auth`'s projection line, so the old line
+ * leaves and a new one arrives. It is qualified by its table and its column position for `trigger`'s
+ * reason. The cost is the one `projects_mcp_auth_check` already pays — a later migration that moved
+ * this default again would pass here unread — and it is bounded the same way: a database carried
+ * forward and one created today are compared as whole text in the test above, where the two would have
+ * to agree about what a project is born as.
+ * `0010_audit_events` ([ADR-0055](../../.ssot/ADR.md#adr-0055)) is the one before it, and it is a single
  * term because the migration is a single whole table: `^audit_events` anchors the *table* — its
  * columns, its three indexes, its foreign key and its three CHECK constraints all carry that prefix —
  * which is the same breadth `^search_quer` and `^oauth_clients` were already accepted at, and for the
  * same reason. It adds no column to any existing table, so it needs no second term.
  */
 const POST_BASELINE_MARKERS =
-  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events/;
+  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|projects \| \d+ \| mcp_auth \|/;
 
 afterAll(async () => {
   for (const database of opened) await dropTestDatabase(baseUrl, database);

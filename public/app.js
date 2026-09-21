@@ -26,7 +26,7 @@ import {
 } from './core.js';
 import { captureAuditFocus, loadAudit, renderAuditView } from './audit.js';
 import { canCreateProject, canDeleteProject, canEdit, initAuthUi, loadMe, renderUserMenu } from './auth.js';
-import { authHeaderFor, initMcpUi, loadMcpTokens, renderMcpAccess } from './mcp.js';
+import { authHeaderFor, initMcpUi, loadMcpTokens, renderMcpAccess, showMcpSecret } from './mcp.js';
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
 import { loadQuerySummary, renderQueries } from './queries.js';
 import { captureSearchFocus, renderSearch } from './search.js';
@@ -975,6 +975,10 @@ createForm.addEventListener('submit', async (event) => {
     closeCreate();
     toast(`Project ${created.name} created`);
     state.selectedId = created.id;
+    // A project is born requiring a token (ADR-0065) and the server minted its first one with it.
+    // This is the only moment that string exists outside the database, so it goes on screen before
+    // anything else does.
+    if (created.mcpToken) showMcpSecret(created, created.mcpToken.secret);
     await refresh();
   } catch (err) {
     errorNode.textContent = err.message;

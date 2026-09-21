@@ -41,12 +41,17 @@ is intended, and credit in the release notes if you want it.
 Some of what this product does looks like a finding and is documented behaviour. These are not
 vulnerabilities, and a report about one of them will be closed with a link back to this section.
 
-- **A project whose MCP endpoint is `open` is readable by anyone who can reach its URL.** `open` is the
-  default, on purpose: it is how Contextator has always behaved, and making `token` the default would
-  break every configured agent on an upgrade. Dashboard accounts and memberships do not reach `/mcp/*` at
-  all — a `member` who is answered `404` for a project in the dashboard can still read that project
-  through its endpoint while it is open. Close it per project under **MCP access**, and read the
-  *MCP access* section of the [README](README.md#mcp-access) for what that does and does not do.
+- **A project whose MCP endpoint is `open` is readable by anyone who can reach its URL.** A *new*
+  project is not open — it requires a token and is handed its first one as it is created — but `open`
+  remains a mode, and a project set to it, or created before that default moved, is readable by anyone
+  who can reach the URL. Dashboard accounts and memberships do not reach `/mcp/*` at all — a `member`
+  who is answered `404` for a project in the dashboard can still read that project through its endpoint
+  while it is open. Read the *MCP access* section of the [README](README.md#mcp-access) for what each
+  mode does and does not do.
+- **An upgrade does not close a project that is already `open`.** The migration moves the column's
+  default and rewrites no row, deliberately: closing configured endpoints during an upgrade would cut
+  every agent already connected to them, silently, in a deployment nobody asked to be a change of
+  access. Switching an existing project is an operator's decision under **MCP access**.
 - **An MCP token grants the whole project.** It is a bearer credential for one endpoint, not an account.
   It carries no identity, records no actor beyond "last used at", and cannot be narrowed to a subset of
   the documents. A holder reads everything indexed in that project. A token that reaches the wrong person

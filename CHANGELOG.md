@@ -10,6 +10,29 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Changed
+
+- **A new project's MCP endpoint requires a token.** Creating a project now mints that project's
+  first token and shows it once, in the creation dialog; before this, a new project was `open` and
+  answered anyone who could reach its URL. Make it **open** from the project page if its documents
+  should be readable without a credential — the mode is unchanged and is still there.
+- **`docker compose` publishes the port on `127.0.0.1` instead of on every interface.** A default
+  installation is now reachable from the machine it runs on and from nowhere else. Set
+  `CONTEXTATOR_BIND=0.0.0.0` in `.env` to publish it on the network as before, and put a
+  TLS-terminating reverse proxy or a VPN in front of it when you do. `HOST` inside the container is
+  unchanged at `0.0.0.0`; what moved is which host interface Docker publishes to.
+
+### Upgrade notes
+
+- **No existing project changes.** The migration moves the column's default and rewrites no row: a
+  project configured `open` stays `open` after the upgrade, and every agent already configured
+  against it keeps working. What is different is the next project you create — it is born requiring
+  a token, and hands you that token as it is created.
+- **The published port moves on your next `docker compose up -d`.** If you reach this instance from
+  another machine — a colleague's laptop, an agent running elsewhere, a proxy on another host — set
+  `CONTEXTATOR_BIND=0.0.0.0` in `.env` before restarting, or it will stop answering them. Reaching
+  it from the host it runs on needs nothing.
+
 ## [0.1.0] - 2026-09-19
 
 First published release. `0.1.0` describes what the product does, not what changed to get there.

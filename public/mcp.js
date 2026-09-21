@@ -34,7 +34,8 @@ const MODES = {
     pill: 'open',
     tone: 'error',
     label: 'Open',
-    blurb: 'Anyone who can reach this URL can read every document indexed here — no account, no token. That is the historical behaviour.',
+    blurb:
+      'Anyone who can reach this URL can read every document indexed here — no account, no token. No project is created this way: it is a choice, for documentation nobody should have to be anybody to read.',
   },
   token: {
     pill: 'token required',
@@ -164,8 +165,13 @@ function openTokenDialog(project) {
   form.elements.name.focus();
 }
 
-/** The one moment the token exists outside the client's config, so hand over something pasteable. */
-function showSecret(project, secret) {
+/**
+ * The one moment the token exists outside the client's config, so hand over something pasteable.
+ *
+ * Exported because there are two such moments now: minting one from the panel below, and creating a
+ * project — which since ADR-0065 is born requiring a token and is handed its first one with it.
+ */
+export function showMcpSecret(project, secret) {
   const id = `${project.name}-docs`;
   const url = project.mcpUrl;
   $('#token-secret-value').textContent = secret;
@@ -200,7 +206,7 @@ export function initMcpUi() {
         body: { name: String(new FormData(form).get('name')).trim() },
       });
       closeDialog(dialog);
-      showSecret(dialogProject, secret);
+      showMcpSecret(dialogProject, secret);
       await loadMcpTokens(true);
     } catch (err) {
       errorNode.textContent = err.message;

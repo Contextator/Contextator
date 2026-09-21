@@ -24,10 +24,10 @@ http://localhost:3444/mcp/<project-name>
 - **Accounts and roles.** People sign in with their own account. `root` and `admin` manage everything and everyone; a
   `member` sees only the projects it is assigned to, as a read-only `viewer` or an `editor` that adds sources, uploads
   files and re-indexes. `ADMIN_TOKEN` stays for scripts and CI. See [Accounts and permissions](#accounts-and-permissions).
-- **A door on each MCP endpoint, with three settings.** A project's endpoint is open by default, as it has always
-  been. Require a bearer token on it to close it to a credential you hand out, or require an **account** and its
-  access becomes the memberships you already manage. Browser-based connectors sign in through OAuth 2.1.
-  See [MCP access](#mcp-access).
+- **A door on each MCP endpoint, with three settings.** A new project requires a **bearer token** that your client
+  sends as an ordinary header, and is handed its first one as it is created, shown once. Make it **open** if its documents should be readable by anyone who can reach the
+  URL, or require an **account** and its access becomes the memberships you already manage. Browser-based connectors
+  sign in through OAuth 2.1. See [MCP access](#mcp-access).
 - **Incremental indexing.** Files are hashed; only changed files are re-embedded, removed files are deleted.
 - **More than Markdown.** `.html`, `.docx`, `.csv` and `.pdf` are converted to Markdown as they are indexed, so an agent
   reads a Word file or a PDF the way it reads a page of documentation. See [File types](#file-types).
@@ -57,6 +57,12 @@ cp .env.example .env
 docker compose up -d
 docker compose logs -f            # wait for "embedding model ready"
 ```
+
+**The port is published on `127.0.0.1` only.** The dashboard and every MCP endpoint answer on this
+machine and nowhere else, so a container started on a laptop or an office server does not appear on
+the network it is plugged into. To publish it on the network deliberately, set `CONTEXTATOR_BIND=0.0.0.0`
+in `.env` and put a TLS-terminating reverse proxy or a VPN in front of it — see
+[Running behind a reverse proxy](#running-behind-a-reverse-proxy).
 
 1. **Create the first account.** Open **http://localhost:3444/setup**, enter the `SETUP_CODE` you chose, and create
    the `root` account. The code exists so that nobody who reaches the server before you can claim it; it stops working
@@ -96,7 +102,7 @@ fp32 model, ~235 MB with `EMBEDDING_DTYPE=fp16`, ~120 MB with `EMBEDDING_DTYPE=q
 Without Compose:
 
 ```bash
-docker run -d --name contextator -p 3444:3444 \
+docker run -d --name contextator -p 127.0.0.1:3444:3444 \
   -e SETUP_CODE=whatever-you-like \
   -v contextator-pgdata:/var/lib/postgresql/data \
   -v contextator-models:/app/.cache/models \
@@ -386,15 +392,19 @@ Accounts govern the dashboard and the admin API. The MCP endpoints have their ow
 
 ## MCP access
 
-A project's MCP endpoint is **open** by default: anyone who can reach `http://host:3444/mcp/<project>` reads every
-document indexed there, with no account and no token. That is how Contextator has always behaved, and an upgrade does
-not change it for a single existing project.
+A new project's MCP endpoint **requires a token**. Creating a project mints its first one and shows it once — that
+string is what a client is configured with, and the server keeps only its hash. A project is therefore closed from its
+first second, and the operator leaves the creation dialog holding the one thing that opens it.
 
-Per project, you can close it. **MCP access** on the project page offers three modes, and they narrow in this order:
+**Upgrading changes nothing about a project that already exists.** A project configured **open** stays open, because
+the agents configured against it were configured against that answer; the new default is the state a *new* project is
+born in and nothing else.
+
+Per project, you decide. **MCP access** on the project page offers three modes, and they narrow in this order:
 
 | Mode | Who gets an answer | What it is for |
 |------|--------------------|----------------|
-| **open** | Anyone who can reach the URL | The historical behaviour, and still the default. Nothing you have configured changes on an upgrade. |
+| **open** | Anyone who can reach the URL | Documents nobody has to be anybody to read: a public handbook, or an instance already behind a VPN. Chosen deliberately — and what every project created before the default moved still is. |
 | **token required** | A client presenting one of that project's tokens | One credential per agent, revocable one at a time. The token names nobody: whoever holds it reads everything indexed in that project. |
 | **account required** | A client acting as an account that is a **member** of the project | The memberships on the project page, reaching the endpoint. An administrator reaches it because an administrator reaches every project. |
 
@@ -777,6 +787,7 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `PORT` / `HOST` | `3444` / `0.0.0.0` | |
+| `CONTEXTATOR_BIND` | `127.0.0.1` | **Which host interface `docker compose` publishes the port on** (docker-compose only; the app never reads it). The default answers on this machine and nowhere else. `0.0.0.0` publishes on every interface — do that with a reverse proxy or a VPN in front, and set `TRUST_PROXY` and `PUBLIC_BASE_URL` to match. `HOST` above stays `0.0.0.0` either way: it is the interface *inside* the container, and Docker cannot forward a published port to a process listening only on the container's own loopback |
 | `DATABASE_URL` | `postgres://contextator:contextator@localhost:5432/contextator` | Local development only. The container ignores it and talks to its embedded PostgreSQL via `PG*` variables set by the entrypoint |
 | `POSTGRES_PASSWORD` | `contextator` | Password of the embedded PostgreSQL (loopback only), applied when the cluster is first created |
 | `CONTEXTATOR_PGDATA_VOLUME` / `CONTEXTATOR_MODELS_VOLUME` | `contextator-pgdata` / `contextator-models` | Docker volume names (docker-compose only) |
@@ -828,8 +839,9 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 
 ### Running behind a reverse proxy
 
-Nothing is in front of this by default — `docker compose` publishes 3444 directly — and the defaults
-are written for that. Put nginx, Caddy, Traefik or a cloud load balancer in front and **two settings
+Nothing is in front of this by default — `docker compose` publishes 3444 on the loopback interface,
+with nothing between it and the port — and the defaults are written for that. Publishing it anywhere
+else (`CONTEXTATOR_BIND=0.0.0.0`) is the moment to put something in front. Put nginx, Caddy, Traefik or a cloud load balancer in front and **two settings
 have to move together**:
 
 ```bash
@@ -1193,10 +1205,15 @@ text, on every pull request, against a real server.
 
 ## Security notes
 
-- An MCP endpoint is **open** by default — the historical behaviour — and can be closed per project with a
-  bearer token; the mechanism and who may change it are in [MCP access](#mcp-access). Tokens are stored as hashes,
-  shown once, scoped to one project, and revoking one closes that project's live MCP sessions rather than waiting
-  for the next request.
+- **The port is published on `127.0.0.1` only.** A default installation is reachable from the machine it runs on and
+  from nowhere else; `CONTEXTATOR_BIND=0.0.0.0` publishes it on the network, and is the one place that decision is
+  made. The container's own `HOST` stays `0.0.0.0` because that is the interface inside it, which Docker forwards the
+  published port to.
+- A new MCP endpoint **requires a token**: creating a project mints its first one and shows it once. A project that
+  already exists is not touched by an upgrade — one configured **open** stays open, because its clients are
+  configured against that answer. The mechanism and who may change it are in [MCP access](#mcp-access). Tokens are
+  stored as hashes, shown once, scoped to one project, and revoking one closes that project's live MCP sessions
+  rather than waiting for the next request.
 - A static token is a credential for the endpoint, not an account: it has no identity and no per-document rules, so a
   holder reads everything indexed in that project. A project left `open` is readable by anyone who can reach its URL,
   whatever the dashboard roles say. A project set to **account required** is the case where they do say: a credential
@@ -1204,8 +1221,8 @@ text, on every pull request, against a real server.
 - The OAuth endpoints (`/.well-known/oauth-*`, `/oauth/*`) are reachable without a credential by design — the two
   discovery documents exist to be fetched by a client that has none, and registering a client grants nothing at all.
   Approving one is a signed-in browser action, same-site checked like every other write in the dashboard.
-- So an instance that leaves its projects open belongs on a private network, or behind a reverse proxy that handles
-  auth — the endpoint itself is the only thing a project token closes.
+- So an instance that publishes its port and leaves its projects open belongs on a private network, or behind a
+  reverse proxy that handles auth — the endpoint itself is the only thing a project token closes.
 - Browser `Origin` headers on `/mcp/*` are validated (DNS-rebinding protection) in both modes; CLI clients send none.
 - Local source directories are confined to `ALLOWED_DOC_ROOTS`; `..`, symlinks that escape, and non-directories are rejected.
 - Git and Notion tokens are encrypted at rest with `SECRET_KEY` (AES-256-GCM) and never returned by the API; credentials pasted into a repository URL are stripped before storage.
