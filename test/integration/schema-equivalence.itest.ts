@@ -73,7 +73,12 @@ const opened: TestDatabase[] = [];
  * `settings` being the obvious places. Its second column needs no term at all: that migration's
  * `search_queries.filter_version` is already inside `^search_quer`, which anchors the *table* rather
  * than the column, and is exactly the breadth that entry accepted for its own two tables.
- * `0012_mcp_auth_default_token` ([ADR-0065](../../.ssot/ADR.md#adr-0065)) is the last one, and it is
+ * `0010_audit_events` ([ADR-0055](../../.ssot/ADR.md#adr-0055)) is the next one, and it is a single
+ * term because the migration is a single whole table: `^audit_events` anchors the *table* — its
+ * columns, its three indexes, its foreign key and its three CHECK constraints all carry that prefix —
+ * which is the same breadth `^search_quer` and `^oauth_clients` were already accepted at, and for the
+ * same reason. It adds no column to any existing table, so it needs no second term.
+ * `0012_mcp_auth_default_token` ([ADR-0065](../../.ssot/ADR.md#adr-0065)) is the one after it, and it is
  * the only term here about a column's *default* rather than about a line appearing or disappearing:
  * `SET DEFAULT 'token'` rewrites the default in `projects.mcp_auth`'s projection line, so the old line
  * leaves and a new one arrives. It is qualified by its table and its column position for `trigger`'s
@@ -81,12 +86,7 @@ const opened: TestDatabase[] = [];
  * this default again would pass here unread — and it is bounded the same way: a database carried
  * forward and one created today are compared as whole text in the test above, where the two would have
  * to agree about what a project is born as.
- * `0010_audit_events` ([ADR-0055](../../.ssot/ADR.md#adr-0055)) is the one before it, and it is a single
- * term because the migration is a single whole table: `^audit_events` anchors the *table* — its
- * columns, its three indexes, its foreign key and its three CHECK constraints all carry that prefix —
- * which is the same breadth `^search_quer` and `^oauth_clients` were already accepted at, and for the
- * same reason. It adds no column to any existing table, so it needs no second term.
- * `0012_lexical_configurations` ([ADR-0064](../../.ssot/ADR.md#adr-0064)) is the newest, and it is one
+ * `0013_lexical_configurations` ([ADR-0064](../../.ssot/ADR.md#adr-0064)) is the newest, and it is one
  * unqualified term for `content_tsv`'s reason: `text_search_config` is not a word that could turn up
  * on another table by accident. It needs no second term for the index it rebuilds —
  * `chunks_project_generation_idx` gains this column and is already inside `index_generation`, which

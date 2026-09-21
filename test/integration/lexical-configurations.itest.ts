@@ -294,7 +294,7 @@ describe('a database that comes up holding a source whose language the column do
       },
       [chunkOf(0, 'Kimlik doğrulama > Anahtarların geri çekilmesi', TR_ANSWER)],
       // `simple`, deliberately: this is what every row of every database looks like the moment
-      // `0012` has added the column and nothing has reconciled it yet.
+      // `0013` has added the column and nothing has reconciled it yet.
       'simple',
     );
   });
@@ -307,7 +307,7 @@ describe('a database that comes up holding a source whose language the column do
     expect(await configOf()).toEqual(['simple']);
     // The dense half still answers — there is one chunk in this project and it is the nearest thing
     // to anything. A null lexical rank is what says the other half found nothing, which is the state
-    // a Turkish source is in the moment `0012` has run and nothing has reconciled it yet.
+    // a Turkish source is in the moment `0013` has run and nothing has reconciled it yet.
     expect((await find())[0].lexicalRank).toBeNull();
   });
 

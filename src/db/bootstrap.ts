@@ -208,7 +208,7 @@ async function backfillContentTsv(db: Db, log: Logger): Promise<void> {
  * and rewrites its `content_tsv` to match ([ADR-0064](../../.ssot/ADR.md#adr-0064)).
  *
  * **It exists because the column cannot be derived from what is already in the row.** A `tsvector`
- * does not remember the configuration it was built with, so `0012` could only give every existing
+ * does not remember the configuration it was built with, so `0013` could only give every existing
  * chunk the default — `simple` — and on an installation whose German source has been indexed with
  * `german` since ADR-0041 that label is a lie the search statement would act on. Rewriting both
  * columns together from the source's `language` is the only repair that needs no knowledge of which
