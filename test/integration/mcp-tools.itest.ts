@@ -555,6 +555,62 @@ describe('the version argument', () => {
 });
 
 /**
+ * `list_topics` naming a source's language — the retrieval-free half of
+ * [ADR-0068](../../.ssot/ADR.md#adr-0068). A source's `config.language` is a PostgreSQL text search
+ * configuration ([ADR-0041](../../.ssot/ADR.md#adr-0041)), and the ones this product ships are already
+ * spelled as language names, so the tool carries the value through rather than translating it.
+ */
+describe("a source's language on list_topics", () => {
+  let multilingual: ProjectRow;
+
+  beforeAll(async () => {
+    const [project] = await fx.database.db
+      .insert(projects)
+      .values({ name: 'multilingual-project', embeddingModel: MODEL_ID, documentCount: 2, chunkCount: 2 })
+      .returning();
+    multilingual = project;
+
+    const [turkish] = await fx.database.db
+      .insert(documentSources)
+      .values({ projectId: project.id, type: 'local', name: 'tr-docs', config: { path: fx.root, extensions: ['md'], language: 'turkish' } })
+      .returning();
+    await seed(fx.database.db, project.id, turkish.id, 'tr-docs/rehber.md', '# Rehber\n\nAnahtarınızı nereden alırsınız.\n', { store: true });
+
+    // No `language` key at all — the shape of every source that predates ADR-0041, and of one whose
+    // language nobody set. `list_topics` must stay silent about it rather than print "unknown" or
+    // fall back to naming `simple`, which is a search-side default and not a language.
+    const [unset] = await fx.database.db
+      .insert(documentSources)
+      .values({ projectId: project.id, type: 'local', name: 'other-docs', config: { path: fx.root, extensions: ['md'] } })
+      .returning();
+    await seed(fx.database.db, project.id, unset.id, 'other-docs/guide.md', '# Guide\n\nWhere to find your key.\n', { store: true });
+
+    // `language: 'simple'` set explicitly — not the same shape as `unset` above, and the one the
+    // guard in `namedLanguageOf` exists for: a source that *names* `simple` still gets no `language:`
+    // segment, because `simple` is the configuration for a corpus whose language is not known, not a
+    // language name. Without a fixture that actually holds this value, a test asserting silence for it
+    // passes vacuously.
+    const [simpleNamed] = await fx.database.db
+      .insert(documentSources)
+      .values({ projectId: project.id, type: 'local', name: 'simple-docs', config: { path: fx.root, extensions: ['md'], language: 'simple' } })
+      .returning();
+    await seed(fx.database.db, project.id, simpleNamed.id, 'simple-docs/notes.md', '# Notes\n\nWhere to find your key.\n', { store: true });
+  });
+
+  it('names the language of a source that has one, and says nothing for a source that has none or names simple', async () => {
+    const answer = await call('list_topics', {}, multilingual);
+    expect(answer.isError).toBe(false);
+    expect(answer.text).toContain('tr-docs (local, language: turkish)');
+    expect(answer.text).toContain('other-docs (local)');
+    expect(answer.text).not.toContain('other-docs (local, language');
+    expect(answer.text).toContain('simple-docs (local)');
+    expect(answer.text).not.toContain('simple-docs (local, language');
+    expect(answer.text).not.toMatch(/language: unknown/i);
+    expect(answer.text).not.toMatch(/language: simple/i);
+  });
+});
+
+/**
  * The fence of [ADR-0066](../../.ssot/ADR.md#adr-0066), through the client, on a real index.
  *
  * **It is not a control and these are not tests of one.** Prompt injection is still a property of the
