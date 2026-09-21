@@ -13,5 +13,8 @@
 -- compatible, and the default is now simply the state a project spends its first minutes in.
 --
 -- The value is not written twice: `DEFAULT_MCP_AUTH` in `src/db/schema.ts` is what drizzle-kit read to
--- emit this statement, and `npm run db:check` is what keeps the two saying the same thing.
+-- emit this statement, and `test/integration/schema.itest.ts` is what keeps the two saying the same
+-- thing — it inserts a project into an upgraded database and asserts that what comes back *is*
+-- `DEFAULT_MCP_AUTH`. `npm run db:check` does not and cannot: it compares the migration files with
+-- their own snapshots and never reads `src/db/schema.ts`, so moving the constant alone leaves it green.
 ALTER TABLE "projects" ALTER COLUMN "mcp_auth" SET DEFAULT 'token';

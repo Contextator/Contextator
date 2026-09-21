@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { mcpTokens, projectMembers, projects, type ProjectRow, type UserRow } from '../../src/db/schema.js';
@@ -12,7 +12,8 @@ import { createMcpToken, issueMcpCredential } from '../../src/services/auth/mcp-
 import { createProjectWithFirstToken } from '../../src/services/projects.js';
 import { setMemberRole } from '../../src/services/auth/memberships.js';
 import { createUser, updateUser } from '../../src/services/auth/users.js';
-import { applySchema, createTestDatabase, dropTestDatabase, type TestDatabase } from './support/postgres.js';
+import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
+import { ensureSchema } from './fixtures/ensure-schema-v5.js';
 import { seedProject, startMcpInstance, type LiveInstance } from './support/mcp-instance.js';
 
 /**
@@ -282,8 +283,8 @@ describe('the query log still learns which credential asked', () => {
  * them. Both, because only the pair says anything: the `401` alone would pass on a build that
  * refused everybody, and the `200` alone would have passed before any of this.
  *
- * The third assertion is the one an existing installation depends on, and it is the negative
- * space of the change: a project that is already `open` is not touched by any of it.
+ * What an upgrade does to a project that already exists is a different claim, on a different
+ * database, and it is made in the describe below rather than borrowed from here.
  */
 describe('a project created the way the product creates one', () => {
   it('is born requiring a token, and is handed that token once', async () => {
@@ -310,9 +311,85 @@ describe('a project created the way the product creates one', () => {
 
     expect((await probe(created.project, created.mcpToken?.secret)).status).toBe(200);
   });
+});
 
-  it('leaves a project that is already open answering anonymously, as its clients are configured for', async () => {
-    await setMode(theirs, 'open');
-    expect((await probe(theirs)).status).toBe(200);
+/**
+ * **The upgrade, end to end, on a database that predates it** — the claim an existing installation
+ * depends on ([ADR-0065](../../.ssot/ADR.md#adr-0065), PRD.md FR-512).
+ *
+ * `schema.itest.ts` holds this at the SQL level: the column default moves and no row is rewritten.
+ * That is the mechanism; it is not yet the promise. The promise is that a client configured against a
+ * project before the upgrade is answered after it, and only a request against a running instance can
+ * say so — which is what this database is for. It is built the way a `0.1.0` installation was built
+ * (the frozen v5 ladder), given a project the way that installation gave itself one, migrated by the
+ * ordinary bootstrap, and then asked the same question an already-configured agent asks: an
+ * `initialize` with no credential at all.
+ *
+ * The second assertion is what stops the first from being a test of nothing having happened: on the
+ * *same* upgraded database, the next project is born closed.
+ */
+describe('an instance upgraded from a 0.1.0 database', () => {
+  let upgraded: TestDatabase;
+  let upgradedLive: LiveInstance;
+  let upgradedRoot: string;
+  /** The project as it existed before the upgrade: created on v5, whose own default was `open`. */
+  let carriedForward: ProjectRow;
+
+  beforeAll(async () => {
+    upgraded = await createTestDatabase(baseUrl, 'mcp_identity_upgrade');
+    upgradedRoot = await mkdtemp(path.join(tmpdir(), 'contextator-mcp-upgrade-'));
+
+    // A `0.1.0` instance: its own startup DDL, frozen, and no migration journal.
+    await ensureSchema(upgraded.db, { dimensions: TEST_EMBEDDING_DIMENSIONS, resetVectors: false, log: silentLogger });
+    // Created the way that instance created one — naming no mode, and getting that schema's default.
+    await upgraded.db.execute(sql`INSERT INTO projects (name) VALUES ('carried-forward')`);
+    const before = await upgraded.db.execute(sql`SELECT mcp_auth FROM projects WHERE name = 'carried-forward'`);
+    expect((before.rows[0] as { mcp_auth: string }).mcp_auth).toBe('open');
+
+    // The upgrade itself: adopt the baseline, apply everything cut since — `0012` included.
+    await applySchema(upgraded);
+    [carriedForward] = await upgraded.db.select().from(projects).where(eq(projects.name, 'carried-forward'));
+
+    upgradedLive = await startMcpInstance(upgraded, { dataDir: path.join(upgradedRoot, '.data'), docRoot: upgradedRoot });
+  });
+
+  afterAll(async () => {
+    await upgradedLive?.close();
+    await rm(upgradedRoot, { recursive: true, force: true });
+    await dropTestDatabase(baseUrl, upgraded);
+  });
+
+  it('still answers a request carrying nothing, on the project it had before the upgrade', async () => {
+    // The request first and the row second, in that order deliberately: what an operator's agent
+    // depends on is the answer, not the column, so the answer is what fails here if this ever moves.
+    const res = await fetch(`${upgradedLive.origin}/mcp/${carriedForward.name}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'configured-before-the-upgrade', version: '0.0.0' } },
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(carriedForward.mcpAuth).toBe('open');
+  });
+
+  it('gives the next project on that same database the new default', async () => {
+    const created = await createProjectWithFirstToken(upgraded.db, { name: 'created-after', createdBy: null }, [upgradedRoot]);
+    expect(created.project.mcpAuth).toBe('token');
+
+    const res = await fetch(`${upgradedLive.origin}/mcp/created-after`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'probe', version: '0.0.0' } },
+      }),
+    });
+    expect(res.status).toBe(401);
   });
 });

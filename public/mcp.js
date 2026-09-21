@@ -34,7 +34,8 @@ const MODES = {
     pill: 'open',
     tone: 'error',
     label: 'Open',
-    blurb: 'Anyone who can reach this URL can read every document indexed here — no account, no token. That is the historical behaviour.',
+    blurb:
+      'Anyone who can reach this URL can read every document indexed here — no account, no token. No project is created this way: it is a choice, for documentation nobody should have to be anybody to read.',
   },
   token: {
     pill: 'token required',
