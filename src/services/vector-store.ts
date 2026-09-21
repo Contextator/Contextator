@@ -89,7 +89,10 @@ export interface SearchHit {
    * Cosine similarity in [-1, 1], higher better — **for display, and no longer for ordering**
    * ([ADR-0041](../../.ssot/ADR.md#adr-0041)). It is computed for every fused candidate, including
    * the ones only the lexical half found, because the query vector and the chunk embeddings are both
-   * in hand at that point and one more `<=>` over at most a hundred rows costs nothing.
+   * in hand at that point and one more `<=>` over the fused pool costs nothing. That pool is fifty
+   * dense candidates plus fifty for each text search configuration the project holds
+   * ([ADR-0064](../../.ssot/ADR.md#adr-0064)) — a hundred rows where it used to be a hundred rows
+   * full stop, and fifty more for every configuration past the first.
    *
    * It is kept because `formatHits` renders it into every MCP result and
    * [API.md](../../.ssot/API.md) §1 freezes the shape of that line. It is **not** a number to
@@ -558,9 +561,11 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
         -- ordering itself, so the excerpts a document keeps are its best ones and not an arbitrary two.
         --
         -- The join to documents is ADR-0067's, and it costs nothing here: this runs over the fused
-        -- pool, which is at most a hundred rows, and it is a lookup on the primary key. relative_path
-        -- and the content length are carried out of it so that the page below and the select list that
-        -- renders the page can order on the same corpus properties this window does.
+        -- pool -- fifty dense candidates plus fifty for each configuration the project holds, so a
+        -- hundred rows with one and a hundred and fifty with two -- and it is a lookup on the primary
+        -- key. relative_path and the content length are carried out of it so that the page below and
+        -- the select list that renders the page can order on the same corpus properties this window
+        -- does.
         select
           f.id,
           f.dense_rank,
@@ -665,8 +670,9 @@ interface RerankedPageArgs {
  * Node, over the reranked ordering, because `row_number() <= n` cannot be computed in SQL over a score
  * SQL has not got.
  *
- * **The rerank is deliberately outside the transaction.** A forward pass over up to a hundred pairs is
- * hundreds of milliseconds at best; holding the search's transaction open across it would pin a pooled
+ * **The rerank is deliberately outside the transaction.** A forward pass over the fused pool — a
+ * hundred pairs with one text search configuration and fifty more for each one beyond it
+ * ([ADR-0064](../../.ssot/ADR.md#adr-0064)) — is hundreds of milliseconds at best; holding the search's transaction open across it would pin a pooled
  * connection for the duration on a server whose indexer is already competing for the same pool. So the
  * candidate statement commits, the model runs, and the page is fetched by id — which is safe here for
  * the same reason a generation is a value rather than a sub-select (ADR-0039): the ids belong to a
