@@ -1395,8 +1395,39 @@ configurations that is now true only down to the point where the two ranked list
 Fixing it means giving the fused ordering a corpus property to break on before the uuid — the same
 correction FR-262 made one level down, applied to the fusion rather than to the candidate lists. That
 is a change to the ordering mechanism [ADR-0041](../../.ssot/ADR.md#adr-0041) fixed and
-[ADR-0064](../../.ssot/ADR.md#adr-0064) deliberately did not touch, so it is recorded here and left to
-be decided rather than slipped in.
+[ADR-0064](../../.ssot/ADR.md#adr-0064) deliberately did not touch, so it was recorded here and put to
+the operator rather than slipped in.
+
+### Fixed, 2026-09-21 ([ADR-0067](../../.ssot/ADR.md#adr-0067))
+
+**Everything above this heading stands as what was measured, and the defect it describes is gone.**
+The fused ordering is now `fused_score desc, dense_rank asc nulls last, content_length asc,
+relative_path asc, chunk_index asc, id asc` — the lexical candidate list's own tie-break lifted one
+level, with the uuid kept as a backstop that `(relative_path, chunk_index)` being unique inside a
+project and generation makes unreachable.
+
+**Six runs over freshly carved databases now return the same ten results, in the same order, for all
+92 questions** — compared pair by pair and page by page, which is the bar the defect itself set: one
+before/after comparison samples this and does not size it.
+
+| six runs, after the fix | |
+|---|---|
+| questions whose ten-result page differs in any of the six | **0 of 92** |
+| `recall@1` / `recall@5` | 58 / 66 in all six |
+| `heading@1` / `heading@5` | 57 / 64 in all six |
+| questions the floor refuses | 1 in all six |
+
+No gate metric moved, and ADR-0041's control still holds: `EVAL_TEXT_SEARCH_CONFIG=simple` returns an
+identical rank and heading rank for all eighty-four of the original questions. One question's rank
+differs from the *arbitrary* value a pre-fix run happened to produce — `x-en-tr-08`, one of the
+thirteen that was a coin toss anyway, now settles at the sixth result. `en-errors-01` returns the same
+fifth result every time.
+
+The section above is kept in full rather than replaced. Nothing in the suite caught this before, which
+is how it was introduced; `test/integration/lexical-configurations.itest.ts` now manufactures the tie
+across six freshly created projects and asserts the order the corpus implies, because asserting
+stability alone cannot catch it — within one database the uuids do not move and the same query twice
+returns the same page either way.
 
 ## Reproducing it
 

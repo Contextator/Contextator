@@ -27,6 +27,12 @@ ships, that stops.
 
 ### Fixed
 
+- **The same search over the same documentation returns the same page again.** Between two results
+  that scored identically, which one came first was decided by an internal identifier that is minted
+  fresh every time a project is re-indexed — so a project holding two languages could hand back a
+  different fifth result after a rebuild, with nothing having changed but the rebuild. Equal results
+  are now ordered by the documents themselves: the shorter excerpt first, then the document's own
+  path and the position of the passage within it.
 - Documentation said PostgreSQL has no Turkish configuration. It has one, and Turkish sources were
   being indexed without stemming because of that claim.
 

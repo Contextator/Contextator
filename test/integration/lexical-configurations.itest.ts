@@ -345,3 +345,155 @@ describe('a database that comes up holding a source whose language the column do
     expect((await find())[0].lexicalRank).toBeNull();
   });
 });
+
+/**
+ * **The fused ordering, when two configurations produce the same rank**
+ * ([ADR-0067](../../.ssot/ADR.md#adr-0067)).
+ *
+ * A chunk's lexical rank is now a rank *within its own configuration*, so a Turkish chunk and an
+ * English chunk can both be rank 1; at a depth where neither is on the dense list their `fused_score`
+ * is `1/(60 + 1)` on both, to the bit. Until ADR-0067 the ordering fell through to `id asc`, which is
+ * `gen_random_uuid()` — so which of the two came first was decided when the rows were inserted and
+ * changed on every re-index. Measured on the evaluation corpus: 13 of 92 questions returned a
+ * different ten-result page between runs, one of them at the fifth result.
+ *
+ * **Seeding the tie is the whole fixture, and asserting stability is not enough to catch this.**
+ * Within one database the uuids do not change, so the same query twice returns the same page whether
+ * or not there is a tie-break underneath it. The defect only shows across databases, which is why this
+ * seeds the same corpus into several freshly created projects — the pattern `hybrid-search.itest.ts`
+ * already uses for ADR-0041's tie-break, for the same reason — and asserts that every one of them
+ * returns the ordering the *corpus* implies rather than merely the same ordering as its neighbour.
+ */
+describe('two configurations that tie on the fused score', () => {
+  let tied: TestDatabase;
+  /** Enough fresh projects that a uuid deciding this would have to win a coin toss six times over. */
+  const PROJECTS = 6;
+  const pages: SearchHit[][] = [];
+
+  /**
+   * The question: one rare word per configuration so each half returns exactly one chunk at rank 1,
+   * plus one ordinary word every filler carries. The ordinary word is what makes the fillers
+   * dense-near — without it nothing in the corpus shares a token with the question, every cosine
+   * distance is 1, and the dense list is itself a tie, which would make this file measure that.
+   */
+  const TIE_QUESTION = 'anahtarı nasıl ZX4417';
+
+  /**
+   * The two chunks that answer it, and they are built to tie. Each is the only chunk of its own
+   * configuration that the question reaches, so each is rank 1 of its own lexical list; both are far
+   * past the dense cut, so neither carries a dense rank. **The Turkish one is deliberately the longer
+   * of the two**, which is what makes the expected order the opposite of the order they are written
+   * and inserted in — a test whose expectation happened to match insertion order would pass against
+   * no tie-break at all.
+   */
+  const SHORT_EN = 'ZX4417 abandons the delivery.';
+  const LONG_TR = 'Yöneticinin anahtarını geri çekmesi, izleyen istekte geçerli olur ve denetim izinde kalır.';
+
+  beforeAll(async () => {
+    tied = await createTestDatabase(baseUrl, 'lexical_configurations_tie');
+    await applySchema(tied, DIMS);
+
+    for (let n = 0; n < PROJECTS; n++) {
+      const [project] = await tied.db
+        .insert(projects)
+        .values({ name: `tie-${n}` })
+        .returning({ id: projects.id });
+      const [tr] = await tied.db
+        .insert(documentSources)
+        .values({ projectId: project.id, type: 'local', name: 'elkitabi', config: { language: 'turkish' } })
+        .returning({ id: documentSources.id });
+      const [en] = await tied.db
+        .insert(documentSources)
+        .values({ projectId: project.id, type: 'local', name: 'handbook' })
+        .returning({ id: documentSources.id });
+
+      // Dense-near the question and lexically worthless to it: every filler carries the question's
+      // ordinary words and neither of its two rare ones, and the repeated word gives every vector a
+      // different length so no two chunks sit at one distance.
+      // Not one word of these reaches either answering chunk, so both of those stay at cosine distance
+      // 1 while every filler is nearer — which is what keeps the two answers off the dense list.
+      const filler = (i: number): NewChunk =>
+        chunkOf(i, `Genel > Bölüm ${i}`, `Bu bölüm bir işin nasıl${' yeniden'.repeat(i + 1)} yapıldığını anlatır.`);
+      const seed = async (path: string, sourceId: string, rows: NewChunk[], config: 'simple' | 'turkish'): Promise<void> => {
+        await replaceDocument(
+          tied.db,
+          {
+            projectId: project.id,
+            sourceId,
+            relativePath: path,
+            title: path,
+            contentHash: `hash-${n}-${path}`,
+            sizeBytes: 512,
+            indexGeneration: LIVE,
+            content: null,
+            contentTruncated: false,
+            version: '',
+          },
+          rows,
+          config,
+        );
+      };
+
+      await seed(
+        'elkitabi/genel.md',
+        tr.id,
+        Array.from({ length: FILLER_CHUNKS }, (_, i) => filler(i)),
+        'turkish',
+      );
+      await seed('elkitabi/kimlik.md', tr.id, [chunkOf(0, 'Kimlik', LONG_TR)], 'turkish');
+      await seed('handbook/codes.md', en.id, [chunkOf(0, 'Codes', SHORT_EN)], 'simple');
+
+      pages.push(
+        await searchChunks(tied.db, {
+          projectId: project.id,
+          generation: LIVE,
+          queryEmbedding: stubVector(TIE_QUESTION),
+          queryText: TIE_QUESTION,
+          limit: 5,
+          selection: WHOLE_PAGE,
+        }),
+      );
+    }
+  });
+
+  afterAll(async () => {
+    await dropTestDatabase(baseUrl, tied);
+  });
+
+  it('has the tie it is about, which is the premise and not an assertion about the product', async () => {
+    // Without this the case below passes against a corpus with nothing to break, which is how a
+    // determinism test quietly becomes a test of nothing.
+    for (const page of pages) {
+      const answering = page.filter((hit) => hit.file !== 'elkitabi/genel.md');
+      expect(answering).toHaveLength(2);
+      expect(answering.map((hit) => hit.lexicalRank)).toEqual([1, 1]);
+      expect(answering.map((hit) => hit.denseRank)).toEqual([null, null]);
+      expect(new Set(answering.map((hit) => hit.fusedScore)).size).toBe(1);
+      // And the best dense-only chunk scores 1/(60 + 1) as well, so the tie is three wide and
+      // `dense_rank asc nulls last` is exercised beside the new keys rather than around them.
+      expect(page[0].denseRank).toBe(1);
+      expect(page[0].fusedScore).toBeCloseTo(answering[0].fusedScore, 12);
+    }
+  });
+
+  it('breaks the tie on the shorter chunk, in every freshly created project', async () => {
+    // The **direction**, not merely the stability: six projects agreeing would also be satisfied by a
+    // uuid that happened to fall the same way six times, and by insertion order. The Turkish chunk is
+    // inserted first and is the longer, so "shorter first" is the one expectation that can only be
+    // produced by the ordering under test.
+    for (const page of pages) {
+      const answering = page.filter((hit) => hit.file !== 'elkitabi/genel.md');
+      expect(answering.map((hit) => hit.file)).toEqual(['handbook/codes.md', 'elkitabi/kimlik.md']);
+    }
+    // It pins the *first* new key and not merely the set of them: on `relative_path` alone
+    // `elkitabi/…` sorts before `handbook/…`, so an ordering that had dropped `content_length` would
+    // return these two the other way round.
+    expect(SHORT_EN.length).toBeLessThan(LONG_TR.length);
+    expect('elkitabi/kimlik.md' < 'handbook/codes.md').toBe(true);
+  });
+
+  it('returns one page, not six, over six databases-worth of fresh identifiers', () => {
+    const orders = pages.map((page) => page.map(identify));
+    for (const order of orders) expect(order).toEqual(orders[0]);
+  });
+});

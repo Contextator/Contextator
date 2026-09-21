@@ -307,11 +307,49 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
   // one for display.
   const vector = sql`${JSON.stringify(queryEmbedding)}::vector`;
 
-  // The page's ordering, and the *whole* of it. Under a rerank the model's score is prepended to these
-  // three rather than replacing them: a cross-encoder returns equal logits often enough — two excerpts
-  // of one section, a duplicated table — that a rerank with no tie-break underneath it would hand the
-  // ordering back to the row order, which is the defect ADR-0041 spent a change removing.
-  const fusedOrdering = sql`fused_score desc, dense_rank asc nulls last, id asc`;
+  /**
+   * The page's ordering, and the *whole* of it. Under a rerank the model's score is prepended to these
+   * rather than replacing them: a cross-encoder returns equal logits often enough — two excerpts of one
+   * section, a duplicated table — that a rerank with no tie-break underneath it would hand the ordering
+   * back to the row order, which is the defect ADR-0041 spent a change removing.
+   *
+   * **The four keys after `fused_score` are [ADR-0067](../../.ssot/ADR.md#adr-0067), and they close the
+   * last place in this file where a `gen_random_uuid()` decided an ordering.** ADR-0041 moved both
+   * candidate lists onto properties of the corpus — the dense one orders `distance, chunk_index, id`
+   * and the lexical one `rank_score, length, chunk_index, id` — and left the *fusion* at
+   * `fused_score, dense_rank, id`, because with one lexical list two chunks could not share a lexical
+   * rank and the remaining ties were rare enough to be invisible. [ADR-0064](../../.ssot/ADR.md#adr-0064)
+   * made them visible: ranks are now assigned within a configuration, so a Turkish chunk and an English
+   * chunk can hold the same lexical rank, neither carries a dense rank at that depth, and their
+   * `fused_score` is identical to the bit. Measured over six runs of the evaluation on freshly carved
+   * databases, 13 of 92 questions returned a different ten-result page, and one of them —
+   * `en-errors-01` — returned a different **fifth** result, which is inside `DEFAULT_SEARCH_LIMIT`.
+   *
+   * Each key is a property of the corpus and each one has a reason, which is the bar a tie-break has to
+   * clear: it is not enough to be deterministic.
+   *
+   * - `content_length asc` — the lexical list's own first tie-break and its own reason: a term in a
+   *   short chunk is stronger evidence than the same term in a long one. It is also the key that
+   *   actually fires here, because the tie this exists for is two chunks at equal *lexical* rank.
+   * - `relative_path asc` — arbitrary as an order and deliberate as a rule: at equal evidence the
+   *   excerpts of one document stay together instead of interleaving with another's, and a path is
+   *   written by whoever wrote the documentation rather than minted by the database.
+   * - `chunk_index asc` — the earlier passage of a document first, which is the lexical list's second
+   *   tie-break and the dense list's.
+   * - `id asc` — the total-order backstop, kept for the reason the two candidate lists keep theirs.
+   *   It is now **unreachable**: `documents_project_generation_path_uq` and
+   *   `chunks_document_chunk_index_uq` together make `(relative_path, chunk_index)` unique inside one
+   *   project and generation, which is the whole scope of any one search.
+   *
+   * **One ordering, three spellings, because three scopes have different aliases in reach.** They must
+   * not drift: `page` picks the rows and `pageToHits` renders them, so a disagreement between the first
+   * two would select one page and display another.
+   */
+  const fusedOrdering = sql`fused_score desc, dense_rank asc nulls last, content_length asc, relative_path asc, chunk_index asc, id asc`;
+  /** The same ordering over the `page` CTE, for the select list that renders it. */
+  const pageOrdering = sql`p.fused_score desc, p.dense_rank asc nulls last, p.content_length asc, p.relative_path asc, p.chunk_index asc, p.id asc`;
+  /** The same ordering where the columns are still on their own tables: the cap, and the rerank's pool. */
+  const candidateOrdering = sql`f.fused_score desc, f.dense_rank asc nulls last, length(c.content) asc, doc.relative_path asc, c.chunk_index asc, f.id asc`;
 
   /**
    * Everything down to the fused list. It is shared by both paths verbatim, which is the property that
@@ -518,6 +556,11 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
         -- in Node: refilling from the candidates below a capped excerpt is what row_number() <= n
         -- does for free, over a pool that is already here. The partition's ORDER BY is the fused
         -- ordering itself, so the excerpts a document keeps are its best ones and not an arbitrary two.
+        --
+        -- The join to documents is ADR-0067's, and it costs nothing here: this runs over the fused
+        -- pool, which is at most a hundred rows, and it is a lookup on the primary key. relative_path
+        -- and the content length are carried out of it so that the page below and the select list that
+        -- renders the page can order on the same corpus properties this window does.
         select
           f.id,
           f.dense_rank,
@@ -525,9 +568,12 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
           f.fused_score,
           c.document_id,
           c.chunk_index,
-          row_number() over (partition by c.document_id order by f.fused_score desc, f.dense_rank asc nulls last, f.id asc) as per_document
+          length(c.content) as content_length,
+          doc.relative_path as relative_path,
+          row_number() over (partition by c.document_id order by ${candidateOrdering}) as per_document
         from fused f
         join chunks c on c.id = f.id
+        join documents doc on doc.id = c.document_id
       ),
       page as materialized (
         -- Materialised so that the limit happens *before* the two neighbour lookups in the select
@@ -538,7 +584,7 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
         order by ${fusedOrdering}
         limit ${limit}
       )`,
-    sql`p.fused_score desc, p.dense_rank asc nulls last, p.id asc`,
+    pageOrdering,
   );
 
   const scanSettings = sql`select
@@ -550,6 +596,7 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
     ? await rerankedPage(db, {
         scanSettings,
         fusedCandidates,
+        candidateOrdering,
         pageToHits,
         rerank,
         queryText,
@@ -593,6 +640,13 @@ interface CandidateRow extends Record<string, unknown> {
 interface RerankedPageArgs {
   scanSettings: ReturnType<typeof sql>;
   fusedCandidates: ReturnType<typeof sql>;
+  /**
+   * The fused ordering in its candidate-scope spelling ([ADR-0067](../../.ssot/ADR.md#adr-0067)).
+   * Passed in rather than rebuilt here, so the pool this path reranks arrives in the same order the
+   * shipped path would have returned it — the fused position is this path's own tie-break under the
+   * model's score, and a pool ordered by a uuid would put a uuid back underneath the rerank.
+   */
+  candidateOrdering: ReturnType<typeof sql>;
   pageToHits: (orderedPage: ReturnType<typeof sql>, ordering: ReturnType<typeof sql>) => ReturnType<typeof sql>;
   rerank: (query: string, passages: readonly string[]) => Promise<number[]>;
   queryText: string;
@@ -633,7 +687,8 @@ async function rerankedPage(db: Db, args: RerankedPageArgs): Promise<{ rows: Hyb
         c.content
       from fused f
       join chunks c on c.id = f.id
-      order by f.fused_score desc, f.dense_rank asc nulls last, f.id asc`);
+      join documents doc on doc.id = c.document_id
+      order by ${args.candidateOrdering}`);
   });
   if (candidates.rows.length === 0) return { rows: [] };
 
