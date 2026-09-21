@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -137,11 +138,53 @@ describe('docker/entrypoint.sh', () => {
     // to be cleared and now means "do not start the embedded PostgreSQL, connect to this container's
     // loopback" — where nothing is listening precisely because of that line. Warned rather than
     // refused: the same address is correct for a container sharing the host's network namespace.
-    expect(entrypoint).toContain('*@localhost:*');
-    expect(entrypoint).toContain('*@127.0.0.1:*');
     expect(entrypoint).toMatch(/warning: .*loopback/);
-    // `[::1]` unescaped is a bracket expression over `:` and `1`, not the IPv6 loopback — a pattern
-    // that reads as covering the address while matching nothing it appears in.
-    expect(entrypoint).toContain(String.raw`*@\[::1\]:*`);
+  });
+
+  /**
+   * **The loopback patterns are run, not read.** The first version of this guard asserted the pattern
+   * text with `toContain`, and that is how the defect it exists for got in: `*@[::1]:*` *reads* as the
+   * IPv6 loopback and is a bracket expression over `:` and `1`, so it matches nothing that address
+   * ever appears in — a warning that never fires, which is worse than no warning because it reads as
+   * covered. A literal assertion cannot tell those apart, and pinning one spelling leaves every other
+   * variant free to break silently. So the `case` patterns are lifted out of the script and executed
+   * by a shell against a table of addresses, which is the only thing that answers *does it match*.
+   */
+  describe('the loopback patterns, executed', () => {
+    const block = entrypoint.slice(
+      entrypoint.indexOf('case "$DATABASE_URL" in'),
+      entrypoint.indexOf('esac', entrypoint.indexOf('case "$DATABASE_URL" in')),
+    );
+    // The alternation line: everything up to the `)` that opens the branch body.
+    const patterns = block.split('\n').find((line) => line.trimStart().startsWith('*@'));
+
+    const matches = (url: string): boolean => {
+      expect(patterns, 'no `*@…` pattern line found in the DATABASE_URL case block').toBeTruthy();
+      const script = `case "$1" in\n${patterns}\n  echo MATCH ;;\n*) echo NO ;;\nesac`;
+      const run = spawnSync('bash', ['-c', script, 'contextator-test', url], { encoding: 'utf8' });
+      expect(run.status, run.stderr).toBe(0);
+      return run.stdout.trim() === 'MATCH';
+    };
+
+    // Both spellings of both loopback addresses, and both with and without a port — a URL may carry
+    // either, and the `/` forms are exactly the ones a single pinned literal would have let go.
+    it.each([
+      'postgres://contextator:contextator@localhost:5432/contextator', // the old .env.example line
+      'postgres://u:p@localhost/contextator',
+      'postgres://u:p@127.0.0.1:5432/contextator',
+      'postgres://u:p@127.0.0.1/contextator',
+      'postgres://u:p@[::1]:5432/contextator',
+      'postgres://u:p@[::1]/contextator',
+    ])('warns on %s', (url) => {
+      expect(matches(url)).toBe(true);
+    });
+
+    it.each([
+      'postgres://u:p@db.example.com:5432/contextator',
+      'postgres://u:p@10.0.0.5:5432/contextator',
+      'postgres://u:p@postgres.internal/contextator',
+    ])('stays quiet on %s', (url) => {
+      expect(matches(url)).toBe(false);
+    });
   });
 });
