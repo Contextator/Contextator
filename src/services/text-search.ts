@@ -86,3 +86,19 @@ export function isTextSearchConfig(value: unknown): value is TextSearchConfig {
 export function textSearchConfigFor(language: unknown): TextSearchConfig {
   return isTextSearchConfig(language) ? language : DEFAULT_TEXT_SEARCH_CONFIG;
 }
+
+/**
+ * The language a source's documents are written in, for an agent to read off `list_topics` rather than
+ * guess — the cross-lingual mitigation of [ADR-0068](../../.ssot/ADR.md#adr-0068): the server does not
+ * translate a query, but it can say what language the answer will be in, and a calling agent that is
+ * itself a language model can write the query in it.
+ *
+ * `undefined` for a source that names none and for one that explicitly names `simple`: `simple` is the
+ * configuration for a corpus whose language is *not known* ({@link DEFAULT_TEXT_SEARCH_CONFIG}), so it
+ * carries no language to report — printing "simple" next to a source would read as a language name and
+ * is not one.
+ */
+export function namedLanguageOf(config: unknown): TextSearchConfig | undefined {
+  const language = (config as { language?: unknown } | null | undefined)?.language;
+  return isTextSearchConfig(language) && language !== 'simple' ? language : undefined;
+}

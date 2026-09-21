@@ -16,6 +16,7 @@ import type { SearchCounter } from '../services/metrics.js';
 import { getProjectById } from '../services/projects.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { SOURCE_VERSION_MAX_LENGTH, listSources } from '../services/sources.js';
+import { namedLanguageOf } from '../services/text-search.js';
 import {
   getDocument,
   getDocumentBySuffix,
@@ -363,7 +364,18 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
           // repeating it on every continuation is context spent to say the same thing again.
           const sources = await listSources(db, project.id);
           if (sources.length > 0) {
-            lines.push(`Sources (the first path segment): ${sources.map((s) => `${s.name} (${s.type}${s.label ? `: ${s.label}` : ''})`).join(', ')}`);
+            // The language, when the source names one, is this tool's half of
+            // [ADR-0068](../../.ssot/ADR.md#adr-0068): it does not say the server can search across
+            // languages, only what language a source's documents are in, for an agent that can write its
+            // query in it. Silent for a source that names none — "language: unknown" is noise, not signal.
+            lines.push(
+              `Sources (the first path segment): ${sources
+                .map((s) => {
+                  const language = namedLanguageOf(s.config);
+                  return `${s.name} (${s.type}${s.label ? `: ${s.label}` : ''}${language ? `, language: ${language}` : ''})`;
+                })
+                .join(', ')}`,
+            );
           }
           // The versions this index carries, when it carries any ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
           // Without it the only way to learn them is to guess one wrong and read the refusal, which is

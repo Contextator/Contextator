@@ -757,6 +757,14 @@ Turkish page and an English question will find an English one; a question that h
 mostly will not be answered, and this is a property of the embedding model rather than a setting you can
 turn on.
 
+**The server cannot cross that boundary, but the caller usually can — so it is told which language to
+write in.** Every MCP client is a language model, and a language model can write a sentence in a
+different language when it is told to. `list_topics` names a source's language when its `config.language`
+sets one, and `instructions` directs the calling agent to write its `search_docs` query in the language
+of the documentation it expects the answer from. This is a direction to the caller, not a change to
+search: nothing below moved, and an agent that ignores the direction, or that is itself asking on behalf
+of someone who cannot read the language it switches to, sees exactly the limit this section describes.
+
 The measurement is in [`eval/BASELINE.md`](eval/BASELINE.md) and it is not close. Thirty questions ask
 about a page written in the other language — fifteen in each direction, written from the corpus before
 anything was run. Four of the thirty are answered in the top five. Twenty-seven of the thirty return, at
