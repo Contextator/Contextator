@@ -17,6 +17,7 @@
     "lint:fix": "biome check --write . && biome check --write .",
     "test": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
+    "test:integration:report": "npm run test:integration -- --reporter=default --reporter=json --outputFile.json=integration-report.json",
     "test:all": "vitest run",
     "smoke": "tsx scripts/smoke-mcp.ts",
     "build:facts": "tsx scripts/build-product-facts.ts",
