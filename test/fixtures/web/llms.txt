@@ -1,0 +1,20 @@
+# Example Docs
+
+> Everything an agent needs to use the Example API.
+
+Some prose that mentions [the marketing site](https://www.example.com/) too.
+
+## Guides
+
+- [Getting started](https://docs.example.com/guide/index.md): the five-minute version
+- [Installation](/guide/install.md): every platform
+- [Mail us](mailto:docs@example.com): not a page
+- [This page](#anchor): also not a page
+
+## Examples
+
+```
+- [Not a link, it is a code sample](https://docs.example.com/never.md)
+```
+
+- [Getting started](https://docs.example.com/guide/index.md): listed twice on purpose

@@ -116,6 +116,7 @@
           <button type="button" class="tab" role="tab" data-kind="obsidian">Obsidian vault</button>
           <button type="button" class="tab" role="tab" data-kind="notion">Notion</button>
           <button type="button" class="tab" role="tab" data-kind="confluence">Confluence</button>
+          <button type="button" class="tab" role="tab" data-kind="web">Documentation site</button>
         </div>
         <div class="dialog-body">
           <div class="field-row">
@@ -247,6 +248,25 @@
               <textarea name="spaceKeys" rows="2" placeholder="Space keys, one per line. Empty = every space this account can read."></textarea>
               <span class="field-hint">Pages are indexed as <code>&lt;name&gt;/&lt;space&gt;/&lt;parent page&gt;/&lt;page&gt;.md</code>, nested the way they are in Confluence.</span>
             </label>
+          </div>
+
+          <div class="kind-only" data-kind="web">
+            <label class="field">
+              <span class="field-label">Entry point</span>
+              <input name="entryUrl" type="url" placeholder="https://docs.example.com/sitemap.xml" autocomplete="off" spellcheck="false" />
+              <span class="field-hint">A <code>sitemap.xml</code>, an <code>llms.txt</code>, or the page a crawl starts from — a crawl stays on that host and at or below that path. <strong>Public pages only:</strong> there is no login, and a page a browser renders from JavaScript is reported on the source rather than indexed blank.</span>
+            </label>
+            <label class="field">
+              <span class="field-label">Entry format</span>
+              <select name="entryKind">
+                <option value="auto">Detect from the document (recommended)</option>
+                <option value="sitemap">sitemap.xml</option>
+                <option value="llms">llms.txt</option>
+                <option value="crawl">Crawl from this page</option>
+              </select>
+              <span class="field-hint">Detection reads the document rather than the URL. When it cannot tell — a sitemap that redirects to a landing page, an <code>llms.txt</code> served as HTML — the source refuses instead of guessing, and names this field. Only <code>sitemap.xml</code> can be checked for freshness in one request; the other two re-fetch on every scheduled run.</span>
+            </label>
+            <p class="field-hint">Every run is held to the instance's crawl ceilings — pages, depth, the gap between requests, a total time budget and <code>robots.txt</code> (<code>WEB_*</code> in <code>.env</code>). Reaching one stops the run and says so on the source.</p>
           </div>
 
           <div class="kind-only" data-kind="obsidian">

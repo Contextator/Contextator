@@ -8,7 +8,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { loadConfig } from '../../src/config.js';
+import { loadConfig, WEB_LIMIT_DEFAULTS } from '../../src/config.js';
 import type { Db } from '../../src/db/client.js';
 import { documentSources, documents, projects, type ProjectRow } from '../../src/db/schema.js';
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
@@ -71,6 +71,7 @@ const embeddings: EmbeddingProvider = {
 
 /** The product's defaults, over one scratch root. */
 const indexerConfig = (root: string) => ({
+  ...WEB_LIMIT_DEFAULTS,
   ALLOWED_DOC_ROOTS: [path.dirname(root)],
   IGNORE_GLOBS: [] as string[],
   CHUNK_MAX_TOKENS: 256,

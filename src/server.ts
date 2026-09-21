@@ -13,6 +13,7 @@ import { webhookRoutes } from './admin/webhooks.js';
 import './services/sources/confluence.js';
 import './services/sources/git.js';
 import './services/sources/notion.js';
+import './services/sources/web.js';
 import { loadConfig, OAUTH_CLIENT_STALE_MS, OAUTH_CLIENT_UNUSED_MS, OAUTH_CREDENTIAL_SWEEP_GRACE_MS } from './config.js';
 import type { AppContext } from './context.js';
 import { createDb, waitForDb } from './db/client.js';

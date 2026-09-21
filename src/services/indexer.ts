@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import type { Config } from '../config.js';
+import type { Config, WebLimits } from '../config.js';
 import type { Logger } from '../context.js';
 import type { Db } from '../db/client.js';
 import { projects, type DocumentSourceRow } from '../db/schema.js';
@@ -103,7 +103,8 @@ export interface IndexerDeps {
     | 'MAX_SPEC_FILE_BYTES'
     | 'MAX_PDF_PAGES'
     | 'MAX_DOCX_UNPACKED_BYTES'
-  >;
+  > &
+    WebLimits;
   log: Logger;
   locks: KeyedMutex;
 }

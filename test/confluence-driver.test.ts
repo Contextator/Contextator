@@ -10,6 +10,7 @@ import { storageToHtml, storageToMarkdown } from '../src/services/sources/conflu
 import { ConfluenceDriver, MAX_PAGES } from '../src/services/sources/confluence.js';
 import { toSourceView } from '../src/services/sources.js';
 import { CAMPAIGN, HANDBOOK, LONG_TITLE, ROTATION, SPACE, StubConfluence, type StubPage } from './support/confluence-stub.js';
+import { WEB_LIMIT_DEFAULTS } from '../src/config.js';
 
 /**
  * The Confluence source against a stub of the REST API ([ADR-0059](../.ssot/ADR.md#adr-0059)).
@@ -141,7 +142,11 @@ describe('confluence source', () => {
   const driverFor = (stub: StubConfluence, config: Record<string, unknown> = {}): ConfluenceDriver =>
     new ConfluenceDriver(
       source(config),
-      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] } },
+      {
+        db: null as never,
+        log,
+        config: { ...WEB_LIMIT_DEFAULTS, DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
+      },
       stub,
     );
 
@@ -332,7 +337,11 @@ describe('what the confluence probe measures', () => {
   const driverFor = (stub: StubConfluence, config: Record<string, unknown> = {}): ConfluenceDriver =>
     new ConfluenceDriver(
       source(config),
-      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] } },
+      {
+        db: null as never,
+        log,
+        config: { ...WEB_LIMIT_DEFAULTS, DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
+      },
       stub,
     );
 

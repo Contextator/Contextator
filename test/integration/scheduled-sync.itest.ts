@@ -17,6 +17,7 @@ import { LocalDriver } from '../../src/services/sources/local.js';
 import { PROBE_TOKEN_KEY, createSource } from '../../src/services/sources.js';
 import { ensureSchema } from './fixtures/ensure-schema-v5.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
+import { WEB_LIMIT_DEFAULTS } from '../../src/config.js';
 
 /**
  * [ADR-0048](../../../.ssot/ADR.md#adr-0048), which makes four claims that are not observable from
@@ -122,6 +123,7 @@ const embeddings: EmbeddingProvider = {
 };
 
 const indexerConfig = {
+  ...WEB_LIMIT_DEFAULTS,
   ALLOWED_DOC_ROOTS: [] as string[],
   IGNORE_GLOBS: [] as string[],
   CHUNK_MAX_TOKENS: 512,

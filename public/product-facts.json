@@ -1,7 +1,7 @@
 {
   "generator": "scripts/build-product-facts.ts",
   "productVersion": "0.1.0",
-  "sourceTypes": ["local", "git", "upload", "notion", "confluence"],
+  "sourceTypes": ["local", "git", "upload", "notion", "confluence", "web"],
   "sourceFlavors": ["plain", "obsidian", "notion-export", "openapi"],
   "fileExtensions": {
     "document": ["md", "mdx", "txt", "html", "htm", "csv", "docx", "pdf"],

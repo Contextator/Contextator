@@ -16,6 +16,7 @@ import { runSyncTick, type SchedulerIndexer } from '../../src/services/scheduler
 import { LocalDriver } from '../../src/services/sources/local.js';
 import { PROBE_TOKEN_KEY } from '../../src/services/sources.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
+import { WEB_LIMIT_DEFAULTS, type WebLimits } from '../../src/config.js';
 
 /**
  * [ADR-0049](../../../.ssot/ADR.md#adr-0049), whose claims are about a route, three columns and one
@@ -72,7 +73,13 @@ let root: string;
 let projectId: string;
 let notionId: string;
 let localId: string;
-let schedulerConfig: { ALLOWED_DOC_ROOTS: string[]; DATA_DIR: string; SECRET_KEY: string; IGNORE_GLOBS: string[]; SYNC_PROBES_PER_TICK: number };
+let schedulerConfig: WebLimits & {
+  ALLOWED_DOC_ROOTS: string[];
+  DATA_DIR: string;
+  SECRET_KEY: string;
+  IGNORE_GLOBS: string[];
+  SYNC_PROBES_PER_TICK: number;
+};
 
 const sourceRow = async (id: string): Promise<DocumentSourceRow> => {
   const [row] = await db.select().from(documentSources).where(eq(documentSources.id, id));
@@ -125,6 +132,7 @@ beforeAll(async () => {
   localId = local.id;
 
   schedulerConfig = {
+    ...WEB_LIMIT_DEFAULTS,
     ALLOWED_DOC_ROOTS: [root],
     DATA_DIR: path.join(root, '.data'),
     SECRET_KEY: '0'.repeat(64),

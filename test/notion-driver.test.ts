@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { DocumentSourceRow } from '../src/db/schema.js';
 import { sourceCurrentDir } from '../src/services/data-dir.js';
 import { NotionDriver } from '../src/services/sources/notion.js';
+import { WEB_LIMIT_DEFAULTS } from '../src/config.js';
 
 /**
  * Drives the real Notion source against a stub of the API client, so the whole import — discovery,
@@ -195,7 +196,11 @@ describe('notion source', () => {
     const stub = new StubNotion([HOME, CHILD]);
     const driver = new NotionDriver(
       source(sourceId, projectId),
-      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] } },
+      {
+        db: null as never,
+        log,
+        config: { ...WEB_LIMIT_DEFAULTS, DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
+      },
       stub as never,
     );
 
@@ -230,7 +235,11 @@ describe('notion source', () => {
     ]);
     const driver = new NotionDriver(
       source(sourceId, projectId),
-      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] } },
+      {
+        db: null as never,
+        log,
+        config: { ...WEB_LIMIT_DEFAULTS, DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
+      },
       stub as never,
     );
 
@@ -249,7 +258,11 @@ describe('notion source', () => {
     stub.failWith = 'API token is invalid.';
     const driver = new NotionDriver(
       source(sourceId, projectId),
-      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] } },
+      {
+        db: null as never,
+        log,
+        config: { ...WEB_LIMIT_DEFAULTS, DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
+      },
       stub as never,
     );
 
@@ -266,7 +279,11 @@ describe('notion source', () => {
     } as DocumentSourceRow;
     const driver = new NotionDriver(
       rooted,
-      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] } },
+      {
+        db: null as never,
+        log,
+        config: { ...WEB_LIMIT_DEFAULTS, DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
+      },
       stub as never,
     );
 
@@ -278,7 +295,11 @@ describe('notion source', () => {
     const stub = new StubNotion([HOME]);
     const driver = new NotionDriver(
       source(sourceId, projectId),
-      { db: null as never, log, config: { DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] } },
+      {
+        db: null as never,
+        log,
+        config: { ...WEB_LIMIT_DEFAULTS, DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
+      },
       stub as never,
     );
 

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">
+  <url>
+    <loc>https://docs.example.com/guide/</loc>
+    <lastmod>2026-09-01T08:00:00.000Z</lastmod>
+  </url>
+  <url>
+    <loc><![CDATA[https://docs.example.com/guide/install.html]]></loc>
+    <lastmod>2026-09-12T11:30:00.000Z</lastmod>
+    <image:image>
+      <image:loc>https://cdn.example.com/screenshots/install.png</image:loc>
+    </image:image>
+  </url>
+  <url>
+    <loc>https://docs.example.com/guide/api?version=3&amp;lang=en</loc>
+  </url>
+  <url>
+    <loc>https://other.example.com/elsewhere</loc>
+    <lastmod>2026-09-20T00:00:00.000Z</lastmod>
+  </url>
+</urlset>

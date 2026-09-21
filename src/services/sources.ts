@@ -9,7 +9,7 @@ import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './
 import { ConflictError, NotFoundError, ValidationError } from './projects.js';
 import { TEXT_SEARCH_CONFIGS } from './text-search.js';
 
-export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion', 'confluence'] as const;
+export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion', 'confluence', 'web'] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
 
 /**
@@ -207,18 +207,50 @@ export const ConfluenceConfig = z.object({
   syncProbeToken: ProbeToken,
 });
 
+/**
+ * A published documentation site ([ADR-0070](../../.ssot/ADR.md#adr-0070)). **Public pages only** —
+ * there is no credential on this type at all, which is the shape of the decision rather than a gap:
+ * a login flow is a per-site negotiation and half of one is a connector that fails in a way nobody can
+ * diagnose. `README.md` says so rather than leaving it to be discovered from an index of login pages.
+ */
+export const WebConfig = z.object({
+  /** `https://docs.example.com/sitemap.xml`, `…/llms.txt`, or the page a crawl starts from. */
+  entryUrl: z.url().max(2048),
+  /**
+   * Which of the three the entry point is. `auto` reads the document and decides.
+   *
+   * **The setting exists for the case where `auto` cannot decide, and that case is refused rather than
+   * guessed.** A `sitemap.xml` that redirects to a landing page, an `llms.txt` a CDN serves as
+   * `text/html`, an XML feed that is not a sitemap: guessing at any of them produces a source that
+   * indexes one page, or none, and reports success. The driver names this field in the refusal, so the
+   * operator is told what to set rather than left to find it.
+   */
+  entryKind: z.enum(['auto', 'sitemap', 'llms', 'crawl']).default('auto'),
+  /**
+   * The driver writes whatever the site served — `.html` for a page, `.md` for the Markdown an
+   * `llms.txt` site publishes beside it — so all three are the default. Each is already a document type
+   * ([ADR-0056](../../.ssot/ADR.md#adr-0056)); nothing here converts anything.
+   */
+  extensions: Extensions.default(['html', 'md', 'txt']),
+  language: Language,
+  version: Version,
+  syncProbeToken: ProbeToken,
+});
+
 export const SourceConfigByType = {
   local: LocalConfig,
   git: GitConfig,
   upload: UploadConfig,
   notion: NotionConfig,
   confluence: ConfluenceConfig,
+  web: WebConfig,
 } as const;
 export type LocalConfig = z.infer<typeof LocalConfig>;
 export type GitConfig = z.infer<typeof GitConfig>;
 export type UploadConfig = z.infer<typeof UploadConfig>;
 export type NotionConfig = z.infer<typeof NotionConfig>;
 export type ConfluenceConfig = z.infer<typeof ConfluenceConfig>;
+export type WebConfig = z.infer<typeof WebConfig>;
 
 export interface SourceView {
   id: string;
