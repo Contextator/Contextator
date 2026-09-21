@@ -73,9 +73,16 @@ export interface ProductFacts {
  * covers a default produced by a coercion rather than stated literally.
  */
 function defaultOf<T>(key: keyof z.infer<typeof EnvSchema>): T {
-  const shape = (EnvSchema as unknown as { shape: Record<string, z.ZodType> }).shape;
+  // `EnvSchema` is `z.object(...).superRefine(...)`, and that `.shape` survives the refinement is a
+  // property of this zod version rather than a promise it makes — so it is checked rather than
+  // assumed. A version that stops exposing it has to fail here, saying which symbol went missing,
+  // and not one line later as a bare `TypeError` about indexing undefined.
+  const shape = (EnvSchema as unknown as { shape?: Record<string, z.ZodType> }).shape;
+  if (typeof shape !== 'object' || shape === null) {
+    throw new Error('EnvSchema no longer exposes `.shape`: this generator cannot read the defaults out of src/config.ts');
+  }
   const field = shape[key as string];
-  if (!field) throw new Error(`config.ts has no ${String(key)} — this generator is out of date`);
+  if (!field) throw new Error(`src/config.ts declares no ${String(key)} — this generator is out of date`);
   return z.object({ value: field }).parse({}).value as T;
 }
 
@@ -96,11 +103,23 @@ function mcpAuthModes(): string[] {
   return modes;
 }
 
-/** The extensions `isArchiveName` accepts, read out of the alternation it tests with. */
+/**
+ * The extensions `isArchiveName` accepts, read out of the alternation it tests with.
+ *
+ * The whole pattern is matched and not the first parenthesis in it: an added `(?:...)` would make
+ * "the first group" mean something else, and the list would be read wrongly while still being
+ * non-empty — a wrong fact published as a verified one, which is the failure this file exists to
+ * prevent. Bound to the shape instead: a literal dot, one parenthesis holding nothing but
+ * alternatives, an end anchor. Anything else is a pattern this function has no reading of, and it
+ * says so rather than returning its best guess.
+ */
 function archiveExtensions(): string[] {
-  const alternation = ARCHIVE_RE.source.match(/\(([^)]*)\)/)?.[1];
-  if (!alternation) throw new Error(`cannot read the extensions out of ARCHIVE_RE: ${ARCHIVE_RE.source}`);
-  return alternation.split('|').map((e) => e.replace(/\\/g, ''));
+  const alternation = ARCHIVE_RE.source.match(/^\\\.\(([^()]+)\)\$$/)?.[1];
+  if (!alternation) throw new Error(`ARCHIVE_RE is no longer a single alternation of extensions, so it cannot be read: ${ARCHIVE_RE.source}`);
+  const extensions = alternation.split('|').map((e) => e.replace(/\\/g, ''));
+  const unreadable = extensions.filter((e) => !/^[a-z0-9]+(\.[a-z0-9]+)*$/.test(e));
+  if (unreadable.length > 0) throw new Error(`ARCHIVE_RE holds something that is not a file extension: ${unreadable.join(', ')}`);
+  return extensions;
 }
 
 /**
