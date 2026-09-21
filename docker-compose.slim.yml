@@ -1,0 +1,71 @@
+# Contextator against a PostgreSQL you already operate: the `-slim` image is the application alone,
+# with no database inside it (ADR-0069).
+#
+#   DATABASE_URL=postgres://user:password@db.example.com:5432/contextator   # in .env
+#   docker compose -f docker-compose.slim.yml up -d
+#   docker compose -f docker-compose.slim.yml logs -f
+#
+# This is a **whole file, not an overlay** on docker-compose.yml. The difference between the two
+# topologies is a mount and a volume that must not exist here, and Compose merges a service's
+# `volumes` by container path — it can add one, never remove one — so an overlay could not take the
+# pgdata mount away, and a file that quietly kept it would be a file that lies about what runs.
+#
+# Use it when your database is somebody else's problem to run: a managed PostgreSQL, an HA pair, a
+# cluster your backups and your monitoring already cover. If that is not your situation, the default
+# single container of docker-compose.yml is a smaller thing to operate and is what ADR-0006 chose.
+#
+# What that server has to be:
+#   * PostgreSQL 16 or newer.
+#   * pgvector installed, or installable by the role in the URL — the first start runs
+#     `CREATE EXTENSION IF NOT EXISTS vector`. On a managed service that is usually a role like
+#     `rds_superuser` or `cloudsqlsuperuser`, or an extension you enable on the instance first.
+#   * A database of its own. It may be empty; the schema is created and migrated at every start.
+#
+# **Backups are yours on this topology.** OPERATIONS.md §4's `docker exec contextator pg_dump …`
+# dumps the *embedded* database of the default image and reaches nothing here. Everything the
+# database holds — projects, documents, embeddings, accounts, sessions, MCP tokens, the audit and
+# query logs — lives in the server named below and is covered by whatever covers that server.
+#
+# The two volumes that remain are the two this image does write: downloaded models and materialised
+# sources. Neither is in the database and neither is re-derivable from it (an *uploaded* source's
+# content exists nowhere else), so `contextator-data` needs backing up beside the database.
+name: contextator
+
+services:
+  contextator:
+    image: contextator/contextator:${CONTEXTATOR_TAG:-latest}-slim
+    container_name: contextator
+    restart: unless-stopped
+    ports:
+      # The host side of the mapping is loopback-only here too (ADR-0065); HOST inside the container
+      # stays 0.0.0.0 below, because Docker cannot forward a published port to a process listening
+      # only on the container's own loopback. CONTEXTATOR_BIND=0.0.0.0 publishes it on the network.
+      - "${CONTEXTATOR_BIND:-127.0.0.1}:${PORT:-3444}:3444"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3444"
+      ALLOWED_DOC_ROOTS: /docs
+      MODEL_CACHE_DIR: /app/.cache/models
+      DATA_DIR: /data
+      # `:?` rather than `:-`: this image has no database to fall back to, so a missing DATABASE_URL
+      # is a mistake to report now, by name, instead of a container that starts and cannot work. The
+      # entrypoint says the same thing a second time for anyone running the image without Compose.
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env — the slim image carries no database of its own}
+    volumes:
+      # Downloaded embedding models (re-downloadable, but ~500 MB)
+      - ${CONTEXTATOR_MODELS_PATH:-models}:/app/.cache/models
+      # Materialised sources: uploaded files, git checkouts, Notion pulls
+      - ${CONTEXTATOR_DATA_PATH:-data}:/data
+      # Your documentation. Create projects with paths like /docs/<subfolder>.
+      - ${DOCS_HOST_PATH:-./docs}:/docs:ro
+    # App shutdown only — there is no PostgreSQL in this container to shut down after it.
+    stop_grace_period: 30s
+
+volumes:
+  models:
+    name: ${CONTEXTATOR_MODELS_VOLUME:-contextator-models}
+  data:
+    name: ${CONTEXTATOR_DATA_VOLUME:-contextator-data}

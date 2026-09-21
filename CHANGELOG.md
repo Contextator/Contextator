@@ -12,6 +12,20 @@ ships, that stops.
 
 ### Added
 
+- **You can point Contextator at a PostgreSQL you already run.** Put a `DATABASE_URL` in `.env` and
+  the container starts no database of its own: it connects to the server you named, creates and
+  migrates its schema there, and leaves the `contextator-pgdata` volume empty. The server needs to be
+  PostgreSQL 16 or newer with pgvector installed or installable by that role. **On this topology its
+  backups are yours** — `docker exec contextator pg_dump …` dumps the embedded database and reaches
+  nothing else.
+- **A `-slim` image, for the same thing without a PostgreSQL inside it at all.** Every published tag
+  now has a `-slim` twin — `latest-slim`, `0.1-slim`, `0.1.0-slim` — carrying the application alone,
+  on both architectures. It requires `DATABASE_URL` rather than accepting it, and started without one
+  it exits immediately naming the variable and what the server behind it has to be.
+  `docker-compose.slim.yml` runs it. The default image and the default installation are unchanged: a
+  single container with its own PostgreSQL is still what `docker compose up -d` gives you.
+- `/api/health` tells a signed-in caller which of the two databases it is talking to
+  (`database.mode`), and an administrator the host, port and database name — never the credential.
 - A source's **Language** setting is back on the dashboard, and `turkish` is one of the values it
   offers. Naming a source's language makes PostgreSQL stem it, so a Turkish question asking about
   `anahtarı` now finds a page that says `anahtarın`. Changing the setting re-indexes that source, as
@@ -19,6 +33,15 @@ ships, that stops.
 
 ### Changed
 
+- **`.env.example` now ships `DATABASE_URL` empty, and this is the one thing to check before you
+  upgrade.** The container reads that line where it used to clear it. A `.env` copied from the old
+  template carries `postgres://contextator:contextator@localhost:5432/contextator` for `npm run dev`
+  — and after this release that line tells the container *not* to start its own PostgreSQL and to
+  connect to its own loopback instead, where nothing is listening. **Clear `DATABASE_URL` in `.env`
+  before `docker compose up -d`**, unless you are deliberately naming an external database. The
+  container says so in its log if you forget: the startup line names the database it chose, and a
+  loopback address on an image that embeds one is called out by name. Running from a source checkout
+  with `npm run dev`, put the value back — it is the only way to say where the database is there.
 - **A new project's MCP endpoint requires a token.** Creating a project now mints that project's
   first token and shows it once, in the creation dialog; before this, a new project was `open` and
   answered anyone who could reach its URL. Make it **open** from the project page if its documents

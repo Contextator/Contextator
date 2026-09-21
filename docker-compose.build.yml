@@ -14,7 +14,14 @@
 # images, and the two mental models, apart.
 #
 # Everything else — volumes, environment, ports — stays exactly what docker-compose.yml defines.
+#
+# `target: full` is named rather than left to default to the Dockerfile's last stage. It is the same
+# stage either way — that ordering is deliberate and asserted — but this file is where somebody looks
+# to build the other one, and `--target slim` is easier to find beside a line that says which target
+# this is (ADR-0069).
 services:
   contextator:
-    build: .
+    build:
+      context: .
+      target: full
     image: contextator/contextator:source

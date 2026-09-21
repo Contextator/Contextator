@@ -76,15 +76,41 @@ start's log will not work.
 | `latest` | The most recent stable release. Never points at a pre-release (`-rc.*`, `-beta.*`, …). |
 | `0.1` | The latest patch release inside the `0.1.x` minor line. Moves as `0.1.x` releases ship. |
 | `0.1.0` | One exact release. Immutable — always the same image. |
+| `…-slim` | The same release **without the embedded PostgreSQL** — `latest-slim`, `0.1-slim`, `0.1.0-slim`. Every tag above has one. |
 
 Pin `0.1.0`-style tags for anything you upgrade deliberately; use `latest` only where an unattended
 minor/patch bump is acceptable.
+
+## Bringing your own PostgreSQL
+
+The default image contains its database and that is the installation to want: nothing to provision,
+nothing to connect, one thing to back up. Point `DATABASE_URL` at a PostgreSQL you already operate
+and the same container starts none of its own:
+
+```bash
+docker run -d --name contextator -p 127.0.0.1:3444:3444 \
+  -e SETUP_CODE=whatever-you-like \
+  -e DATABASE_URL=postgres://user:password@db.example.com:5432/contextator \
+  -v contextator-models:/app/.cache/models \
+  -v contextator-data:/data \
+  -v /path/to/your/docs:/docs:ro \
+  contextator/contextator:latest-slim
+```
+
+The `-slim` tags carry no PostgreSQL at all, which is why `DATABASE_URL` is shown with them; the
+default tags accept exactly the same variable and simply leave their own database unused. A `-slim`
+container started without a `DATABASE_URL` exits saying so rather than waiting.
+
+That server has to be **PostgreSQL 16 or newer** with **pgvector installed, or installable by the
+role in the URL** — the first start runs `CREATE EXTENSION IF NOT EXISTS vector` — and a database of
+its own, which may be empty. **Its backups are yours:** `docker exec contextator pg_dump …` dumps the
+*embedded* database and reaches nothing else.
 
 ## Volumes
 
 | Path in the container | Holds | Re-downloadable / re-creatable? |
 |---|---|---|
-| `/var/lib/postgresql/data` | Projects, documents and vector embeddings — the PostgreSQL cluster | **No.** This is the only copy of your indexed content and accounts. |
+| `/var/lib/postgresql/data` | Projects, documents and vector embeddings — the PostgreSQL cluster. Nothing writes here once `DATABASE_URL` is set, and the `-slim` image has no cluster at all | **No.** This is the only copy of your indexed content and accounts. |
 | `/app/.cache/models` | The downloaded embedding model | Yes — deleting it just re-downloads the model (~90–470 MB) on next start. |
 | `/data` | Materialised sources: uploaded files, git checkouts, Notion pulls | Partially. Git checkouts and Notion pulls are re-pullable; **an uploaded source's content is not stored anywhere else.** |
 | `/docs` | Your documentation, mounted **read-only** from the host | Not owned by the container at all — it is your own directory. |
@@ -101,7 +127,8 @@ ones most installs touch first.
 | Variable | Default | What it does |
 |---|---|---|
 | `SETUP_CODE` | – (generated and logged) | The code `/setup` asks for once, to claim the first `root` account. |
-| `POSTGRES_PASSWORD` | `contextator` | Password of the embedded PostgreSQL, applied when the cluster is first created. |
+| `DATABASE_URL` | – (the embedded PostgreSQL) | Where the database is. Set it to run against a PostgreSQL you operate; the container then starts none of its own. Required on the `-slim` tags. |
+| `POSTGRES_PASSWORD` | `contextator` | Password of the embedded PostgreSQL, applied when the cluster is first created. Unread once `DATABASE_URL` is set. |
 | `EMBEDDING_MODEL` | `Xenova/multilingual-e5-small` | Any transformers.js feature-extraction model; changing it re-indexes every project. |
 | `EMBEDDING_DTYPE` | `fp32` | `fp16` or `q8` shrink the model download; the default model publishes all three. |
 | `PUBLIC_BASE_URL` | – | e.g. `https://docs.example.com`. Required once a reverse proxy sits in front of this container. |

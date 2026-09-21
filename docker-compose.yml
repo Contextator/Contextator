@@ -1,5 +1,9 @@
 # Contextator: one container with PostgreSQL 16 + pgvector and the app.
 #
+# Set DATABASE_URL in .env and the same container runs against a PostgreSQL you operate instead,
+# starting none of its own (ADR-0069). Use the `-slim` image, which does not carry one at all, with
+# docker-compose.slim.yml.
+#
 #   docker compose up -d          start (pulls contextator/contextator on first run)
 #   docker compose logs -f        follow logs
 #   docker compose down           stop and remove the container; data stays in the volumes below
@@ -42,13 +46,25 @@ services:
       ALLOWED_DOC_ROOTS: /docs
       MODEL_CACHE_DIR: /app/.cache/models
       DATA_DIR: /data
-      # The app talks to the embedded PostgreSQL (the entrypoint sets the PG* variables).
-      # A DATABASE_URL from .env is for `npm run dev` on the host and is cleared here.
-      DATABASE_URL: ""
-      # Used when the database cluster is created on the first start.
+      # Where the database is, and it is the one line that decides between the two topologies
+      # (ADR-0069). Left empty — the shipped default, and what .env.example ships — the entrypoint
+      # starts the PostgreSQL embedded in the image and points the app at it through the libpq PG*
+      # variables; nothing below has to be provided and the pgdata volume is the database.
+      #
+      # Write a DATABASE_URL into .env and the container starts no PostgreSQL at all: it connects to
+      # the server you named, the pgdata volume stays empty, and **that database's backups become
+      # yours** — `docker exec contextator pg_dump …` reaches the embedded one and nothing else this
+      # image ships reaches the other. The server needs to be PostgreSQL 16 or newer with pgvector
+      # installed or installable by that role (the first start runs `CREATE EXTENSION IF NOT EXISTS
+      # vector`); the database itself may be empty, the schema is created and migrated at startup.
+      # For the app alone, with no PostgreSQL inside the image, see docker-compose.slim.yml.
+      DATABASE_URL: ${DATABASE_URL:-}
+      # Used when the embedded database cluster is created on the first start; unread on a DATABASE_URL
+      # installation, where the credentials are in that URL.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-contextator}
     volumes:
-      # Database cluster
+      # Database cluster. Created and left empty on a DATABASE_URL installation, where nothing writes
+      # here — a mount cannot be made conditional, and an empty volume costs nothing.
       - ${CONTEXTATOR_PGDATA_PATH:-pgdata}:/var/lib/postgresql/data
       # Downloaded embedding models (re-downloadable, but ~500 MB)
       - ${CONTEXTATOR_MODELS_PATH:-models}:/app/.cache/models
