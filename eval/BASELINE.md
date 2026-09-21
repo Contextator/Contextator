@@ -1323,11 +1323,12 @@ is the ceiling, and it is why this change cannot be priced at `recall@5` here �
 
 **And one of them gets worse, which is recorded because it is the only negative signal anywhere in this
 change.** `probe-p10` — *"Bir kapsamın diğerini kapsamadığı durum hangisi?"* — falls from the second
-result to the seventh. Two others move a place, in the same direction. This is weak evidence and is not
-treated as more: these questions were written in a batch to hunt for headroom rather than to the
-standard `eval/README.md` sets for the golden set, and one question over a set of 46 is inside the
-noise band this file has documented twice. It is here so that the next person to touch the lexical half
-starts from it rather than rediscovering it.
+result to the seventh. Three others lose a single place — `probe-p08`, `probe-p12` and `probe-p24`,
+each from first to second — and one gains a single place, `probe-p05` from third to second. This is
+weak evidence and is not treated as more: these questions were written in a batch to hunt for headroom
+rather than to the standard `eval/README.md` sets for the golden set, and one question over a set of 46
+is inside the noise band this file has documented twice. It is all here so that the next person to
+touch the lexical half starts from it rather than rediscovering it.
 
 ## The mutation, which is what prices the query side
 
@@ -1353,11 +1354,21 @@ had broken the `simple` half as well and was not the mutation described here.
 
 ## One thing got less deterministic, and it is this change's doing
 
-**Two runs of the shipped configuration over freshly carved databases are no longer identical.** One
-question in ninety-two moves: `x-en-tr-08` alternates between the sixth and seventh result, where a
-Turkish chunk and an English chunk swap places. Three runs at `EVAL_TEXT_SEARCH_CONFIG=simple` — one
-configuration, everything else equal — are identical to the question, so this is the multi-configuration
-path and not the harness.
+**Runs of the shipped configuration over freshly carved databases are no longer identical, and the set
+that differs is not the same set twice.** Over six runs, **13 of the 92 questions** return a
+ten-result page that is not identical in all of them: `en-api-01`, `en-api-02`, `en-env-01`,
+`en-env-02`, `en-env-03`, `en-errors-01`, `en-obs-01`, `en-trouble-01`, `tr-saklama-02`, `x-en-tr-08`,
+`x-en-tr-11`, `x-en-tr-14`, `x-tr-en-14`. Any two of those runs differ on between **4 and 12** of them,
+and which ones differ changes with the pair — so a single before/after comparison sees a sample of
+this and not its size. Three runs at `EVAL_TEXT_SEARCH_CONFIG=simple` — one configuration, everything
+else equal — are identical to the question, so this is the multi-configuration path and not the
+harness.
+
+**For four of the thirteen it is not a swap inside the page: a different document is on it.**
+`en-api-01`, `en-api-02`, `en-trouble-01` and `tr-saklama-02` each have two sections that drift in and
+out of the ten between runs — for `tr-saklama-02`, the Turkish page on `HLY-5030` and the English
+*Testing a restore* trade the tenth position. In every one of the four the pair that trades is one
+Turkish chunk against one English chunk, which is the mechanism below showing its face.
 
 The mechanism is the uuid backstop [ADR-0041](../../.ssot/ADR.md#adr-0041) left in the fused ordering,
 reached through a door this change opened. Ranks are now assigned *within* a configuration, so two
@@ -1367,12 +1378,19 @@ dense_rank asc nulls last, id asc` falls through to `id`, which is `gen_random_u
 every database. Before this change two chunks could not share a lexical rank, so the tie could not
 arise.
 
-**What it costs here is nothing measurable and that is not the same as nothing.** Both positions are
-outside the top five in every run, so `recall@1`, `recall@5`, `heading@5` and the refusal counts are
-stable across runs and every number in this file is reproducible. But FR-262 says the same question
-against the same corpus returns the same answer, and for a project holding two configurations that is
-now true only down to the point where the two lists meet. On a corpus where such a pair lands at rank
-five instead of six it would move a page.
+**Every number in this file is reproducible, and that is not the same as the product being
+deterministic.** Across the six runs `recall@1` is 58, `recall@5` is 66, `heading@1` is 57,
+`heading@5` is 64 and the floor refuses one question — every one of them identical in all six. The
+metrics are stable because the movement is mostly below the window they measure.
+
+**It is not, however, below the window the product serves.** `en-errors-01` — *What does HLY-4019
+mean?* — returns a different **fifth** result depending on the run: a Turkish `HLY-3001 ve HLY-3002`
+section in three of the six, an English *Threat model* section in the other three. `DEFAULT_SEARCH_LIMIT`
+is 5, so that is a row an agent is handed by default; `MAX_SEARCH_LIMIT` is 20, so positions six to ten
+— where the other twelve move — are served to any caller that asks for them. The narrow statement is
+the right one: **no metric this product measures moves, and the page it returns does.** FR-262 says
+the same question against the same corpus returns the same answer, and for a project holding two
+configurations that is now true only down to the point where the two ranked lists meet.
 
 Fixing it means giving the fused ordering a corpus property to break on before the uuid — the same
 correction FR-262 made one level down, applied to the fusion rather than to the candidate lists. That
