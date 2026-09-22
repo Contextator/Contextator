@@ -230,6 +230,19 @@ function describeBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+/**
+ * Where the archive goes when the operator names no file.
+ *
+ * `DATA_DIR/backups`, and **never the working directory**. Inside the container the working directory
+ * is `/app`, which is an image layer: an archive written there is not on a volume, it is gone the next
+ * time the container is recreated, and the person who finds that out is the person who went looking
+ * for the backup. `backups/` is a sibling of `projects/`, so the orphan sweep does not see it and the
+ * next backup — which carries only `projects/<id>/sources/<id>/current` — does not carry it.
+ */
+export function archiveDestination(requested: string | undefined, config: Pick<Config, 'DATA_DIR'>, now: Date = new Date()): string {
+  return requested ?? path.join(config.DATA_DIR, 'backups', defaultArchiveName(now));
+}
+
 /** `contextator-backup-2026-09-22T12-00-00Z.tar.gz`, when the operator names no file. */
 export function defaultArchiveName(now: Date = new Date()): string {
   return `contextator-backup-${now
@@ -250,12 +263,13 @@ async function main(): Promise<void> {
   if (requested === '--help' || requested === '-h') {
     console.error('Usage: npm run backup -- [file.tar.gz]');
     console.error('  Writes the database, the upload trees and a manifest into one archive.');
+    console.error('  Without a path, writes it under <DATA_DIR>/backups/, which is a volume.');
     console.error('  SECRET_KEY is never written into it; keep it separately.');
     process.exit(2);
   }
 
   const config = loadConfig();
-  const out = requested ?? path.join(process.cwd(), defaultArchiveName());
+  const out = archiveDestination(requested, config);
   const { db, pool } = createDb(config.DATABASE_URL);
   await fs.mkdir(config.DATA_DIR, { recursive: true });
   const staging = await fs.mkdtemp(path.join(config.DATA_DIR, `${STAGING}-`));

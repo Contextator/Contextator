@@ -11,6 +11,7 @@ import {
   checkServerVersion,
   connectionFromEnv,
   describeTopology,
+  localPgTools,
   MANIFEST_KIND,
   MANIFEST_VERSION,
   majorVersion,
@@ -20,6 +21,7 @@ import {
   secretKeyFingerprint,
   type Manifest,
 } from '../scripts/backup-archive.js';
+import { archiveDestination } from '../scripts/backup.js';
 import { useEmbeddedDatabaseWhenNothingElseSays } from '../scripts/embedded-database.js';
 
 /**
@@ -315,5 +317,75 @@ describe('the embedded database, for a command run through `docker exec`', () =>
     const slim: NodeJS.ProcessEnv = { ...inImage };
     expect(useEmbeddedDatabaseWhenNothingElseSays(slim, noSocket)).toBe('configured');
     expect(slim).toEqual(inImage);
+  });
+});
+
+/**
+ * The adapter every operator invocation actually runs — `spawn`, the environment merge, and the
+ * refusal the `slim` image produces — which nothing exercised until this file did.
+ *
+ * It is driven through `commandFor` because the host this suite runs on has no PostgreSQL client
+ * installed, which is [ADR-0046](../.ssot/ADR.md#adr-0046)'s own reason for running the real tools in
+ * the container. `node` stands in for a program that is there; a name nothing could have installed
+ * stands in for the `slim` image, where there is no `pg_dump` at all.
+ */
+describe('the tools on this process’s own PATH', () => {
+  const connection = { env: { PGDATABASE: 'from-the-connection' }, database: 'from-the-connection' };
+
+  it('runs the program and gives back what it printed', async () => {
+    const tools = localPgTools('/tmp', connection, () => 'node');
+    await expect(tools.version('pg_dump')).resolves.toMatch(/^v\d+\./);
+  });
+
+  /** The merge is what carries a DATABASE_URL's credentials to libpq without putting them in argv. */
+  it('hands the child the connection environment merged over this process’s own', async () => {
+    const tools = localPgTools('/tmp', connection, () => 'node');
+    // Concatenated rather than interpolated: this string is a program for the child, not a template
+    // for this file, and a `${…}` in it is the one thing a linter here would rewrite.
+    const child = 'process.stdout.write(process.env.PGDATABASE + "|" + Boolean(process.env.PATH))';
+    const printed = await tools.run('pg_dump', ['-e', child]);
+    expect(printed).toBe('from-the-connection|true');
+  });
+
+  it('reports the exit code and what went to stderr, rather than an empty failure', async () => {
+    const tools = localPgTools('/tmp', connection, () => 'node');
+    await expect(tools.run('pg_restore', ['-e', 'process.stderr.write("boom"); process.exit(3)'])).rejects.toThrow(/exited 3.*boom/s);
+  });
+
+  /**
+   * FR-576's last sentence, which had no test behind it: on the `slim` image there is no `pg_dump`,
+   * and the command has to say that rather than die at `ENOENT`.
+   */
+  it('refuses by name when the tool is not there, and names the image that has it', async () => {
+    const tools = localPgTools('/tmp', connection, () => 'no-such-postgres-client-6f1c');
+    await expect(tools.version('pg_dump')).rejects.toMatchObject({ code: 'no_pg_tools' });
+    await expect(tools.version('pg_dump')).rejects.toThrow(/-slim/);
+    await expect(tools.version('pg_dump')).rejects.toThrow(/pg_dump/);
+  });
+
+  it('is the identity by default, so nothing outside a test redirects the tool name', async () => {
+    const tools = localPgTools('/tmp', connection);
+    // There is no PostgreSQL client on this host; the point is that the name it looked for is the
+    // tool's own, which the refusal quotes back.
+    await expect(tools.version('pg_restore')).rejects.toThrow(/`pg_restore` is not on the PATH/);
+  });
+});
+
+describe('where an unnamed archive goes', () => {
+  /**
+   * Inside the container the working directory is `/app` — an image layer, not a volume. An archive
+   * written there survives exactly until the container is recreated, and the person who discovers
+   * that is the person who went looking for the backup.
+   */
+  it('lands under DATA_DIR, on a volume, and never in the working directory', () => {
+    const at = new Date('2026-09-22T12:00:00.000Z');
+    const chosen = archiveDestination(undefined, { DATA_DIR: '/data' }, at);
+    expect(chosen).toBe('/data/backups/contextator-backup-2026-09-22T12-00-00Z.tar.gz');
+    expect(chosen.startsWith('/data/')).toBe(true);
+    expect(chosen).not.toContain(process.cwd());
+  });
+
+  it('is whatever the operator named, when they named one', () => {
+    expect(archiveDestination('/srv/backups/mine.tar.gz', { DATA_DIR: '/data' })).toBe('/srv/backups/mine.tar.gz');
   });
 });

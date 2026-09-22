@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -118,11 +119,46 @@ export async function runRestore(deps: RestoreDeps, archivePath: string, opts: {
     return { manifest, checkedOnly: true, uploadsRestored: 0 };
   }
 
-  // ── From here on it writes ────────────────────────────────────────────────────────────────────────
+  // ── Unpacked, and checked again — still before anything is written ────────────────────────────────
   say('');
   say(`restoring into "${tools.database}" — this replaces what is there now.`);
+  // Emptied first, because what gets put back has to come from **this** archive. A staging directory
+  // that still held the previous restore's `data/` would let a later, truncated archive pass the
+  // check below on somebody else's bytes — and then write them over the live tree. `main()` names a
+  // fresh directory per run, so this is belt and braces there; it is the whole guarantee for any
+  // caller that reuses one, the integration suite included.
+  await fs.rm(tools.scratch.local, { recursive: true, force: true });
   await fs.mkdir(tools.scratch.local, { recursive: true });
   await tar.extract({ file: archive, cwd: tools.scratch.local, filter: permitted });
+
+  /**
+   * **The manifest is a claim about bytes, and this is where the bytes answer.**
+   *
+   * Each upload tree is restored by removing the one on disk and putting the carried one in its
+   * place. A manifest naming a tree the archive does not actually contain — a truncated download, an
+   * archive somebody edited, an entry the `permitted` filter dropped — would therefore *delete* that
+   * source's files and then die on the copy, with `pg_restore --clean` already behind it. So every
+   * tree is required to be here before the first one is removed, and this check sits before the
+   * database is touched rather than beside the removal it protects: a refusal at this line costs
+   * nothing at all, and the same refusal one step later costs a corpus.
+   *
+   * [ADR-0051](../.ssot/ADR.md#adr-0051) learned this in the other direction — its import checks the
+   * dimension again per chunk *while reading*, because a manifest is a claim — and had to add a
+   * compensating unwind for what that leaves behind. There is nothing to unwind here if the check is
+   * made first.
+   */
+  for (const upload of manifest.uploads) {
+    const carried = path.join(tools.scratch.local, DATA_PREFIX, upload.path);
+    const found = await fs.stat(carried).catch(() => null);
+    if (!found?.isDirectory()) {
+      throw new BackupRefused(
+        'incomplete_archive',
+        `This backup's manifest lists an upload tree for "${upload.project} / ${upload.source}" ` +
+          `(${upload.files} file(s)), and the archive does not contain it. Restoring would delete that source's ` +
+          'files here and have nothing to put back. The archive is truncated or was edited. Nothing has been written.',
+      );
+    }
+  }
 
   const dumpRemote = path.join(tools.scratch.remote, DATABASE_ENTRY);
   // ADR-0046's command, unchanged and for its reasons: `--clean --if-exists` is what lets one command
@@ -169,8 +205,10 @@ async function main(): Promise<void> {
 
   const config = loadConfig();
   const { db, pool } = createDb(config.DATABASE_URL);
-  await fs.mkdir(config.DATA_DIR, { recursive: true });
-  const staging = await fs.mkdtemp(path.join(config.DATA_DIR, `${STAGING}-`));
+  // Named rather than created: `runRestore` makes it when it reaches the unpacking, so a `--check`
+  // run leaves no directory behind either. "Nothing was written." has to be true of the filesystem
+  // and not only of the database.
+  const staging = path.join(config.DATA_DIR, `${STAGING}-${randomUUID()}`);
   try {
     await runRestore(
       {

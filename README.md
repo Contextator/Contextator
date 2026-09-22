@@ -605,11 +605,19 @@ goes through the container.
 docker exec contextator npm run backup -- /data/backups/contextator-$(date +%F).tar.gz
 docker cp contextator:/data/backups/contextator-$(date +%F).tar.gz .
 
+# Restoring on a fresh installation — which is the case that matters — starts with the directory,
+# because nothing has created it there yet and `docker cp` says `no such directory`:
+docker exec contextator sh -c 'mkdir -p /data/backups'
+docker cp contextator-2026-09-22.tar.gz contextator:/data/backups/
+
 # Reads the manifest and every refusal, writes nothing:
 docker exec contextator npm run restore -- /data/backups/contextator-2026-09-22.tar.gz --check
 docker exec contextator npm run restore -- /data/backups/contextator-2026-09-22.tar.gz
 docker compose restart contextator
 ```
+
+Run `npm run backup` with no path at all and it writes `<DATA_DIR>/backups/contextator-backup-<timestamp>.tar.gz`
+— on the data volume, never in the container's working directory, which is an image layer.
 
 The archive holds the database, the materialised files of every **upload** source — which exist nowhere
 else — and a manifest that is the first entry in it, so `--check` costs one small read of a file that

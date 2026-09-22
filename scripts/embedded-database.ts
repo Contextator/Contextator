@@ -17,8 +17,11 @@ import { existsSync } from 'node:fs';
  * because the failure is three lines after the line it checks.
  *
  * `POSTGRES_USER`, `POSTGRES_DB` and `PGDATA` *are* image environment, so `docker exec` does see them,
- * and the socket is `trust` for local connections (`db/init.sql` and the base image's `pg_hba.conf`) —
- * which is the same property that lets `pg_dump` run there at all. Reading those rather than baking
+ * and the socket is `trust` for local connections — which is the same property that lets `pg_dump` run
+ * there at all. That `trust` line is written by the PostgreSQL base image's own `initdb` wrapper and by
+ * nothing in this repository: `db/init.sql` creates the extension and says nothing about
+ * authentication, so an installation that replaces the base image's `pg_hba.conf` is one where this
+ * falls back to `POSTGRES_PASSWORD` below. Reading those rather than baking
  * `PGHOST`/`PGUSER` into the `Dockerfile` is deliberate: an operator who overrides `POSTGRES_USER` on
  * the compose file would otherwise get a command silently pointed at a role that does not exist.
  */
@@ -42,7 +45,10 @@ export function useEmbeddedDatabaseWhenNothingElseSays(
   /** Injected only by the unit suite: the socket directory does not exist on a developer's host. */
   exists: (path: string) => boolean = existsSync,
 ): DatabaseSource {
-  if (env.DATABASE_URL || env.PGHOST || env.PGDATABASE) return 'configured';
+  // Trimmed, because `describeTopology` and `connectionFromEnv` trim: `docker-compose.yml` writes
+  // `DATABASE_URL: ${DATABASE_URL:-}` into the image environment, so the empty case is ordinary, and
+  // a value that is whitespace must not send three functions to three different answers.
+  if (env.DATABASE_URL?.trim() || env.PGHOST?.trim() || env.PGDATABASE?.trim()) return 'configured';
   if (!env.PGDATA || !exists(SOCKET_DIR)) return 'configured';
 
   env.PGHOST = SOCKET_DIR;

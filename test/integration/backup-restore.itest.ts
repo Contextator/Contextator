@@ -961,6 +961,72 @@ describe('the backup command, and the instance it is asked to bring back', () =>
     });
   });
 
+  describe('--check, which is what an operator is told to run first', () => {
+    it('evaluates every refusal and writes nothing at all — not a row, not a file, not a directory', async () => {
+      // A scratch directory that does not exist yet, so "it created nothing" is assertable rather
+      // than a claim about a directory `beforeAll` already made. `main()` names its staging directory
+      // the same way and lets `runRestore` be the thing that creates it.
+      const untouched = nodePath.join(exchangeDir, 'check-scratch');
+      await fsp.rm(untouched, { recursive: true, force: true });
+      const deps: RestoreDeps = { ...restoreDeps(BACKUP_KEY), tools: containerTools(untouched, `${EXCHANGE_DIR}/check-scratch`) };
+
+      const before = await treeContents(dataDir);
+      const report = await runRestore(deps, archive, { check: true });
+
+      expect(report.checkedOnly).toBe(true);
+      expect(report.uploadsRestored).toBe(0);
+      expect(report.manifest.counts.chunks).toBe(backupManifest.counts.chunks);
+      // Nothing unpacked, nothing created: the archive is gigabytes in a real instance and `--check`
+      // is meant to cost a few hundred bytes of it.
+      await expect(fsp.stat(untouched)).rejects.toMatchObject({ code: 'ENOENT' });
+      // And the instance it was pointed at is exactly as it was.
+      expect(await treeContents(dataDir)).toEqual(before);
+      const rows = await cli.db.execute(sql`SELECT count(*)::int AS n FROM projects`);
+      expect((rows.rows[0] as { n: number }).n).toBe(1);
+    });
+
+    it('still refuses the wrong key, because a check that passes everything checks nothing', async () => {
+      await expect(runRestore(restoreDeps(WRONG_KEY), archive, { check: true })).rejects.toMatchObject({ code: 'secret_key_mismatch' });
+    });
+  });
+
+  describe('an archive whose manifest promises an upload tree it does not carry', () => {
+    /**
+     * A truncated download, an archive somebody opened and repacked, an entry the extraction filter
+     * dropped. The restore removes each carried tree and puts the archive's copy in its place, so a
+     * manifest that names a tree the bytes do not hold would **delete that source's only copy** and
+     * then die on the copy — with `pg_restore --clean` already behind it.
+     */
+    it('refuses before it touches the database, and the tree that was already there survives', async () => {
+      const doctored = nodePath.join(exchangeDir, 'missing-tree.tar.gz');
+      const staging = nodePath.join(exchangeDir, 'missing-tree');
+      await fsp.rm(staging, { recursive: true, force: true });
+      await fsp.mkdir(staging, { recursive: true });
+      // Everything the real archive holds except the upload tree its manifest still lists.
+      await tar.extract({ file: archive, cwd: staging });
+      await fsp.rm(nodePath.join(staging, 'data'), { recursive: true, force: true });
+      await tar.create({ gzip: true, file: doctored, cwd: staging, portable: true }, ['manifest.json', 'README.txt', 'database.dump']);
+
+      const upload = await cli.db.select().from(documentSources).where(eq(documentSources.type, 'upload')).limit(1);
+      const project = await cli.db.select().from(projects).limit(1);
+      const onDisk = nodePath.join(dataDir, 'projects', project[0].id, 'sources', upload[0].id, 'current');
+      const before = await treeContents(onDisk);
+      expect(Object.keys(before)).toHaveLength(1);
+
+      try {
+        await expect(runRestore(restoreDeps(BACKUP_KEY), doctored)).rejects.toMatchObject({ code: 'incomplete_archive' });
+        // The files are still there — this is the assertion the refusal exists for.
+        expect(await treeContents(onDisk)).toEqual(before);
+        // And the database was never reached: the rows the previous restore put back are still theirs.
+        const rows = await cli.db.execute(sql`SELECT count(*)::int AS n FROM chunks`);
+        expect((rows.rows[0] as { n: number }).n).toBeGreaterThan(0);
+      } finally {
+        await fsp.rm(doctored, { force: true });
+        await fsp.rm(staging, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('an archive that is not an instance backup', () => {
     it('is refused by what it says it is, not by what it is called', async () => {
       const other = nodePath.join(exchangeDir, 'not-a-backup.tar.gz');
