@@ -327,6 +327,35 @@ describe('a specification is expanded on the thread and pulled back one document
   });
 
   /**
+   * **The one error the watchdog can produce, and ADR-0071 §7 says which kind it has to be.**
+   *
+   * Closing the leak created a way to fail that the boundary is not allowed to have: a reader that
+   * comes back after the window meets a session the worker has already dropped, and the worker answers
+   * that with "not open" — a *broken run*, because the worker cannot know who closed it. This class
+   * can: it is the one that gave up. So the refusal is produced here, before the request is sent, and
+   * it names the file, which is the only currency §7 lets this boundary pay in.
+   */
+  it('refuses the file by name when a reader comes back to an expansion the watchdog released', async () => {
+    const service = conversion({ idleMs: 120 });
+    const bytes = await readFile(path.join(SPECS, 'petstore.yaml'));
+
+    const expansion = await service.expand('api/petstore.yaml', bytes, SPEC_LIMITS);
+    await until(() => !service.threadHeld, 5000);
+
+    const refusal = await (async () => {
+      for await (const _document of expansion.documents()) return null;
+      return null;
+    })().catch((err: unknown) => err);
+
+    expect(refusal).toBeInstanceOf(DocumentExtractionError);
+    expect((refusal as Error).message).toContain('api/petstore.yaml');
+    expect((refusal as Error).message).toContain('left unread');
+    // Not a bare "conversion session N is not open": that sentence is a failed run, and is what this
+    // case exists to keep out of the indexer.
+    expect((refusal as Error).message).not.toContain('is not open');
+  });
+
+  /**
    * **The reason the watchdog measures "unread" and not "idle", stated as a test.**
    *
    * Between two documents the caller is chunking and embedding the last one, so a sweep that released

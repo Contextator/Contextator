@@ -85,6 +85,14 @@ interface Pending {
   timer: NodeJS.Timeout;
 }
 
+/**
+ * The half of a refusal that says what happens next, and it is not one sentence because it is not one
+ * outcome: a file that already had a document keeps it (FR-404), so it is *not* retried on the next
+ * run — its bytes have not changed — while one that had none is.
+ */
+const AFTERWARDS =
+  'A file that was already indexed keeps the document it had until its bytes change or the project is rebuilt; one that was not is converted again on the next run.';
+
 function seconds(ms: number): string {
   return ms % 1000 === 0 ? `${ms / 1000}s` : `${(ms / 1000).toFixed(1)}s`;
 }
@@ -181,15 +189,34 @@ export class ConversionService {
     this.#sessions.add(session);
     // Nothing has claimed this expansion yet, and until something does there is no `finally` anywhere
     // that would give the thread back. See `#unread`.
-    this.#watchUnread(session);
+    //
+    // **The flag lives in this closure and nowhere else**, which is what lets a reader arriving late be
+    // told the truth without the service having to remember abandoned session ids for ever. It also
+    // keeps the two cases apart, and they must be kept apart: a session this client gave up on is a
+    // refused *file*, while a session the worker has never heard of is two sides disagreeing about
+    // state — a broken run, and it has to stay one. The worker cannot tell them apart, so it is not
+    // asked to.
+    let releasedUnread = false;
+    this.#watchUnread(session, () => {
+      releasedUnread = true;
+    });
     const service = this;
     return {
       count: opened.count,
       async *documents(): AsyncGenerator<DerivedDocument> {
-        // **The first line of the body, and it has to be, because this is the moment the `try` below
-        // becomes real.** An async generator's body does not run when `documents()` is called; it runs
-        // on the first `next()`. So handing the object back is not a claim on the expansion and calling
-        // `documents()` is not one either — stepping it is, and from here `finally` is guaranteed.
+        // **The first two lines of the body, and they have to be, because this is the moment the `try`
+        // below becomes real.** An async generator's body does not run when `documents()` is called; it
+        // runs on the first `next()`. So handing the object back is not a claim on the expansion and
+        // calling `documents()` is not one either — stepping it is, and from here `finally` is
+        // guaranteed. Which also makes this the first moment a reader can be told that it arrived too
+        // late, in the one currency this boundary is allowed to pay in (ADR-0071 §7): a refusal that
+        // names the file, rather than an error about a session nobody outside this class has heard of.
+        if (releasedUnread) {
+          throw new DocumentExtractionError(
+            `"${relativePath}" was expanded and then left unread for ${seconds(service.#settings.idleMs)}, so the conversion thread was released and the parse discarded. ` +
+              `The file was not indexed and nothing else was affected. ${AFTERWARDS}`,
+          );
+        }
         service.#read(session);
         try {
           for (;;) {
@@ -225,22 +252,6 @@ export class ConversionService {
   }
 
   /**
-   * An expansion is over, however it ended.
-   *
-   * **Two things happen here and only one of them is conditional, which is the bug this shape exists
-   * to prevent.** A reader that walked away leaves the specification's object graph live on the far
-   * side, so that session is closed — the indexer stops reading whenever a document fails to embed or
-   * to write, and the graph would otherwise stay until some later file replaced it. An expansion read
-   * to its end needs no `close`: the worker dropped that session itself when its generator finished.
-   *
-   * But **the thread has to be let go in both cases**, and `#armIdle` cannot be the one to notice: it
-   * runs from `#settle`, which for the final `next` fires while the session is still registered and so
-   * correctly declines to release anything. Leaving the release to the `close` message meant an
-   * expansion read to the end — the ordinary path, and the one ADR-0057 calls the heaviest — never
-   * armed the idle timer and never unref'd the thread. A run whose last converted file was a
-   * specification held its thread for ever, against four documents that promise otherwise.
-   */
-  /**
    * Somebody has started reading this expansion: the watchdog's job is over, `finally` has it now.
    *
    * **What this deliberately does not cover**, so that it is a choice rather than an oversight: a
@@ -264,9 +275,12 @@ export class ConversionService {
    * same turn it opens it. Reaching this timer means a caller took the handle and dropped it, which is
    * how the leak this closes was written in the first place.
    */
-  #watchUnread(session: number): void {
+  #watchUnread(session: number, onReleased: () => void): void {
     const watchdog = setTimeout(() => {
       this.#unread.delete(session);
+      // Before the release, so that a reader arriving in the same turn cannot slip between the two and
+      // see a closed session with nothing saying who closed it.
+      onReleased();
       void this.#release(session);
     }, this.#settings.idleMs);
     watchdog.unref();
@@ -279,6 +293,22 @@ export class ConversionService {
     this.#unread.clear();
   }
 
+  /**
+   * An expansion is over, however it ended.
+   *
+   * **Two things happen here and only one of them is conditional, which is the bug this shape exists
+   * to prevent.** A reader that walked away leaves the specification's object graph live on the far
+   * side, so that session is closed — the indexer stops reading whenever a document fails to embed or
+   * to write, and the graph would otherwise stay until some later file replaced it. An expansion read
+   * to its end needs no `close`: the worker dropped that session itself when its generator finished.
+   *
+   * But **the thread has to be let go in both cases**, and `#armIdle` cannot be the one to notice: it
+   * runs from `#settle`, which for the final `next` fires while the session is still registered and so
+   * correctly declines to release anything. Leaving the release to the `close` message meant an
+   * expansion read to the end — the ordinary path, and the one ADR-0057 calls the heaviest — never
+   * armed the idle timer and never unref'd the thread. A run whose last converted file was a
+   * specification held its thread for ever, against four documents that promise otherwise.
+   */
   async #release(session: number): Promise<void> {
     this.#read(session);
     const abandoned = this.#sessions.delete(session);
@@ -371,8 +401,7 @@ export class ConversionService {
       one.reject(
         new DocumentExtractionError(
           `"${one.relativePath}" could not be converted: the conversion thread stopped before it answered — ${reason}. ` +
-            `Conversion runs off the server's own thread, so nothing else was affected. ` +
-            `A file that was already indexed keeps the document it had until its bytes change or the project is rebuilt; one that was not is converted again on the next run.`,
+            `Conversion runs off the server's own thread, so nothing else was affected. ${AFTERWARDS}`,
         ),
       );
     }
