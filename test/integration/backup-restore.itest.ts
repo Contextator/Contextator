@@ -1,16 +1,34 @@
-import { sql } from 'drizzle-orm';
+import fsp from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import nodePath from 'node:path';
+import { gunzipSync } from 'node:zlib';
+
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { eq, sql } from 'drizzle-orm';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
+import * as tar from 'tar';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { MAX_SEARCH_LIMIT } from '../../src/config.js';
+import { describeTopology, secretKeyFingerprint, type Manifest as BackupManifest, type PgTool, type PgTools } from '../../scripts/backup-archive.js';
+import { runBackup } from '../../scripts/backup.js';
+import { runRestore, type RestoreDeps } from '../../scripts/restore.js';
+import { loadConfig, MAX_SEARCH_LIMIT } from '../../src/config.js';
 import { MIGRATIONS_FOLDER } from '../../src/db/bootstrap.js';
-import { documentSources, projects } from '../../src/db/schema.js';
+import { documentSources, projects, type ProjectRow } from '../../src/db/schema.js';
+import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
+import { chunkMarkdown, embeddingText, estimateTokens } from '../../src/services/chunker.js';
+import { decryptSecret, encryptSecret } from '../../src/services/crypto.js';
+import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
 import { type NewChunk, replaceDocument, searchChunks, type SearchHit } from '../../src/services/vector-store.js';
 import {
   applySchema,
   createTestDatabase,
   dropTestDatabase,
+  EXCHANGE_DIR,
   execInPostgresOrThrow,
+  silentLogger,
   TEST_EMBEDDING_DIMENSIONS,
   type TestDatabase,
 } from './support/postgres.js';
@@ -39,6 +57,8 @@ import { captureSchema, renderSchemaSnapshot, type SchemaSnapshot } from './supp
 
 const baseUrl = inject('postgresBaseUrl');
 const containerId = inject('postgresContainerId');
+/** The host side of the directory the container shares, where the command's archive is written. */
+const exchangeDir = inject('postgresExchangeDir');
 const DIMS = TEST_EMBEDDING_DIMENSIONS;
 
 /** Every project here is freshly created, so its live generation is the column's default (ADR-0039). */
@@ -581,5 +601,498 @@ describe('what the measurement says', () => {
     // footprint — which is the number an operator sizing a backup volume needs and the one nobody had
     // written down.
     expect(measured.dumpBytes).toBeGreaterThan(measured.vectorBytes);
+  });
+});
+
+/* ──────────────────────────────────────────────────────────────────────────────────────────────────
+ * `npm run backup` / `npm run restore` — the command, end to end
+ * ([ADR-0072](../../../.ssot/ADR.md#adr-0072))
+ *
+ * Everything above proves what a `pg_dump` and a `pg_restore` do. What it cannot prove is the thing
+ * ADR-0046 wrote down and left to a document: **a dump is not the installation.** It carries no
+ * `SECRET_KEY`, so every stored source credential comes back undecryptable; it carries nothing from
+ * `DATA_DIR`, so an upload source — the only source type whose files exist nowhere else — comes back
+ * configured and permanently empty. The section below is those two gaps, closed by a command and
+ * asserted end to end: a real instance with an upload source and an encrypted credential, backed up,
+ * emptied, and restored, with the answers and the files asked for on the other side.
+ *
+ * The tools still run **inside the container**, at the version that matches the server, exactly where
+ * ADR-0046 put them. `PgTools` is the seam that lets them: the operator's invocation runs them on its
+ * own `PATH` (`localPgTools`), and this file runs them through the harness's exec handle with a bind
+ * mount underneath, so what the suite asserts on is the archive the command actually wrote.
+ * ────────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/** The key the fixture's encrypted credential is written under, and the one the restore must want. */
+const BACKUP_KEY = 'f'.repeat(64);
+/** A key that is 32+ characters and is not that one. */
+const WRONG_KEY = '9'.repeat(64);
+
+const CLI_DATABASE = 'backup_cli';
+
+/** The file the upload source holds, which is in no `pg_dump` and in no remote anybody can re-pull. */
+const UPLOADED_PATH = 'onboarding.md';
+const UPLOADED_BODY = [
+  '# Onboarding',
+  '',
+  '## Rotating the deploy key',
+  '',
+  'The deploy key is rotated from the source panel; the previous key stops working immediately.',
+  '',
+  '## Where uploads land',
+  '',
+  'An uploaded archive is unpacked into a staging directory and swapped in when the upload is committed.',
+].join('\n');
+
+/**
+ * `PgTools` over the harness's container: the tools where ADR-0046 put them, writing into a directory
+ * the host can read.
+ *
+ * `umask 000` because the exec runs as root inside the container and this process is the host user:
+ * a dump written 0600 by one of them is a dump the other cannot open, and that is a property of the
+ * bind mount rather than of anything under test. `PGUSER` is set here rather than passed as `-U` for
+ * the same reason `connectionFromEnv` does it — the command under test adds no connection flags.
+ */
+function containerTools(scratchLocal: string, scratchRemote: string, ran: PgTool[] = []): PgTools {
+  const quote = (arg: string): string => `'${arg.replace(/'/g, `'\\''`)}'`;
+  const script = (tool: string, args: string[]): string =>
+    `umask 000; export PGUSER=contextator PGDATABASE=${CLI_DATABASE}; exec ${tool} ${args.map(quote).join(' ')}`;
+  return {
+    scratch: { local: scratchLocal, remote: scratchRemote },
+    database: CLI_DATABASE,
+    run: async (tool, args) => {
+      // **`ran` is how a test says "and it never got that far".** Every refusal in this feature is a
+      // claim about *order* — nothing written before the check — and the only thing that writes is
+      // `pg_restore`. Asserting on the database's contents afterwards cannot separate "it did not
+      // run" from "it ran and put back the same rows", which is exactly the shape a restore has: the
+      // dump is valid, so re-applying it leaves every count where it was. Recording the call does
+      // separate them.
+      ran.push(tool);
+      return (await execInPostgresOrThrow(containerId, ['sh', '-c', script(tool, args)])).stdout;
+    },
+    // Deliberately not recorded: `--version` is one of the refusal *inputs* and touches nothing.
+    version: async (tool) => (await execInPostgresOrThrow(containerId, [tool, '--version'])).stdout.trim(),
+  };
+}
+
+/** One Markdown page indexed the way the indexer indexes one: chunked, embedded, stored. */
+async function seedPage(database: TestDatabase, projectId: string, sourceId: string, relativePath: string, body: string): Promise<void> {
+  const { title, chunks: pieces } = chunkMarkdown(body, relativePath, { maxTokens: 96, overlapTokens: 24, countTokens: estimateTokens });
+  const rows: NewChunk[] = pieces.map((piece) => ({
+    chunkIndex: piece.index,
+    headingPath: piece.headingPath,
+    content: piece.content,
+    tokenCount: piece.tokenCount,
+    embedding: stubVector(embeddingText(piece)),
+  }));
+  await replaceDocument(
+    database.db,
+    {
+      projectId,
+      sourceId,
+      relativePath,
+      title,
+      contentHash: `sha-${relativePath}`,
+      sizeBytes: body.length,
+      indexGeneration: LIVE,
+      content: body,
+      contentTruncated: false,
+      version: '',
+    },
+    rows,
+  );
+}
+
+/** The three fields `registerTools` reaches for, and a stub encoder, so `read_document` can be called. */
+function toolContext(database: TestDatabase, dataDir: string): ToolContext {
+  const provider: EmbeddingProvider = {
+    id: 'local:stub-bag-of-words:fp32',
+    provider: 'local',
+    model: 'stub-bag-of-words',
+    dimensions: DIMS,
+    ready: true,
+    maxInputTokens: 512,
+    truncatesAtTokens: 512,
+    windowSource: 'default',
+    countTokens: estimateTokens,
+    queryPrefix: '',
+    passagePrefix: '',
+    warmup: async () => {},
+    embedPassages: async (texts: string[]) => texts.map(stubVector),
+    embedQuery: async (text: string) => stubVector(text),
+  };
+  return {
+    db: database.db,
+    embeddings: provider,
+    // The floor was measured against a real encoder (ADR-0042); this file's vectors are a stub, and
+    // what is being asserted is that the rows came back, not where they scored.
+    config: loadConfig({ DATABASE_URL: database.url, DATA_DIR: dataDir, ALLOWED_DOC_ROOTS: dataDir, SEARCH_SCORE_FLOOR: '0' }),
+    log: silentLogger,
+    queryLog: undefined,
+  } as ToolContext;
+}
+
+async function readDocument(database: TestDatabase, dataDir: string, project: ProjectRow, relativePath: string): Promise<string> {
+  const server = new McpServer({ name: 'contextator-test', version: '0.0.0' });
+  registerTools(server, toolContext(database, dataDir), project);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'itest', version: '0.0.0' });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const result = await client.callTool({ name: 'read_document', arguments: { path: relativePath } });
+    const content = (result.content as Array<{ type: string; text?: string }> | undefined) ?? [];
+    expect(result.isError).not.toBe(true);
+    return content.find((c) => c.type === 'text')?.text ?? '';
+  } finally {
+    await client.close();
+  }
+}
+
+/** Every file under a directory, as path → bytes, so "the tree came back" is a claim about content. */
+async function treeContents(dir: string): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  const walk = async (at: string, prefix: string): Promise<void> => {
+    for (const entry of await fsp.readdir(at, { withFileTypes: true })) {
+      const full = nodePath.join(at, entry.name);
+      const key = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) await walk(full, key);
+      else if (entry.isFile()) out[key] = await fsp.readFile(full, 'utf8');
+    }
+  };
+  try {
+    await walk(dir, '');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  return out;
+}
+
+describe('the backup command, and the instance it is asked to bring back', () => {
+  let cli: TestDatabase;
+  let dataDir: string;
+  let scratch: { local: string; remote: string };
+  let archive: string;
+  let project: ProjectRow;
+  let uploadDir: string;
+  let uploadBefore: Record<string, string>;
+  let backupOutput: string[];
+  let backupManifest: BackupManifest;
+
+  /** A fresh, empty instance at the shape a first start leaves: schema created, nothing in it. */
+  async function emptyInstance(): Promise<void> {
+    await dropTestDatabase(baseUrl, cli);
+    cli = await createTestDatabase(baseUrl, CLI_DATABASE);
+    await applySchema(cli, DIMS);
+    await fsp.rm(dataDir, { recursive: true, force: true });
+    await fsp.mkdir(dataDir, { recursive: true });
+  }
+
+  const restoreDeps = (secretKey: string | undefined, ran: PgTool[] = []): RestoreDeps => ({
+    db: cli.db,
+    config: loadConfig({ DATABASE_URL: cli.url, DATA_DIR: dataDir, SECRET_KEY: secretKey ?? '' }),
+    tools: containerTools(scratch.local, scratch.remote, ran),
+    // The topology this suite runs in: it reaches the database over a URL, which is exactly what
+    // ADR-0069 calls external — and the command has to say so rather than imply the container's own.
+    topology: describeTopology({ DATABASE_URL: cli.url }),
+    secretKey,
+    say: () => {},
+  });
+
+  beforeAll(async () => {
+    cli = await createTestDatabase(baseUrl, CLI_DATABASE);
+    await applySchema(cli, DIMS);
+
+    dataDir = await fsp.mkdtemp(nodePath.join(tmpdir(), 'contextator-backup-data-'));
+    scratch = { local: nodePath.join(exchangeDir, 'cli'), remote: `${EXCHANGE_DIR}/cli` };
+    await fsp.mkdir(scratch.local, { recursive: true });
+    await fsp.chmod(scratch.local, 0o777);
+    archive = nodePath.join(exchangeDir, 'instance-backup.tar.gz');
+
+    [project] = await cli.db.insert(projects).values({ name: 'handbook', embeddingModel: 'local:stub-bag-of-words:fp32' }).returning();
+
+    // An upload source: its `current/` tree is the only copy of its content anywhere, and no `pg_dump`
+    // has ever contained it.
+    const [upload] = await cli.db
+      .insert(documentSources)
+      .values({ projectId: project.id, type: 'upload', name: 'manuals' })
+      .returning({ id: documentSources.id });
+    uploadDir = nodePath.join(dataDir, 'projects', project.id, 'sources', upload.id, 'current');
+    await fsp.mkdir(uploadDir, { recursive: true });
+    await fsp.writeFile(nodePath.join(uploadDir, UPLOADED_PATH), UPLOADED_BODY, 'utf8');
+    await seedPage(cli, project.id, upload.id, `manuals/${UPLOADED_PATH}`, UPLOADED_BODY);
+    uploadBefore = await treeContents(uploadDir);
+
+    // And a source holding a credential encrypted under SECRET_KEY, so the key the backup records is a
+    // key something in the dump actually depends on.
+    await cli.db.insert(documentSources).values({
+      projectId: project.id,
+      type: 'git',
+      name: 'private-repo',
+      config: { url: 'https://example.invalid/private.git', branch: 'main', subdir: '', extensions: ['md'] },
+      secretEnc: encryptSecret('ghp_a_token_that_must_not_travel', BACKUP_KEY),
+    });
+
+    backupOutput = [];
+    const result = await runBackup(
+      {
+        db: cli.db,
+        config: loadConfig({ DATABASE_URL: cli.url, DATA_DIR: dataDir, SECRET_KEY: BACKUP_KEY }),
+        tools: containerTools(scratch.local, scratch.remote),
+        topology: describeTopology({ DATABASE_URL: cli.url }),
+        say: (line) => backupOutput.push(line),
+      },
+      archive,
+    );
+    backupManifest = result.manifest;
+  }, 600_000);
+
+  afterAll(async () => {
+    await dropTestDatabase(baseUrl, cli);
+    await fsp.rm(dataDir, { recursive: true, force: true });
+    await fsp.rm(scratch.local, { recursive: true, force: true });
+    await fsp.rm(archive, { force: true });
+  });
+
+  describe('what one archive holds', () => {
+    it('carries the database, the upload tree and a manifest that is read first', async () => {
+      const entries: string[] = [];
+      await tar.list({ file: archive, onReadEntry: (entry) => entries.push(entry.path) });
+      expect(entries[0]).toBe('manifest.json');
+      expect(entries).toContain('README.txt');
+      expect(entries).toContain('database.dump');
+      expect(entries.some((path) => path.startsWith('data/projects/') && path.endsWith(UPLOADED_PATH))).toBe(true);
+
+      expect(backupManifest.counts.projects).toBe(1);
+      expect(backupManifest.counts.uploadSources).toBe(1);
+      expect(backupManifest.counts.uploadFiles).toBe(1);
+      expect(backupManifest.uploads[0].path).toBe(`projects/${project.id}/sources/${backupManifest.uploads[0].path.split('/')[3]}/current`);
+    });
+
+    /**
+     * The worst thing this phase could have produced, asserted against rather than promised. The key
+     * is searched for in the **decompressed** bytes of the whole archive, not in the manifest: a
+     * convenience that wrote it into `README.txt`, or into a `.env` somebody decided to carry, would
+     * pass every other assertion in this file.
+     */
+    it('does not contain SECRET_KEY anywhere in it, only a key check value', async () => {
+      const bytes = gunzipSync(await fsp.readFile(archive)).toString('latin1');
+      expect(bytes).not.toContain(BACKUP_KEY);
+      expect(bytes).toContain(secretKeyFingerprint(BACKUP_KEY));
+
+      expect(backupManifest.secretKey.present).toBe(true);
+      expect(backupManifest.secretKey.fingerprint).toBe(secretKeyFingerprint(BACKUP_KEY));
+      // One source credential in the dump depends on that key, which is what makes the refusal below
+      // a statement about the data rather than about a setting.
+      expect(backupManifest.secretKey.encryptedSources).toBe(1);
+      expect(backupOutput.join('\n')).toContain('SECRET_KEY is NOT in this file');
+    });
+
+    /**
+     * ADR-0069's topology, said out loud. This suite reaches its database over a URL, which is the
+     * external case — where the dump may be a second, unmanaged copy of somebody else's production
+     * data, and where the upload trees beside it are still in no other backup.
+     */
+    it('says which database it talked to and whose job that database is', () => {
+      const said = backupOutput.join('\n');
+      expect(said).toContain('database: external');
+      expect(said).toContain('Nothing in this image operates that server');
+      expect(said).toContain('upload trees');
+      expect(said).not.toContain(BACKUP_KEY);
+      expect(backupManifest.database.mode).toBe('external');
+      expect(backupManifest.database.target).not.toBeNull();
+      // The credential in the URL is not in the manifest either.
+      expect(JSON.stringify(backupManifest)).not.toContain('contextator:contextator@');
+    });
+  });
+
+  describe('restored with the wrong SECRET_KEY', () => {
+    it('stops before it writes anything, and leaves the empty instance empty', async () => {
+      await emptyInstance();
+
+      const ran: PgTool[] = [];
+      await expect(runRestore(restoreDeps(WRONG_KEY, ran), archive)).rejects.toMatchObject({ code: 'secret_key_mismatch' });
+
+      // The whole of "it does not leave a half-loaded instance": the database it was pointed at still
+      // has nothing in it, and DATA_DIR is still empty. A refusal made *after* `pg_restore --clean`
+      // would have dropped the schema and half-written the rest. The row count says that here because
+      // this instance is empty and the archive is not; `ran` says it on any instance, which is the
+      // claim that survives somebody reusing this case against a populated one.
+      expect(ran).toEqual([]);
+      const rows = await cli.db.execute(sql`SELECT count(*)::int AS n FROM projects`);
+      expect((rows.rows[0] as { n: number }).n).toBe(0);
+      expect(await treeContents(dataDir)).toEqual({});
+    });
+
+    it('refuses a missing key the same way, naming the fingerprint it wants', async () => {
+      const ran: PgTool[] = [];
+      await expect(runRestore(restoreDeps(undefined, ran), archive)).rejects.toMatchObject({ code: 'secret_key_missing' });
+      expect(ran).toEqual([]);
+      const rows = await cli.db.execute(sql`SELECT count(*)::int AS n FROM projects`);
+      expect((rows.rows[0] as { n: number }).n).toBe(0);
+      expect(await treeContents(dataDir)).toEqual({});
+    });
+  });
+
+  describe('restored with the key it was taken under', () => {
+    it('brings the project back searchable, and the uploaded file back on disk and readable', async () => {
+      // The instance is the empty one the two refusals above left behind.
+      const ran: PgTool[] = [];
+      const report = await runRestore(restoreDeps(BACKUP_KEY, ran), archive);
+      expect(report.uploadsRestored).toBe(1);
+      // The guard against the recorder being something no code path can fill: a real restore does
+      // reach `pg_restore`, exactly once. Without this, every `expect(ran).toEqual([])` above would
+      // pass on a recorder that was never wired to anything.
+      expect(ran).toEqual(['pg_restore']);
+
+      const restored = await cli.db.select().from(projects).limit(1);
+      expect(restored).toHaveLength(1);
+      expect(restored[0].name).toBe('handbook');
+
+      // Searchable: the product's own read path, over the restored database.
+      const hits = await searchChunks(cli.db, {
+        projectId: restored[0].id,
+        generation: restored[0].liveGeneration,
+        queryEmbedding: stubVector('where do uploaded archives land'),
+        queryText: 'where do uploaded archives land',
+        limit: 5,
+        selection: WHOLE_PAGE,
+      });
+      expect(hits.length).toBeGreaterThan(0);
+      expect(hits.some((hit) => hit.content.includes('staging directory'))).toBe(true);
+
+      // Readable: `read_document` through a real MCP client, which serves `documents.content`.
+      const answer = await readDocument(cli, dataDir, restored[0], `manuals/${UPLOADED_PATH}`);
+      expect(answer).toContain('Rotating the deploy key');
+      expect(answer).toContain('swapped in when the upload is committed');
+
+      // And the file itself, which no `pg_dump` has ever held: byte for byte, where it was.
+      const upload = await cli.db.select().from(documentSources).where(eq(documentSources.type, 'upload')).limit(1);
+      const restoredDir = nodePath.join(dataDir, 'projects', restored[0].id, 'sources', upload[0].id, 'current');
+      expect(await treeContents(restoredDir)).toEqual(uploadBefore);
+
+      // The credential came back encrypted, and the key this environment holds still opens it — which
+      // is the thing the refusal above was protecting.
+      const git = await cli.db.select().from(documentSources).where(eq(documentSources.type, 'git')).limit(1);
+      expect(decryptSecret(git[0].secretEnc ?? '', BACKUP_KEY)).toBe('ghp_a_token_that_must_not_travel');
+    });
+
+    it('is a clean no-op for the next start of the application over it', async () => {
+      const before = await captureSchema(cli.db);
+      await applySchema(cli, DIMS);
+      expect(renderSchemaSnapshot(await captureSchema(cli.db))).toBe(renderSchemaSnapshot(before));
+    });
+  });
+
+  describe('--check, which is what an operator is told to run first', () => {
+    it('evaluates every refusal and writes nothing at all — not a row, not a file, not a directory', async () => {
+      // A scratch directory that does not exist yet, so "it created nothing" is assertable rather
+      // than a claim about a directory `beforeAll` already made. `main()` names its staging directory
+      // the same way and lets `runRestore` be the thing that creates it.
+      const untouched = nodePath.join(exchangeDir, 'check-scratch');
+      await fsp.rm(untouched, { recursive: true, force: true });
+      const deps: RestoreDeps = { ...restoreDeps(BACKUP_KEY), tools: containerTools(untouched, `${EXCHANGE_DIR}/check-scratch`) };
+
+      const before = await treeContents(dataDir);
+      const ran: PgTool[] = [];
+      const report = await runRestore({ ...deps, tools: containerTools(untouched, `${EXCHANGE_DIR}/check-scratch`, ran) }, archive, { check: true });
+
+      // The write claims first, so a regression reports as the thing that broke rather than as a
+      // changed return value. The same reason as the refusals below: this instance already holds what
+      // the archive holds, so a `--check` that quietly went on and restored would leave every count
+      // where it is. What it cannot do is reach `pg_restore` without being seen.
+      expect(ran).toEqual([]);
+      // Nothing unpacked, nothing created: the archive is gigabytes in a real instance and `--check`
+      // is meant to cost a few hundred bytes of it.
+      await expect(fsp.stat(untouched)).rejects.toMatchObject({ code: 'ENOENT' });
+      // And the instance it was pointed at is exactly as it was.
+      expect(await treeContents(dataDir)).toEqual(before);
+      const rows = await cli.db.execute(sql`SELECT count(*)::int AS n FROM projects`);
+      expect((rows.rows[0] as { n: number }).n).toBe(1);
+
+      expect(report.checkedOnly).toBe(true);
+      expect(report.uploadsRestored).toBe(0);
+      expect(report.manifest.counts.chunks).toBe(backupManifest.counts.chunks);
+    });
+
+    it('still refuses the wrong key, because a check that passes everything checks nothing', async () => {
+      await expect(runRestore(restoreDeps(WRONG_KEY), archive, { check: true })).rejects.toMatchObject({ code: 'secret_key_mismatch' });
+    });
+  });
+
+  describe('an archive whose manifest promises an upload tree it does not carry', () => {
+    /**
+     * A truncated download, an archive somebody opened and repacked, an entry the extraction filter
+     * dropped. The restore removes each carried tree and puts the archive's copy in its place, so a
+     * manifest that names a tree the bytes do not hold would **delete that source's only copy** and
+     * then die on the copy — with `pg_restore --clean` already behind it.
+     */
+    it('refuses before it touches the database, and the tree that was already there survives', async () => {
+      const doctored = nodePath.join(exchangeDir, 'missing-tree.tar.gz');
+      const staging = nodePath.join(exchangeDir, 'missing-tree');
+      await fsp.rm(staging, { recursive: true, force: true });
+      await fsp.mkdir(staging, { recursive: true });
+      // Everything the real archive holds except the upload tree its manifest still lists.
+      await tar.extract({ file: archive, cwd: staging });
+      await fsp.rm(nodePath.join(staging, 'data'), { recursive: true, force: true });
+      await tar.create({ gzip: true, file: doctored, cwd: staging, portable: true }, ['manifest.json', 'README.txt', 'database.dump']);
+
+      const upload = await cli.db.select().from(documentSources).where(eq(documentSources.type, 'upload')).limit(1);
+      const project = await cli.db.select().from(projects).limit(1);
+      const onDisk = nodePath.join(dataDir, 'projects', project[0].id, 'sources', upload[0].id, 'current');
+      const before = await treeContents(onDisk);
+      expect(Object.keys(before)).toHaveLength(1);
+
+      try {
+        const ran: PgTool[] = [];
+        await expect(runRestore(restoreDeps(BACKUP_KEY, ran), doctored)).rejects.toMatchObject({ code: 'incomplete_archive' });
+
+        /**
+         * **"Before it touches the database" is this line and nothing else.**
+         *
+         * The two assertions that used to stand here cannot see the difference the name claims. The
+         * tree survives whether the check sits before `pg_restore` or after it, because either way it
+         * is refused before the `rm`/`cp` loop; and `chunks > 0` holds either way too, because the
+         * doctored archive carries the **same valid dump** — re-applying it leaves every count
+         * exactly where it was. Moving the check after `pg_restore` therefore kept all 21 tests
+         * green, which is how this was found.
+         *
+         * A restore that ran and put the same rows back is not the same event as one that never ran:
+         * `--clean --if-exists` dropped and rebuilt every table on the way, and an operator who is
+         * told "Nothing has been written." would be told it by a command that had just replaced their
+         * database. So the assertion is that the tool was never invoked.
+         */
+        expect(ran).toEqual([]);
+
+        // The files are still there — this is the assertion the refusal exists for.
+        expect(await treeContents(onDisk)).toEqual(before);
+        const rows = await cli.db.execute(sql`SELECT count(*)::int AS n FROM chunks`);
+        expect((rows.rows[0] as { n: number }).n).toBeGreaterThan(0);
+      } finally {
+        await fsp.rm(doctored, { force: true });
+        await fsp.rm(staging, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('an archive that is not an instance backup', () => {
+    it('is refused by what it says it is, not by what it is called', async () => {
+      const other = nodePath.join(exchangeDir, 'not-a-backup.tar.gz');
+      const staging = nodePath.join(exchangeDir, 'not-a-backup');
+      await fsp.mkdir(staging, { recursive: true });
+      await fsp.writeFile(
+        nodePath.join(staging, 'manifest.json'),
+        JSON.stringify({ kind: 'contextator.project-export', manifestVersion: 1 }),
+        'utf8',
+      );
+      await tar.create({ gzip: true, file: other, cwd: staging, portable: true }, ['manifest.json']);
+      const ran: PgTool[] = [];
+      try {
+        await expect(runRestore(restoreDeps(BACKUP_KEY, ran), other)).rejects.toMatchObject({ code: 'not_a_backup' });
+        // Every refusal in this feature is a claim about order, so every one of them says so.
+        expect(ran).toEqual([]);
+      } finally {
+        await fsp.rm(other, { force: true });
+        await fsp.rm(staging, { recursive: true, force: true });
+      }
+    });
   });
 });

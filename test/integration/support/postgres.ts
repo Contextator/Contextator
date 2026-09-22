@@ -1,3 +1,7 @@
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { chmod } from 'node:fs/promises';
 import { PostgreSqlContainer, type StartedPostgreSqlContainer } from '@testcontainers/postgresql';
 import { sql } from 'drizzle-orm';
 import type pg from 'pg';
@@ -39,8 +43,23 @@ export interface RunningPostgres {
    * handle in whichever worker needs one.
    */
   containerId: string;
+  /**
+   * A directory both the host and the container can write to — `local` as this process sees it,
+   * `remote` as the container does.
+   *
+   * It exists for `backup-restore.itest.ts` and for one reason:
+   * [ADR-0046](../../../.ssot/ADR.md#adr-0046) put `pg_dump` and `pg_restore` **inside** the container,
+   * beside the server they speak to, and [ADR-0072](../../../.ssot/ADR.md#adr-0072) does not move them
+   * — so the file those tools write has to reach a test that is not in there with them. A bind mount
+   * is the whole of it: no base64 round trip, no copy out, and the archive the suite asserts on is the
+   * archive the command wrote.
+   */
+  exchange: { local: string; remote: string };
   stop(): Promise<void>;
 }
+
+/** Where the exchange directory is mounted inside the container. */
+export const EXCHANGE_DIR = '/exchange';
 
 /**
  * Starts one `pgvector/pgvector:pg16` for the whole run. Callers get a base URL and are expected to
@@ -48,6 +67,12 @@ export interface RunningPostgres {
  * being able to see one another.
  */
 export async function startPostgres(): Promise<RunningPostgres> {
+  // 0o777 because the tools run as the image's `postgres` user and this process is the host's: on
+  // Linux the two are different uids over the same inode, and a directory only one of them can write
+  // to is a bind mount that works on a laptop and fails in CI.
+  const exchange = await mkdtemp(path.join(tmpdir(), 'contextator-exchange-'));
+  await chmod(exchange, 0o777);
+
   const container: StartedPostgreSqlContainer = await new PostgreSqlContainer(PGVECTOR_IMAGE)
     .withDatabase('contextator_test')
     .withUsername('contextator')
@@ -71,12 +96,14 @@ export async function startPostgres(): Promise<RunningPostgres> {
      * have to think about, and `/dev/shm` is allocated on demand — an unused tmpfs page costs nothing.
      */
     .withSharedMemorySize(256 * 1024 * 1024)
+    .withBindMounts([{ source: exchange, target: EXCHANGE_DIR, mode: 'rw' }])
     .start();
 
   return {
     baseUrl: container.getConnectionUri(),
     image: PGVECTOR_IMAGE,
     containerId: container.getId(),
+    exchange: { local: exchange, remote: EXCHANGE_DIR },
     stop: async () => {
       await container.stop();
     },
