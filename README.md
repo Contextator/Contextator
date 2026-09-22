@@ -1203,7 +1203,7 @@ src/services/flavors.ts       content-type transforms (Obsidian wikilinks, Notio
 src/services/openapi.ts       OpenAPI/Swagger → one Markdown document per operation: $ref resolution, cycle and depth guards, derived paths
 src/services/doc-types/       one transform per file extension, all of them producing Markdown: html, docx, csv, pdf
 src/services/doc-types/pdf.ts a PDF read as a layout — lines, columns, running heads, headings by size, tables by alignment
-src/services/conversion/  the thread all of that runs on: `worker.ts` (the same transforms, over there), `client.ts` (a thread that dies, one that stops answering, and a refusal that must arrive as a refusal), `protocol.ts` (the wire)
+src/services/conversion/     the thread all of that runs on: `worker.ts` (the same transforms, over there), `client.ts` (a thread that dies, one that stops answering, a refusal that has to arrive as a refusal), `protocol.ts` (the wire)
 scripts/build-doc-fixtures.ts the dependency-free PDF and zip writers the binary test fixtures come from
 src/types/                    ambient declarations for the two dependencies that ship none (mammoth, the turndown GFM plugin)
 src/services/archives.ts      zip / tar / tar.gz / rar extraction with path and size guards

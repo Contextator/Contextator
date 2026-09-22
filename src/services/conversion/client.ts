@@ -29,6 +29,7 @@
 
 import { Worker } from 'node:worker_threads';
 
+import type { Logger } from '../../context.js';
 import { DocumentExtractionError, type ExtractLimits } from '../doc-types/index.js';
 import type { Flavor } from '../flavors.js';
 import type { DerivedDocument, SpecLimits } from '../openapi.js';
@@ -55,6 +56,15 @@ export interface ConversionSettings {
    * entry and does not pass this.
    */
   entry?: URL;
+  /**
+   * Where a thread that died or was given up on is written down.
+   *
+   * The *file* is already reported twice — `indexer.ts` logs every refusal and writes the reason onto
+   * the owning source — but the thread going away is a fact about the server, not about the file, and
+   * nothing else is in a position to say it. Optional so that a caller which has no logger (a script,
+   * a test) does not have to invent one.
+   */
+  log?: Pick<Logger, 'warn'>;
 }
 
 /** One file's expansion, held open in the worker and stepped one document at a time (ADR-0057). */
@@ -118,6 +128,17 @@ export class ConversionService {
   }
 
   /**
+   * Whether a conversion thread is being held right now.
+   *
+   * The idle promise — ADR-0071 §3, `README.md` and `.env.example` all make it — is a promise about
+   * exactly this bit: after `CONVERSION_IDLE_MS` with nothing to convert it goes false, and the heap a
+   * large document grew goes back to the operating system with it.
+   */
+  get threadHeld(): boolean {
+    return this.#worker !== null;
+  }
+
+  /**
    * One file's bytes → the Markdown that is chunked and stored.
    *
    * **The bytes are handed over, not lent**: they are transferred into the worker and the caller's
@@ -161,10 +182,10 @@ export class ConversionService {
             yield reply.document;
           }
         } finally {
-          // The indexer stops reading an expansion whenever a document fails to embed or to write, and
-          // the specification's graph would otherwise stay live in the worker until the next file
-          // replaced it. `for await` runs this on `break` and on a thrown error alike.
-          await service.#discard(session);
+          // Every way out of the loop comes through here — the last document, a `break`, a throw — and
+          // it has to, because letting the thread go is bookkeeping this class cannot do while a
+          // session is still registered against it. `for await` runs this on all three.
+          await service.#release(session);
         }
       },
     };
@@ -181,11 +202,30 @@ export class ConversionService {
     await worker?.terminate();
   }
 
-  async #discard(session: number): Promise<void> {
-    if (!this.#sessions.delete(session) || !this.#worker) return;
-    // A failure here is not worth reporting: the expansion is already being abandoned, and the only
-    // thing a dead worker can cost is memory it no longer has.
-    await this.#send({ kind: 'close', session }, 'an abandoned specification').catch(() => undefined);
+  /**
+   * An expansion is over, however it ended.
+   *
+   * **Two things happen here and only one of them is conditional, which is the bug this shape exists
+   * to prevent.** A reader that walked away leaves the specification's object graph live on the far
+   * side, so that session is closed — the indexer stops reading whenever a document fails to embed or
+   * to write, and the graph would otherwise stay until some later file replaced it. An expansion read
+   * to its end needs no `close`: the worker dropped that session itself when its generator finished.
+   *
+   * But **the thread has to be let go in both cases**, and `#armIdle` cannot be the one to notice: it
+   * runs from `#settle`, which for the final `next` fires while the session is still registered and so
+   * correctly declines to release anything. Leaving the release to the `close` message meant an
+   * expansion read to the end — the ordinary path, and the one ADR-0057 calls the heaviest — never
+   * armed the idle timer and never unref'd the thread. A run whose last converted file was a
+   * specification held its thread for ever, against four documents that promise otherwise.
+   */
+  async #release(session: number): Promise<void> {
+    const abandoned = this.#sessions.delete(session);
+    if (abandoned && this.#worker) {
+      // A failure here is not worth reporting: the expansion is already being abandoned, and the only
+      // thing a dead worker can cost is memory it no longer has.
+      await this.#send({ kind: 'close', session }, 'an abandoned specification').catch(() => undefined);
+    }
+    this.#armIdle();
   }
 
   #send(request: WithoutId<ConversionRequest>, relativePath: string, transfer: readonly ArrayBuffer[] = []): Promise<ConversionSuccess> {
@@ -252,6 +292,10 @@ export class ConversionService {
     const worker = this.#worker;
     this.#worker = null;
     this.#sessions.clear();
+    // Said once, here, because this is a fact about the server rather than about a file: the files are
+    // each reported by `indexer.ts` as it refuses them, and an operator reading a log full of refused
+    // documents has nothing telling them the thread underneath went away.
+    if (worker) this.#settings.log?.warn({ reason, files: this.#pending.size }, 'conversion thread replaced');
     this.#failAll(reason);
     void worker?.terminate();
   }
@@ -264,7 +308,8 @@ export class ConversionService {
       one.reject(
         new DocumentExtractionError(
           `"${one.relativePath}" could not be converted: the conversion thread stopped before it answered — ${reason}. ` +
-            `Conversion runs off the server's own thread, so nothing else was affected and the next run will try this file again.`,
+            `Conversion runs off the server's own thread, so nothing else was affected. ` +
+            `A file that was already indexed keeps the document it had until its bytes change or the project is rebuilt; one that was not is converted again on the next run.`,
         ),
       );
     }

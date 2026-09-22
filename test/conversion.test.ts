@@ -41,6 +41,15 @@ function conversion(settings: Partial<{ timeoutMs: number; idleMs: number; entry
   return service;
 }
 
+/** Waits for a condition rather than for a duration, so the idle window is a floor and not a race. */
+async function until(condition: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error('condition did not hold within the timeout');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 afterEach(async () => {
   await Promise.all(services.splice(0).map((service) => service.stop()));
 });
@@ -140,17 +149,33 @@ describe('a refused file keeps its name and its reason across the boundary', () 
     expect((refusal as Error).message).toBe((inProcess as Error).message);
   });
 
-  /** The three caps of FR-406 are applied on the far side as well, against the bytes in hand. */
-  it('applies the conversion caps inside the thread', async () => {
-    const bytes = await readFile(path.join(DOCS, 'support-handbook.pdf'));
-    const tiny: ExtractLimits = { ...LIMITS, maxFileBytes: 64 * 1024, maxPdfPages: 1 };
+  /**
+   * **All three caps of FR-406, one case each, because two of them used to be unasserted.**
+   *
+   * The earlier version of this case set all three low and then put `maxFileBytes` back, so only
+   * `maxPdfPages` was ever exercised — and raising `maxUnpackedBytes` to `MAX_SAFE_INTEGER` on the way
+   * into the worker left all 871 unit tests green. A limit nothing measures is a limit that can be
+   * dropped at the boundary in silence, which is the whole failure mode the caps exist against.
+   */
+  it.each([
+    ['support-handbook.pdf', { maxFileBytes: 1024 }, /over the 1 KiB a file of this type may be/, 'MAX_CONVERTED_FILE_BYTES'],
+    ['support-handbook.pdf', { maxPdfPages: 1 }, /pages/, 'MAX_PDF_PAGES'],
+    ['onboarding-checklist.docx', { maxUnpackedBytes: 1024 }, /unpack past the limit/, 'MAX_DOCX_UNPACKED_BYTES'],
+  ] as Array<[string, Partial<ExtractLimits>, RegExp, string]>)('applies %s inside the thread when %o is lowered', async (name, lowered, matcher) => {
+    const bytes = await readFile(path.join(DOCS, name));
+    const limits: ExtractLimits = { ...LIMITS, ...lowered };
+    const stored = `handbook/${name}`;
+    const inProcess = await extractDocument(stored, Buffer.from(bytes), limits).catch((err: unknown) => err);
 
     const refusal = await conversion()
-      .convert('handbook/support-handbook.pdf', 'plain', Buffer.from(bytes), { ...tiny, maxFileBytes: LIMITS.maxFileBytes })
+      .convert(stored, 'plain', Buffer.from(bytes), limits)
       .catch((err: unknown) => err);
 
     expect(refusal).toBeInstanceOf(DocumentExtractionError);
-    expect((refusal as Error).message).toMatch(/MAX_PDF_PAGES|pages/);
+    expect((refusal as Error).message).toMatch(matcher);
+    // The cap that fired over there is the one that fires here, with the same sentence: a limit
+    // quietly widened on the way across would produce a different refusal, or none.
+    expect((refusal as Error).message).toBe((inProcess as Error).message);
   });
 });
 
@@ -223,6 +248,53 @@ describe('a specification is expanded on the thread and pulled back one document
     expect((reused as Error).message).toContain('is not open');
 
     expect(await service.convert('notes/after.md', 'plain', Buffer.from('# After\n\nstill here\n'), LIMITS)).toBe('# After\n\nstill here\n');
+  });
+
+  /**
+   * **The thread is let go after an expansion is read to its end, and not only after one that was
+   * abandoned.** ADR-0071 §3, `config.ts`, `README.md` and `.env.example` all promise that a thread
+   * with nothing to do is dropped after `CONVERSION_IDLE_MS`; the first version of this class did that
+   * for every path except the ordinary one. Releasing the session inside the loop and closing it in
+   * `finally` meant the release ran, found nothing to close, and returned before it armed anything —
+   * so a run whose last converted file was a specification held its thread, `ref`'d, for ever.
+   *
+   * Two assertions, because the leak had two halves. `MessagePort` is what a live, `ref`'d worker
+   * registers with the event loop, and it disappears the moment the worker is `unref`'d — so the count
+   * returning to its baseline is the process no longer being held open. `threadHeld` going false is
+   * the memory actually going back.
+   */
+  it('lets the thread go once an expansion has been read to the end', async () => {
+    const livePorts = (): number => process.getActiveResourcesInfo().filter((resource) => resource === 'MessagePort').length;
+    const baseline = livePorts();
+    const service = conversion({ idleMs: 150 });
+    const bytes = await readFile(path.join(SPECS, 'petstore.yaml'));
+
+    const expansion = await service.expand('api/petstore.yaml', bytes, SPEC_LIMITS);
+    let read = 0;
+    for await (const _document of expansion.documents()) read++;
+    expect(read).toBe(expansion.count);
+
+    // Nothing left to convert: the thread stops holding the event loop open immediately…
+    expect(livePorts()).toBe(baseline);
+    expect(service.threadHeld).toBe(true);
+
+    // …and is gone once the idle window passes.
+    await until(() => !service.threadHeld, 3000);
+    expect(service.threadHeld).toBe(false);
+
+    // And the next file gets a new one, rather than the service being left unusable by its own tidying.
+    expect(await service.convert('notes/after.md', 'plain', Buffer.from('# After\n\nstill here\n'), LIMITS)).toBe('# After\n\nstill here\n');
+    expect(service.threadHeld).toBe(true);
+  });
+
+  /** The same promise on the ordinary path: one file converted, then quiet. */
+  it('lets the thread go after an ordinary conversion too', async () => {
+    const service = conversion({ idleMs: 150 });
+    await service.convert('notes/one.md', 'plain', Buffer.from('# One\n\nhere\n'), LIMITS);
+    expect(service.threadHeld).toBe(true);
+
+    await until(() => !service.threadHeld, 3000);
+    expect(service.threadHeld).toBe(false);
   });
 });
 

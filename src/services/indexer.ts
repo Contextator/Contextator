@@ -188,7 +188,8 @@ export class Indexer {
 
   constructor(private readonly deps: IndexerDeps) {
     this.conversion =
-      deps.conversion ?? new ConversionService({ timeoutMs: deps.config.CONVERSION_TIMEOUT_MS, idleMs: deps.config.CONVERSION_IDLE_MS });
+      deps.conversion ??
+      new ConversionService({ timeoutMs: deps.config.CONVERSION_TIMEOUT_MS, idleMs: deps.config.CONVERSION_IDLE_MS, log: deps.log });
   }
 
   /** Drop the conversion thread. The queue itself holds nothing else that needs closing. */
