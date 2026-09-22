@@ -117,6 +117,18 @@ export class ConversionService {
   readonly #pending = new Map<number, Pending>();
   /** Expansions the worker is holding open, so a crash can forget them and `close` can skip a dead thread. */
   readonly #sessions = new Set<number>();
+  /**
+   * Expansions that have been opened and not yet *read from*, each with the deadline by which somebody
+   * has to start reading it.
+   *
+   * A registered session is the one thing that makes this class hold its thread indefinitely — that is
+   * deliberate, because between two documents the caller is chunking and embedding the last one, and a
+   * sweep that could not tell a slow reader from an absent one would abandon a live expansion and fail
+   * the run. So "slow" is never guessed at. What *is* knowable is that nobody has read the **first**
+   * document yet: until then no `finally` exists anywhere that would release the session, and the
+   * expansion is exactly as abandoned as it looks.
+   */
+  readonly #unread = new Map<number, NodeJS.Timeout>();
   #worker: Worker | null = null;
   #nextId = 1;
   #idleTimer: NodeJS.Timeout | null = null;
@@ -167,10 +179,18 @@ export class ConversionService {
     if (opened.kind !== 'opened') throw new Error(`conversion answered "${opened.kind}" to an expand request`);
     const session = opened.id;
     this.#sessions.add(session);
+    // Nothing has claimed this expansion yet, and until something does there is no `finally` anywhere
+    // that would give the thread back. See `#unread`.
+    this.#watchUnread(session);
     const service = this;
     return {
       count: opened.count,
       async *documents(): AsyncGenerator<DerivedDocument> {
+        // **The first line of the body, and it has to be, because this is the moment the `try` below
+        // becomes real.** An async generator's body does not run when `documents()` is called; it runs
+        // on the first `next()`. So handing the object back is not a claim on the expansion and calling
+        // `documents()` is not one either — stepping it is, and from here `finally` is guaranteed.
+        service.#read(session);
         try {
           for (;;) {
             const reply = await service.#send({ kind: 'next', session }, relativePath);
@@ -198,6 +218,8 @@ export class ConversionService {
     this.#idleTimer = null;
     const worker = this.#worker;
     this.#worker = null;
+    this.#sessions.clear();
+    this.#forgetUnread();
     this.#failAll('the server is shutting down');
     await worker?.terminate();
   }
@@ -218,7 +240,47 @@ export class ConversionService {
    * armed the idle timer and never unref'd the thread. A run whose last converted file was a
    * specification held its thread for ever, against four documents that promise otherwise.
    */
+  /**
+   * Somebody has started reading this expansion: the watchdog's job is over, `finally` has it now.
+   *
+   * **What this deliberately does not cover**, so that it is a choice rather than an oversight: a
+   * consumer that steps the generator and then drops the iterator *without* calling `return()` on it.
+   * A suspended generator is never resumed by the garbage collector, so its `finally` would not run —
+   * but that state is indistinguishable from a consumer that is simply slow between documents, and
+   * abandoning a live expansion fails the run. `for await` cannot produce it: it calls `return()` on
+   * every exit, including a `break` and a throw. Only a hand-rolled loop can, and there is none.
+   */
+  #read(session: number): void {
+    const watchdog = this.#unread.get(session);
+    if (watchdog) clearTimeout(watchdog);
+    this.#unread.delete(session);
+  }
+
+  /**
+   * An expansion nobody has started reading within the idle window is one nobody is coming back for.
+   *
+   * The window is `CONVERSION_IDLE_MS` because it is the same promise — a thread with nothing to do is
+   * let go — and it is enormously generous for what it measures: the indexer steps the generator in the
+   * same turn it opens it. Reaching this timer means a caller took the handle and dropped it, which is
+   * how the leak this closes was written in the first place.
+   */
+  #watchUnread(session: number): void {
+    const watchdog = setTimeout(() => {
+      this.#unread.delete(session);
+      void this.#release(session);
+    }, this.#settings.idleMs);
+    watchdog.unref();
+    this.#unread.set(session, watchdog);
+  }
+
+  /** Every watchdog dropped at once, for a thread that is going away and takes its sessions with it. */
+  #forgetUnread(): void {
+    for (const watchdog of this.#unread.values()) clearTimeout(watchdog);
+    this.#unread.clear();
+  }
+
   async #release(session: number): Promise<void> {
+    this.#read(session);
     const abandoned = this.#sessions.delete(session);
     if (abandoned && this.#worker) {
       // A failure here is not worth reporting: the expansion is already being abandoned, and the only
@@ -292,6 +354,7 @@ export class ConversionService {
     const worker = this.#worker;
     this.#worker = null;
     this.#sessions.clear();
+    this.#forgetUnread();
     // Said once, here, because this is a fact about the server rather than about a file: the files are
     // each reported by `indexer.ts` as it refuses them, and an operator reading a log full of refused
     // documents has nothing telling them the thread underneath went away.

@@ -287,6 +287,67 @@ describe('a specification is expanded on the thread and pulled back one document
     expect(service.threadHeld).toBe(true);
   });
 
+  /**
+   * **An expansion that is opened and never read is the same leak one step further out.**
+   *
+   * Nothing in the product reaches it today — `indexer.ts` opens the expansion and enters the loop in
+   * the same turn, with no branch between them — and that is exactly why the case is here. The leak it
+   * guards against is one `continue` away, and it is silent: the run finishes, every document is
+   * correct, and a thread is held for the life of the process.
+   *
+   * Two of them, because a handle can be dropped at two different moments and only one of them is
+   * obvious. An async generator's body does not run when `documents()` is *called*; it runs on the
+   * first `next()`. So a fix that treated the call as a claim would close the first case and leave the
+   * second one open, looking closed.
+   */
+  it('lets the thread go when an expansion is opened and the handle is thrown away', async () => {
+    const service = conversion({ idleMs: 120 });
+    const bytes = await readFile(path.join(SPECS, 'petstore.yaml'));
+
+    const expansion = await service.expand('api/petstore.yaml', bytes, SPEC_LIMITS);
+    expect(expansion.count).toBeGreaterThan(0);
+    expect(service.threadHeld).toBe(true);
+
+    await until(() => !service.threadHeld, 5000);
+    expect(service.threadHeld).toBe(false);
+  });
+
+  it('lets the thread go when documents() is called and never stepped', async () => {
+    const service = conversion({ idleMs: 120 });
+    const bytes = await readFile(path.join(SPECS, 'petstore.yaml'));
+
+    const expansion = await service.expand('api/petstore.yaml', bytes, SPEC_LIMITS);
+    // Created, not started: the generator body — and therefore the `finally` that would release the
+    // session — has not run and never will.
+    const iterator = expansion.documents();
+    expect(typeof iterator.next).toBe('function');
+
+    await until(() => !service.threadHeld, 5000);
+    expect(service.threadHeld).toBe(false);
+  });
+
+  /**
+   * **The reason the watchdog measures "unread" and not "idle", stated as a test.**
+   *
+   * Between two documents the caller is chunking and embedding the last one, so a sweep that released
+   * a thread because nothing had been asked of it recently would abandon a live expansion — and the
+   * next `next` would answer "session is not open", which is a **failed run** rather than a refused
+   * file. The gap below is longer than the whole idle window, deliberately.
+   */
+  it('does not abandon an expansion whose reader is slow between documents', async () => {
+    const service = conversion({ idleMs: 100 });
+    const bytes = await readFile(path.join(SPECS, 'petstore.yaml'));
+
+    const expansion = await service.expand('api/petstore.yaml', bytes, SPEC_LIMITS);
+    const read: DerivedDocument[] = [];
+    for await (const document of expansion.documents()) {
+      read.push(document);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+
+    expect(read.length).toBe(expansion.count);
+  });
+
   /** The same promise on the ordinary path: one file converted, then quiet. */
   it('lets the thread go after an ordinary conversion too', async () => {
     const service = conversion({ idleMs: 150 });
