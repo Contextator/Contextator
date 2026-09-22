@@ -6,6 +6,7 @@ import { users, type UserRole } from '../src/db/schema.js';
 import { generateTempPassword, hashPassword } from '../src/services/passwords.js';
 import { revokeSessionsOfUser } from '../src/services/auth/sessions.js';
 import { normalizeUsername } from '../src/services/auth/users.js';
+import { useEmbeddedDatabaseWhenNothingElseSays } from './embedded-database.js';
 
 /**
  * Last resort when nobody can sign in any more: `npm run reset-password -- <username>`.
@@ -73,6 +74,10 @@ async function main(): Promise<void> {
   // Imported here rather than at the top: a test that imports `resetPassword` must not have this
   // file rewrite its environment on the way in.
   await import('dotenv/config');
+  // Without this the command documented in ADR-0032 stops at a configuration error inside the very
+  // container it was taught to ship in: `docker exec` inherits the image's environment, and the PG*
+  // variables live only in the process the entrypoint spawned. See `embedded-database.ts`.
+  useEmbeddedDatabaseWhenNothingElseSays();
   const username = normalizeUsername(process.argv[2] ?? '');
   if (!username) {
     console.error('Usage: npm run reset-password -- <username>');

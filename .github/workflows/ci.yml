@@ -206,6 +206,44 @@ jobs:
           printf '%s\n' "$output"
           printf '%s\n' "$output" | grep -qF 'Usage: npm run reset-password -- <username>'
 
+      # …and with an argument it needs the database, which is a different thing entirely and is what
+      # the step above cannot see. `docker/entrypoint.sh` puts the PG* variables in the environment of
+      # the one process it spawns, and `docker exec` inherits the *image's* environment — so on the
+      # default topology every operator command stopped at "Set DATABASE_URL, or the libpq variables",
+      # three lines after the usage line the step above checks. Eighteen days, green
+      # (ADR-0072, scripts/embedded-database.ts).
+      #
+      # So this one starts the image and talks to the database through it. Every assertion below is a
+      # sentence that can only be produced *after* a successful query: the account list of an instance
+      # that has none, a manifest counting real rows, and a restore that read that manifest back.
+      - name: The operator commands reach the embedded database inside the image
+        run: |
+          set -eo pipefail
+          # EMBEDDING_OFFLINE so the boot does not fetch 470 MB of model to answer a question about
+          # backups; the model failing to load is logged and the server still serves (ADR-0032).
+          docker run -d --name ctx-ops -e EMBEDDING_OFFLINE=1 -e SECRET_KEY="$(head -c 32 /dev/urandom | xxd -p -c 64)" contextator:ci
+          for _ in $(seq 1 60); do docker exec ctx-ops pg_isready -q -U contextator -d contextator && break; sleep 2; done
+          docker exec ctx-ops pg_isready -U contextator -d contextator
+
+          # The recovery tool, past its usage line and all the way to a query.
+          reset=$(docker exec ctx-ops npm run reset-password -- nobody 2>&1 || true)
+          printf '%s\n' "$reset"
+          printf '%s\n' "$reset" | grep -qF 'This instance has no accounts at all'
+
+          # The backup, in the image, on the topology every default installation runs.
+          docker exec ctx-ops sh -c 'mkdir -p /data/backups && chown node:node /data/backups'
+          backup=$(docker exec ctx-ops npm run backup -- /data/backups/ci.tar.gz 2>&1)
+          printf '%s\n' "$backup"
+          printf '%s\n' "$backup" | grep -qF 'database: embedded'
+          printf '%s\n' "$backup" | grep -qF 'SECRET_KEY is NOT in this file'
+
+          # And the restore reading it back, evaluating every refusal and writing nothing.
+          check=$(docker exec ctx-ops npm run restore -- /data/backups/ci.tar.gz --check 2>&1)
+          printf '%s\n' "$check"
+          printf '%s\n' "$check" | grep -qF 'Nothing was written.'
+
+          docker rm -f ctx-ops
+
       # The second target of the same Dockerfile, built on every pull request rather than only on a
       # release tag (ADR-0069). A stage that is only ever built when a version is being cut is a
       # stage that breaks in between and is discovered by the release — and `slim` shares the `build`

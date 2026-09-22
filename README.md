@@ -596,8 +596,36 @@ volume is empty, and backing that database up — and restoring it, and watching
 already covers the server it runs on. The two bullets below about what a dump does *not* contain
 apply on both topologies, and so does the paragraph about `/data`.
 
-PostgreSQL listens on `127.0.0.1` inside the container only and is not published. Inspect, back up and
-restore it through the container:
+PostgreSQL listens on `127.0.0.1` inside the container only and is not published, so everything here
+goes through the container.
+
+**One command takes the backup, because a `pg_dump` is not the installation:**
+
+```bash
+docker exec contextator npm run backup -- /data/backups/contextator-$(date +%F).tar.gz
+docker cp contextator:/data/backups/contextator-$(date +%F).tar.gz .
+
+# Reads the manifest and every refusal, writes nothing:
+docker exec contextator npm run restore -- /data/backups/contextator-2026-09-22.tar.gz --check
+docker exec contextator npm run restore -- /data/backups/contextator-2026-09-22.tar.gz
+docker compose restart contextator
+```
+
+The archive holds the database, the materialised files of every **upload** source — which exist nowhere
+else — and a manifest that is the first entry in it, so `--check` costs one small read of a file that
+may be gigabytes.
+
+**`SECRET_KEY` is not in it and never will be.** A backup carrying the key would be the whole instance
+in one file, on a volume with a weaker access story than the environment it came from. What travels is
+a fingerprint of the key — 128 bits of keyed HMAC — which is what lets `restore` **refuse a wrong or
+missing key before it writes anything** instead of leaving you with a half-loaded instance and no way
+back. Keep the key where the archive is not.
+
+The restore also refuses a dump taken from a newer PostgreSQL major version than the server it is going
+into; going the other way, 16 to 17, is the documented upgrade and is what the command exists for.
+
+**By hand, when you want the database and nothing else** — and these are the two commands the test
+suite runs:
 
 ```bash
 docker exec -it contextator psql -U contextator
@@ -605,20 +633,22 @@ docker exec contextator pg_dump -U contextator -Fc contextator > contextator.dum
 docker exec -i contextator pg_restore -U contextator -d contextator --clean --if-exists < contextator.dump
 ```
 
-Those two commands are the ones the test suite runs. `test/integration/backup-restore.itest.ts` seeds a
-real PostgreSQL, dumps it, **drops the database**, restores it, and then asserts that the schema, the
-search results — identical rows, identical order, identical scores — and the next start of the
-application all come back unchanged. A row count would not have caught a restore that lost the vector
-index or the lexical column, so it is not one of the assertions.
+`test/integration/backup-restore.itest.ts` seeds a real PostgreSQL, dumps it, **drops the database**,
+restores it, and then asserts that the schema, the search results — identical rows, identical order,
+identical scores — and the next start of the application all come back unchanged. A row count would not
+have caught a restore that lost the vector index or the lexical column, so it is not one of the
+assertions. The same file then does the whole round trip through `npm run backup` and `npm run restore`,
+with an upload source and an encrypted credential, and asserts that a wrong key leaves the instance
+untouched.
 
-Two things a dump does **not** contain, and both matter on the day you need it:
+Two things a **dump** does not contain, which is the whole reason the command above exists:
 
 - **`SECRET_KEY`.** It is an environment variable. Without the original key, every stored source
   credential has to be re-entered. Keep it somewhere the dump is not — the dump plus the key is the
   whole instance.
 - **`/data`.** Git checkouts are re-clonable and Notion pulls are re-pullable, but **an upload source's
   `current/` directory is the only copy of its content anywhere**. A `/data` backup can be restricted to
-  those and skip the re-clonable gigabytes.
+  those and skip the re-clonable gigabytes, which is exactly what `npm run backup` does.
 
 Take the backup when no project is `indexing`: a re-index writes a second generation beside the live one
 and `pg_dump` cannot filter rows, so a dump taken mid-run is twice the size. Expect a dump of roughly
@@ -1262,6 +1292,10 @@ public/product-facts.json     generated: the numbers and identifiers this produc
 public/pages/                 body of each product/legal page + the shell they share, and the OAuth approval page
 scripts/smoke-mcp.ts          end-to-end MCP client check
 scripts/reset-password.ts     last-resort password reset straight against the database; ships in the image and runs there
+scripts/backup.ts             `npm run backup` — the database, the upload trees and a manifest in one archive; never SECRET_KEY, only its fingerprint
+scripts/restore.ts            `npm run restore` — the same archive back, with every refusal decided before a byte is unpacked (`--check` decides them and writes nothing)
+scripts/backup-archive.ts     the archive's format and every refusal in it: the manifest, the key check value, the topology, and where pg_dump/pg_restore run
+scripts/embedded-database.ts  how an operator command run through `docker exec` finds the container's own PostgreSQL — the entrypoint's PG* variables are not in that environment
 scripts/build-product-facts.ts `npm run build:facts` — writes public/product-facts.json by reading the declarations, never by restating them
 scripts/eval.ts               `npm run eval` — indexes eval/corpus, asks eval/golden.jsonl, prints recall@1, recall@5, MRR
 scripts/eval-scoring.ts       the scoring arithmetic and the report, with no database or model in it, so it can be unit-tested
@@ -1273,6 +1307,7 @@ test/*.test.ts                unit suite — pure functions, no database, no Doc
 test/cla-*.test.ts            the licence gate: its judgements, the whole flow against fakes, and the GitHub clients against an injected fetch
 test/dockerhub-description.test.ts  DOCKERHUB.md fits Docker Hub's limit, its links are absolute, and it names the image
 test/container-topology.test.ts     the packaging contract: `full` is still the default target, `slim` still carries no database, and neither compose file has gone back to forcing DATABASE_URL empty
+test/backup-manifest.test.ts        the backup's refusals, each in both directions: the key check value, the server's major version, the topology, the manifest reader
 test/product-facts.test.ts    public/product-facts.json is still what the generator produces from today's code
 test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
 test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with

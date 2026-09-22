@@ -12,6 +12,25 @@ ships, that stops.
 
 ### Added
 
+- **`npm run backup` and `npm run restore`: one archive that is the installation, not just the
+  database.** `docker exec contextator npm run backup -- /data/backups/instance.tar.gz` writes the
+  database dump, the materialised files of every **upload** source — which exist nowhere else — and a
+  manifest that is read before anything else. Restoring is the same command backwards, and
+  `--check` evaluates every refusal and writes nothing. The `pg_dump` and `pg_restore` lines you have
+  been running by hand still work and are still what the test suite asserts on; what they never
+  carried was the other half.
+- **`SECRET_KEY` is never written into a backup, and a restore refuses the wrong one before it writes
+  anything.** The archive records a fingerprint of the key, not the key: enough for `restore` to stop
+  with a message naming the key it wants, and nothing like enough to be the key. Previously a restore
+  with a different key succeeded and left every stored source credential undecryptable — discovered
+  later, one source at a time. Keep the key where the archive is not.
+- **A procedure for upgrading the embedded PostgreSQL across a major version**, in OPERATIONS.md §3.2,
+  executed 16 → 17 before it was written: back up, start the new image against an *empty* cluster
+  volume, restore, keep the old volume as the rollback. `pg_upgrade` needs both majors' binaries at
+  once and the image carries one. Pulling an image whose PostgreSQL crossed a major without doing this
+  gives `FATAL: database files are incompatible with server` and a restart loop — nothing is damaged,
+  and rolling the tag back is the way out.
+
 - **You can point Contextator at a PostgreSQL you already run.** Put a `DATABASE_URL` in `.env` and
   the container starts no database of its own: it connects to the server you named, creates and
   migrates its schema there, and leaves the `contextator-pgdata` volume empty. The server needs to be
@@ -58,6 +77,14 @@ ships, that stops.
   language on any source is unaffected, down to the ordering of its results.
 
 ### Fixed
+
+- **Operator commands run inside the container could not find the database.**
+  `docker exec contextator npm run reset-password -- <username>` — the documented last resort when
+  nobody can sign in — stopped at `Invalid configuration: Set DATABASE_URL, or the libpq variables
+  PGHOST/PGUSER/PGPASSWORD/PGDATABASE` on every installation using the container's own PostgreSQL.
+  The entrypoint sets those variables for the one process it starts, and `docker exec` does not see
+  that process's environment. CI had been asserting that the command prints its usage line, which it
+  reaches three lines earlier. It now works, and CI talks to the database.
 
 - **The same search over the same documentation returns the same page again.** Between two results
   that scored identically, which one came first was decided by an internal identifier that is minted
