@@ -14,6 +14,7 @@ import { documentSources, documents, projects, type ProjectRow } from '../../src
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
 import { estimateTokens } from '../../src/services/chunker.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
+import { ConversionService } from '../../src/services/conversion/client.js';
 import { Indexer, type JobState } from '../../src/services/indexer.js';
 import { KeyedMutex } from '../../src/services/locks.js';
 import { getProjectById } from '../../src/services/projects.js';
@@ -35,6 +36,19 @@ const baseUrl = inject('postgresBaseUrl');
 const DIMS = TEST_EMBEDDING_DIMENSIONS;
 const MODEL_ID = 'local:stub-bag-of-words:fp32';
 const FIXTURES = path.join(__dirname, '..', 'fixtures', 'doc-types');
+const WORKERS = path.join(__dirname, '..', 'fixtures', 'conversion');
+
+/**
+ * What one `search_docs` call may take while the indexer is converting, end to end and including the
+ * in-memory MCP transport this file talks through.
+ *
+ * Measured rather than guessed, all three numbers from the run below. On an idle machine the slowest of
+ * a hundred calls is about 7 ms; with the rest of the integration suite running in parallel, which is
+ * how this normally executes, it is about 48 ms. With the specification parsed on this thread instead,
+ * the slowest is 1.5 seconds — the parse, entire, with nothing else able to run. The bound sits in the
+ * gap: well clear of a loaded machine's noise and several times under the block it exists to catch.
+ */
+const CONVERSION_LATENCY_BOUND_MS = 250;
 
 /** The deterministic stand-in the other indexing tests use: a hashed bag of words, L2-normalised. */
 function stubVector(text: string): number[] {
@@ -84,7 +98,36 @@ const indexerConfig = (root: string) => ({
   MAX_SPEC_FILE_BYTES: 8 * 1024 * 1024,
   MAX_PDF_PAGES: 2000,
   MAX_DOCX_UNPACKED_BYTES: 256 * 1024 * 1024,
+  CONVERSION_TIMEOUT_MS: 120_000,
+  CONVERSION_IDLE_MS: 60_000,
 });
+
+/**
+ * A specification whose weight is in a `components` section nothing points at — a schema catalogue
+ * kept for clients that are gone. It is the cheapest honest way to write a file that is expensive to
+ * *parse* and small to *index*, which is what separates the conversion cost from everything after it.
+ */
+function catalogueSpec(operations: number, schemas: number): string {
+  const lines = ['openapi: 3.0.3', 'info:', '  title: Fleet API', '  version: "4.2"', 'paths:'];
+  for (let i = 0; i < operations; i++) {
+    lines.push(`  /fleet/vehicles/${i}:`);
+    lines.push('    get:');
+    lines.push(`      summary: Read vehicle ${i}`);
+    lines.push(`      description: The ${i}th vehicle in the fleet, with its telemetry and its maintenance window.`);
+    lines.push('      responses:');
+    lines.push('        "200": { description: OK }');
+  }
+  lines.push('components:');
+  lines.push('  schemas:');
+  for (let i = 0; i < schemas; i++) {
+    lines.push(`    Legacy${i}:`);
+    lines.push('      type: object');
+    lines.push('      properties:');
+    for (let p = 0; p < 6; p++)
+      lines.push(`        field${p}: { type: string, description: "A field kept for the 2019 client, number ${p} of ${i}" }`);
+  }
+  return lines.join('\n');
+}
 
 interface Fixture {
   database: TestDatabase;
@@ -356,4 +399,108 @@ describe('a project of mixed file types', () => {
     expect(job.chunksDone).toBe(0);
     expect(job.filesRemoved).toBe(0);
   }, 120_000);
+});
+
+/**
+ * **What moving conversion onto its own thread has to keep true**
+ * ([ADR-0071](../../.ssot/ADR.md#adr-0071)).
+ *
+ * The unit tests assert that the conversion produces the same bytes and that the client survives a
+ * thread that dies or stops answering. Neither of them can say what the *product* does about it, and
+ * that is the pair of claims here: an endpoint that keeps answering while a run converts, and a thread
+ * that crashes leaving one refused file behind rather than a dead server.
+ */
+describe('conversion off the event loop', () => {
+  /**
+   * **Criterion two.** The specification below is 40 operations and about 6 MiB, most of it a
+   * `components` section no operation references — the shape of a schema catalogue that outlived its
+   * clients, and a perfectly ordinary file. Parsing it is about a second and a half of uninterruptible
+   * work ([ADR-0057](../../.ssot/ADR.md#adr-0057): the graph is around fifty-five times the file), and
+   * it is the single most expensive thing this product does to one file.
+   *
+   * Before this phase that was a second and a half in which `/mcp` answered nothing at all.
+   *
+   * It is deliberately a specification and not forty PDFs: a PDF parses in single-digit milliseconds,
+   * so no bound a healthy run could meet would have caught conversion moving back onto this thread.
+   */
+  it('answers search_docs while the most expensive file this product parses is being parsed', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'contextator-doc-types-busy-'));
+    await writeFile(path.join(root, 'fleet.yaml'), catalogueSpec(40, 10_000));
+
+    const [project] = await fx.database.db.insert(projects).values({ name: 'busy-conversion' }).returning();
+    await fx.database.db
+      .insert(documentSources)
+      .values({ projectId: project.id, type: 'local', name: 'api', flavor: 'openapi', config: { path: root, extensions: ['yaml'] } });
+
+    const indexer = new Indexer({ db: fx.database.db, embeddings, config: indexerConfig(root), log: silentLogger, locks: new KeyedMutex() });
+    const job = indexer.enqueue(project.id);
+
+    // The searches go to the *other* project, which is already indexed: what is being measured is the
+    // endpoint's availability, not any interaction between two runs.
+    const latencies: number[] = [];
+    while (job.phase !== 'done' && job.phase !== 'error') {
+      const started = performance.now();
+      const answer = await call('search_docs', { query: 'which engineer does a level three wake' });
+      latencies.push(performance.now() - started);
+      expect(answer.isError).toBe(false);
+    }
+    await settle(fx.database.db, job);
+
+    expect(job.phase).toBe('done');
+    // The run really did index the specification, so the parse really did happen inside this window.
+    expect((await getProjectById(fx.database.db, project.id))?.documentCount).toBe(40);
+    // Enough calls that the number means something, spread over the whole run rather than its tail.
+    expect(latencies.length).toBeGreaterThan(15);
+    expect(Math.max(...latencies)).toBeLessThan(CONVERSION_LATENCY_BOUND_MS);
+    await rm(root, { recursive: true, force: true });
+  }, 180_000);
+
+  /**
+   * **Criterion three.** The thread dies on every `.pdf` and answers normally for everything else. The
+   * process stays up, the PDF is refused *by name* with the reason on its source, the Markdown beside
+   * it indexes, and the run finishes — which is the same shape ADR-0056 gives an unreadable file, now
+   * extended to a failure mode a function call did not have.
+   */
+  it('survives a conversion thread that dies, refusing the file rather than the run', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'contextator-doc-types-crash-'));
+    await copyFile(path.join(FIXTURES, 'support-handbook.pdf'), path.join(root, 'handbook.pdf'));
+    await writeFile(path.join(root, 'runbook.md'), '# Runbook\n\nRestart the collector, then drain the queue.\n');
+
+    const [project] = await fx.database.db.insert(projects).values({ name: 'crashing-conversion' }).returning();
+    const [source] = await fx.database.db
+      .insert(documentSources)
+      .values({ projectId: project.id, type: 'local', name: 'manuals', config: { path: root, extensions: ['md', 'pdf'] } })
+      .returning();
+
+    const conversion = new ConversionService({
+      timeoutMs: 30_000,
+      idleMs: 30_000,
+      entry: new URL(`file://${path.join(WORKERS, 'pdf-crashing-worker.ts')}`),
+    });
+    const indexer = new Indexer({
+      db: fx.database.db,
+      embeddings,
+      config: indexerConfig(root),
+      log: silentLogger,
+      locks: new KeyedMutex(),
+      conversion,
+    });
+    const job = await settle(fx.database.db, indexer.enqueue(project.id));
+
+    expect(job.phase).toBe('done');
+    const after = await getProjectById(fx.database.db, project.id);
+    expect(after?.status).toBe('idle');
+    expect(after?.lastError).toBeNull();
+    // The file beside it indexed on a thread that had just been replaced.
+    expect(after?.documentCount).toBe(1);
+
+    const [row] = await fx.database.db.select().from(documentSources).where(eq(documentSources.id, source.id));
+    expect(row.status).toBe('idle');
+    expect(row.lastError).toContain('manuals/handbook.pdf');
+    expect(row.lastError).toContain('the conversion thread stopped before it answered');
+    expect(row.lastError).toContain('exited with code 3');
+
+    await conversion.stop();
+    await rm(root, { recursive: true, force: true });
+  }, 180_000);
 });

@@ -732,8 +732,18 @@ merely recorded. On an incremental run the file keeps whatever document it alrea
 (`force`, or a changed embedding model) publishes the corpus as it stands, so a file that can no longer
 be converted is not in the new generation — the same rule the index applies to a source that cannot be read.
 
-**What a file may cost while it is converted.** Conversion runs in the server's own process, beside the
-dashboard and the MCP endpoint, and until now only the upload path had any size limit at all — a file
+**Conversion runs on its own thread.** Every file type, the content-type transforms and the OpenAPI
+expansion happen on a worker thread, not on the thread that serves the dashboard and the MCP endpoint —
+so a file that takes a second to parse is not a second nobody can search in, and a parser that exhausts
+its heap fails that file instead of taking the server with it. Nothing about the conversion itself
+changes: the same transforms, producing the same Markdown. A thread that dies, or that is still
+converting one file after `CONVERSION_TIMEOUT_MS` (two minutes), is a file refused **by name** with the
+reason on its source, exactly as an unreadable PDF is; the thread is replaced and the run carries on.
+The thread is kept between files and dropped after `CONVERSION_IDLE_MS` (one minute) of quiet, so an
+idle server is not holding the heap a large document grew.
+
+**What a file may cost while it is converted.** The memory is still this container's, wherever the
+thread is, and until the caps below existed only the upload path had any size limit at all — a file
 reached through a local directory or a git checkout was parsed at whatever size it happened to be.
 Three caps bound it, and each closes something the others do not:
 
@@ -1193,6 +1203,7 @@ src/services/flavors.ts       content-type transforms (Obsidian wikilinks, Notio
 src/services/openapi.ts       OpenAPI/Swagger → one Markdown document per operation: $ref resolution, cycle and depth guards, derived paths
 src/services/doc-types/       one transform per file extension, all of them producing Markdown: html, docx, csv, pdf
 src/services/doc-types/pdf.ts a PDF read as a layout — lines, columns, running heads, headings by size, tables by alignment
+src/services/conversion/      the thread all of that runs on: `worker.ts` (the same transforms, over there), `client.ts` (a thread that dies, one that stops answering, a refusal that has to arrive as a refusal), `protocol.ts` (the wire)
 scripts/build-doc-fixtures.ts the dependency-free PDF and zip writers the binary test fixtures come from
 src/types/                    ambient declarations for the two dependencies that ship none (mammoth, the turndown GFM plugin)
 src/services/archives.ts      zip / tar / tar.gz / rar extraction with path and size guards

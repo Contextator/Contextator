@@ -778,8 +778,8 @@ export function checkSpecSize(relativePath: string, sizeBytes: number, limits: S
   if (sizeBytes <= limits.maxSpecBytes) return;
   throw new DocumentExtractionError(
     `"${relativePath}" is ${bytesLabel(sizeBytes)}, over the ${bytesLabel(limits.maxSpecBytes)} a specification may be when it is parsed. ` +
-      `Parsing one produces an object graph around fifty-five times the size of the file, held in the server's own process for as long as the file ` +
-      `is being indexed, so the limit is there to keep one specification from taking the dashboard and the MCP endpoint down with it; ` +
+      `Parsing one produces an object graph around fifty-five times the size of the file, held for as long as the file ` +
+      `is being indexed, so the limit is there to keep one specification from exhausting the memory this server has; ` +
       `raise MAX_SPEC_FILE_BYTES if this file is genuinely one API and the host has the headroom — about 400 MB at the default ceiling.`,
   );
 }

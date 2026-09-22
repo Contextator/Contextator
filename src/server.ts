@@ -127,6 +127,9 @@ async function main(): Promise<void> {
     stopSessionReaper?.();
     stopSyncScheduler?.();
     await sessions.closeAll();
+    // The conversion thread is the one piece of the indexer that outlives a run (ADR-0071); an
+    // in-flight file is refused rather than left holding the process open.
+    await indexer.stop();
     // Before the pool, and awaited: what is buffered is a handful of rows and a shutdown that drops
     // them would lose exactly the queries of the minute somebody restarted the container.
     await queryLog?.close().catch((err: unknown) => log.warn({ err }, 'query log did not flush on shutdown'));
