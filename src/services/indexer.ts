@@ -5,13 +5,14 @@ import type { Db } from '../db/client.js';
 import { projects, type DocumentSourceRow } from '../db/schema.js';
 import { chunkReserveTokens } from './chunk-budget.js';
 import { chunkMarkdown, embeddingText } from './chunker.js';
-import { checkFileSize, DocumentExtractionError, extractDocument, readFailure } from './doc-types/index.js';
+import { ConversionService } from './conversion/client.js';
+import { checkFileSize, DocumentExtractionError, readFailure } from './doc-types/index.js';
 import type { EmbeddingProvider } from './embeddings/provider.js';
-import { expandsToManyDocuments, transformContent, allowedExtensionsFor, type Flavor } from './flavors.js';
+import { expandsToManyDocuments, allowedExtensionsFor, type Flavor } from './flavors.js';
 import { readAndHash, walkMarkdown } from './fs-scan.js';
 import { recordIndexRun } from './index-runs.js';
 import type { KeyedMutex } from './locks.js';
-import { checkSpecSize, readOpenApi, type DerivedDocument } from './openapi.js';
+import { checkSpecSize, type DerivedDocument } from './openapi.js';
 import { getProjectById } from './projects.js';
 import { driverFor } from './sources/driver.js';
 import { listSources, recountSources, setSourceStatus, sourceVersion } from './sources.js';
@@ -103,10 +104,20 @@ export interface IndexerDeps {
     | 'MAX_SPEC_FILE_BYTES'
     | 'MAX_PDF_PAGES'
     | 'MAX_DOCX_UNPACKED_BYTES'
+    | 'CONVERSION_TIMEOUT_MS'
+    | 'CONVERSION_IDLE_MS'
   > &
     WebLimits;
   log: Logger;
   locks: KeyedMutex;
+  /**
+   * The thread files are converted on ([ADR-0071](../../.ssot/ADR.md#adr-0071)).
+   *
+   * Optional because there is exactly one sensible one and every caller wants it; it is a seam so that
+   * a test can hand in a worker that crashes or never answers, which is the only way to observe what
+   * this queue does when the thread it depends on goes away.
+   */
+  conversion?: ConversionService;
 }
 
 const ACTIVE_PHASES: ReadonlySet<JobPhase> = new Set(['queued', 'syncing', 'scanning', 'embedding', 'finalizing']);
@@ -169,7 +180,21 @@ export class Indexer {
   /** Project whose job is being processed right now. */
   private current: string | null = null;
 
-  constructor(private readonly deps: IndexerDeps) {}
+  /**
+   * The conversion thread, built once for the queue rather than once per run: a run is hundreds of
+   * files and the thread is kept between them, then dropped again when the server goes quiet.
+   */
+  private readonly conversion: ConversionService;
+
+  constructor(private readonly deps: IndexerDeps) {
+    this.conversion =
+      deps.conversion ?? new ConversionService({ timeoutMs: deps.config.CONVERSION_TIMEOUT_MS, idleMs: deps.config.CONVERSION_IDLE_MS });
+  }
+
+  /** Drop the conversion thread. The queue itself holds nothing else that needs closing. */
+  async stop(): Promise<void> {
+    await this.conversion.stop();
+  }
 
   enqueue(projectId: string, opts: EnqueueOptions = {}): JobState {
     const trigger = opts.trigger ?? 'manual';
@@ -582,24 +607,32 @@ export class Indexer {
           }
 
           // Bytes → Markdown, by file type (ADR-0056), or bytes → many documents, by content type
-          // (ADR-0057). Only the reading is inside this boundary: `readOpenApi` parses and validates
-          // here, and hands back a generator that renders one document at a time, so a specification
-          // with three thousand operations never holds three thousand rendered documents at once.
+          // (ADR-0057) — **on the conversion thread, not this one**
+          // ([ADR-0071](../../.ssot/ADR.md#adr-0071)). `bytes` is transferred rather than copied and
+          // must not be read after this point; the run needs `hash` and `sizeBytes`, which were taken
+          // above, and never the buffer again.
           //
-          // Whatever throws here throws its own type. A parser's own exception escaping would fail the
-          // whole run and, being deterministic, keep failing it until somebody found the file.
-          let documents: Iterable<DerivedDocument>;
+          // Only the *opening* is inside this boundary: `expand` parses and validates over there and
+          // hands back a handle that yields one rendered document at a time, so a specification with
+          // three thousand operations neither holds three thousand rendered documents nor brings its
+          // object graph across.
+          //
+          // Whatever throws here throws its own type, and that now includes the thread dying or
+          // ceasing to answer — both arrive as a refusal naming this file, because neither is a
+          // statement about the other three hundred files in the source.
+          let documents: AsyncIterable<DerivedDocument> | Iterable<DerivedDocument>;
           try {
             documents = expands
-              ? readOpenApi(file.relativePath, bytes, specLimits).documents()
+              ? (await this.conversion.expand(file.relativePath, bytes, specLimits)).documents()
               : // **One string, used twice, and that is the point of ADR-0043.** What is chunked and
                 // what is stored are the same value — the flavor-transformed text — so `read_document`
                 // cannot come to disagree with `search_docs` about what an Obsidian note says. Deriving
-                // it twice, or storing `content` instead, is how that drift starts.
+                // it twice, or storing `content` instead, is how that drift starts. `sizeBytes` is the
+                // file's own, as it has always been, and not the Markdown's.
                 [
                   {
                     relativePath: file.relativePath,
-                    markdown: transformContent(file.flavor, await extractDocument(file.relativePath, bytes, extractLimits)),
+                    markdown: await this.conversion.convert(file.relativePath, file.flavor, bytes, extractLimits),
                     sizeBytes,
                   },
                 ];
@@ -621,13 +654,16 @@ export class Indexer {
            * `DocumentExtractionError` is a refused file; anything else — a failed `replaceDocument`, a
            * pool that is gone — is still a failed run, because it is not a statement about this file.
            *
-           * **No input reaches this catch today, and that is deliberate rather than accidental — do not
-           * delete it as dead code.** `services/openapi.ts` closes every way it can throw at its own
-           * edge: `readOpenApi` validates before yielding anything, and each `renderOperation` is
+           * **No *specification* reaches this catch, and that is deliberate rather than accidental — do
+           * not delete it as dead code.** `services/openapi.ts` closes every way it can throw at its
+           * own edge: `readOpenApi` validates before yielding anything, and each `renderOperation` is
            * wrapped so that whatever comes out of it is already a `DocumentExtractionError`. Because
-           * that boundary is total, nothing a specification can contain arrives here, and no test can
-           * make it. It exists for the change that makes it reachable, which is a small one and will
-           * not look like it: a renderer that throws outside `openapi.ts`'s own wrapper, a second
+           * that boundary is total, nothing a specification can *contain* arrives here. What does, since
+           * [ADR-0071](../../.ssot/ADR.md#adr-0071), is the thread itself going away half-way through
+           * an expansion — an OOM in the renderer, a crash, a step that never answered — which is a
+           * refusal naming the file, and leaves every document already written standing. It also still
+           * exists for the change that would make a render failure reachable, which is a small one and
+           * will not look like it: a renderer that throws outside `openapi.ts`'s own wrapper, a second
            * expanding content type whose generator does not carry one, or someone removing the
            * catch-all there because nothing was hitting it either. Any of those and an exception from
            * one file fails the whole run — deterministically, for every *other* file in the source,
@@ -637,7 +673,7 @@ export class Indexer {
            */
           let renderFailure: DocumentExtractionError | null = null;
           try {
-            for (const doc of documents) {
+            for await (const doc of documents) {
               produced++;
               // The document-level half of the incremental run. For a one-document file this is only
               // ever false — the short-circuit above already returned — so it costs nothing there and

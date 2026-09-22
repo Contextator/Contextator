@@ -447,9 +447,10 @@ export const EnvSchema = z
      *
      * **It is deliberately lower than `UPLOAD_MAX_FILE_BYTES`, because it answers a different
      * question.** The upload limit is about what may be *stored*, and it never applied to a local
-     * directory or a git checkout at all. This one is about what may be *parsed*, in the server's own
-     * process, beside the dashboard and `/mcp` — so it has to hold for every source type. A file over
-     * it is refused by name with the reason on its source; the run carries on.
+     * directory or a git checkout at all. This one is about what may be *parsed* — on the conversion
+     * thread since [ADR-0071](../../.ssot/ADR.md#adr-0071), but out of the same container's memory —
+     * so it has to hold for every source type. A file over it is refused by name with the reason on
+     * its source; the run carries on.
      *
      * 32 MiB is a very large document and a small fraction of a container's memory. Raise it if your
      * corpus genuinely holds bigger ones and the host has the headroom.
@@ -468,8 +469,8 @@ export const EnvSchema = z
      * cost.** A converted type's output is roughly the size of its input. A specification is parsed
      * whole into a JS object graph, and that graph measures **about fifty-five times the file** — 1 MiB
      * of YAML became 60 MiB of objects, 2 MiB became 113 MiB, 4 MiB became 218 MiB, 8 MiB became
-     * 444 MiB. At the 32 MiB conversion ceiling that is well over a gigabyte in the process that also
-     * serves the dashboard and `/mcp`, which is not a ceiling at all.
+     * 444 MiB. At the 32 MiB conversion ceiling that is well over a gigabyte out of one container,
+     * which is not a ceiling at all.
      *
      * **And the graph is not transient.** The indexer renders one document at a time out of it, so it
      * stays live for as long as that one file is being indexed — beside the embedding model, which on
@@ -517,6 +518,41 @@ export const EnvSchema = z
       .int()
       .min(1024 * 1024)
       .default(256 * 1024 * 1024),
+
+    /**
+     * How long one file may be inside the conversion thread before it is given up on
+     * ([ADR-0071](../../.ssot/ADR.md#adr-0071)).
+     *
+     * **A thread cannot be interrupted from outside.** A parser in a loop never returns to its event
+     * loop, so there is no message that would stop it and no signal that would reach it; the only
+     * remedy is to stop waiting and replace the thread. Without this, one crafted file holds the
+     * indexing queue for ever — which would be a *worse* failure than the synchronous conversion this
+     * replaced, where at least the process could be restarted.
+     *
+     * Two minutes is far past anything the ceilings of FR-406 and FR-428 admit: 2 000 pages of PDF is
+     * a couple of seconds, and an 8 MiB specification parses in well under ten. A file that hits this
+     * is refused by name with the reason on its source and the run carries on.
+     */
+    CONVERSION_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(1000)
+      .default(120 * 1000),
+
+    /**
+     * How long the conversion thread is kept once there is nothing to convert (ADR-0071).
+     *
+     * A run is hundreds of files and the thread is kept across them — spawning one per file would pay
+     * tens of milliseconds of startup and a re-import of the parsers each time, for nothing. But a
+     * thread that has just read a 2 000-page PDF is holding the heap that took, and an idle server
+     * should not be. Dropping it after a minute of quiet gives that memory back to the operating
+     * system; the next file pays one startup.
+     */
+    CONVERSION_IDLE_MS: z.coerce
+      .number()
+      .int()
+      .min(1000)
+      .default(60 * 1000),
 
     // Uploads and archives
     UPLOAD_MAX_FILE_BYTES: z.coerce

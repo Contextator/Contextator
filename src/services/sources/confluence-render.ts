@@ -216,7 +216,7 @@ export function storageToMarkdown(storage: string, title: string): string {
   if (bytes > MAX_PAGE_BODY_BYTES) {
     throw new ConfluenceRenderError(
       `"${title}" is ${Math.ceil(bytes / 1024)} KiB of storage format, over the ${MAX_PAGE_BODY_BYTES / (1024 * 1024)} MiB one page may be. ` +
-        "Converting it happens in the server's own process; split the page, or exclude its space from this source.",
+        'Converting it costs memory this server has to find in one piece; split the page, or exclude its space from this source.',
     );
   }
   return withTitle(htmlFragmentToMarkdown(storageToHtml(storage)), title);

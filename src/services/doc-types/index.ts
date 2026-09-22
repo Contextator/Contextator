@@ -43,12 +43,14 @@ export type DocumentExtractor = (bytes: Buffer, relativePath: string, limits: Ex
  * What one file is allowed to cost while it is being converted
  * ([ADR-0056](../../../.ssot/ADR.md#adr-0056)).
  *
- * **These bound the indexer's own process, and that is why they are not the upload limits.**
+ * **These bound the indexer's own memory, and that is why they are not the upload limits.**
  * `UPLOAD_MAX_FILE_BYTES` governs what may be *stored*, and it only ever applied to the upload path —
  * a file reached through a local directory or a git checkout passed no size check at all. What runs
- * here is a parser holding a whole document in memory, in the same process as the dashboard and
- * `/mcp`, so the ceiling that matters is the one on what may be *parsed*, and it has to apply to every
- * source type.
+ * here is a parser holding a whole document in memory. Since
+ * [ADR-0071](../../../.ssot/ADR.md#adr-0071) that is a worker thread rather than the thread serving
+ * the dashboard and `/mcp`, which is why an exhausted heap is now one refused file — but the heap is
+ * still this container's, so the ceiling that matters is still the one on what may be *parsed*, and it
+ * still has to apply to every source type.
  */
 export interface ExtractLimits {
   /** Raw bytes of a file of a converted type. `.md` and friends are not parsed and are not capped. */
@@ -199,7 +201,7 @@ export function checkFileSize(relativePath: string, sizeBytes: number, limits: E
   if (!isConvertedType(relativePath) || sizeBytes <= limits.maxFileBytes) return;
   throw new DocumentExtractionError(
     `"${relativePath}" is ${bytesLabel(sizeBytes)}, over the ${bytesLabel(limits.maxFileBytes)} a file of this type may be when it is converted. ` +
-      `Converting it happens in the server's own process, so the limit is there to keep one document from taking the dashboard and the MCP endpoint down with it; ` +
+      `Converting it happens on the server's conversion thread and its memory is the server's, so the limit is there to keep one document from exhausting it; ` +
       `raise MAX_CONVERTED_FILE_BYTES if this file is genuinely a document, or split it.`,
   );
 }
