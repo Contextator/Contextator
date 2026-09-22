@@ -371,21 +371,21 @@ export function connectionFromEnv(env: NodeJS.ProcessEnv = process.env): PgConne
  * The tools on this process's own `PATH`, writing into `dir`. **What every operator invocation uses**,
  * and therefore the adapter that has to be exercised rather than assumed.
  *
- * `commandFor` exists for that exercising and for nothing else: the unit suite runs on a host with no
- * PostgreSQL client installed — which is the same fact ADR-0046 built its whole "run them in the
- * container" argument on — so the only way to drive this adapter's `spawn`, its environment merge and
- * its refusal is to point it at a program that is there, and at one that is not. It defaults to the
- * identity, so no caller outside a test passes it.
+ * It takes no seam for that exercising and deliberately does not: the unit suite drives it by putting
+ * a directory on `PATH` instead, which is the same lookup an operator's invocation does and the one
+ * thing a redirection parameter would have stopped testing. The environment is captured here, at
+ * construction, which is what makes that work and is also what `connection.env` needs — the libpq
+ * variables have to reach the child, and they must not reach it through `argv`.
  */
-export function localPgTools(dir: string, connection: PgConnection, commandFor: (tool: PgTool) => string = (tool) => tool): PgTools {
+export function localPgTools(dir: string, connection: PgConnection): PgTools {
   const environment = { ...process.env, ...connection.env };
   return {
     scratch: { local: dir, remote: dir },
     database: connection.database,
-    run: (tool, args) => runLocal(commandFor(tool), args, environment),
+    run: (tool, args) => runLocal(tool, args, environment),
     version: async (tool) => {
       try {
-        return (await runLocal(commandFor(tool), ['--version'], environment)).trim();
+        return (await runLocal(tool, ['--version'], environment)).trim();
       } catch (err) {
         throw new BackupRefused(
           'no_pg_tools',

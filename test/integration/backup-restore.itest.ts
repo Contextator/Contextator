@@ -11,7 +11,7 @@ import { readMigrationFiles } from 'drizzle-orm/migrator';
 import * as tar from 'tar';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
-import { describeTopology, secretKeyFingerprint, type Manifest as BackupManifest, type PgTools } from '../../scripts/backup-archive.js';
+import { describeTopology, secretKeyFingerprint, type Manifest as BackupManifest, type PgTool, type PgTools } from '../../scripts/backup-archive.js';
 import { runBackup } from '../../scripts/backup.js';
 import { runRestore, type RestoreDeps } from '../../scripts/restore.js';
 import { loadConfig, MAX_SEARCH_LIMIT } from '../../src/config.js';
@@ -652,14 +652,24 @@ const UPLOADED_BODY = [
  * bind mount rather than of anything under test. `PGUSER` is set here rather than passed as `-U` for
  * the same reason `connectionFromEnv` does it — the command under test adds no connection flags.
  */
-function containerTools(scratchLocal: string, scratchRemote: string): PgTools {
+function containerTools(scratchLocal: string, scratchRemote: string, ran: PgTool[] = []): PgTools {
   const quote = (arg: string): string => `'${arg.replace(/'/g, `'\\''`)}'`;
   const script = (tool: string, args: string[]): string =>
     `umask 000; export PGUSER=contextator PGDATABASE=${CLI_DATABASE}; exec ${tool} ${args.map(quote).join(' ')}`;
   return {
     scratch: { local: scratchLocal, remote: scratchRemote },
     database: CLI_DATABASE,
-    run: async (tool, args) => (await execInPostgresOrThrow(containerId, ['sh', '-c', script(tool, args)])).stdout,
+    run: async (tool, args) => {
+      // **`ran` is how a test says "and it never got that far".** Every refusal in this feature is a
+      // claim about *order* — nothing written before the check — and the only thing that writes is
+      // `pg_restore`. Asserting on the database's contents afterwards cannot separate "it did not
+      // run" from "it ran and put back the same rows", which is exactly the shape a restore has: the
+      // dump is valid, so re-applying it leaves every count where it was. Recording the call does
+      // separate them.
+      ran.push(tool);
+      return (await execInPostgresOrThrow(containerId, ['sh', '-c', script(tool, args)])).stdout;
+    },
+    // Deliberately not recorded: `--version` is one of the refusal *inputs* and touches nothing.
     version: async (tool) => (await execInPostgresOrThrow(containerId, [tool, '--version'])).stdout.trim(),
   };
 }
@@ -776,10 +786,10 @@ describe('the backup command, and the instance it is asked to bring back', () =>
     await fsp.mkdir(dataDir, { recursive: true });
   }
 
-  const restoreDeps = (secretKey: string | undefined): RestoreDeps => ({
+  const restoreDeps = (secretKey: string | undefined, ran: PgTool[] = []): RestoreDeps => ({
     db: cli.db,
     config: loadConfig({ DATABASE_URL: cli.url, DATA_DIR: dataDir, SECRET_KEY: secretKey ?? '' }),
-    tools: containerTools(scratch.local, scratch.remote),
+    tools: containerTools(scratch.local, scratch.remote, ran),
     // The topology this suite runs in: it reaches the database over a URL, which is exactly what
     // ADR-0069 calls external — and the command has to say so rather than imply the container's own.
     topology: describeTopology({ DATABASE_URL: cli.url }),
@@ -898,18 +908,24 @@ describe('the backup command, and the instance it is asked to bring back', () =>
     it('stops before it writes anything, and leaves the empty instance empty', async () => {
       await emptyInstance();
 
-      await expect(runRestore(restoreDeps(WRONG_KEY), archive)).rejects.toMatchObject({ code: 'secret_key_mismatch' });
+      const ran: PgTool[] = [];
+      await expect(runRestore(restoreDeps(WRONG_KEY, ran), archive)).rejects.toMatchObject({ code: 'secret_key_mismatch' });
 
       // The whole of "it does not leave a half-loaded instance": the database it was pointed at still
       // has nothing in it, and DATA_DIR is still empty. A refusal made *after* `pg_restore --clean`
-      // would have dropped the schema and half-written the rest.
+      // would have dropped the schema and half-written the rest. The row count says that here because
+      // this instance is empty and the archive is not; `ran` says it on any instance, which is the
+      // claim that survives somebody reusing this case against a populated one.
+      expect(ran).toEqual([]);
       const rows = await cli.db.execute(sql`SELECT count(*)::int AS n FROM projects`);
       expect((rows.rows[0] as { n: number }).n).toBe(0);
       expect(await treeContents(dataDir)).toEqual({});
     });
 
     it('refuses a missing key the same way, naming the fingerprint it wants', async () => {
-      await expect(runRestore(restoreDeps(undefined), archive)).rejects.toMatchObject({ code: 'secret_key_missing' });
+      const ran: PgTool[] = [];
+      await expect(runRestore(restoreDeps(undefined, ran), archive)).rejects.toMatchObject({ code: 'secret_key_missing' });
+      expect(ran).toEqual([]);
       const rows = await cli.db.execute(sql`SELECT count(*)::int AS n FROM projects`);
       expect((rows.rows[0] as { n: number }).n).toBe(0);
       expect(await treeContents(dataDir)).toEqual({});
@@ -919,8 +935,13 @@ describe('the backup command, and the instance it is asked to bring back', () =>
   describe('restored with the key it was taken under', () => {
     it('brings the project back searchable, and the uploaded file back on disk and readable', async () => {
       // The instance is the empty one the two refusals above left behind.
-      const report = await runRestore(restoreDeps(BACKUP_KEY), archive);
+      const ran: PgTool[] = [];
+      const report = await runRestore(restoreDeps(BACKUP_KEY, ran), archive);
       expect(report.uploadsRestored).toBe(1);
+      // The guard against the recorder being something no code path can fill: a real restore does
+      // reach `pg_restore`, exactly once. Without this, every `expect(ran).toEqual([])` above would
+      // pass on a recorder that was never wired to anything.
+      expect(ran).toEqual(['pg_restore']);
 
       const restored = await cli.db.select().from(projects).limit(1);
       expect(restored).toHaveLength(1);
@@ -971,11 +992,14 @@ describe('the backup command, and the instance it is asked to bring back', () =>
       const deps: RestoreDeps = { ...restoreDeps(BACKUP_KEY), tools: containerTools(untouched, `${EXCHANGE_DIR}/check-scratch`) };
 
       const before = await treeContents(dataDir);
-      const report = await runRestore(deps, archive, { check: true });
+      const ran: PgTool[] = [];
+      const report = await runRestore({ ...deps, tools: containerTools(untouched, `${EXCHANGE_DIR}/check-scratch`, ran) }, archive, { check: true });
 
-      expect(report.checkedOnly).toBe(true);
-      expect(report.uploadsRestored).toBe(0);
-      expect(report.manifest.counts.chunks).toBe(backupManifest.counts.chunks);
+      // The write claims first, so a regression reports as the thing that broke rather than as a
+      // changed return value. The same reason as the refusals below: this instance already holds what
+      // the archive holds, so a `--check` that quietly went on and restored would leave every count
+      // where it is. What it cannot do is reach `pg_restore` without being seen.
+      expect(ran).toEqual([]);
       // Nothing unpacked, nothing created: the archive is gigabytes in a real instance and `--check`
       // is meant to cost a few hundred bytes of it.
       await expect(fsp.stat(untouched)).rejects.toMatchObject({ code: 'ENOENT' });
@@ -983,6 +1007,10 @@ describe('the backup command, and the instance it is asked to bring back', () =>
       expect(await treeContents(dataDir)).toEqual(before);
       const rows = await cli.db.execute(sql`SELECT count(*)::int AS n FROM projects`);
       expect((rows.rows[0] as { n: number }).n).toBe(1);
+
+      expect(report.checkedOnly).toBe(true);
+      expect(report.uploadsRestored).toBe(0);
+      expect(report.manifest.counts.chunks).toBe(backupManifest.counts.chunks);
     });
 
     it('still refuses the wrong key, because a check that passes everything checks nothing', async () => {
@@ -1014,10 +1042,28 @@ describe('the backup command, and the instance it is asked to bring back', () =>
       expect(Object.keys(before)).toHaveLength(1);
 
       try {
-        await expect(runRestore(restoreDeps(BACKUP_KEY), doctored)).rejects.toMatchObject({ code: 'incomplete_archive' });
+        const ran: PgTool[] = [];
+        await expect(runRestore(restoreDeps(BACKUP_KEY, ran), doctored)).rejects.toMatchObject({ code: 'incomplete_archive' });
+
+        /**
+         * **"Before it touches the database" is this line and nothing else.**
+         *
+         * The two assertions that used to stand here cannot see the difference the name claims. The
+         * tree survives whether the check sits before `pg_restore` or after it, because either way it
+         * is refused before the `rm`/`cp` loop; and `chunks > 0` holds either way too, because the
+         * doctored archive carries the **same valid dump** — re-applying it leaves every count
+         * exactly where it was. Moving the check after `pg_restore` therefore kept all 21 tests
+         * green, which is how this was found.
+         *
+         * A restore that ran and put the same rows back is not the same event as one that never ran:
+         * `--clean --if-exists` dropped and rebuilt every table on the way, and an operator who is
+         * told "Nothing has been written." would be told it by a command that had just replaced their
+         * database. So the assertion is that the tool was never invoked.
+         */
+        expect(ran).toEqual([]);
+
         // The files are still there — this is the assertion the refusal exists for.
         expect(await treeContents(onDisk)).toEqual(before);
-        // And the database was never reached: the rows the previous restore put back are still theirs.
         const rows = await cli.db.execute(sql`SELECT count(*)::int AS n FROM chunks`);
         expect((rows.rows[0] as { n: number }).n).toBeGreaterThan(0);
       } finally {
@@ -1038,8 +1084,11 @@ describe('the backup command, and the instance it is asked to bring back', () =>
         'utf8',
       );
       await tar.create({ gzip: true, file: other, cwd: staging, portable: true }, ['manifest.json']);
+      const ran: PgTool[] = [];
       try {
-        await expect(runRestore(restoreDeps(BACKUP_KEY), other)).rejects.toMatchObject({ code: 'not_a_backup' });
+        await expect(runRestore(restoreDeps(BACKUP_KEY, ran), other)).rejects.toMatchObject({ code: 'not_a_backup' });
+        // Every refusal in this feature is a claim about order, so every one of them says so.
+        expect(ran).toEqual([]);
       } finally {
         await fsp.rm(other, { force: true });
         await fsp.rm(staging, { recursive: true, force: true });

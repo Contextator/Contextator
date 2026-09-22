@@ -324,50 +324,85 @@ describe('the embedded database, for a command run through `docker exec`', () =>
  * The adapter every operator invocation actually runs — `spawn`, the environment merge, and the
  * refusal the `slim` image produces — which nothing exercised until this file did.
  *
- * It is driven through `commandFor` because the host this suite runs on has no PostgreSQL client
- * installed, which is [ADR-0046](../.ssot/ADR.md#adr-0046)'s own reason for running the real tools in
- * the container. `node` stands in for a program that is there; a name nothing could have installed
- * stands in for the `slim` image, where there is no `pg_dump` at all.
+ * **It is driven by putting a directory on `PATH`, not by handing `localPgTools` a way to rename the
+ * tool.** The host this suite runs on has no PostgreSQL client installed — which is
+ * [ADR-0046](../.ssot/ADR.md#adr-0046)'s own reason for running the real tools beside the server — so
+ * the choice was between a redirection parameter that exists only for tests and a fake `pg_dump` on
+ * the path. The fake is better on both counts: nothing test-shaped survives in the production
+ * signature, and the lookup being exercised is the lookup an operator's container does.
  */
-describe('the tools on this process’s own PATH', () => {
+describe('the tools on this process\u2019s own PATH', () => {
   const connection = { env: { PGDATABASE: 'from-the-connection' }, database: 'from-the-connection' };
+  let bin: string;
+  let empty: string;
+  let originalPath: string | undefined;
 
-  it('runs the program and gives back what it printed', async () => {
-    const tools = localPgTools('/tmp', connection, () => 'node');
-    await expect(tools.version('pg_dump')).resolves.toMatch(/^v\d+\./);
+  beforeAll(async () => {
+    const root = await mkdtemp(nodePath.join(tmpdir(), 'contextator-pgbin-'));
+    bin = nodePath.join(root, 'bin');
+    empty = nodePath.join(root, 'empty');
+    await mkdir(bin, { recursive: true });
+    await mkdir(empty, { recursive: true });
+    // A `pg_dump` that answers `--version` and otherwise prints what libpq would have been told, so
+    // the environment merge is observable from the child rather than asserted on the parent.
+    await writeFile(
+      nodePath.join(bin, 'pg_dump'),
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "--version" ]; then echo "pg_dump (PostgreSQL) 99.9 (fake)"; exit 0; fi',
+        // `$PATH` unbraced, because a `${…}` here is shell but reads as a template hole to a linter.
+        'if [ -n "$PATH" ]; then has_path=yes; else has_path=no; fi',
+        'echo "$PGDATABASE|$has_path"',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    // …and a `pg_restore` that fails the way a real one does when something goes wrong.
+    await writeFile(nodePath.join(bin, 'pg_restore'), ['#!/bin/sh', 'echo boom >&2', 'exit 3', ''].join('\n'), { mode: 0o755 });
+    originalPath = process.env.PATH;
+  });
+
+  afterAll(() => {
+    process.env.PATH = originalPath;
+  });
+
+  /** `localPgTools` captures the environment when it is built, so the path is set before that. */
+  function toolsWith(pathDir: string): ReturnType<typeof localPgTools> {
+    process.env.PATH = pathDir;
+    try {
+      return localPgTools('/tmp', connection);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  }
+
+  it('finds the tool by its own name on the PATH and gives back what it printed', async () => {
+    await expect(toolsWith(bin).version('pg_dump')).resolves.toBe('pg_dump (PostgreSQL) 99.9 (fake)');
   });
 
   /** The merge is what carries a DATABASE_URL's credentials to libpq without putting them in argv. */
-  it('hands the child the connection environment merged over this process’s own', async () => {
-    const tools = localPgTools('/tmp', connection, () => 'node');
-    // Concatenated rather than interpolated: this string is a program for the child, not a template
-    // for this file, and a `${…}` in it is the one thing a linter here would rewrite.
-    const child = 'process.stdout.write(process.env.PGDATABASE + "|" + Boolean(process.env.PATH))';
-    const printed = await tools.run('pg_dump', ['-e', child]);
-    expect(printed).toBe('from-the-connection|true');
+  it('hands the child the connection environment merged over this process\u2019s own', async () => {
+    expect((await toolsWith(bin).run('pg_dump', [])).trim()).toBe('from-the-connection|yes');
   });
 
   it('reports the exit code and what went to stderr, rather than an empty failure', async () => {
-    const tools = localPgTools('/tmp', connection, () => 'node');
-    await expect(tools.run('pg_restore', ['-e', 'process.stderr.write("boom"); process.exit(3)'])).rejects.toThrow(/exited 3.*boom/s);
+    await expect(toolsWith(bin).run('pg_restore', [])).rejects.toThrow(/exited 3.*boom/s);
   });
 
   /**
    * FR-576's last sentence, which had no test behind it: on the `slim` image there is no `pg_dump`,
    * and the command has to say that rather than die at `ENOENT`.
    */
-  it('refuses by name when the tool is not there, and names the image that has it', async () => {
-    const tools = localPgTools('/tmp', connection, () => 'no-such-postgres-client-6f1c');
+  it('refuses by name when the tool is not on the PATH, and names the image that has it', async () => {
+    const tools = toolsWith(empty);
     await expect(tools.version('pg_dump')).rejects.toMatchObject({ code: 'no_pg_tools' });
     await expect(tools.version('pg_dump')).rejects.toThrow(/-slim/);
-    await expect(tools.version('pg_dump')).rejects.toThrow(/pg_dump/);
+    await expect(tools.version('pg_dump')).rejects.toThrow(/`pg_dump` is not on the PATH/);
   });
 
-  it('is the identity by default, so nothing outside a test redirects the tool name', async () => {
-    const tools = localPgTools('/tmp', connection);
-    // There is no PostgreSQL client on this host; the point is that the name it looked for is the
-    // tool's own, which the refusal quotes back.
-    await expect(tools.version('pg_restore')).rejects.toThrow(/`pg_restore` is not on the PATH/);
+  it('looks for each tool under its own name, so a half-installed client is named correctly', async () => {
+    // `pg_dump` is on this path and `psql`-era leftovers are not; the refusal quotes the one asked for.
+    await expect(toolsWith(empty).version('pg_restore')).rejects.toThrow(/`pg_restore` is not on the PATH/);
   });
 });
 

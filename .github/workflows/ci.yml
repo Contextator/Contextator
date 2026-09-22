@@ -230,8 +230,8 @@ jobs:
           printf '%s\n' "$reset"
           printf '%s\n' "$reset" | grep -qF 'This instance has no accounts at all'
 
-          # The backup, in the image, on the topology every default installation runs.
-          docker exec ctx-ops sh -c 'mkdir -p /data/backups && chown node:node /data/backups'
+          # The backup, in the image, on the topology every default installation runs. No mkdir:
+          # the command creates the directory it is given, and that is part of what is being checked.
           backup=$(docker exec ctx-ops npm run backup -- /data/backups/ci.tar.gz 2>&1)
           printf '%s\n' "$backup"
           printf '%s\n' "$backup" | grep -qF 'database: embedded'
