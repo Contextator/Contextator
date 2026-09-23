@@ -126,6 +126,19 @@ export const canManageUsers = (principal: Principal): boolean => roleAtLeast(pri
 /** Only a root account may create, change or delete another root account. */
 export const canActOnRole = (principal: Principal, targetRole: UserRole): boolean => targetRole !== 'root' || principal.role === 'root';
 
+/**
+ * Whether an [ADR-0076](../../.ssot/ADR.md#adr-0076) API token's scope covers this route.
+ *
+ * The scope is written in the same key space `audit_events.action` and this file's own route tables
+ * already use — `<METHOD> <route template>` — so it is not a second permission vocabulary, only a
+ * subset of the first: a scope entry that is not one of this file's own route strings matches nothing
+ * and grants nothing. It never widens what the token's owner may already do; `checkRequest` applies it
+ * on top of, never instead of, the ordinary role and membership checks below.
+ */
+export function apiTokenAllowsRoute(scope: readonly string[], method: string, url: string): boolean {
+  return scope.includes(`${method} ${url}`);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The audit log ([ADR-0055](../../.ssot/ADR.md#adr-0055))
 // ---------------------------------------------------------------------------------------------
@@ -219,6 +232,7 @@ const AUDIT_CREATED: ReadonlyArray<{ method: string; url: string; type: string; 
   { method: 'POST', url: '/api/projects/import', type: 'projectId', path: ['projectId'] },
   { method: 'POST', url: '/api/projects/:id/sources', type: 'sid', path: ['id'] },
   { method: 'POST', url: '/api/projects/:id/mcp-tokens', type: 'tokenId', path: ['token', 'id'] },
+  { method: 'POST', url: '/api/tokens', type: 'tokenId', path: ['token', 'id'] },
   { method: 'POST', url: '/api/users', type: 'userId', path: ['user', 'id'] },
   // The first account. `POST /api/setup` is the one request in this product that creates its own
   // actor, and the account it creates is both the target and the person the row names.

@@ -25,7 +25,8 @@ http://localhost:3444/mcp/<project-name>
 - **Admin dashboard** at `http://localhost:3444/` to manage projects and their sources — add a repository, drop a folder or an archive on the page, test a connection, trigger re-indexing and watch progress.
 - **Accounts and roles.** People sign in with their own account. `root` and `admin` manage everything and everyone; a
   `member` sees only the projects it is assigned to, as a read-only `viewer` or an `editor` that adds sources, uploads
-  files and re-indexes. `ADMIN_TOKEN` stays for scripts and CI. See [Accounts and permissions](#accounts-and-permissions).
+  files and re-indexes. Any account can mint its own named, scoped, revocable **API token** for a script or CI job;
+  `ADMIN_TOKEN` still works too. See [Accounts and permissions](#accounts-and-permissions).
 - **A door on each MCP endpoint, with three settings.** A new project requires a **bearer token** that your client
   sends as an ordinary header, and is handed its first one as it is created, shown once. Make it **open** if its documents should be readable by anyone who can reach the
   URL, or require an **account** and its access becomes the memberships you already manage. Browser-based connectors
@@ -486,6 +487,13 @@ password_change_required`.
 
 `ADMIN_TOKEN` is unchanged and still works: `Authorization: Bearer <token>` acts with **root** permissions, so scripts
 and CI that predate accounts keep running. Treat it like a root password and keep it out of browsers.
+
+For a new script or CI job, an **API token** is the recommended credential instead of `ADMIN_TOKEN`: any signed-in
+account can mint one from *API tokens* in the account menu, name it, optionally restrict it to one project and an
+expiry date, and pick exactly which routes it may call (`POST /api/projects/:id/reindex` and nothing else, for
+example). The secret is shown once, at creation. A token can never do more than the account that minted it can, and
+it can be revoked on its own — unlike `ADMIN_TOKEN`, which is all-or-nothing and requires an environment-variable
+edit and a restart to retire.
 
 Accounts govern the dashboard and the admin API. The MCP endpoints have their own door — see
 [MCP access](#mcp-access) below.
@@ -1258,9 +1266,10 @@ value, and no setting here can tell the difference.
 
 ## Admin API
 
-All endpoints return JSON. Every request is authenticated either by the session cookie the dashboard receives at
-sign-in, or by `Authorization: Bearer <ADMIN_TOKEN>` (machine access, root permissions). `GET /api/health` is exempt,
-and answers with less detail when nobody is signed in.
+All endpoints return JSON. Every request is authenticated by the session cookie the dashboard receives at sign-in, by
+`Authorization: Bearer <ADMIN_TOKEN>` (machine access, root permissions), or by `Authorization: Bearer <ctxk_…>` — an
+account's own API token, scoped to a subset of routes and, optionally, one project (below, under **Accounts**).
+`GET /api/health` is exempt, and answers with less detail when nobody is signed in.
 
 A cookie-authenticated request that changes something must come from this site: the server checks `Sec-Fetch-Site`
 (falling back to `Origin`/`Referer`) and answers `403 csrf_blocked` otherwise. Bearer requests are exempt — they carry
@@ -1313,6 +1322,9 @@ no ambient credential.
 | `POST /api/users/:id/password` `{ password? }` | Set a new temporary password → `{ temporaryPassword }`, forces a change at next sign-in and ends that account's sessions |
 | `DELETE /api/users/:id` | Delete the account, its sessions and its memberships |
 | `DELETE /api/users/:id/sessions` | Sign that account out everywhere |
+| `GET /api/tokens` | Your own API tokens: name, prefix, scope, restricted project (if any), status, expiry, last used. Never the secret |
+| `POST /api/tokens` `{ name?, scope, projectId?, expiresAt? }` | Mint one → `201 { token, secret }`; `secret` is returned **once**. Scope entries and `projectId` outside your own reach mint fine but never match anything, since every request re-checks your live role and project access |
+| `DELETE /api/tokens/:tokenId` | Revoke one of your own tokens. Takes effect on its very next use |
 | `GET /api/projects/:id/members` | Accounts with access to this project and their role (any member of it) |
 | `PUT /api/projects/:id/members/:userId` `{ role }` | Grant or change `viewer` / `editor` (root/admin) |
 | `DELETE /api/projects/:id/members/:userId` | Revoke access (root/admin) |
@@ -1445,7 +1457,8 @@ src/services/document-read.ts  joining chunks back into a section, and cutting t
 src/mcp/sessions.ts           per-connection McpServer/transport registry + idle reaper
 src/auth/policy.ts            every authorization rule as data — no DB, no Fastify, fully unit-tested; also which requests are audit events and what they may record
 src/auth/authorize.ts         the request checks that need no database, in the order they must happen
-src/auth/plugin.ts            resolves the principal (cookie or ADMIN_TOKEN) and applies the policy
+src/auth/plugin.ts            resolves the principal (cookie, ADMIN_TOKEN or an account's own API token) and applies the policy
+src/services/auth/api-tokens.ts  mint/list/verify/revoke for an account's own scoped API tokens (ctxk_…)
 src/auth/cookies.ts           the session cookie's name, flags and Secure decision
 src/auth/csrf.ts              same-site check for cookie-authenticated writes
 src/services/passwords.ts     scrypt hashing (node:crypto), policy and temporary passwords
@@ -1461,6 +1474,7 @@ src/admin/webhooks.ts         push webhooks, verified with the per-source secret
 src/services/notion-webhook.ts which Notion deliveries mean a run, the window a captured token may be stored in, and the debounce before the queue
 src/admin/auth-routes.ts      /api/auth/* and /api/setup/*
 src/admin/users-routes.ts     /api/users/*
+src/admin/tokens-routes.ts    /api/tokens/* — an account's own API tokens, self-service
 src/admin/audit-routes.ts     /api/audit — the read side of the audit log: the filters, the keyset page, and the sentence a row is rendered as
 src/admin/members-routes.ts   /api/projects/:id/members/*
 src/admin/mcp-routes.ts       /api/projects/:id/mcp-tokens/* and the open/token/account switch
@@ -1474,6 +1488,7 @@ public/                       vanilla HTML/JS dashboard (no build step)
 public/core.js                shared helpers: el(), api(), state, the event bus
 public/auth.js                the signed-in account, the top-bar menu, permission helpers
 public/users.js               the account list at #/~users
+public/tokens.js              your own API tokens at #/~tokens — create, list, revoke
 public/audit.js               the audit log at #/~audit — who changed this instance, filtered and paged by the server
 public/queries.js             a project's query-log panel: what agents asked, and the export beside it
 public/members.js             a project's Members panel

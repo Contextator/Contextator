@@ -34,6 +34,7 @@ import { mcpRoutes } from './mcp-routes.js';
 import { memberRoutes } from './members-routes.js';
 import { queriesRoutes } from './queries-routes.js';
 import { sourceRoutes } from './sources-routes.js';
+import { tokensRoutes } from './tokens-routes.js';
 import { transferRoutes } from './transfer-routes.js';
 import { usersRoutes } from './users-routes.js';
 
@@ -315,7 +316,12 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
 
   app.get('/api/projects', async (req) => {
     const principal = req.principal as Principal;
-    const member = principal.kind === 'session' && principal.role === 'member' ? principal.userId : null;
+    // `kind`, not just `kind === 'session'`: an [ADR-0076](../../.ssot/ADR.md#adr-0076) API token
+    // carries its owner's role, looked up fresh, and a member-owned token must see exactly what its
+    // owner's session would — never every project, which is what `member = null` (the unfiltered,
+    // `'manager'`-labelled read below) would hand it. Only `ADMIN_TOKEN` (`kind === 'token'`) is
+    // exempt: it has no account and no membership to filter by.
+    const member = principal.kind !== 'token' && principal.role === 'member' ? principal.userId : null;
     const [rows, sourceCounts, roles] = await Promise.all([
       member ? listProjectsForUser(db, member) : listProjects(db),
       countSourcesByProject(db),
@@ -500,5 +506,6 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
   await app.register(mcpRoutes, { ctx });
   await app.register(queriesRoutes, { ctx });
   await app.register(sourceRoutes, { ctx });
+  await app.register(tokensRoutes, { ctx });
   await app.register(transferRoutes, { ctx });
 };

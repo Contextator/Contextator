@@ -30,6 +30,7 @@ import { authHeaderFor, initMcpUi, loadMcpTokens, renderMcpAccess, showMcpSecret
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
 import { loadQuerySummary, renderQueries } from './queries.js';
 import { captureSearchFocus, renderSearch } from './search.js';
+import { initTokensUi, loadApiTokens, renderTokensView } from './tokens.js';
 import { initUsersUi, renderUsersView } from './users.js';
 
 const POLL_ACTIVE_MS = 2000;
@@ -187,6 +188,7 @@ function parseHash() {
   const raw = decodeURIComponent(location.hash.replace(/^#\/?/, ''));
   if (raw === '~users') return { view: 'users', selected: null };
   if (raw === '~audit') return { view: 'audit', selected: null };
+  if (raw === '~tokens') return { view: 'tokens', selected: null };
   return { view: 'projects', selected: raw || null };
 }
 
@@ -195,11 +197,12 @@ function applyHash() {
   const changed = view !== state.view;
   state.view = view;
   if (view === 'projects' && selected) state.selectedId = selected;
-  // Both instance views are full-width: neither is about the project in the list beside them.
-  document.body.classList.toggle('no-sidebar', view === 'users' || view === 'audit');
+  // All three instance views are full-width: none of them is about the project in the list beside them.
+  document.body.classList.toggle('no-sidebar', view === 'users' || view === 'audit' || view === 'tokens');
   if (view === 'users') void loadUsers();
   if (view === 'audit') void loadAudit();
-  if (changed || view === 'users') renderAll();
+  if (view === 'tokens') void loadApiTokens();
+  if (changed || view === 'users' || view === 'tokens') renderAll();
 }
 
 function renderAll() {
@@ -428,6 +431,11 @@ function renderDetail() {
 
   if (state.view === 'audit') {
     main.append(renderAuditView());
+    return;
+  }
+
+  if (state.view === 'tokens') {
+    main.append(renderTokensView());
     return;
   }
 
@@ -903,6 +911,8 @@ async function refresh() {
   // A no-op unless a filter or the page moved, for ADR-0050's reason one table along: the audit log
   // is append-only and a filtered scan of it twice a second buys nothing. The panel carries Refresh.
   if (state.view === 'audit') void loadAudit();
+  // A no-op once loaded, same reason as loadMcpTokens: a mint or a revoke calls it with force itself.
+  if (state.view === 'tokens') void loadApiTokens();
   schedule();
 }
 
@@ -1781,6 +1791,7 @@ async function boot() {
   initUsersUi();
   initMembersUi();
   initMcpUi();
+  initTokensUi();
   await loadMe();
   applyHash();
   document.body.classList.remove('booting');

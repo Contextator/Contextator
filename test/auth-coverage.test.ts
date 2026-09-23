@@ -12,6 +12,9 @@ import {
   requiredProjectAccess,
   requiredRole,
 } from '../src/auth/policy.js';
+import { checkRequest } from '../src/auth/authorize.js';
+import type { Principal } from '../src/auth/types.js';
+import { ForbiddenError } from '../src/services/errors.js';
 import type { AppContext } from '../src/context.js';
 import { SetupGate } from '../src/services/auth/setup.js';
 import { SlidingWindow } from '../src/services/rate-limit.js';
@@ -111,7 +114,11 @@ describe('every /api route is covered by the policy', () => {
       if (PUBLIC_ROUTES.has(url)) return false;
       if (isProjectScoped(url)) return requiredProjectAccess(method, url) === undefined;
       // Everything else is at least "signed in"; these are the ones that ask for more.
-      return requiredRole(method, url) === null && !url.startsWith('/api/auth/') && url !== '/api/projects';
+      // `/api/tokens/*` ([ADR-0076](../.ssot/ADR.md#adr-0076)) joins `/api/auth/*` here for the same
+      // reason: it is self-service for any signed-in account, gated by `requireSession` refusing a
+      // bearer credential rather than by a row in `requiredRole` — there is no role above "has a
+      // session" to ask for.
+      return requiredRole(method, url) === null && !url.startsWith('/api/auth/') && !url.startsWith('/api/tokens') && url !== '/api/projects';
     });
 
     expect(uncovered).toEqual([]);
@@ -164,6 +171,55 @@ describe('every /api route is covered by the policy', () => {
     expect(urls.has(METRICS_ROUTE)).toBe(true);
     expect(METRICS_ROUTE.startsWith('/api/')).toBe(false);
     expect(PUBLIC_ROUTES.has(METRICS_ROUTE)).toBe(false);
+  });
+});
+
+/**
+ * **[ADR-0076](../.ssot/ADR.md#adr-0076)'s own claim, checked against every route the server really
+ * has rather than the handful `test/permissions.test.ts` names by hand.** A token's `scope` is a list
+ * of exact `"<METHOD> <route template>"` strings; the reviewer's finding was that no test walked the
+ * *whole* route table to prove the one entry in scope is the only one that passes. `checkRequest` is
+ * pure and `buildApi()` registers nothing live, so the two pair without a database or a request.
+ */
+describe('an ADR-0076 API token scoped to one route reaches only that route', () => {
+  it('passes the route named in its scope and is refused on every other registered /api/ route', async () => {
+    const app = await buildApi();
+    const table = routeTable(app.printRoutes({ commonPrefix: false }));
+    await app.close();
+
+    const apiRoutes = table.filter(([method, url]) => url.startsWith('/api/') && method !== 'HEAD' && method !== 'OPTIONS');
+    expect(apiRoutes.length).toBeGreaterThan(20);
+
+    const scopedMethod = 'POST';
+    const scopedUrl = '/api/projects/:id/reindex';
+    expect(apiRoutes).toContainEqual([scopedMethod, scopedUrl]);
+
+    const principal: Principal = {
+      kind: 'apiToken',
+      role: 'admin',
+      userId: '3f2504e0-4f89-41d3-9a0c-0305e82c3301',
+      username: 'ci · dana',
+      tokenId: 't-scan',
+      scope: [`${scopedMethod} ${scopedUrl}`],
+      projectId: null,
+      mustChangePassword: false,
+    };
+    const env = { allowedOrigins: [], needsSetup: false, hasAdminToken: false };
+
+    for (const [method, url] of apiRoutes) {
+      const facts = { method, url, headers: {}, host: 'example.test', principal, projectIdParam: 'p-1' };
+      // The four routes reachable with no credential at all are `checkRequest`'s very first line —
+      // a scope list decides nothing about them, in either direction, so they are not this claim.
+      if (PUBLIC_ROUTES.has(url)) {
+        expect(() => checkRequest(facts, env)).not.toThrow();
+        continue;
+      }
+      if (method === scopedMethod && url === scopedUrl) {
+        expect(() => checkRequest(facts, env)).not.toThrow();
+      } else {
+        expect(() => checkRequest(facts, env)).toThrow(ForbiddenError);
+      }
+    }
   });
 });
 

@@ -6,6 +6,7 @@ import {
   PASSWORD_CHANGE_ALLOWED,
   PUBLIC_ROUTES,
   accessFromMembership,
+  apiTokenAllowsRoute,
   auditCreatedTarget,
   auditReadsResponse,
   auditSubject,
@@ -18,6 +19,8 @@ import {
   satisfies,
 } from '../src/auth/policy.js';
 import { checkRequest } from '../src/auth/authorize.js';
+import { requireSession } from '../src/auth/plugin.js';
+import { ForbiddenError } from '../src/services/errors.js';
 import { mcpAccessDecision, mcpAccessStatus } from '../src/mcp/access.js';
 import { DEFAULT_MCP_AUTH, type McpAuthMode } from '../src/db/schema.js';
 import type { Principal, ProjectAccess } from '../src/auth/types.js';
@@ -30,6 +33,20 @@ const as = (role: 'root' | 'admin' | 'member'): Principal => ({
   username: role,
   sessionId: 's',
   mustChangePassword: false,
+});
+
+/** An [ADR-0076](../.ssot/ADR.md#adr-0076) API token principal, defaulted to the brief's own scenario:
+ * a `member`-role token scoped to reindex exactly one project. */
+const asApiToken = (overrides: Partial<Extract<Principal, { kind: 'apiToken' }>> = {}): Principal => ({
+  kind: 'apiToken',
+  role: 'member',
+  userId: 'id-apitoken-owner',
+  username: 'ci reindexer · owner',
+  tokenId: 't-1',
+  scope: ['POST /api/projects/:id/reindex'],
+  projectId: null,
+  mustChangePassword: false,
+  ...overrides,
 });
 
 /** The whole matrix in one table: actor × route × expected answer. */
@@ -177,6 +194,105 @@ describe('the permission matrix', () => {
     expect(accessFromMembership(as('member'), 'viewer')).toBe('viewer');
     expect(accessFromMembership(as('member'), 'editor')).toBe('editor');
     expect(accessFromMembership(as('member'), null)).toBe('none');
+  });
+});
+
+/**
+ * [ADR-0076](../.ssot/ADR.md#adr-0076) — an account's own bearer API tokens.
+ *
+ * The `CASES`/`allows()` matrix above never sees an `apiToken` principal: it only replicates
+ * `requiredRole` + `isProjectScoped` + `accessFromMembership` + `satisfies`, none of which is where a
+ * token's scope or its single-project restriction is applied. Those live inside `checkRequest` itself
+ * (`src/auth/authorize.ts`), and `/api/tokens/*`'s self-service-only gate lives in `requireSession`
+ * (`src/auth/plugin.ts`) — so both are exercised directly here instead of through the matrix.
+ */
+describe('API tokens (ADR-0076)', () => {
+  const env = { allowedOrigins: [], needsSetup: false, hasAdminToken: true, metricsPublic: false };
+  const facts = (over: Partial<Parameters<typeof checkRequest>[0]>) => ({
+    method: 'GET',
+    url: '/api/health',
+    headers: {},
+    host: 'example.test',
+    principal: null,
+    ...over,
+  });
+
+  it('requireSession accepts a session and refuses ADMIN_TOKEN and an API token', () => {
+    const session = as('member');
+    expect(requireSession({ principal: session } as never)).toBe(session);
+    expect(() => requireSession({ principal: token } as never)).toThrow(ForbiddenError);
+    expect(() => requireSession({ principal: asApiToken() } as never)).toThrow(ForbiddenError);
+  });
+
+  it("apiTokenAllowsRoute matches only the token's own scope, the brief's reindex-only scenario", () => {
+    const scope = ['POST /api/projects/:id/reindex'];
+    expect(apiTokenAllowsRoute(scope, 'POST', '/api/projects/:id/reindex')).toBe(true);
+    expect(apiTokenAllowsRoute(scope, 'GET', '/api/projects/:id/reindex')).toBe(false);
+    expect(apiTokenAllowsRoute(scope, 'GET', '/api/projects/:id/sources')).toBe(false);
+    expect(apiTokenAllowsRoute(scope, 'DELETE', '/api/projects/:id')).toBe(false);
+    expect(apiTokenAllowsRoute([], 'POST', '/api/projects/:id/reindex')).toBe(false);
+  });
+
+  it('checkRequest lets a reindex-scoped token reindex and refuses it everything else', () => {
+    const principal = asApiToken();
+    expect(checkRequest(facts({ method: 'POST', url: '/api/projects/:id/reindex', principal, projectIdParam: 'p-1' }), env)).toBe(
+      'needs-project-access',
+    );
+    expect(() => checkRequest(facts({ method: 'DELETE', url: '/api/projects/:id/sources/:sid', principal, projectIdParam: 'p-1' }), env)).toThrow(
+      ForbiddenError,
+    );
+    expect(() => checkRequest(facts({ method: 'POST', url: '/api/projects', principal }), env)).toThrow(ForbiddenError);
+  });
+
+  it("checkRequest narrows a token to its owner's live role, even when its scope names a route the role cannot reach", () => {
+    // A member-role token whose scope nominally lists an admin-only route: the ordinary role check
+    // inside checkRequest runs first and refuses it before the scope is ever consulted.
+    const principal = asApiToken({ role: 'member', scope: ['POST /api/projects'] });
+    expect(() => checkRequest(facts({ method: 'POST', url: '/api/projects', principal }), env)).toThrow(ForbiddenError);
+
+    // The same scope entry works once the owner's own role can reach the route.
+    const admin = asApiToken({ role: 'admin', scope: ['POST /api/projects'] });
+    expect(checkRequest(facts({ method: 'POST', url: '/api/projects', principal: admin }), env)).toBe('ok');
+  });
+
+  it('checkRequest restricts a project-bound token to the one project it names', () => {
+    const principal = asApiToken({ projectId: 'p-1' });
+    expect(checkRequest(facts({ method: 'POST', url: '/api/projects/:id/reindex', principal, projectIdParam: 'p-1' }), env)).toBe(
+      'needs-project-access',
+    );
+    expect(() => checkRequest(facts({ method: 'POST', url: '/api/projects/:id/reindex', principal, projectIdParam: 'p-2' }), env)).toThrow(
+      ForbiddenError,
+    );
+  });
+
+  it("checkRequest refuses a project-bound token on instance-level routes, even when an unrelated :id happens to read the same as the token's project", () => {
+    const principal = asApiToken({ role: 'admin', projectId: 'p-1', scope: ['GET /api/projects', 'PATCH /api/users/:id'] });
+    // `GET /api/projects` carries no `:id` at all — a project-bound token cannot be "about" a route
+    // that names no project, no matter what its scope list says.
+    expect(() => checkRequest(facts({ method: 'GET', url: '/api/projects', principal }), env)).toThrow(ForbiddenError);
+    // `/api/users/:id` does carry a `:id`, but it names a user, not a project. A token restricted to
+    // project `p-1` must not slip through just because the id in this unrelated URL happens to read
+    // `p-1` too — this is what the explicit `!isProjectScoped(...)` guard in `authorize.ts` catches,
+    // distinct from the plain id comparison next to it (which a coincidental match defeats on its own).
+    expect(() => checkRequest(facts({ method: 'PATCH', url: '/api/users/:id', principal, projectIdParam: 'p-1' }), env)).toThrow(ForbiddenError);
+  });
+
+  it('checkRequest leaves an unscoped token free to reach any project its owner already can', () => {
+    const principal = asApiToken({ projectId: null });
+    expect(checkRequest(facts({ method: 'POST', url: '/api/projects/:id/reindex', principal, projectIdParam: 'p-9' }), env)).toBe(
+      'needs-project-access',
+    );
+  });
+
+  it('records the creation of a token, with the id read back out of the response', () => {
+    const id = '9c2c6a2e-6a1a-4f2e-9d3a-6f1c2b6a9c11';
+    expect(auditCreatedTarget('POST', '/api/tokens', { token: { id }, secret: 'ctxk_the-secret' })).toEqual({
+      type: 'tokenId',
+      id,
+    });
+    // The secret itself never lands anywhere this table could read — only the declared `token.id` path does.
+    expect(auditCreatedTarget('POST', '/api/tokens', { secret: 'ctxk_the-secret' })).toBeNull();
+    expect(auditReadsResponse('POST', '/api/tokens')).toBe(true);
   });
 });
 

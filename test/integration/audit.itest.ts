@@ -16,6 +16,7 @@ import {
   type UserRow,
 } from '../../src/db/schema.js';
 import { sweepAuditLog } from '../../src/services/audit.js';
+import { createApiToken } from '../../src/services/auth/api-tokens.js';
 import { registerOauthClient } from '../../src/services/auth/oauth.js';
 import { createUser } from '../../src/services/auth/users.js';
 import { applySchema, createTestDatabase, dropTestDatabase, type TestDatabase } from './support/postgres.js';
@@ -278,6 +279,46 @@ describe('the three acts the audit log exists for', () => {
     expect(afterUser.actorUserId).toBeNull();
     // The name is still there, which is the whole reason it is a column and not a join.
     expect(afterUser.actorLabel).toBe('erol');
+  });
+});
+
+/**
+ * [ADR-0076](../../.ssot/ADR.md#adr-0076) — the reviewer's MAJOR 2: `test/audit.test.ts` proves
+ * `buildAuditRow` attributes an `apiToken` principal as `api_token`, naming the owner behind it, but
+ * that principal never came off a real request there. This drives one through `live.app.inject` with a
+ * bearer token rather than the `cookie` helper, so the row asserted on is the one `installAuth`'s own
+ * three-tier resolution (`src/auth/plugin.ts`) actually produced for a request that carried no session
+ * at all — proof the wiring, not just the pure function, tells the two apart.
+ */
+describe('a request carrying an ADR-0076 API token', () => {
+  it('is recorded as api_token, naming the account the token belongs to', async () => {
+    const owner = await createUser(database.db, { username: 'wren', role: 'admin', password: PASSWORD });
+    const { token, view } = await createApiToken(database.db, {
+      userId: owner.id,
+      name: 'ci deploy',
+      scope: ['PATCH /api/projects/:id/mcp-auth'],
+      projectId: null,
+      expiresAt: null,
+      createdBy: owner.id,
+    });
+
+    const res = await live.app.inject({
+      method: 'PATCH',
+      url: `/api/projects/${spare.id}/mcp-auth`,
+      headers: { authorization: `Bearer ${token}` },
+      payload: { mode: 'account' },
+    });
+    expect(res.statusCode).toBe(200);
+
+    await live.ctx.audit.settled();
+
+    const row = (await database.db.select().from(auditEvents).where(eq(auditEvents.actorUserId, owner.id)))[0];
+    expect(row).toBeDefined();
+    expect(row.actorKind).toBe('api_token');
+    expect(row.actorUserId).toBe(owner.id);
+    expect(row.actorLabel).toBe(`${view.name} · ${owner.username}`);
+    expect(row.projectId).toBe(spare.id);
+    expect(row.action).toBe('PATCH /api/projects/:id/mcp-auth');
   });
 });
 

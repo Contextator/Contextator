@@ -7,11 +7,28 @@ export type ProjectAccess = 'none' | 'viewer' | 'editor' | 'manager';
 
 /**
  * Who is making the request. `token` is ADMIN_TOKEN — machine access with root permissions, kept
- * so scripts and CI that predate accounts keep working.
+ * so scripts and CI that predate accounts keep working. `apiToken` is an
+ * [ADR-0076](../../.ssot/ADR.md#adr-0076) credential: machine access that, unlike ADMIN_TOKEN, names
+ * an account, a scope and — optionally — a single project, and can be revoked on its own.
  */
 export type Principal =
   | { kind: 'token'; role: 'root'; userId: null; username: string; mustChangePassword: false }
-  | { kind: 'session'; role: UserRole; userId: string; username: string; sessionId: string; mustChangePassword: boolean };
+  | { kind: 'session'; role: UserRole; userId: string; username: string; sessionId: string; mustChangePassword: boolean }
+  | {
+      kind: 'apiToken';
+      /** The owning account's role, looked up fresh on every request — never the value at mint time. */
+      role: UserRole;
+      /** The owning account's id. `resolveProjectAccess` and `accessFromMembership` key off this. */
+      userId: string;
+      /** `"<token name> · <owner's username>"`, so an audit row names both without a schema change. */
+      username: string;
+      tokenId: string;
+      /** Route templates this token may call, `<METHOD> <url>`, the same key space `policy.ts` uses. */
+      scope: readonly string[];
+      /** The single project this token is restricted to, or `null` for every project the owner reaches. */
+      projectId: string | null;
+      mustChangePassword: boolean;
+    };
 
 declare module 'fastify' {
   interface FastifyRequest {

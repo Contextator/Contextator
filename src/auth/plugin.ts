@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.js';
 import { ForbiddenError, UnauthorizedError } from '../services/errors.js';
 import { resolveProjectAccess } from '../services/auth/memberships.js';
+import { verifyApiToken } from '../services/auth/api-tokens.js';
 import { findSessionUser, touchSession } from '../services/auth/sessions.js';
 import { checkProjectAccess, checkRequest } from './authorize.js';
 import { auditCreatedTarget, auditReadsResponse, auditSubject, METRICS_ROUTE, PUBLIC_ROUTES } from './policy.js';
@@ -46,6 +47,25 @@ export function installAuth(app: FastifyInstance, ctx: AppContext): void {
       req.principal = TOKEN_PRINCIPAL;
       return;
     }
+    // An [ADR-0076](../../.ssot/ADR.md#adr-0076) API token — its own account, its own scope, its own
+    // expiry, revocable on its own. `verifyApiToken` reads the owner's role fresh on every call, so a
+    // demotion or deactivation reaches every token that account holds without touching a row of theirs.
+    if (bearer) {
+      const identity = await verifyApiToken(db, bearer);
+      if (identity) {
+        req.principal = {
+          kind: 'apiToken',
+          role: identity.role,
+          userId: identity.userId,
+          username: identity.username,
+          tokenId: identity.tokenId,
+          scope: identity.scope,
+          projectId: identity.projectId,
+          mustChangePassword: identity.mustChangePassword,
+        };
+        return;
+      }
+    }
     const raw = readSessionCookie(req);
     if (!raw) return;
     let session: Awaited<ReturnType<typeof findSessionUser>>;
@@ -88,6 +108,9 @@ export function installAuth(app: FastifyInstance, ctx: AppContext): void {
   // 2) May they do this? Every rule that does not need the database lives in authorize.ts.
   app.addHook('preHandler', async (req) => {
     const url = req.routeOptions.url ?? '';
+    // Read before `checkRequest` so an `apiToken`'s single-project restriction can be checked in the
+    // same pass as every other rule, without a second round trip through the caller.
+    const id = (req.params as { id?: string }).id;
     const verdict = checkRequest(
       {
         method: req.method,
@@ -100,6 +123,7 @@ export function installAuth(app: FastifyInstance, ctx: AppContext): void {
         // can open — two SHA-256 digests on every request to buy nothing would be a silly price.
         metricsTokenPresented:
           url === METRICS_ROUTE && scrapeToken !== undefined && timingSafeCompare(readBearer(req.headers.authorization), scrapeToken),
+        projectIdParam: id,
       },
       {
         allowedOrigins: config.ALLOWED_ORIGINS,
@@ -110,7 +134,6 @@ export function installAuth(app: FastifyInstance, ctx: AppContext): void {
     );
     if (verdict === 'ok') return;
 
-    const id = (req.params as { id?: string }).id;
     if (!id || !UUID_RE.test(id)) return; // let the handler's zod parse answer 400
     const access = await resolveProjectAccess(db, req.principal!, id);
     checkProjectAccess(req.method, url, access);
@@ -197,7 +220,7 @@ export function requirePrincipal(req: FastifyRequest): Principal {
 export function requireSession(req: FastifyRequest): Extract<Principal, { kind: 'session' }> {
   const principal = requirePrincipal(req);
   if (principal.kind !== 'session') {
-    throw new ForbiddenError('token_has_no_account', 'ADMIN_TOKEN is machine access; this needs a user account');
+    throw new ForbiddenError('token_has_no_account', 'A bearer token is machine access; this needs a user account');
   }
   return principal;
 }

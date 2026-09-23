@@ -716,6 +716,50 @@ export const userSessions = pgTable(
   ],
 );
 
+/**
+ * Admin API credentials scoped to an account ([ADR-0076](../../.ssot/ADR.md#adr-0076)). Unlike
+ * `ADMIN_TOKEN`, every row here is an identity: it belongs to a user, carries its own name and
+ * scope, and can be revoked without touching any other credential.
+ *
+ * Only the hash is stored, like every other bearer credential in this schema; the token itself is
+ * shown once, when it is minted (ADR-0017's pattern).
+ */
+export const apiTokens = pgTable(
+  'api_tokens',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** The account this token acts as. Its access can never exceed this account's own, live access. */
+    userId: uuid('user_id').notNull(),
+    /** What it is for, in the operator's words: "CI reindex", "staging bot". */
+    name: text('name').notNull().default(''),
+    tokenHash: text('token_hash').notNull().unique('api_tokens_token_hash_key'),
+    /** First few characters, so two tokens can be told apart in a list without storing either. */
+    prefix: text('prefix').notNull(),
+    /**
+     * A subset of the routes `src/auth/policy.ts` already recognizes, each written the same way
+     * `audit_events.action` is: `<METHOD> <route template>`. Not a new permission vocabulary — this
+     * column can only narrow what the owning account may already do, never widen it.
+     */
+    scope: jsonb('scope').notNull().$type<string[]>(),
+    /** Restricts the token to one project; NULL reaches every project the owner already reaches. */
+    projectId: uuid('project_id'),
+    createdBy: uuid('created_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+  },
+  (t) => [
+    foreignKey({ name: 'api_tokens_user_id_fkey', columns: [t.userId], foreignColumns: [users.id] }).onDelete('cascade'),
+    // CASCADE, not SET NULL: a token restricted to a deleted project must stop working, not quietly
+    // widen into one that reaches every project the owner has — the same reasoning `mcp_tokens` uses.
+    foreignKey({ name: 'api_tokens_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    foreignKey({ name: 'api_tokens_created_by_fkey', columns: [t.createdBy], foreignColumns: [users.id] }).onDelete('set null'),
+    index('api_tokens_user_idx').on(t.userId),
+    index('api_tokens_expires_idx').on(t.expiresAt).where(sql`expires_at is not null`),
+  ],
+);
+
 /** Which member account reaches which project, and how far. */
 export const projectMembers = pgTable(
   'project_members',
@@ -771,7 +815,10 @@ export const auditEvents = pgTable(
      * also the same key space `src/auth/policy.ts` already states every permission in.
      */
     action: text('action').notNull(),
-    /** `user` — a dashboard account — or `token`, which is `ADMIN_TOKEN` and has no account row. */
+    /**
+     * `user` — a dashboard account — `token`, which is `ADMIN_TOKEN` and has no account row, or
+     * `api_token`, an [ADR-0076](../../.ssot/ADR.md#adr-0076) credential that does.
+     */
     actorKind: text('actor_kind').notNull().$type<AuditActorKind>(),
     /**
      * The account that acted, when one did. `ON DELETE SET NULL` rather than cascade: deleting a
@@ -821,13 +868,13 @@ export const auditEvents = pgTable(
   },
   (t) => [
     foreignKey({ name: 'audit_events_actor_user_id_fkey', columns: [t.actorUserId], foreignColumns: [users.id] }).onDelete('set null'),
-    check('audit_events_actor_kind_check', sql`${t.actorKind} in ('user', 'token')`),
+    check('audit_events_actor_kind_check', sql`${t.actorKind} in ('user', 'token', 'api_token')`),
     // The two halves of "no row without an actor", stated in the database so that a future writer
     // — a backfill, a panel, a migration — cannot produce an anonymous event either.
     check('audit_events_actor_label_check', sql`length(btrim(${t.actorLabel})) > 0`),
-    // `ADMIN_TOKEN` is not an account, so it must not carry one; a `user` event may end up with NULL
-    // here once the account is deleted, which is what the `SET NULL` above is for.
-    check('audit_events_actor_user_check', sql`${t.actorKind} = 'user' or ${t.actorUserId} is null`),
+    // `ADMIN_TOKEN` is not an account, so it must not carry one; a `user` or `api_token` event may
+    // end up with NULL here once the account is deleted, which is what the `SET NULL` above is for.
+    check('audit_events_actor_user_check', sql`${t.actorKind} in ('user', 'api_token') or ${t.actorUserId} is null`),
     // The retention sweep is instance-wide — one `created_at` predicate over every row.
     index('audit_events_created_idx').on(t.createdAt),
     // "What happened on this project", and "what did this account do", which are the two questions a
@@ -864,10 +911,12 @@ export type McpAuthMode = 'open' | 'token' | 'account';
 /** Which of the three credentials an `mcp_tokens` row is ([ADR-0054](../../.ssot/ADR.md#adr-0054)). */
 export type McpTokenKind = 'static' | 'access' | 'refresh';
 /**
- * Who an audit event belongs to ([ADR-0055](../../.ssot/ADR.md#adr-0055)): a dashboard account, or
- * `ADMIN_TOKEN` — machine access that is a credential rather than a person, and says so.
+ * Who an audit event belongs to ([ADR-0055](../../.ssot/ADR.md#adr-0055)): a dashboard account,
+ * `ADMIN_TOKEN` — machine access that is a credential rather than a person, and says so — or
+ * `api_token`, an [ADR-0076](../../.ssot/ADR.md#adr-0076) credential that names the account it acts
+ * as and the token itself in its label.
  */
-export type AuditActorKind = 'user' | 'token';
+export type AuditActorKind = 'user' | 'token' | 'api_token';
 export type ProjectMemberRole = 'viewer' | 'editor';
 
 export type UserRow = typeof users.$inferSelect;
@@ -875,6 +924,7 @@ export type UserSessionRow = typeof userSessions.$inferSelect;
 export type ProjectMemberRow = typeof projectMembers.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 export type McpTokenRow = typeof mcpTokens.$inferSelect;
+export type ApiTokenRow = typeof apiTokens.$inferSelect;
 export type OauthClientRow = typeof oauthClients.$inferSelect;
 export type DocumentSourceRow = typeof documentSources.$inferSelect;
 export type DocumentRow = typeof documents.$inferSelect;

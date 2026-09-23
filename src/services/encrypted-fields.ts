@@ -90,6 +90,7 @@ export const UNENCRYPTED_SECRET_COLUMNS: Readonly<Record<string, string>> = {
     'A one-way hash of a bearer token, never reversed — the presented token is hashed and compared. Rotating SECRET_KEY has nothing to do with it.',
   'users.password_hash': 'scrypt (src/services/passwords.ts). Hashed, not encrypted; there is no plaintext to re-encrypt.',
   'user_sessions.token_hash': 'A one-way hash of a session cookie, like mcp_tokens.token_hash. Sessions also expire on their own.',
+  'api_tokens.token_hash': 'A one-way hash of an ADR-0076 API token, like mcp_tokens.token_hash. Revocable and optionally expiring besides.',
   'settings.key':
     'The name of a setting — "schema_version", not key material. It is here only because the guard test matches column names and would otherwise ask about it on every run.',
 };
