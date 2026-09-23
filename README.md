@@ -601,12 +601,18 @@ goes through the container.
 
 **One command takes the backup, because a `pg_dump` is not the installation:**
 
+<!-- MIRRORED-IN backup-and-restore: ../wiki/Backup-and-Data.md ../.ssot/OPERATIONS.md -->
+
 ```bash
 docker exec contextator npm run backup -- /data/backups/contextator-$(date +%F).tar.gz
 docker cp contextator:/data/backups/contextator-$(date +%F).tar.gz .
+```
 
-# Restoring on a fresh installation — which is the case that matters — starts with the directory,
-# because nothing has created it there yet and `docker cp` says `no such directory`:
+Restoring on a fresh installation — which is the case that matters — starts with the directory:
+
+```bash
+# The directory first — on a fresh installation nothing has created it yet, and `docker cp` into a
+# directory that is not there answers `no such directory`.
 docker exec contextator sh -c 'mkdir -p /data/backups'
 docker cp contextator-2026-09-22.tar.gz contextator:/data/backups/
 
@@ -616,8 +622,21 @@ docker exec contextator npm run restore -- /data/backups/contextator-2026-09-22.
 docker compose restart contextator
 ```
 
+<!-- /MIRRORED-IN -->
+
 Run `npm run backup` with no path at all and it writes `<DATA_DIR>/backups/contextator-backup-<timestamp>.tar.gz`
 — on the data volume, never in the container's working directory, which is an image layer.
+
+**These two blocks are mirrored in two other places**, and both follow this one:
+
+| Mirror | Why it exists |
+|---|---|
+| `wiki/Backup-and-Data.md` → *Backing up*, *Restoring* | The wiki is the only published documentation until this branch merges |
+| `.ssot/OPERATIONS.md` → §4.1, §4.2 | The operations record, read by a maintainer who holds both working trees |
+
+`restore` overwrites a live database, so these must not drift: change a command **here**, then in
+both. `test/readme-mirrors.test.ts` fails when they differ — in either direction, and also when one
+of them is dropped from the list above.
 
 The archive holds the database, the materialised files of every **upload** source — which exist nowhere
 else — and a manifest that is the first entry in it, so `--check` costs one small read of a file that
@@ -665,6 +684,157 @@ time to be the HNSW index being rebuilt over every chunk in the instance.
 
 `POSTGRES_PASSWORD` is applied when the cluster is created. To change it later run
 `ALTER USER contextator PASSWORD '...'` via `psql` and update `.env` before the next start.
+
+### Upgrading PostgreSQL across a major version
+
+**An ordinary image upgrade never does this.** `docker compose pull` moves the application; it does not
+move the cluster, because the cluster is a volume and the image's PostgreSQL major version is what can
+read it. The day a release moves from PostgreSQL 16 to 17 is the day this applies, and it applies
+**before** the pull, not after.
+
+What happens if you just pull:
+
+```
+PostgreSQL Database directory appears to contain a database; Skipping initialization
+FATAL:  database files are incompatible with server
+DETAIL:  The data directory was initialized by PostgreSQL version 16, which is not compatible with
+         this version 17.11 (Debian 17.11-1.pgdg12+2).
+[contextator] PostgreSQL exited during startup (exit code 1)
+```
+
+The container exits 1, `restart: unless-stopped` starts it again, and it exits 1 again. **Nothing is
+damaged**: the old cluster is untouched and the old image still reads it.
+
+**If that is where you are right now, this is the way out and it is one line.** Put `CONTEXTATOR_TAG`
+back to the major you were on, `docker compose up -d`, and you are exactly where you were — then do the
+upgrade below, in order, on the running old image. Do **not** start with the rollback block further
+down: that one restores a *parked copy* of the cluster, and on an accidental pull no copy has been
+made yet, so it has nothing to restore from.
+
+`pg_upgrade` is not the path, and it is worth knowing why: it needs the binaries of *both* majors
+present at once, and this image carries exactly one. So the path is a logical dump and a restore — the
+same `npm run backup` and `npm run restore` as above, run across the version boundary.
+
+**Find out what your cluster volume is actually called before anything else**, because step 3 removes it
+by name and `docker run -v <name>:/from` **creates an empty volume when that name does not exist, without
+an error**. `docker-compose.yml` names it `${CONTEXTATOR_PGDATA_VOLUME:-contextator-pgdata}`, so an
+instance that set that variable has a different name — and one that set `CONTEXTATOR_PGDATA_PATH` has no
+volume at all but a host directory, which is copied and moved with `cp -a` on the host instead.
+
+Step 3 is **one `&&` chain** rather than a list with a warning between the lines, and that is the whole
+of the protection: `docker volume inspect` fails on a name that is not there, `cp -a` fails on a full
+disk, the `PG_VERSION` comparison fails on a short copy — and any of those stops the chain **before**
+`docker volume rm`. **The removal is deliberately the last link**, so "stopped" and "nothing was
+removed" are the same sentence. Pasting a whole block in one go is how this is actually used, so the
+guards are in the shell and not in the prose around it.
+
+**Read what `STOPPED:` actually says, because the two blocks say different things on purpose.** Each
+is the `||` of a chain, so it prints when *any* link fails, and what is true at that moment depends on
+which side of the deletion the chain stopped on. In step 3 the deletion is the last link, so stopping
+means the volume is still there. In the rollback it cannot be last — the volume has to be emptied
+before it can be refilled — so the emptying and the refilling are one container command, and the
+message states the only thing true in every failure of that chain: the parked copy was only read. A
+message that said "nothing has been deleted" in both places would be wrong in one of them.
+
+On an instance that keeps the cluster in a host directory (`CONTEXTATOR_PGDATA_PATH`) there is no
+volume in any of this: copy that directory aside with `cp -a` on the host, check the copy, and empty
+the original instead of removing a volume.
+
+<!-- MIRRORED-IN postgres-major-upgrade: ../wiki/Backup-and-Data.md -->
+
+```bash
+PGVOL=${CONTEXTATOR_PGDATA_VOLUME:-contextator-pgdata}   # from your .env; the default is shown
+OLD=16                                                   # the major you are leaving
+```
+
+```bash
+# 1. On the OLD image, still running. Take it when no project is indexing.
+#    No mkdir here: `backup` creates the directory it is given. Step 5 needs one, because
+#    `docker cp` does not.
+docker exec contextator npm run backup -- /data/backups/pre-pg17.tar.gz
+docker cp contextator:/data/backups/pre-pg17.tar.gz .     # off this host, not beside the volume
+
+# 2. Stop the old container. KEEP its cluster — it is the rollback.
+docker compose down
+
+# 3. Copy the old cluster aside, CHECK THE COPY, and only then remove the original.
+#    Step 4 recreates the volume — Compose creates a named volume it does not find — so there is
+#    no `docker volume create "$PGVOL"` here to be the link after the deletion.
+docker volume inspect "$PGVOL" >/dev/null &&
+  docker volume create "$PGVOL-pg$OLD" &&
+  docker run --rm -v "$PGVOL":/from -v "$PGVOL-pg$OLD":/to alpine sh -c 'cp -a /from/. /to/' &&
+  [ "$(docker run --rm -v "$PGVOL-pg$OLD":/to alpine cat /to/PG_VERSION 2>/dev/null)" = "$OLD" ] &&
+  docker volume rm "$PGVOL" ||
+  printf '%s\n' \
+    "STOPPED: see the error above." \
+    "$PGVOL has NOT been removed: the removal is the last link of that chain, so it was either" \
+    "never reached or refused by Docker. The parked copy $PGVOL-pg$OLD may or may not exist and" \
+    "may or may not be complete — nothing depends on it yet." \
+    "Fix the error and run this block again; it is safe to repeat."
+
+# 4. Pull the new image and start it. It initdb's the empty volume and creates an empty schema.
+docker compose pull && docker compose up -d
+docker exec contextator psql -U contextator -c 'select version()'
+
+# 5. Put the instance back.
+docker exec contextator sh -c 'mkdir -p /data/backups'
+docker cp pre-pg17.tar.gz contextator:/data/backups/
+docker exec contextator npm run restore -- /data/backups/pre-pg17.tar.gz --check
+docker exec contextator npm run restore -- /data/backups/pre-pg17.tar.gz
+docker compose restart contextator
+```
+
+**The rollback is step 3 in reverse, and it is a copy rather than a rename** — Docker has no
+`volume rename`. Put `CONTEXTATOR_TAG` back to the version you were on, then:
+
+```bash
+# Re-stated here on purpose: a rollback is run later, and often in a shell that never saw step 1.
+PGVOL=${CONTEXTATOR_PGDATA_VOLUME:-contextator-pgdata}
+OLD=16
+
+docker compose down
+# The emptying and the refilling are one container command, so no link here deletes something the
+# next link then fails to replace. `$PGVOL-pg$OLD` is only ever read.
+docker volume inspect "$PGVOL-pg$OLD" >/dev/null &&
+  docker run --rm -v "$PGVOL-pg$OLD":/from -v "$PGVOL":/to alpine \
+    sh -c 'find /to -mindepth 1 -delete && cp -a /from/. /to/' &&
+  docker compose up -d ||
+  printf '%s\n' \
+    "STOPPED: see the error above." \
+    "Nothing in this block writes to $PGVOL-pg$OLD — it is only read — so the cluster you are" \
+    "rolling back to is whatever it was before you started." \
+    "$PGVOL may be untouched, emptied, or half-written depending on where this stopped, so do NOT" \
+    "start the old image against it yet. Fix the error and run this block again: it empties and" \
+    "refills $PGVOL from scratch, so repeating it is safe."
+```
+
+<!-- /MIRRORED-IN -->
+
+That throws away whatever the new major had in it, which after step 5 is the restored instance — so it
+is a rollback to the moment of step 1 and not to the moment you run it. Anything indexed in between is
+re-indexed.
+
+**Three things to know before you start.**
+
+- **`SECRET_KEY` has to be the same on the other side.** It is not in the archive, and the restore stops
+  before writing if it is missing or different. Have `.env` in front of you.
+- **The restore rebuilds every index, and that is most of the wall clock.** Size the maintenance window
+  from the whole instance's chunk count.
+- **The restore refuses the other direction.** A dump taken from 17 will not go into a 16 server, and it
+  says so before writing rather than half-applying. So a rollback is the *volume*, not the dump.
+
+**This section is the source for this procedure, and it is not the only copy of it.** It is written
+here, beside the code that implements `backup` and `restore` and versioned with it, because a
+procedure that deletes a cluster has to have exactly one copy that decides what it says.
+
+| Mirror | Why it exists | Rule |
+|---|---|---|
+| `wiki/Backup-and-Data.md` → *Upgrading PostgreSQL across a major version* | The wiki is the only published documentation until this branch merges, and an operator whose cluster will not start cannot be sent to a page they cannot reach | Kept **byte-identical** to the commands above. **If you change a command here, change it there.** Where the two disagree, **this copy wins** |
+
+`test/readme-mirrors.test.ts` checks that byte-identity on every `npm test` run that can see the
+mirror checkouts, fails rather than shrugs when a listed mirror is missing, and pins how many mirrors
+this file claims — a list that can quietly get shorter is not a list. See ADR-0073 as amended by
+ADR-0074.
 
 ## Connecting AI clients
 
