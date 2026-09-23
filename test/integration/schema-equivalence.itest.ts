@@ -91,9 +91,15 @@ const opened: TestDatabase[] = [];
  * on another table by accident. It needs no second term for the index it rebuilds —
  * `chunks_project_generation_idx` gains this column and is already inside `index_generation`, which
  * matches the columns the projection lists rather than the index's name.
+ * `0014_api_tokens` ([ADR-0076](../../.ssot/ADR.md#adr-0076)) is the newest, and like `0010_audit_events`
+ * it is a single term because the migration is a single whole table: `^api_tokens` anchors the *table* —
+ * its twelve columns, its two indexes, its primary key and its three foreign keys all carry that prefix.
+ * The `audit_events` CHECK constraints it widens to admit `'api_token'` are already covered by
+ * `^audit_events`, unqualified for the same reason `projects_mcp_auth_check` is: the DROP-and-ADD shows
+ * up as changed text on a constraint name this term already matches.
  */
 const POST_BASELINE_MARKERS =
-  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|projects \| \d+ \| mcp_auth \||text_search_config/;
+  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config/;
 
 afterAll(async () => {
   for (const database of opened) await dropTestDatabase(baseUrl, database);

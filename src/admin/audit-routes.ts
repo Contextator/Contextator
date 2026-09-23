@@ -177,6 +177,11 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
   'DELETE /api/projects/:id/mcp-tokens/:tokenId': { verb: 'revoked an MCP credential', prep: 'of', target: 'credential' },
   'PUT /api/projects/:id/members/:userId': { verb: 'granted access', prep: 'to', target: 'account' },
   'DELETE /api/projects/:id/members/:userId': { verb: 'revoked access', prep: 'to', target: 'account' },
+  // A self-service API token ([ADR-0076](../../.ssot/ADR.md#adr-0076)) — never project-scoped as an
+  // *action*, even when the token itself is scoped to one: minting and revoking are things an
+  // account does to its own credentials, not to a project.
+  'POST /api/tokens': { verb: 'created an API token', target: 'token' },
+  'DELETE /api/tokens/:tokenId': { verb: 'revoked an API token', target: 'token' },
   // The query log. The switch says which way it was thrown, or the panel reads as its own opposite.
   'PATCH /api/projects/:id/query-log': {
     verb: (detail) =>

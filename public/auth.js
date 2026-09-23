@@ -77,6 +77,7 @@ export function renderUserMenu() {
           openPasswordDialog();
         },
       }),
+      el('a', { class: 'menu-item', role: 'menuitem', href: '#/~tokens', text: 'API tokens', onclick: closeMenu }),
       canManageUsers() ? el('a', { class: 'menu-item', role: 'menuitem', href: '#/~users', text: 'Users', onclick: closeMenu }) : null,
       canReadAudit() ? el('a', { class: 'menu-item', role: 'menuitem', href: '#/~audit', text: 'Audit log', onclick: closeMenu }) : null,
       el('span', { class: 'menu-sep' }),

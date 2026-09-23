@@ -47,13 +47,15 @@ export interface AuditContext {
  *
  * `ADMIN_TOKEN` is `actorKind: 'token'` with no account id and the label `ADMIN_TOKEN`, which is what
  * `Principal.username` already holds for it — machine access is recorded as machine access rather than
- * as a person nobody can name.
+ * as a person nobody can name. An [ADR-0076](../../.ssot/ADR.md#adr-0076) API token is `actorKind:
+ * 'api_token'`, with its owner's real `userId` and the `"<token name> · <owner>"` label
+ * `Principal.username` already carries for it — unlike `ADMIN_TOKEN`, it does name somebody.
  */
 export function buildAuditRow(subject: AuditSubject, context: AuditContext): AuditEventInsert {
   const { principal } = context;
   return {
     action: subject.action.slice(0, MAX_ACTION_CHARS),
-    actorKind: principal.kind === 'token' ? 'token' : 'user',
+    actorKind: principal.kind === 'token' ? 'token' : principal.kind === 'apiToken' ? 'api_token' : 'user',
     actorUserId: principal.kind === 'token' ? null : principal.userId,
     actorLabel: principal.username.slice(0, MAX_LABEL_CHARS),
     actorIp: context.ip ? context.ip.slice(0, MAX_IP_CHARS) : null,

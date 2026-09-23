@@ -538,6 +538,61 @@
       </div>
     </dialog>
 
+    <dialog id="api-token-dialog" class="dialog">
+      <form id="api-token-form" method="dialog" novalidate>
+        <div class="dialog-head">
+          <h2>New API token</h2>
+          <p class="muted">A bearer credential for the admin API, scoped to your own account. It can never reach more than you can — narrow it further below.</p>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span class="field-label">What is it for <span class="muted">— optional</span></span>
+            <input name="name" maxlength="100" autocomplete="off" placeholder="CI reindex job" />
+            <span class="field-hint">Only a label, so you can tell two tokens apart and revoke the right one.</span>
+          </label>
+          <label class="field">
+            <span class="field-label">Scope</span>
+            <textarea name="scope" rows="3" placeholder="POST /api/projects/:id/reindex" required></textarea>
+            <span class="field-hint">One <code>METHOD /route</code> per line, exactly as the admin API documents it. The token can call only these routes, and only as far as your own role already reaches.</span>
+          </label>
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">Project <span class="muted">— optional</span></span>
+              <select name="projectId"></select>
+              <span class="field-hint">Restricts the token to one project instead of every project you can reach.</span>
+            </label>
+            <label class="field">
+              <span class="field-label">Expires <span class="muted">— optional</span></span>
+              <input name="expiresAt" type="date" />
+              <span class="field-hint">Leave empty for a token that lasts until you revoke it.</span>
+            </label>
+          </div>
+          <p id="api-token-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-foot">
+          <button type="button" class="ghost" id="api-token-cancel">Cancel</button>
+          <button type="submit" class="primary" id="api-token-submit">Create token</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="api-token-secret-dialog" class="dialog dialog-wide">
+      <div class="dialog-head">
+        <h2>Your API token</h2>
+        <p class="muted">This is the only time it is shown — the server keeps only a hash. Save it now; if you lose it, revoke it and make another.</p>
+      </div>
+      <div class="dialog-body">
+        <div class="snippet">
+          <pre id="api-token-secret-value"></pre>
+          <button type="button" class="copy" id="api-token-secret-copy">Copy</button>
+        </div>
+        <p class="field-hint">Send it as <code>Authorization: Bearer &lt;token&gt;</code>.</p>
+      </div>
+      <div class="dialog-foot">
+        <button type="button" class="primary" id="api-token-secret-close">Done</button>
+      </div>
+    </dialog>
+
     <dialog id="password-dialog" class="dialog">
       <form id="password-form" method="dialog" novalidate>
         <div class="dialog-head">

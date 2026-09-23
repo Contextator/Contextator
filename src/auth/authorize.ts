@@ -5,6 +5,7 @@ import {
   METRICS_ROUTE,
   PASSWORD_CHANGE_ALLOWED,
   PUBLIC_ROUTES,
+  apiTokenAllowsRoute,
   isProjectScoped,
   requiredProjectAccess,
   requiredRole,
@@ -28,6 +29,8 @@ export interface RequestFacts {
    * secrets and compares nothing, which is what lets the whole decision be a unit test.
    */
   metricsTokenPresented?: boolean;
+  /** `req.params.id` on a project-scoped route, read before this call so an `apiToken`'s single-project restriction can be checked without a second round trip through the caller. */
+  projectIdParam?: string;
 }
 
 export interface AuthorizeEnv {
@@ -73,6 +76,23 @@ export function checkRequest(facts: RequestFacts, env: AuthorizeEnv): 'ok' | 'ne
 
   const needRole = requiredRole(facts.method, facts.url);
   if (needRole && !roleAtLeast(principal.role, needRole)) throw new ForbiddenError();
+
+  // [ADR-0076](../../.ssot/ADR.md#adr-0076): a bearer API token narrows the owner's own authority
+  // further still, by route and — optionally — by a single project. Applied on top of every check
+  // above, never instead of one: nothing here can grant a token more than its owner already has.
+  if (principal.kind === 'apiToken') {
+    if (!apiTokenAllowsRoute(principal.scope, facts.method, facts.url)) throw new ForbiddenError();
+    if (principal.projectId) {
+      // A project-restricted token reaches exactly one project and nothing about the instance
+      // around it. An instance-level route (`GET /api/projects`, `GET /api/audit`, …) is never
+      // "about" a single project no matter what its scope list says, so it is refused outright
+      // here rather than left to whatever the handler happens to filter by — the same mistake
+      // that let a member-owned, unrestricted token over-read `GET /api/projects` (routes.ts).
+      if (!isProjectScoped(facts.url) || facts.projectIdParam !== principal.projectId) {
+        throw new ForbiddenError();
+      }
+    }
+  }
 
   return isProjectScoped(facts.url) ? 'needs-project-access' : 'ok';
 }

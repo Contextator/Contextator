@@ -21,6 +21,16 @@ const session: Principal = {
   mustChangePassword: false,
 };
 const machine: Principal = { kind: 'token', role: 'root', userId: null, username: 'ADMIN_TOKEN', mustChangePassword: false };
+const apiToken: Principal = {
+  kind: 'apiToken',
+  role: 'admin',
+  userId: '7c9e6679-7425-40de-944b-e07fc1f90ae7',
+  username: 'deploy · dana',
+  tokenId: 't-1',
+  scope: ['POST /api/projects/:id/reindex'],
+  projectId: null,
+  mustChangePassword: false,
+};
 
 const subjectOf = (method: string, url: string, params: Record<string, unknown> = {}, body?: unknown) => {
   const subject = auditSubject(method, url, params, body);
@@ -59,6 +69,20 @@ describe('the row an audit event becomes', () => {
     expect(row.actorLabel).toBe('ADMIN_TOKEN');
   });
 
+  it('records an ADR-0076 API token as api_token, naming the account behind it', () => {
+    const row = buildAuditRow(subjectOf('POST', '/api/projects/:id/reindex', { id: 'p-1' }), {
+      principal: apiToken,
+      ip: '10.0.0.5',
+      statusCode: 202,
+    });
+    // Unlike `machine` above, this *does* name somebody: the owning account's id and the
+    // `"<token name> · <owner>"` label survive even though the request carried a token, not a
+    // session — the reviewer's M4 mutation (`actorKind` always `'user'`) must turn this red.
+    expect(row.actorKind).toBe('api_token');
+    expect(row.actorUserId).toBe(apiToken.userId);
+    expect(row.actorLabel).toBe('deploy · dana');
+  });
+
   /**
    * **There is no shape of input that produces an unattributed row.** `AuditContext.principal` is not
    * optional, so a caller cannot leave the actor out; the label is derived from it rather than passed
@@ -67,7 +91,7 @@ describe('the row an audit event becomes', () => {
    * server — two statements of one rule, because this is the rule the table exists for.
    */
   it('always produces a non-empty actor label', () => {
-    for (const principal of [session, machine]) {
+    for (const principal of [session, machine, apiToken]) {
       const row = buildAuditRow(subjectOf('POST', '/api/projects/:id/reindex', { id: 'p-1' }), { principal, ip: null, statusCode: 202 });
       expect(row.actorLabel.trim().length).toBeGreaterThan(0);
     }

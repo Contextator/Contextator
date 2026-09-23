@@ -30,8 +30,11 @@ import { captureSchema, renderSchemaSnapshot, snapshotDifference } from './suppo
 const baseUrl = inject('postgresBaseUrl');
 const here = dirname(fileURLToPath(import.meta.url));
 
-/** The fourteen tables the current schema version owns, in the order PostgreSQL lists them. */
+/** The fifteen tables the current schema version owns, in the order PostgreSQL lists them. */
 const EXPECTED_TABLES = [
+  // An account's own bearer credentials for the admin API ([ADR-0076](../../../.ssot/ADR.md#adr-0076)).
+  // Self-service and revocable, scoped to a subset of what its owner's live role can already do.
+  'api_tokens',
   // Who changed this instance, and what they changed ([ADR-0055](../../../.ssot/ADR.md#adr-0055)).
   // Deliberately **not** the query log with a column added: that one holds what people asked, under a
   // thirty-day window because it is user content; this holds what an operator did, under a year's.
@@ -219,16 +222,19 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     // and its column position — the first here that is about a column's *default* rather than about a
     // line appearing, so the projection shows the old default leaving and the new one arriving; and
     // `0013_lexical_configurations` ([ADR-0064](../../../.ssot/ADR.md#adr-0064)), which adds
-    // `chunks.text_search_config` and rebuilds `chunks_project_generation_idx` around it. So the
-    // claim is no longer "nothing changed": it is that nothing changed *except* what those migrations
-    // say they change, and the lines that moved are checked by name rather than counted.
+    // `chunks.text_search_config` and rebuilds `chunks_project_generation_idx` around it; and
+    // `0014_api_tokens` ([ADR-0076](../../../.ssot/ADR.md#adr-0076)), one whole new table anchored by
+    // `^api_tokens`, plus the `audit_events` CHECK constraints it widens, already covered by
+    // `^audit_events`. So the claim is no longer "nothing changed": it is that nothing changed
+    // *except* what those migrations say they change, and the lines that moved are checked by name
+    // rather than counted.
     await applySchema(database);
     const changed = snapshotDifference(afterLadder, await captureSchema(db));
     expect(changed).not.toHaveLength(0);
     expect(
       changed.filter(
         (line) =>
-          !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|projects \| \d+ \| mcp_auth \||text_search_config/.test(
+          !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config/.test(
             line,
           ),
       ),

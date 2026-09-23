@@ -175,7 +175,15 @@ export async function startMcpInstance(database: TestDatabase, opts: { dataDir: 
     // is busy — which a source deletion refuses on — the queue depth `/metrics` reports, and dropping
     // a deleted project's queue state. Nothing in these suites indexes anything, so there is no queue
     // to have: the first two are constants and the third has nothing to forget.
-    indexer: { isBusy: () => false, stats: () => ({ interactive: 0, scheduled: 0, running: 0 }), forget: () => {} },
+    indexer: {
+      isBusy: () => false,
+      stats: () => ({ interactive: 0, scheduled: 0, running: 0 }),
+      forget: () => {},
+      // `GET /api/projects`'s `toView` (src/admin/routes.ts) asks both of these for every row it
+      // renders; no test here ever queues a job, so "nothing running, nothing queued" is the whole stub.
+      getJob: () => undefined,
+      queueInfo: () => undefined,
+    },
     // Real, because a source deletion takes the project's lock and a stub would either deadlock or
     // quietly skip the thing the lock is there for.
     locks: new KeyedMutex(),

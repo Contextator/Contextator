@@ -36,7 +36,7 @@ export const icon = (name) => el('span', { class: 'icon-wrap', html: ICON[name],
  */
 export const state = {
   me: null, // { id, username, displayName, role, mustChangePassword, projects: { <id>: 'viewer'|'editor' } }
-  view: 'projects', // 'projects' | 'users' | 'audit'
+  view: 'projects', // 'projects' | 'users' | 'audit' | 'tokens'
   projects: [],
   health: null,
   selectedId: null,
@@ -52,8 +52,11 @@ export const state = {
   mcpTokensFor: null,
   users: [], // the account list, only while the users view is open
   usersLoaded: false,
+  apiTokens: [], // the signed-in account's own bearer API tokens (ADR-0076), only while ~tokens is open
+  apiTokensLoaded: false,
   confirmDeleteSource: null,
   confirmDeleteUser: null,
+  confirmDeleteApiToken: null,
   filter: '',
   connectTab: 0,
   /**
