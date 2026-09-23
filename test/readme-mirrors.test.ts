@@ -46,9 +46,9 @@ const mirrorRegion = (id: string) => new RegExp(`<!--\\s*MIRRORED-FROM\\s+${id}:
 const shellBlocks = (text: string): string[] => [...text.matchAll(/```bash\n[\s\S]*?\n```/g)].map((m) => m[0]);
 
 const regions = [...readme.matchAll(SOURCE_REGION)].map((m) => ({
-	id: m[1],
-	targets: m[2].split(/\s+/).filter(Boolean),
-	blocks: shellBlocks(m[3]),
+  id: m[1],
+  targets: m[2].split(/\s+/).filter(Boolean),
+  blocks: shellBlocks(m[3]),
 }));
 
 /** An opened region that is never closed matches nothing above, so it would vanish rather than fail. */
@@ -64,48 +64,51 @@ const openers = (readme.match(/<!--\s*MIRRORED-IN\s/g) ?? []).length;
  * the path in the README is wrong and that is a failure, not a skip.
  */
 function locate(relative: string): { file: string | null; checkoutPresent: boolean } {
-	let checkoutPresent = false;
-	for (const base of [REPO, path.join(REPO, '..')]) {
-		const candidate = path.resolve(base, relative);
-		if (existsSync(candidate)) return { file: candidate, checkoutPresent: true };
-		if (existsSync(path.dirname(candidate))) checkoutPresent = true;
-	}
-	return { file: null, checkoutPresent };
+  let checkoutPresent = false;
+  for (const base of [REPO, path.join(REPO, '..')]) {
+    const candidate = path.resolve(base, relative);
+    if (existsSync(candidate)) return { file: candidate, checkoutPresent: true };
+    if (existsSync(path.dirname(candidate))) checkoutPresent = true;
+  }
+  return { file: null, checkoutPresent };
 }
 
 describe('README mirrors', () => {
-	it('still claims as many mirrors as it did when this was written', () => {
-		expect(openers, 'a MIRRORED-IN region is opened and never closed').toBe(regions.length);
-		expect(
-			regions.map((r) => r.id).sort(),
-			'a MIRRORED-IN region was removed or renamed — if that is deliberate, change EXPECTED and say why in the commit',
-		).toEqual(Object.keys(EXPECTED.mirrors).sort());
-		expect(regions.length).toBe(EXPECTED.regions);
-		for (const region of regions) {
-			expect(region.blocks.length, `the region ${region.id} holds no shell block`).toBeGreaterThan(0);
-			expect(region.targets.length, `${region.id} lost a mirror from its list`).toBe(EXPECTED.mirrors[region.id as keyof typeof EXPECTED.mirrors]);
-		}
-	});
+  it('still claims as many mirrors as it did when this was written', () => {
+    expect(openers, 'a MIRRORED-IN region is opened and never closed').toBe(regions.length);
+    expect(
+      regions.map((r) => r.id).sort(),
+      'a MIRRORED-IN region was removed or renamed — if that is deliberate, change EXPECTED and say why in the commit',
+    ).toEqual(Object.keys(EXPECTED.mirrors).sort());
+    expect(regions.length).toBe(EXPECTED.regions);
+    for (const region of regions) {
+      expect(region.blocks.length, `the region ${region.id} holds no shell block`).toBeGreaterThan(0);
+      expect(region.targets.length, `${region.id} lost a mirror from its list`).toBe(EXPECTED.mirrors[region.id as keyof typeof EXPECTED.mirrors]);
+    }
+  });
 
-	for (const region of regions) {
-		for (const [n, target] of region.targets.entries()) {
-			const { file, checkoutPresent } = locate(target);
-			const name = `${region.id} → mirror ${n + 1} (${target})`;
+  for (const region of regions) {
+    for (const [n, target] of region.targets.entries()) {
+      const { file, checkoutPresent } = locate(target);
+      const name = `${region.id} → mirror ${n + 1} (${target})`;
 
-			if (file === null && !checkoutPresent) {
-				// Not `it.skip`: a skip in a summary line reads as a pass. This states the reason.
-				it.todo(`${name} — checkout not present, byte-identity NOT verified in this run`);
-				continue;
-			}
+      if (file === null && !checkoutPresent) {
+        // Not `it.skip`: a skip in a summary line reads as a pass. This states the reason.
+        it.todo(`${name} — checkout not present, byte-identity NOT verified in this run`);
+        continue;
+      }
 
-			it(`${name} — carries exactly the source's blocks, in order`, () => {
-				expect(file, `${target} is named by README.md but is not there — fix the path, or drop the mirror on purpose`).not.toBeNull();
-				const text = readFileSync(file as string, 'utf8');
-				const claimed = [...text.matchAll(mirrorRegion(region.id))].flatMap((m) => shellBlocks(m[1]));
-				expect(claimed.length, `${target} has no MIRRORED-FROM ${region.id} region — the mirror stopped declaring itself`).toBeGreaterThan(0);
-				// Equality, not inclusion: this is what catches a block the mirror grew on its own.
-				expect(claimed, `${target} does not carry exactly the blocks README.md marks as mirrored.\nThe README is the source: change it there, then copy across.`).toEqual(region.blocks);
-			});
-		}
-	}
+      it(`${name} — carries exactly the source's blocks, in order`, () => {
+        expect(file, `${target} is named by README.md but is not there — fix the path, or drop the mirror on purpose`).not.toBeNull();
+        const text = readFileSync(file as string, 'utf8');
+        const claimed = [...text.matchAll(mirrorRegion(region.id))].flatMap((m) => shellBlocks(m[1]));
+        expect(claimed.length, `${target} has no MIRRORED-FROM ${region.id} region — the mirror stopped declaring itself`).toBeGreaterThan(0);
+        // Equality, not inclusion: this is what catches a block the mirror grew on its own.
+        expect(
+          claimed,
+          `${target} does not carry exactly the blocks README.md marks as mirrored.\nThe README is the source: change it there, then copy across.`,
+        ).toEqual(region.blocks);
+      });
+    }
+  }
 });

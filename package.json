@@ -24,6 +24,7 @@
     "eval": "tsx scripts/eval.ts",
     "warm-model": "tsx scripts/warm-model.ts",
     "reset-password": "tsx scripts/reset-password.ts",
+    "rotate-secret": "tsx scripts/rotate-secret.ts",
     "backup": "tsx scripts/backup.ts",
     "restore": "tsx scripts/restore.ts",
     "db:generate": "drizzle-kit generate",

@@ -1,11 +1,28 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
+import { decryptWebhookSecret, keyringOf, type SecretKeyring } from '../services/crypto.js';
 import { captureVerificationToken, decideEvent, eventTypeOf, minIntervalOf, noteDelivery, verificationTokenOf } from '../services/notion-webhook.js';
 import { getSourceById } from '../services/sources.js';
 import { pushedBranches, verifyNotionSignature, verifyWebhook } from '../services/webhook-verify.js';
 
 const Params = z.object({ sourceId: z.uuid() });
+
+/**
+ * The stored webhook secret, opened, or `null` when no key in the ring can open it.
+ *
+ * Unreadable is not the sender's fault, but it is answered like a bad signature anyway: an
+ * unauthenticated caller learns nothing about this instance's key state, and the operator learns it
+ * from the log line beside the call ([ADR-0075](../../.ssot/ADR.md#adr-0075)). The secret itself never
+ * reaches a log — only the source id does.
+ */
+function openWebhookSecret(stored: string, keys: SecretKeyring): string | null {
+  try {
+    return decryptWebhookSecret(stored, keys);
+  } catch {
+    return null;
+  }
+}
 
 /**
  * The two routes that authenticate themselves: `POST /api/webhooks/git/:sourceId` (push notifications
@@ -20,6 +37,7 @@ const Params = z.object({ sourceId: z.uuid() });
  */
 export const webhookRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
   const { db, config, indexer, log } = ctx;
+  const keys = keyringOf(config);
 
   app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) => done(null, body));
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'buffer' }, (_req, body, done) => done(null, body));
@@ -31,7 +49,12 @@ export const webhookRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
     if (!source || source.type !== 'git' || !source.webhookSecret) return reply.code(404).send({ error: 'not_found' });
 
     const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(typeof req.body === 'string' ? req.body : '');
-    const { ok, provider } = verifyWebhook(req.headers, raw, source.webhookSecret);
+    const secret = openWebhookSecret(source.webhookSecret, keys);
+    if (secret === null) {
+      log.warn({ sourceId: source.id }, 'webhook secret cannot be decrypted with the configured keys; regenerate it for this source');
+      return reply.code(401).send({ error: 'invalid_signature' });
+    }
+    const { ok, provider } = verifyWebhook(req.headers, raw, secret);
     if (!ok) {
       log.warn({ sourceId: source.id, provider }, 'webhook signature rejected');
       return reply.code(401).send({ error: 'invalid_signature' });
@@ -88,7 +111,7 @@ export const webhookRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
     // all, which is the difference between refusing a request and being configured by one.
     const token = verificationTokenOf(payload);
     if (token !== null) {
-      if (!(await captureVerificationToken(db, source.id, token))) {
+      if (!(await captureVerificationToken(db, source.id, token, keys))) {
         log.warn({ sourceId: source.id }, 'notion webhook verification token refused: no window open');
         return reply.code(401).send({ error: 'verification_not_open' });
       }
@@ -102,7 +125,12 @@ export const webhookRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
       log.warn({ sourceId: source.id }, 'notion webhook delivery for a source that was never verified');
       return reply.code(401).send({ error: 'not_verified' });
     }
-    if (!verifyNotionSignature(req.headers, raw, source.webhookSecret)) {
+    const secret = openWebhookSecret(source.webhookSecret, keys);
+    if (secret === null) {
+      log.warn({ sourceId: source.id }, 'notion webhook secret cannot be decrypted with the configured keys; re-verify this source');
+      return reply.code(401).send({ error: 'invalid_signature' });
+    }
+    if (!verifyNotionSignature(req.headers, raw, secret)) {
       log.warn({ sourceId: source.id }, 'notion webhook signature rejected');
       return reply.code(401).send({ error: 'invalid_signature' });
     }

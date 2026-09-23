@@ -2,6 +2,7 @@ import { and, eq, isNotNull, sql } from 'drizzle-orm';
 import { WEBHOOK_VERIFICATION_WINDOW_MINUTES } from '../config.js';
 import type { Db } from '../db/client.js';
 import { documentSources, type DocumentSourceRow } from '../db/schema.js';
+import { encryptWebhookSecret, type SecretKeyring } from './crypto.js';
 
 /**
  * The Notion webhook ([ADR-0049](../../.ssot/ADR.md#adr-0049)): which deliveries mean a run, and the
@@ -91,10 +92,12 @@ export async function openVerificationWindow(db: Db, sourceId: string): Promise<
  * The comparison is made by the database, like every other deadline in this product, so that clock
  * skew between the application and PostgreSQL cannot open a window that is shut.
  */
-export async function captureVerificationToken(db: Db, sourceId: string, token: string): Promise<boolean> {
+export async function captureVerificationToken(db: Db, sourceId: string, token: string, keys: SecretKeyring): Promise<boolean> {
   const stored = await db
     .update(documentSources)
-    .set({ webhookSecret: token, webhookVerificationExpiresAt: null })
+    // Encrypted on the way in, like every other secret this product stores
+    // ([ADR-0075](../../.ssot/ADR.md#adr-0075)); an instance with no SECRET_KEY stores it as it always did.
+    .set({ webhookSecret: encryptWebhookSecret(token, keys), webhookVerificationExpiresAt: null })
     .where(
       and(
         eq(documentSources.id, sourceId),

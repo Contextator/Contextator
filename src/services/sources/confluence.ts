@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { DocumentSourceRow } from '../../db/schema.js';
-import { decryptSecret } from '../crypto.js';
+import { decryptSecret, keyringOf } from '../crypto.js';
 import { sourceCurrentDir } from '../data-dir.js';
 import { ValidationError } from '../projects.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig, type ConfluenceConfig } from '../sources.js';
@@ -86,7 +86,7 @@ export class ConfluenceDriver implements SourceDriver {
     if (!this.cfg.email) {
       throw new ValidationError('This Confluence source has no account e-mail; Confluence Cloud authenticates with an e-mail plus an API token');
     }
-    const token = decryptSecret(this.source.secretEnc, this.ctx.config.SECRET_KEY);
+    const token = decryptSecret(this.source.secretEnc, keyringOf(this.ctx.config));
     this.built = new HttpConfluenceClient(
       { baseUrl: this.cfg.baseUrl, email: this.cfg.email, token },
       undefined,

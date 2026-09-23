@@ -648,6 +648,14 @@ a fingerprint of the key — 128 bits of keyed HMAC — which is what lets `rest
 missing key before it writes anything** instead of leaving you with a half-loaded instance and no way
 back. Keep the key where the archive is not.
 
+That key is rotatable — `npm run rotate-secret`, and ADR-0075 is the record of why — which gives
+the paragraph above a second edge: **a rotation makes every archive taken before it unrestorable by this
+instance.** The old archive's fingerprint names the retired key, the environment holds the new one, and
+`restore` refuses — correctly, because the ciphertexts in that dump were written under the key that was
+retired. So a rotation ends with a backup decision: take a fresh archive right after it and call that
+one the oldest restorable, or keep the retired key with the archives that still need it, labelled and
+stored somewhere those archives are not.
+
 The restore also refuses a dump taken from a newer PostgreSQL major version than the server it is going
 into; going the other way, 16 to 17, is the documented upgrade and is what the command exists for.
 
@@ -672,7 +680,8 @@ Two things a **dump** does not contain, which is the whole reason the command ab
 
 - **`SECRET_KEY`.** It is an environment variable. Without the original key, every stored source
   credential has to be re-entered. Keep it somewhere the dump is not — the dump plus the key is the
-  whole instance.
+  whole instance — and keep the key you retire when you rotate, or the dumps older than the rotation
+  become unrestorable.
 - **`/data`.** Git checkouts are re-clonable and Notion pulls are re-pullable, but **an upload source's
   `current/` directory is the only copy of its content anywhere**. A `/data` backup can be restricted to
   those and skip the re-clonable gigabytes, which is exactly what `npm run backup` does.
@@ -817,7 +826,10 @@ re-indexed.
 **Three things to know before you start.**
 
 - **`SECRET_KEY` has to be the same on the other side.** It is not in the archive, and the restore stops
-  before writing if it is missing or different. Have `.env` in front of you.
+  before writing if it is missing or different. Have `.env` in front of you — and if you have rotated
+  `SECRET_KEY` since this archive was taken, `.env` is now the *wrong* key: a pre-rotation archive can
+  only be restored with the key it was taken under, so use the retired key here or take a fresh backup
+  before starting.
 - **The restore rebuilds every index, and that is most of the wall clock.** Size the maintenance window
   from the whole instance's chunk count.
 - **The restore refuses the other direction.** A dump taken from 17 will not go into a 16 server, and it
@@ -1138,7 +1150,8 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `MODEL_CACHE_DIR` | `.cache/models` | Model download directory; `/app/.cache/models` inside the container |
 | `IGNORE_GLOBS` | – | e.g. `**/CHANGELOG.md,drafts/**`. Applies to every source |
 | `DATA_DIR` | `.data` | Writable directory holding the materialised sources (git checkouts, uploads, Notion pulls). `/data` inside the container |
-| `SECRET_KEY` | – | At least 32 characters (`openssl rand -hex 32`). Encrypts git/Notion tokens at rest (AES-256-GCM). Needed only once such a source exists; changing it invalidates stored tokens |
+| `SECRET_KEY` | – | At least 32 characters (`openssl rand -hex 32`). Encrypts git/Notion tokens and webhook secrets at rest (AES-256-GCM). Needed only once such a source exists. Changing it on its own leaves every stored token unreadable — replace it with a rotation instead: `SECRET_KEY_PREVIOUS` below |
+| `SECRET_KEY_PREVIOUS` | – | The key being retired, set only for the length of a rotation. It never encrypts: reads fall back to it, every write uses `SECRET_KEY`. Set it, set the new `SECRET_KEY`, restart, run `npm run rotate-secret`, then remove it and restart again — that removal is what retires the old key |
 | `MAX_STORED_DOCUMENT_BYTES` | `1048576` (1 MB) | How much of each document's text is kept in the database for `read_document`. Past it the prefix is stored and the tool says so. Compressed out of line by PostgreSQL, so the cost is a small fraction of the same document's vectors |
 | `UPLOAD_MAX_FILE_BYTES` | `52428800` (50 MB) | Per uploaded file |
 | `UPLOAD_MAX_FILES_PER_REQUEST` | `500` | The dashboard splits large folders across requests by itself |
@@ -1417,7 +1430,8 @@ src/types/                    ambient declarations for the two dependencies that
 src/services/archives.ts      zip / tar / tar.gz / rar extraction with path and size guards
 src/services/uploads.ts       staged upload sessions and their commit into a source
 src/services/data-dir.ts      layout of DATA_DIR, atomic directory swaps, orphan sweep
-src/services/crypto.ts        AES-256-GCM encryption of source tokens (SECRET_KEY)
+src/services/crypto.ts        AES-256-GCM encryption of source tokens and webhook secrets, and the key id that makes SECRET_KEY rotatable
+src/services/encrypted-fields.ts  the one list of columns encrypted under SECRET_KEY, derived from the schema so a new one cannot be forgotten
 src/services/embeddings/      provider interface, local (transformers.js) and OpenAI implementations
 src/services/chunk-budget.ts  the after-warmup half of the chunk budget check: what the model reads, against what the chunker produces
 src/services/indexer.ts       incremental background indexing queue
@@ -1470,6 +1484,7 @@ public/product-facts.json     generated: the numbers and identifiers this produc
 public/pages/                 body of each product/legal page + the shell they share, and the OAuth approval page
 scripts/smoke-mcp.ts          end-to-end MCP client check
 scripts/reset-password.ts     last-resort password reset straight against the database; ships in the image and runs there
+scripts/rotate-secret.ts      `npm run rotate-secret` — moves every encrypted value onto the current SECRET_KEY; re-runnable, interruptible, and silent about plaintext
 scripts/backup.ts             `npm run backup` — the database, the upload trees and a manifest in one archive; never SECRET_KEY, only its fingerprint
 scripts/restore.ts            `npm run restore` — the same archive back, with every refusal decided before a byte is unpacked (`--check` decides them and writes nothing)
 scripts/backup-archive.ts     the archive's format and every refusal in it: the manifest, the key check value, the topology, and where pg_dump/pg_restore run
@@ -1591,7 +1606,7 @@ text, on every pull request, against a real server.
   reverse proxy that handles auth — the endpoint itself is the only thing a project token closes.
 - Browser `Origin` headers on `/mcp/*` are validated (DNS-rebinding protection) in both modes; CLI clients send none.
 - Local source directories are confined to `ALLOWED_DOC_ROOTS`; `..`, symlinks that escape, and non-directories are rejected.
-- Git and Notion tokens are encrypted at rest with `SECRET_KEY` (AES-256-GCM) and never returned by the API; credentials pasted into a repository URL are stripped before storage.
+- Git and Notion tokens are encrypted at rest with `SECRET_KEY` (AES-256-GCM) and never returned by the API; credentials pasted into a repository URL are stripped before storage. `SECRET_KEY` can be rotated without re-entering them — `SECRET_KEY_PREVIOUS`, then `npm run rotate-secret` — and the command never prints a secret.
 - Push webhooks verify the provider's signature against the per-source secret before anything is queued; the endpoint is otherwise unauthenticated by necessity.
 - Uploads and archives are extracted into a scratch directory first and only then copied in: entries that escape, dot-directories, non-portable names and unselected file types are dropped, and `ARCHIVE_MAX_ENTRIES` / `ARCHIVE_MAX_TOTAL_BYTES` bound a zip bomb. Nested archives are unpacked one level deep.
 - A git subdirectory is resolved inside the checkout; `..` segments are rejected.
@@ -1623,6 +1638,7 @@ text, on every pull request, against a real server.
 | Container keeps restarting, logs say `PostgreSQL exited during startup` | The PostgreSQL output above that line tells why: usually a data directory from another PostgreSQL major version, or a bind-mounted `CONTEXTATOR_PGDATA_PATH` with wrong permissions. |
 | `Directory is outside the allowed document roots` | Use a path under `ALLOWED_DOC_ROOTS` (`/docs/...` inside Docker). |
 | Adding a private git or Notion source fails on `SECRET_KEY` | Set `SECRET_KEY` (32+ characters) and restart; it is only required once a source stores a token. |
+| Every private source stopped syncing after `SECRET_KEY` was changed | The old key is what those tokens were encrypted with. Put it back in `SECRET_KEY_PREVIOUS`, restart, run `npm run rotate-secret`, then remove `SECRET_KEY_PREVIOUS` and restart. If the old key is gone, re-enter each source's token. |
 | A git source's row shows an authentication error | Check the token's scope, and on Bitbucket app passwords put your real username in the Username field. **Test connection** reports the remote's answer verbatim. |
 | `Subdirectory "…" does not exist in the repository` | The path is relative to the repository root and is checked against the branch that was checked out. |
 | A push webhook returns `401 invalid_signature` | The secret in the repository settings is not the one shown while editing the source — copy it again, or **Regenerate** and paste the new one. |

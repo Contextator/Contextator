@@ -7,7 +7,7 @@ import { MAX_SEARCH_LIMIT, SYNC_MAX_INTERVAL_MINUTES, SYNC_MIN_INTERVAL_MINUTES,
 import type { AppContext } from '../context.js';
 import { pingDb } from '../db/client.js';
 import type { ProjectRow } from '../db/schema.js';
-import { SecretDecryptError, SecretKeyMissingError } from '../services/crypto.js';
+import { keyringOf, SecretDecryptError, SecretKeyMissingError } from '../services/crypto.js';
 import { removeProjectDir } from '../services/data-dir.js';
 import { ForbiddenError, RateLimitedError, SearchUnavailableError, UnauthorizedError } from '../services/errors.js';
 import { PathNotAllowedError } from '../services/fs-scan.js';
@@ -453,7 +453,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
           // project whose only source is quietly unscheduled ([ADR-0048](../../.ssot/ADR.md#adr-0048)).
           syncIntervalMinutes: config.SYNC_DEFAULT_INTERVAL_MINUTES || null,
         },
-        { allowedRoots: config.ALLOWED_DOC_ROOTS, secretKey: config.SECRET_KEY },
+        { allowedRoots: config.ALLOWED_DOC_ROOTS, keys: keyringOf(config) },
       );
       if (body.index) indexer.enqueue(project.id);
     }

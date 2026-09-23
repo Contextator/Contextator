@@ -293,7 +293,7 @@ describe('a source of API specifications', () => {
   });
 
   it('refuses .yaml on a content type that cannot read it, rather than scanning nothing', async () => {
-    const opts = { allowedRoots: [path.dirname(fx.root)], secretKey: '0'.repeat(64) };
+    const opts = { allowedRoots: [path.dirname(fx.root)], keys: { current: '0'.repeat(64) } };
     await expect(
       createSource(fx.database.db, fx.project.id, { type: 'local', name: 'plain-yaml', config: { path: fx.root, extensions: ['md', 'yaml'] } }, opts),
     ).rejects.toThrow(ValidationError);
