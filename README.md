@@ -601,12 +601,18 @@ goes through the container.
 
 **One command takes the backup, because a `pg_dump` is not the installation:**
 
+<!-- MIRRORED-IN: ../wiki/Backup-and-Data.md -->
+
 ```bash
 docker exec contextator npm run backup -- /data/backups/contextator-$(date +%F).tar.gz
 docker cp contextator:/data/backups/contextator-$(date +%F).tar.gz .
+```
 
-# Restoring on a fresh installation — which is the case that matters — starts with the directory,
-# because nothing has created it there yet and `docker cp` says `no such directory`:
+Restoring on a fresh installation — which is the case that matters — starts with the directory:
+
+```bash
+# The directory first — on a fresh installation nothing has created it yet, and `docker cp` into a
+# directory that is not there answers `no such directory`.
 docker exec contextator sh -c 'mkdir -p /data/backups'
 docker cp contextator-2026-09-22.tar.gz contextator:/data/backups/
 
@@ -616,8 +622,15 @@ docker exec contextator npm run restore -- /data/backups/contextator-2026-09-22.
 docker compose restart contextator
 ```
 
+<!-- /MIRRORED-IN -->
+
 Run `npm run backup` with no path at all and it writes `<DATA_DIR>/backups/contextator-backup-<timestamp>.tar.gz`
 — on the data volume, never in the container's working directory, which is an image layer.
+
+**These commands are mirrored on `wiki/Backup-and-Data.md`** (*Backing up* and *Restoring*), for the
+reason the upgrade section below gives: the wiki is published and this file is not yet. That copy
+follows this one — `restore` overwrites a live database, so the two must not drift — and
+`test/readme-mirrors.test.ts` is what notices when they have.
 
 The archive holds the database, the materialised files of every **upload** source — which exist nowhere
 else — and a manifest that is the first entry in it, so `--check` costs one small read of a file that
@@ -721,6 +734,8 @@ On an instance that keeps the cluster in a host directory (`CONTEXTATOR_PGDATA_P
 volume in any of this: copy that directory aside with `cp -a` on the host, check the copy, and empty
 the original instead of removing a volume.
 
+<!-- MIRRORED-IN: ../wiki/Backup-and-Data.md -->
+
 ```bash
 PGVOL=${CONTEXTATOR_PGDATA_VOLUME:-contextator-pgdata}   # from your .env; the default is shown
 OLD=16                                                   # the major you are leaving
@@ -787,6 +802,8 @@ docker volume inspect "$PGVOL-pg$OLD" >/dev/null &&
     "refills $PGVOL from scratch, so repeating it is safe."
 ```
 
+<!-- /MIRRORED-IN -->
+
 That throws away whatever the new major had in it, which after step 5 is the restored instance — so it
 is a rollback to the moment of step 1 and not to the moment you run it. Anything indexed in between is
 re-indexed.
@@ -800,9 +817,16 @@ re-indexed.
 - **The restore refuses the other direction.** A dump taken from 17 will not go into a 16 server, and it
   says so before writing rather than half-applying. So a rollback is the *volume*, not the dump.
 
-This block is the **only** copy of this procedure. It is written here, beside the code that implements
-`backup` and `restore` and versioned with it, because a procedure that deletes a cluster must not exist
-in two spellings; see ADR-0073.
+**This section is the source for this procedure, and it is not the only copy of it.** It is written
+here, beside the code that implements `backup` and `restore` and versioned with it, because a
+procedure that deletes a cluster has to have exactly one copy that decides what it says.
+
+| Mirror | Why it exists | Rule |
+|---|---|---|
+| `wiki/Backup-and-Data.md` → *Upgrading PostgreSQL across a major version* | The wiki is the only published documentation until this branch merges, and an operator whose cluster will not start cannot be sent to a page they cannot reach | Kept **byte-identical** to the commands above. **If you change a command here, change it there.** Where the two disagree, **this copy wins** |
+
+`test/readme-mirrors.test.ts` checks that byte-identity on every `npm test` run that can see the wiki
+checkout, and says so plainly when it cannot. See ADR-0073 as amended by ADR-0074.
 
 ## Connecting AI clients
 
