@@ -10,7 +10,7 @@ import { UploadDriver } from './upload.js';
 export interface DriverContext {
   db: Db;
   log: Logger;
-  config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'IGNORE_GLOBS'> & WebLimits;
+  config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS'> & WebLimits;
 }
 
 export interface SyncResult {

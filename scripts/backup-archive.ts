@@ -91,13 +91,19 @@ const Manifest = z.object({
   /**
    * The key, described rather than carried.
    *
-   * `encryptedSources` is the number of rows in the dump that cannot be read without it, and it is
-   * what makes the refusal in `checkSecretKey` a statement about the data rather than about a setting.
+   * `encryptedSources` is the number of rows in the dump that a wrong key would *destroy* — a sync
+   * credential the provider issued and this instance cannot reissue — and it is what makes the
+   * refusal in `checkSecretKey` a statement about the data rather than about a setting.
+   * `regenerableSecrets` counts the other kind, webhook secrets, which this instance can generate
+   * again; they are reported and not refused for ([ADR-0075](../.ssot/ADR.md#adr-0075)). It defaults
+   * to zero so that an archive written before that split — where the number meant exactly today's
+   * `encryptedSources` — still reads correctly here.
    */
   secretKey: z.object({
     present: z.boolean(),
     fingerprint: z.string().max(64).nullable(),
     encryptedSources: z.number().int().min(0),
+    regenerableSecrets: z.number().int().min(0).default(0),
   }),
   counts: z.object({
     projects: z.number().int().min(0),
@@ -180,19 +186,35 @@ export type SecretKeyVerdict = { ok: true; note: string | null } | { ok: false; 
  * is unpacked, which is the difference between a refusal and a half-restored instance.
  *
  * **The refusal is about the ciphertext, not about the setting.** `encryptedSources` counts the rows
- * in the dump that cannot be read without the key. When it is zero there is nothing for a wrong key to
- * cost: an instance whose sources are all public git repositories, local directories and uploads has
- * no encrypted column at all, and refusing its restore would be refusing the one case that is
- * unambiguously safe. It is still *said*, because a key that changed silently is a key nobody notices
- * has changed until the first private source is added. When it is not zero, a wrong key means every
- * one of those sources comes back with a token that will never decrypt — which is a restore that
- * looks like it worked and has to be done again — so it stops.
+ * in the dump that cannot be read without the key *and cannot be replaced either*: a git token or a
+ * Notion integration secret, issued by the provider and re-entered by hand or not at all. When it is
+ * zero there is nothing for a wrong key to destroy: an instance whose sources are all public git
+ * repositories, local directories and uploads loses nothing it cannot make again, and refusing its
+ * restore would be refusing the one case that is unambiguously safe. It is still *said*, because a
+ * key that changed silently is a key nobody notices has changed until the first private source is
+ * added. When it is not zero, a wrong key means every one of those sources comes back with a token
+ * that will never decrypt — which is a restore that looks like it worked and has to be done again —
+ * so it stops.
+ *
+ * **A webhook secret is not that.** Whatever its provenance it is re-established from this side —
+ * generated here and pasted into the repository for a git source, re-delivered into a verification
+ * window the operator reopens for a Notion one ([ADR-0049](../.ssot/ADR.md#adr-0049)) — so losing one
+ * costs a regeneration, not a credential. `regenerableSecrets` is therefore reported in the verdict's
+ * note and never in the decision ([ADR-0075](../.ssot/ADR.md#adr-0075)) — the alternative, counting
+ * both in one number, is what would make a single public repository with a webhook stop a restore
+ * that costs nothing.
  */
 export function checkSecretKey(manifest: Manifest, secretKey: string | undefined): SecretKeyVerdict {
-  const { present, fingerprint, encryptedSources } = manifest.secretKey;
+  const { present, fingerprint, encryptedSources, regenerableSecrets } = manifest.secretKey;
   const atStake =
     `${encryptedSources} source${encryptedSources === 1 ? '' : 's'} in this backup ` +
-    `${encryptedSources === 1 ? 'holds a credential' : 'hold credentials'} encrypted under it`;
+    `${encryptedSources === 1 ? 'holds a sync credential' : 'hold sync credentials'} encrypted under it`;
+  const regenerable =
+    regenerableSecrets === 0
+      ? ''
+      : ` ${regenerableSecrets} webhook secret(s) in it were encrypted under that key too; those come back unreadable. ` +
+        'For a git source, regenerate the secret here and paste the new one into the repository; for a Notion source, ' +
+        'open a fresh verification window and re-verify from Notion.';
 
   if (!present || !fingerprint) {
     if (secretKey) {
@@ -206,8 +228,9 @@ export function checkSecretKey(manifest: Manifest, secretKey: string | undefined
       return {
         ok: true,
         note:
-          'This backup was taken under a SECRET_KEY and this environment has none. Nothing in it is encrypted ' +
-          '(no source held a credential), so the restore is complete — but set the key before adding a private source.',
+          'This backup was taken under a SECRET_KEY and this environment has none; no source in it holds a sync ' +
+          'credential, so nothing it carries is lost for good — but set the key before adding a private source.' +
+          regenerable,
       };
     }
     return {
@@ -226,8 +249,9 @@ export function checkSecretKey(manifest: Manifest, secretKey: string | undefined
       return {
         ok: true,
         note:
-          'The SECRET_KEY in this environment is not the one this backup was taken under. Nothing in it is encrypted ' +
-          '(no source held a credential), so the restore is complete — but any credential entered before this backup would not have survived.',
+          'The SECRET_KEY in this environment is not the one this backup was taken under; no source in it holds a sync ' +
+          'credential, so nothing it carries is lost for good — but any credential entered before this backup would not have survived.' +
+          regenerable,
       };
     }
     return {
@@ -236,7 +260,8 @@ export function checkSecretKey(manifest: Manifest, secretKey: string | undefined
       message:
         `The SECRET_KEY in this environment is not the one this backup was taken under, and ${atStake}. ` +
         `The backup needs the key whose fingerprint is ${fingerprint}; this environment's is ${secretKeyFingerprint(secretKey)}. ` +
-        'Restoring anyway would put back credentials that can never be decrypted, and each one would have to be re-entered by hand. ' +
+        'Restoring anyway would put back credentials that can never be decrypted, and each one would have to be issued again ' +
+        'by its provider and re-entered here by hand. ' +
         'Nothing has been written.',
     };
   }
@@ -604,7 +629,8 @@ export function readmeFor(manifest: Manifest): string {
     '',
     'What is NOT in it, and will not be:',
     secretKey.present
-      ? `  - SECRET_KEY. The instance had one, and ${secretKey.encryptedSources} source(s) hold a credential encrypted under it. ` +
+      ? `  - SECRET_KEY. The instance had one, and ${secretKey.encryptedSources} source(s) hold a sync credential ` +
+        `encrypted under it, ${secretKey.regenerableSecrets} a webhook secret. ` +
         `Only a key check value travels (${secretKey.fingerprint}), which is enough for a restore to refuse the wrong key and ` +
         'nothing like enough to be the key. Keep the key somewhere this file is not: a backup carrying it would be the whole ' +
         'instance in one place, which is exactly what encrypting the credentials was for.'

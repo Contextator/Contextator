@@ -3,7 +3,7 @@ import path from 'node:path';
 import git from 'isomorphic-git';
 import http from 'isomorphic-git/http/node';
 import type { DocumentSourceRow } from '../../db/schema.js';
-import { decryptSecret } from '../crypto.js';
+import { decryptSecret, keyringOf } from '../crypto.js';
 import { sourceRepoDir } from '../data-dir.js';
 import { isInside } from '../fs-scan.js';
 import { PathNotAllowedError } from '../fs-scan.js';
@@ -32,7 +32,7 @@ export class GitDriver implements SourceDriver {
 
   private authOptions() {
     const url = sanitizeGitUrl(this.cfg.url);
-    const token = this.source.secretEnc ? decryptSecret(this.source.secretEnc, this.ctx.config.SECRET_KEY) : null;
+    const token = this.source.secretEnc ? decryptSecret(this.source.secretEnc, keyringOf(this.ctx.config)) : null;
     const provider = detectProvider(url, this.cfg.provider);
     return {
       url,

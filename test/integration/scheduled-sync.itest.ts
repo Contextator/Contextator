@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import type { Db } from '../../src/db/client.js';
 import { bootstrapDatabase } from '../../src/db/bootstrap.js';
 import { documentSources, indexRuns, projects, type DocumentSourceRow } from '../../src/db/schema.js';
+import { keyringOf } from '../../src/services/crypto.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
 import { Indexer, type JobState } from '../../src/services/indexer.js';
 import { KeyedMutex } from '../../src/services/locks.js';
@@ -462,7 +463,7 @@ describe('what one probe decides', () => {
         { type: 'local', name, config: { path: fx.roots.get('probe'), extensions: ['md'] } },
         {
           allowedRoots: fx.schedulerConfig.ALLOWED_DOC_ROOTS,
-          secretKey: fx.schedulerConfig.SECRET_KEY,
+          keys: keyringOf(fx.schedulerConfig),
         },
       );
       extra.push(row.id);
@@ -542,7 +543,7 @@ describe('the migration that adds the columns', () => {
       database.db,
       project.id,
       { type: 'upload', name: 'files' },
-      { allowedRoots: [], secretKey: '0'.repeat(64) },
+      { allowedRoots: [], keys: { current: '0'.repeat(64) } },
     );
     expect(unscheduled.syncIntervalMinutes).toBeNull();
     expect(unscheduled.nextSyncAt).toBeNull();
@@ -551,7 +552,7 @@ describe('the migration that adds the columns', () => {
       database.db,
       project.id,
       { type: 'upload', name: 'more', syncIntervalMinutes: 60 },
-      { allowedRoots: [], secretKey: '0'.repeat(64) },
+      { allowedRoots: [], keys: { current: '0'.repeat(64) } },
     );
     expect(scheduled.syncIntervalMinutes).toBe(60);
     // Jittered into the first interval at creation, never "right now".

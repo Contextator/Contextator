@@ -19,7 +19,7 @@ import { MIGRATIONS_FOLDER } from '../../src/db/bootstrap.js';
 import { documentSources, projects, type ProjectRow } from '../../src/db/schema.js';
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
 import { chunkMarkdown, embeddingText, estimateTokens } from '../../src/services/chunker.js';
-import { decryptSecret, encryptSecret } from '../../src/services/crypto.js';
+import { decryptSecret, encryptSecret, encryptWebhookSecret } from '../../src/services/crypto.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
 import { type NewChunk, replaceDocument, searchChunks, type SearchHit } from '../../src/services/vector-store.js';
 import {
@@ -828,7 +828,29 @@ describe('the backup command, and the instance it is asked to bring back', () =>
       type: 'git',
       name: 'private-repo',
       config: { url: 'https://example.invalid/private.git', branch: 'main', subdir: '', extensions: ['md'] },
-      secretEnc: encryptSecret('ghp_a_token_that_must_not_travel', BACKUP_KEY),
+      secretEnc: encryptSecret('ghp_a_token_that_must_not_travel', { current: BACKUP_KEY }),
+    });
+
+    // And a source that holds **no** sync credential and is still unreadable without the key: its
+    // webhook secret is encrypted under it (ADR-0075). A manifest that counted only `secret_enc`
+    // would call this instance key-independent and let a restore with the wrong key report success.
+    await cli.db.insert(documentSources).values({
+      projectId: project.id,
+      type: 'notion',
+      name: 'workspace',
+      config: { rootIds: [], extensions: ['md'] },
+      webhookSecret: encryptWebhookSecret('secret_a_verification_token_notion_minted', { current: BACKUP_KEY }),
+    });
+
+    // A row that has not been through the rotation pass yet: its webhook secret is still in the clear,
+    // so it is readable without any key and must **not** be counted. Counting it would make an
+    // instance that has never encrypted anything refuse restores it has nothing at stake in.
+    await cli.db.insert(documentSources).values({
+      projectId: project.id,
+      type: 'confluence',
+      name: 'handbook-wiki',
+      config: { baseUrl: 'https://example.invalid/wiki', email: 'ops@example.invalid', spaceKeys: ['DOCS'], extensions: ['md'] },
+      webhookSecret: 'wh-written-in-the-clear-before-adr-0075',
     });
 
     backupOutput = [];
@@ -880,9 +902,15 @@ describe('the backup command, and the instance it is asked to bring back', () =>
 
       expect(backupManifest.secretKey.present).toBe(true);
       expect(backupManifest.secretKey.fingerprint).toBe(secretKeyFingerprint(BACKUP_KEY));
-      // One source credential in the dump depends on that key, which is what makes the refusal below
-      // a statement about the data rather than about a setting.
+      // Two sources in the dump depend on that key, and they are counted apart because a wrong key
+      // costs two different things. One holds a sync credential the provider issued: that is what
+      // `encryptedSources` counts and what makes the refusal below a statement about the data rather
+      // than about a setting. The other holds nothing but a webhook secret, which this instance can
+      // generate again — counted, reported, and never a reason to stop a restore. The third source's
+      // webhook secret is pre-ADR-0075 plaintext and is in neither number, because a restore reads
+      // it without any key at all.
       expect(backupManifest.secretKey.encryptedSources).toBe(1);
+      expect(backupManifest.secretKey.regenerableSecrets).toBe(1);
       expect(backupOutput.join('\n')).toContain('SECRET_KEY is NOT in this file');
     });
 
@@ -932,6 +960,32 @@ describe('the backup command, and the instance it is asked to bring back', () =>
     });
   });
 
+  /**
+   * Step 2 of the SECRET_KEY rotation runbook (OPERATIONS.md §5.20) replaces `SECRET_KEY` with the new
+   * key and keeps the old one in `SECRET_KEY_PREVIOUS`, so the *instance* can still read everything.
+   * A restore cannot: it runs before there is an instance, and the check value in the manifest is
+   * compared against `SECRET_KEY` and nothing else. That is why the runbook says an older archive
+   * stops being restorable at step 2 rather than at step 4, and this is the case that says so —
+   * teaching the check to fall back to the keyring would turn the documented consequence into a lie.
+   */
+  describe('restored at step 2 of a rotation, with the archive\u2019s key still in SECRET_KEY_PREVIOUS', () => {
+    it('refuses exactly as it would with no old key anywhere, and writes nothing', async () => {
+      await emptyInstance();
+
+      const ran: PgTool[] = [];
+      const deps: RestoreDeps = {
+        ...restoreDeps(WRONG_KEY, ran),
+        config: loadConfig({ DATABASE_URL: cli.url, DATA_DIR: dataDir, SECRET_KEY: WRONG_KEY, SECRET_KEY_PREVIOUS: BACKUP_KEY }),
+      };
+      await expect(runRestore(deps, archive)).rejects.toMatchObject({ code: 'secret_key_mismatch' });
+
+      expect(ran).toEqual([]);
+      const rows = await cli.db.execute(sql`SELECT count(*)::int AS n FROM projects`);
+      expect((rows.rows[0] as { n: number }).n).toBe(0);
+      expect(await treeContents(dataDir)).toEqual({});
+    });
+  });
+
   describe('restored with the key it was taken under', () => {
     it('brings the project back searchable, and the uploaded file back on disk and readable', async () => {
       // The instance is the empty one the two refusals above left behind.
@@ -972,7 +1026,7 @@ describe('the backup command, and the instance it is asked to bring back', () =>
       // The credential came back encrypted, and the key this environment holds still opens it — which
       // is the thing the refusal above was protecting.
       const git = await cli.db.select().from(documentSources).where(eq(documentSources.type, 'git')).limit(1);
-      expect(decryptSecret(git[0].secretEnc ?? '', BACKUP_KEY)).toBe('ghp_a_token_that_must_not_travel');
+      expect(decryptSecret(git[0].secretEnc ?? '', { current: BACKUP_KEY })).toBe('ghp_a_token_that_must_not_travel');
     });
 
     it('is a clean no-op for the next start of the application over it', async () => {

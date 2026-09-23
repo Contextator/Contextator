@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Client } from '@notionhq/client';
 import type { DocumentSourceRow } from '../../db/schema.js';
-import { decryptSecret, SecretKeyMissingError } from '../crypto.js';
+import { decryptSecret, keyringOf, SecretKeyMissingError } from '../crypto.js';
 import { sourceCurrentDir } from '../data-dir.js';
 import { ValidationError } from '../projects.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig, type NotionConfig } from '../sources.js';
@@ -47,7 +47,7 @@ export class NotionDriver implements SourceDriver {
   private client(): Client {
     if (this.injectedClient) return this.injectedClient;
     if (!this.source.secretEnc) throw new SecretKeyMissingError();
-    const auth = decryptSecret(this.source.secretEnc, this.ctx.config.SECRET_KEY);
+    const auth = decryptSecret(this.source.secretEnc, keyringOf(this.ctx.config));
     return new Client({ auth });
   }
 

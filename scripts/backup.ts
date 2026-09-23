@@ -5,6 +5,8 @@ import { sql } from 'drizzle-orm';
 import * as tar from 'tar';
 import { loadConfig, type Config } from '../src/config.js';
 import { createDb, type Db } from '../src/db/client.js';
+import { documentSources } from '../src/db/schema.js';
+import { encryptedRowFilter } from '../src/services/encrypted-fields.js';
 import {
   BackupRefused,
   connectionFromEnv,
@@ -81,14 +83,39 @@ async function uploadSources(db: Db): Promise<UploadSource[]> {
   }));
 }
 
-async function counts(db: Db): Promise<{ projects: number; documents: number; chunks: number; encryptedSources: number }> {
+/**
+ * The two secret counts are counted apart on purpose ([ADR-0075](../../.ssot/ADR.md#adr-0075)).
+ *
+ * `encryptedSources` stays what Faz 09 made it: rows the wrong key would destroy — a sync credential
+ * the provider issued and this instance cannot reissue. That number, and only that number, is what
+ * makes `checkSecretKey` refuse. `regenerableSecrets` is the second kind: webhook secrets, which this
+ * instance generates and can generate again. Counting both in one number would mean a single public
+ * repository with a webhook stops a restore that costs nothing, which is the case Faz 09 went out of
+ * its way to let through.
+ */
+async function counts(
+  db: Db,
+): Promise<{ projects: number; documents: number; chunks: number; encryptedSources: number; regenerableSecrets: number }> {
   const result = await db.execute(sql`
     SELECT (SELECT count(*)::int FROM projects) AS projects,
            (SELECT count(*)::int FROM documents) AS documents,
            (SELECT count(*)::int FROM chunks) AS chunks,
-           (SELECT count(*)::int FROM document_sources WHERE secret_enc IS NOT NULL) AS encrypted_sources`);
-  const row = result.rows[0] as { projects: number; documents: number; chunks: number; encrypted_sources: number };
-  return { projects: row.projects, documents: row.documents, chunks: row.chunks, encryptedSources: row.encrypted_sources };
+           (SELECT count(*)::int FROM document_sources WHERE ${encryptedRowFilter(documentSources, 'irrecoverable')}) AS encrypted_sources,
+           (SELECT count(*)::int FROM document_sources WHERE ${encryptedRowFilter(documentSources, 'regenerable')}) AS regenerable_secrets`);
+  const row = result.rows[0] as {
+    projects: number;
+    documents: number;
+    chunks: number;
+    encrypted_sources: number;
+    regenerable_secrets: number;
+  };
+  return {
+    projects: row.projects,
+    documents: row.documents,
+    chunks: row.chunks,
+    encryptedSources: row.encrypted_sources,
+    regenerableSecrets: row.regenerable_secrets,
+  };
 }
 
 async function schemaFacts(db: Db): Promise<{ version: string; migrations: number }> {
@@ -169,6 +196,7 @@ export async function runBackup(deps: BackupDeps, outPath: string): Promise<Back
       present: Boolean(config.SECRET_KEY),
       fingerprint: config.SECRET_KEY ? secretKeyFingerprint(config.SECRET_KEY) : null,
       encryptedSources: tally.encryptedSources,
+      regenerableSecrets: tally.regenerableSecrets,
     },
     counts: {
       projects: tally.projects,
@@ -214,11 +242,15 @@ export function secretKeySentences(manifest: Manifest): string[] {
       '  Set one before adding a private git repository or a Notion integration, and this line will change.',
     ];
   }
-  const { encryptedSources, fingerprint } = manifest.secretKey;
+  const { encryptedSources, regenerableSecrets, fingerprint } = manifest.secretKey;
   return [
     `  SECRET_KEY is NOT in this file and never will be — only its fingerprint, ${fingerprint}.`,
-    `  ${encryptedSources} source credential(s) in the dump are encrypted under it. A restore without that exact key` +
-      ' cannot decrypt any of them, and `restore` will refuse to start rather than leave you to find out.',
+    `  ${encryptedSources} source(s) in the dump hold a sync credential encrypted under it — the token the provider` +
+      ' issued, which this instance cannot reissue. A restore without that exact key cannot decrypt any of them, and' +
+      ' `restore` will refuse to start rather than leave you to find out.',
+    `  ${regenerableSecrets} source(s) hold a webhook secret encrypted under it. Those a restore does not stop for.` +
+      ' For a git source, regenerate the secret here and paste the new one into the repository; for a Notion source,' +
+      ' open a fresh verification window and re-verify from Notion.',
     '  Keep the key where this archive is not. The two together are the whole instance.',
   ];
 }

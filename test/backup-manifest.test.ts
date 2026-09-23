@@ -45,7 +45,7 @@ function manifest(overrides: Partial<Manifest> = {}): Manifest {
     product: { name: 'contextator', version: '0.1.0' },
     database: { mode: 'embedded', target: null, serverVersion: '16.4 (Debian 16.4-1.pgdg120+1)', dumpToolVersion: 'pg_dump (PostgreSQL) 16.4' },
     schema: { version: '5', migrations: 13 },
-    secretKey: { present: true, fingerprint: secretKeyFingerprint(KEY), encryptedSources: 2 },
+    secretKey: { present: true, fingerprint: secretKeyFingerprint(KEY), encryptedSources: 2, regenerableSecrets: 0 },
     counts: { projects: 1, documents: 3, chunks: 12, uploadSources: 1, uploadFiles: 2, uploadBytes: 40, databaseDumpBytes: 1024 },
     uploads: [{ project: 'handbook', source: 'manuals', path: 'projects/x/sources/y/current', files: 2, bytes: 40 }],
     ...overrides,
@@ -104,17 +104,74 @@ describe('restoring with the wrong SECRET_KEY, or none', () => {
    * source is added.
    */
   it('lets a wrong key through when no source credential depends on it, and says so', () => {
-    const empty = manifest({ secretKey: { present: true, fingerprint: secretKeyFingerprint(KEY), encryptedSources: 0 } });
+    const empty = manifest({
+      secretKey: { present: true, fingerprint: secretKeyFingerprint(KEY), encryptedSources: 0, regenerableSecrets: 0 },
+    });
     for (const key of [undefined, OTHER_KEY]) {
       const verdict = checkSecretKey(empty, key);
       expect(verdict.ok).toBe(true);
       if (!verdict.ok) throw new Error('unreachable');
-      expect(verdict.note).toContain('no source held a credential');
+      expect(verdict.note).toContain('no source in it holds a sync credential');
     }
   });
 
+  /**
+   * And it stays that case once webhooks are in the picture. A public repository with a push webhook
+   * has an encrypted column — the webhook secret — but nothing a wrong key destroys: the secret is
+   * re-established from this side either way, generated here for a git source and re-delivered into a
+   * reopened verification window for a Notion one (ADR-0075 point 7). Counting it with the sync
+   * credentials is what would turn "restore me, I have nothing to lose" into a refusal, and naming
+   * only the git half is what would leave a Notion operator with a webhook that never fires again.
+   */
+  it('lets a wrong key through when the only encrypted values are regenerable, and names the cost', () => {
+    const webhooksOnly = manifest({
+      secretKey: { present: true, fingerprint: secretKeyFingerprint(KEY), encryptedSources: 0, regenerableSecrets: 3 },
+    });
+    for (const key of [undefined, OTHER_KEY]) {
+      const verdict = checkSecretKey(webhooksOnly, key);
+      expect(verdict.ok, `key ${key ?? 'none'}`).toBe(true);
+      if (!verdict.ok) throw new Error('unreachable');
+      expect(verdict.note).toContain('3 webhook secret(s)');
+      // The remedy has to be the one that exists: regenerate and re-paste, never "re-enter by hand".
+      expect(verdict.note).toContain('regenerate the secret here and paste the new one into the repository');
+      // And it has to cover both provenances — Notion's secret is not one this instance can mint.
+      expect(verdict.note).toContain('open a fresh verification window and re-verify from Notion');
+      expect(verdict.note).not.toContain('re-entered here by hand');
+    }
+  });
+
+  /**
+   * A webhook secret does not turn a refusal into an acceptance, and it does not turn one into a
+   * refusal either: the decision is `encryptedSources` alone, in both directions.
+   */
+  it('still refuses when a sync credential is at stake, whatever the webhook count is', () => {
+    const both = manifest({
+      secretKey: { present: true, fingerprint: secretKeyFingerprint(KEY), encryptedSources: 1, regenerableSecrets: 4 },
+    });
+    const verdict = checkSecretKey(both, OTHER_KEY);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) throw new Error('unreachable');
+    expect(verdict.code).toBe('secret_key_mismatch');
+    expect(verdict.message).toContain('1 source in this backup holds a sync credential');
+    expect(verdict.message).toContain('issued again by its provider and re-entered here by hand');
+  });
+
+  /**
+   * Archives written before the count was split carry one number, and it meant what
+   * `encryptedSources` means now. Reading one must not invent webhook secrets it never counted.
+   */
+  it('reads an archive written before the split as having no regenerable secrets', () => {
+    const before = { ...manifest(), secretKey: { present: true, fingerprint: secretKeyFingerprint(KEY), encryptedSources: 0 } };
+    const parsed = parseManifest(before);
+    expect(parsed.secretKey.regenerableSecrets).toBe(0);
+    const verdict = checkSecretKey(parsed, OTHER_KEY);
+    expect(verdict.ok).toBe(true);
+    if (!verdict.ok) throw new Error('unreachable');
+    expect(verdict.note).not.toContain('webhook secret');
+  });
+
   it('says nothing when the instance never had a key', () => {
-    const none = manifest({ secretKey: { present: false, fingerprint: null, encryptedSources: 0 } });
+    const none = manifest({ secretKey: { present: false, fingerprint: null, encryptedSources: 0, regenerableSecrets: 0 } });
     expect(checkSecretKey(none, undefined)).toEqual({ ok: true, note: null });
     const withKey = checkSecretKey(none, KEY);
     if (!withKey.ok) throw new Error('unreachable');

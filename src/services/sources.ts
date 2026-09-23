@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { PROJECT_NAME_RE, SYNC_MAX_INTERVAL_MINUTES, SYNC_MIN_INTERVAL_MINUTES } from '../config.js';
 import type { Db } from '../db/client.js';
 import { documents, documentSources, type DocumentSourceRow } from '../db/schema.js';
-import { encryptSecret, randomSecret } from './crypto.js';
+import { decryptWebhookSecret, encryptSecret, encryptWebhookSecret, randomSecret, type SecretKeyring } from './crypto.js';
 import { allowedExtensionsFor, FLAVOR_ONLY_EXTENSIONS, FLAVORS, type Flavor } from './flavors.js';
 import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './fs-scan.js';
 import { ConflictError, NotFoundError, ValidationError } from './projects.js';
@@ -294,11 +294,32 @@ export interface SourceView {
 const HAS_WEBHOOK = new Set<string>(['git', 'notion']);
 
 export interface SourceViewOptions {
+  /** The ring the stored webhook secret is opened with ([ADR-0075](../../.ssot/ADR.md#adr-0075)). */
+  keys: SecretKeyring;
   /** A project viewer may read a source's settings but not the secret a push webhook signs with. */
   revealWebhookSecret?: boolean;
 }
 
-export function toSourceView(row: DocumentSourceRow, opts: SourceViewOptions = {}): SourceView {
+/**
+ * The webhook secret as a caller may see it, or `null`.
+ *
+ * `null` here means one of three different things and deliberately does not distinguish them: there is
+ * no secret, the caller is a viewer, or the value is sealed under a key this process no longer holds.
+ * Only the last is a fault, and `hasWebhookSecret` beside it stays `true` in that case — the source
+ * *has* a secret, deliveries signed with it still verify for as long as the key is in the ring, and
+ * what the operator needs is to regenerate it, not to be told a cipher detail. Throwing instead would
+ * take a whole project's source list down over one unreadable row.
+ */
+function webhookSecretView(row: DocumentSourceRow, keys: SecretKeyring): string | null {
+  if (!row.webhookSecret) return null;
+  try {
+    return decryptWebhookSecret(row.webhookSecret, keys);
+  } catch {
+    return null;
+  }
+}
+
+export function toSourceView(row: DocumentSourceRow, opts: SourceViewOptions): SourceView {
   const reveal = opts.revealWebhookSecret ?? true;
   return {
     id: row.id,
@@ -309,7 +330,7 @@ export function toSourceView(row: DocumentSourceRow, opts: SourceViewOptions = {
     flavor: row.flavor as Flavor,
     config: row.config,
     hasSecret: Boolean(row.secretEnc),
-    webhookSecret: reveal && HAS_WEBHOOK.has(row.type) ? row.webhookSecret : null,
+    webhookSecret: reveal && HAS_WEBHOOK.has(row.type) ? webhookSecretView(row, opts.keys) : null,
     hasWebhookSecret: HAS_WEBHOOK.has(row.type) && Boolean(row.webhookSecret),
     webhookVerificationExpiresAt: row.type === 'notion' ? row.webhookVerificationExpiresAt : null,
     webhookDueAt: row.type === 'notion' ? row.webhookDueAt : null,
@@ -420,7 +441,11 @@ export interface CreateSourceInput {
 
 export interface SourceServiceOptions {
   allowedRoots: string[];
-  secretKey: string | undefined;
+  /**
+   * Both keys, not one: a source read during a rotation may hold a credential the retired key wrote,
+   * and every write here uses `current` ([ADR-0075](../../.ssot/ADR.md#adr-0075)).
+   */
+  keys: SecretKeyring;
 }
 
 function isUniqueViolation(err: unknown): boolean {
@@ -452,8 +477,11 @@ export async function createSource(db: Db, projectId: string, input: CreateSourc
   if (!FLAVORS.includes(flavor)) throw new ValidationError(`Unknown flavor "${String(flavor)}"`);
   const config = await validateConfig(input.type, input.config, opts);
   checkExtensions(flavor, config);
-  const secretEnc = input.secret ? encryptSecret(input.secret, opts.secretKey) : null;
-  const webhookSecret = input.type === 'git' ? randomSecret() : null;
+  const secretEnc = input.secret ? encryptSecret(input.secret, opts.keys) : null;
+  // Encrypted when the instance has a key and stored in the clear when it has none — a git source on a
+  // public repository must not be the thing that forces SECRET_KEY on an operator (ADR-0017), and
+  // `npm run rotate-secret` seals such a value the day a key appears.
+  const webhookSecret = input.type === 'git' ? encryptWebhookSecret(randomSecret(), opts.keys) : null;
   try {
     const syncIntervalMinutes = input.syncIntervalMinutes ?? null;
     const [row] = await db
@@ -555,7 +583,7 @@ export async function updateSource(
       if (kept.length !== stored.length) patch.config = { ...existing.config, extensions: kept };
     }
   }
-  if (input.secret !== undefined) patch.secretEnc = input.secret ? encryptSecret(input.secret, opts.secretKey) : null;
+  if (input.secret !== undefined) patch.secretEnc = input.secret ? encryptSecret(input.secret, opts.keys) : null;
   if (input.syncIntervalMinutes !== undefined && input.syncIntervalMinutes !== existing.syncIntervalMinutes) {
     patch.syncIntervalMinutes = input.syncIntervalMinutes;
     // Re-jittered rather than carried over: a source moved from daily to hourly would otherwise keep
@@ -573,11 +601,12 @@ export async function updateSource(
   return row;
 }
 
-export async function regenerateWebhookSecret(db: Db, projectId: string, sourceId: string): Promise<DocumentSourceRow> {
+export async function regenerateWebhookSecret(db: Db, projectId: string, sourceId: string, opts: SourceServiceOptions): Promise<DocumentSourceRow> {
   const existing = await getSource(db, projectId, sourceId);
   if (!existing) throw new NotFoundError('Source not found');
   if (existing.type !== 'git') throw new ValidationError('Only git sources have a webhook secret');
-  const [row] = await db.update(documentSources).set({ webhookSecret: randomSecret() }).where(eq(documentSources.id, sourceId)).returning();
+  const webhookSecret = encryptWebhookSecret(randomSecret(), opts.keys);
+  const [row] = await db.update(documentSources).set({ webhookSecret }).where(eq(documentSources.id, sourceId)).returning();
   return row;
 }
 

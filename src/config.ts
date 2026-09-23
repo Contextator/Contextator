@@ -424,6 +424,16 @@ export const EnvSchema = z
     /** Encrypts source secrets (git / Notion tokens) at rest. Only needed once such a source exists. */
     SECRET_KEY: z.string().min(32, 'must be at least 32 characters').optional(),
     /**
+     * The key being retired, set for the length of a rotation and removed afterwards
+     * ([ADR-0075](../../.ssot/ADR.md#adr-0075), [OPERATIONS.md](../../.ssot/OPERATIONS.md) §5.20).
+     *
+     * **It only ever decrypts.** Every write uses `SECRET_KEY`, so an instance running with both keys
+     * is already producing values the old key cannot open — which is what makes
+     * `npm run rotate-secret` a catch-up pass rather than a cutover, and what makes leaving this
+     * variable set for a week harmless except that the old key has not actually been retired yet.
+     */
+    SECRET_KEY_PREVIOUS: z.string().min(32, 'must be at least 32 characters').optional(),
+    /**
      * How much of a document's text is kept in `documents.content`, in bytes of UTF-8
      * ([ADR-0043](../../.ssot/ADR.md#adr-0043)). Past it the prefix is stored and
      * `documents.content_truncated` is set, so `read_document` can say what it is not showing.
@@ -987,6 +997,25 @@ export const EnvSchema = z
     }
     if (c.AUTH_SESSION_TTL_DAYS * 24 * 60 * 60_000 < c.AUTH_SESSION_IDLE_MS) {
       ctx.addIssue({ code: 'custom', path: ['AUTH_SESSION_TTL_DAYS'], message: 'must not be shorter than AUTH_SESSION_IDLE_MS' });
+    }
+    // A rotation with only the old key set reads everything and writes nothing it can read back; it is
+    // the shape of a half-finished edit to the environment, and it fails now rather than at the first
+    // token a source stores.
+    if (c.SECRET_KEY_PREVIOUS !== undefined && c.SECRET_KEY === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['SECRET_KEY'],
+        message: 'required when SECRET_KEY_PREVIOUS is set: the new key is the one everything is written with',
+      });
+    }
+    // Equal keys are not a rotation, and the danger is that they look like one: the pass would report
+    // every row converted while the key being retired is still the key in use.
+    if (c.SECRET_KEY_PREVIOUS !== undefined && c.SECRET_KEY_PREVIOUS === c.SECRET_KEY) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['SECRET_KEY_PREVIOUS'],
+        message: 'must differ from SECRET_KEY; set it to the key being retired, or unset it',
+      });
     }
   });
 

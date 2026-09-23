@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { SYNC_MAX_INTERVAL_MINUTES } from '../config.js';
 import type { AppContext } from '../context.js';
+import { keyringOf } from '../services/crypto.js';
 import { removeSourceDir } from '../services/data-dir.js';
 import { FLAVORS } from '../services/flavors.js';
 import { ConflictError, NotFoundError, ValidationError, getProjectById } from '../services/projects.js';
@@ -63,7 +64,7 @@ const UpdateBody = z.object({
 /** `/api/projects/:id/sources/*` — registered inside adminRoutes so the ADMIN_TOKEN hook applies. */
 export const sourceRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
   const { db, config, indexer, locks, log } = ctx;
-  const serviceOpts = { allowedRoots: config.ALLOWED_DOC_ROOTS, secretKey: config.SECRET_KEY };
+  const serviceOpts = { allowedRoots: config.ALLOWED_DOC_ROOTS, keys: keyringOf(config) };
 
   const requireProject = async (id: string) => {
     const project = await getProjectById(db, id);
@@ -76,7 +77,7 @@ export const sourceRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     await requireProject(id);
     // A viewer sees that a webhook exists; only an editor sees what it is signed with.
     const revealWebhookSecret = req.projectAccess !== 'viewer';
-    return (await listSources(db, id)).map((row) => toSourceView(row, { revealWebhookSecret }));
+    return (await listSources(db, id)).map((row) => toSourceView(row, { ...serviceOpts, revealWebhookSecret }));
   });
 
   app.post('/api/projects/:id/sources', async (req, reply) => {
@@ -90,7 +91,7 @@ export const sourceRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     const syncIntervalMinutes = body.syncIntervalMinutes !== undefined ? body.syncIntervalMinutes : config.SYNC_DEFAULT_INTERVAL_MINUTES || null;
     const row = await createSource(db, id, { ...body, syncIntervalMinutes }, serviceOpts);
     if (body.index) indexer.enqueue(id);
-    return reply.code(201).send(toSourceView(row));
+    return reply.code(201).send(toSourceView(row, serviceOpts));
   });
 
   app.patch('/api/projects/:id/sources/:sid', async (req) => {
@@ -114,7 +115,7 @@ export const sourceRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     // Settings that change what the source yields (path, branch, subdir, file types, content type)
     // only take effect on a run; queue one instead of leaving the source silently stale.
     if (row.flavor !== before.flavor || JSON.stringify(row.config) !== JSON.stringify(before.config)) indexer.enqueue(id);
-    return toSourceView(row);
+    return toSourceView(row, serviceOpts);
   });
 
   app.delete('/api/projects/:id/sources/:sid', async (req, reply) => {
@@ -185,7 +186,7 @@ export const sourceRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
   app.post('/api/projects/:id/sources/:sid/webhook-secret', async (req) => {
     const { id, sid } = SourceParams.parse(req.params);
     await requireProject(id);
-    return toSourceView(await regenerateWebhookSecret(db, id, sid));
+    return toSourceView(await regenerateWebhookSecret(db, id, sid, serviceOpts), serviceOpts);
   });
 
   await app.register(uploadRoutes, { ctx });

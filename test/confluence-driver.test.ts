@@ -411,8 +411,8 @@ describe('the confluence credential', () => {
   const KEY = '0'.repeat(64);
 
   it('is absent from the view the API returns', () => {
-    const row = source({}, encryptSecret(TOKEN, KEY));
-    const view = toSourceView(row);
+    const row = source({}, encryptSecret(TOKEN, { current: KEY }));
+    const view = toSourceView(row, { keys: { current: KEY } });
     expect(view.hasSecret).toBe(true);
     expect(JSON.stringify(view)).not.toContain(TOKEN);
     // Nor the ciphertext: a view carrying it would move the secret to anywhere the dashboard is read.
