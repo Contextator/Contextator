@@ -601,7 +601,7 @@ goes through the container.
 
 **One command takes the backup, because a `pg_dump` is not the installation:**
 
-<!-- MIRRORED-IN: ../wiki/Backup-and-Data.md -->
+<!-- MIRRORED-IN backup-and-restore: ../wiki/Backup-and-Data.md ../.ssot/OPERATIONS.md -->
 
 ```bash
 docker exec contextator npm run backup -- /data/backups/contextator-$(date +%F).tar.gz
@@ -627,10 +627,16 @@ docker compose restart contextator
 Run `npm run backup` with no path at all and it writes `<DATA_DIR>/backups/contextator-backup-<timestamp>.tar.gz`
 — on the data volume, never in the container's working directory, which is an image layer.
 
-**These commands are mirrored on `wiki/Backup-and-Data.md`** (*Backing up* and *Restoring*), for the
-reason the upgrade section below gives: the wiki is published and this file is not yet. That copy
-follows this one — `restore` overwrites a live database, so the two must not drift — and
-`test/readme-mirrors.test.ts` is what notices when they have.
+**These two blocks are mirrored in two other places**, and both follow this one:
+
+| Mirror | Why it exists |
+|---|---|
+| `wiki/Backup-and-Data.md` → *Backing up*, *Restoring* | The wiki is the only published documentation until this branch merges |
+| `.ssot/OPERATIONS.md` → §4.1, §4.2 | The operations record, read by a maintainer who holds both working trees |
+
+`restore` overwrites a live database, so these must not drift: change a command **here**, then in
+both. `test/readme-mirrors.test.ts` fails when they differ — in either direction, and also when one
+of them is dropped from the list above.
 
 The archive holds the database, the materialised files of every **upload** source — which exist nowhere
 else — and a manifest that is the first entry in it, so `--check` costs one small read of a file that
@@ -734,7 +740,7 @@ On an instance that keeps the cluster in a host directory (`CONTEXTATOR_PGDATA_P
 volume in any of this: copy that directory aside with `cp -a` on the host, check the copy, and empty
 the original instead of removing a volume.
 
-<!-- MIRRORED-IN: ../wiki/Backup-and-Data.md -->
+<!-- MIRRORED-IN postgres-major-upgrade: ../wiki/Backup-and-Data.md -->
 
 ```bash
 PGVOL=${CONTEXTATOR_PGDATA_VOLUME:-contextator-pgdata}   # from your .env; the default is shown
@@ -825,8 +831,10 @@ procedure that deletes a cluster has to have exactly one copy that decides what 
 |---|---|---|
 | `wiki/Backup-and-Data.md` → *Upgrading PostgreSQL across a major version* | The wiki is the only published documentation until this branch merges, and an operator whose cluster will not start cannot be sent to a page they cannot reach | Kept **byte-identical** to the commands above. **If you change a command here, change it there.** Where the two disagree, **this copy wins** |
 
-`test/readme-mirrors.test.ts` checks that byte-identity on every `npm test` run that can see the wiki
-checkout, and says so plainly when it cannot. See ADR-0073 as amended by ADR-0074.
+`test/readme-mirrors.test.ts` checks that byte-identity on every `npm test` run that can see the
+mirror checkouts, fails rather than shrugs when a listed mirror is missing, and pins how many mirrors
+this file claims — a list that can quietly get shorter is not a list. See ADR-0073 as amended by
+ADR-0074.
 
 ## Connecting AI clients
 

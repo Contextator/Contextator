@@ -1,98 +1,111 @@
-import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
  * `README.md` is the source for two destructive procedures — the backup and restore of ADR-0072, and
- * the PostgreSQL major-version upgrade — and `wiki/Backup-and-Data.md` carries a mirror of both
- * ([ADR-0073](../.ssot/ADR.md) as amended by ADR-0074). The mirror exists because the wiki is the only
- * published documentation until the README's branch merges, and an operator whose cluster will not
- * start cannot be sent to a page they cannot reach.
+ * the PostgreSQL major-version upgrade — and three other documents carry mirrors of them
+ * ([ADR-0073](../.ssot/ADR.md) as amended by ADR-0074). A mirror exists where the source cannot be
+ * reached by the audience that needs it: the wiki is the only published documentation until this
+ * branch merges, and `.ssot/OPERATIONS.md` is the operations record a maintainer reads.
  *
- * ADR-0074 promised the person editing the README a written list of what else to change, and a list is
- * itself a claim. This file measures it: every shell block the README marks as mirrored has to appear,
- * byte for byte, in the file the marker names.
+ * ADR-0074 promised the person editing the README a written list of what else to change. A list is
+ * itself a claim, so this file measures it — and measures it in the three ways a list goes wrong:
  *
- * WHAT MAKES THIS DIFFERENT FROM THE OTHER GATES IN THIS REPOSITORY, and it is worth being plain about:
- * the wiki is a **separate repository**, so this cannot be a gate that always runs. It runs for the
- * person who has both checkouts — which is exactly the person who can edit both — and it says, out
- * loud, when it did not. A check that silently passed because it found nothing to read would be worse
- * than no check, because the green would mean two different things.
+ *  1. **The copies drift.** Every shell block in a bracketed region has to appear, byte for byte, in
+ *     every file the region names.
+ *  2. **A mirror grows something the source does not have.** The comparison is an equality of block
+ *     lists, not a subset test — a `docker volume rm -f` added to the wiki and to nowhere else is a
+ *     destructive command nobody reviewed, and it used to pass.
+ *  3. **The list gets shorter.** Region count and per-region mirror counts are pinned to numbers, and
+ *     a named file that is not there when its checkout is fails instead of being skipped. A test that
+ *     goes quiet as its subject disappears is the failure mode this repository keeps finding, and it
+ *     would be absurd for the file that exists to catch it to have it.
+ *
+ * WHAT THIS CANNOT BE, and it is worth being plain about: the wiki and `.ssot` are **separate
+ * repositories**, so this cannot be a gate that always runs. It runs for whoever has the checkouts —
+ * which is whoever can edit them — and when a checkout is genuinely absent it says so as a `todo`
+ * rather than as a pass. Absent checkout and misspelt path are different things and are reported
+ * differently; that distinction is the whole of point 3.
  */
 
 const REPO = path.join(__dirname, '..');
 const readme = readFileSync(path.join(REPO, 'README.md'), 'utf8');
 
 /**
- * The README brackets a mirrored region between `<!-- MIRRORED-IN: <path> -->` and `<!-- /MIRRORED-IN -->`.
- *
- * A bracket rather than a heading, because "everything until the next heading" is not what is
- * mirrored: the backup section's `psql` / `pg_dump` block is deliberately not, and the first version
- * of this file failed on it. Where a region begins and ends is the author's statement, made where the
- * editing happens, and this file only measures the statement.
+ * What this README claims, pinned. These two numbers are the list's own length, and they are the
+ * assertion that deleting a marker pair — the quickest way to make a red run go green — is itself red.
  */
-const REGION = /<!--\s*MIRRORED-IN:\s*(\S+)\s*-->([\s\S]*?)<!--\s*\/MIRRORED-IN\s*-->/g;
+const EXPECTED = { regions: 2, mirrors: { 'backup-and-restore': 2, 'postgres-major-upgrade': 1 } } as const;
+
+/** `<!-- MIRRORED-IN <id>: <path> <path> -->` … `<!-- /MIRRORED-IN -->` in the source. */
+const SOURCE_REGION = /<!--\s*MIRRORED-IN\s+([\w-]+):\s*([^>]*?)\s*-->([\s\S]*?)<!--\s*\/MIRRORED-IN\s*-->/g;
+/** `<!-- MIRRORED-FROM <id>: … -->` … `<!-- /MIRRORED-FROM -->` in a mirror. Several per file is fine. */
+const mirrorRegion = (id: string) => new RegExp(`<!--\\s*MIRRORED-FROM\\s+${id}:[^>]*-->([\\s\\S]*?)<!--\\s*/MIRRORED-FROM\\s*-->`, 'g');
+
+const shellBlocks = (text: string): string[] => [...text.matchAll(/```bash\n[\s\S]*?\n```/g)].map((m) => m[0]);
+
+const regions = [...readme.matchAll(SOURCE_REGION)].map((m) => ({
+	id: m[1],
+	targets: m[2].split(/\s+/).filter(Boolean),
+	blocks: shellBlocks(m[3]),
+}));
+
+/** An opened region that is never closed matches nothing above, so it would vanish rather than fail. */
+const openers = (readme.match(/<!--\s*MIRRORED-IN\s/g) ?? []).length;
 
 /**
- * Where the wiki checkout is, or `null`.
+ * Where a mirror lives, and whether its repository is checked out at all.
  *
- * The marker's path is relative to the repository root on an ordinary clone (`…/Contextator` and
- * `…/wiki` as siblings). A git worktree puts the repository somewhere else entirely — `…/.worktrees/x`
- * — and the sibling is then one level further up, so both are tried rather than one being declared the
- * right layout.
+ * A marker's path is relative to the repository root on an ordinary clone (`…/Contextator`, `…/wiki`
+ * and `…/.ssot` as siblings). A git worktree puts the repository somewhere else — `…/.worktrees/x` —
+ * and the sibling is then one level further up, so both bases are tried rather than one being declared
+ * the right layout. `checkoutPresent` is the parent directory: if that is there and the file is not,
+ * the path in the README is wrong and that is a failure, not a skip.
  */
-function resolveMirror(relative: string): string | null {
+function locate(relative: string): { file: string | null; checkoutPresent: boolean } {
+	let checkoutPresent = false;
 	for (const base of [REPO, path.join(REPO, '..')]) {
 		const candidate = path.resolve(base, relative);
-		if (existsSync(candidate)) return candidate;
+		if (existsSync(candidate)) return { file: candidate, checkoutPresent: true };
+		if (existsSync(path.dirname(candidate))) checkoutPresent = true;
 	}
-	return null;
+	return { file: null, checkoutPresent };
 }
 
-/** Every ```bash … ``` block inside one bracketed region. */
-const shellBlocks = (region: string): string[] => [...region.matchAll(/```bash\n[\s\S]*?\n```/g)].map((m) => m[0]);
-
-const regions = [...readme.matchAll(REGION)].map((m) => ({ target: m[1], blocks: shellBlocks(m[2]), index: m.index ?? 0 }));
-
-/** An opened region that is never closed matches nothing above, so it would vanish silently. */
-const openers = (readme.match(/<!--\s*MIRRORED-IN:/g) ?? []).length;
-
 describe('README mirrors', () => {
-	it('marks the blocks it says are mirrored', () => {
-		// The floor under everything below: a list that has emptied itself passes every other
-		// assertion in this file, so the count is asserted before the contents are — and an unclosed
-		// region is an emptied list that still looks like a marked one.
-		expect(regions.length, 'no <!-- MIRRORED-IN: … --> … <!-- /MIRRORED-IN --> region in README.md').toBeGreaterThan(0);
+	it('still claims as many mirrors as it did when this was written', () => {
 		expect(openers, 'a MIRRORED-IN region is opened and never closed').toBe(regions.length);
+		expect(
+			regions.map((r) => r.id).sort(),
+			'a MIRRORED-IN region was removed or renamed — if that is deliberate, change EXPECTED and say why in the commit',
+		).toEqual(Object.keys(EXPECTED.mirrors).sort());
+		expect(regions.length).toBe(EXPECTED.regions);
 		for (const region of regions) {
-			expect(region.blocks.length, `the region for ${region.target} holds no shell block`).toBeGreaterThan(0);
+			expect(region.blocks.length, `the region ${region.id} holds no shell block`).toBeGreaterThan(0);
+			expect(region.targets.length, `${region.id} lost a mirror from its list`).toBe(EXPECTED.mirrors[region.id as keyof typeof EXPECTED.mirrors]);
 		}
 	});
 
 	for (const region of regions) {
-		const resolved = resolveMirror(region.target);
-		const where = `${region.target} (README char ${region.index})`;
+		for (const [n, target] of region.targets.entries()) {
+			const { file, checkoutPresent } = locate(target);
+			const name = `${region.id} → mirror ${n + 1} (${target})`;
 
-		if (resolved === null) {
-			// Not `it.skip`: a skip in a summary line is easy to read as a pass. This states the reason.
-			it.todo(`${where} — mirror checkout not present, byte-identity NOT verified in this run`);
-			continue;
-		}
-
-		it(`${where} — every mirrored shell block appears byte for byte`, () => {
-			const mirror = readFileSync(resolved, 'utf8');
-			const blocks = region.blocks;
-			expect(blocks.length).toBeGreaterThan(0);
-			for (const block of blocks) {
-				const digest = createHash('md5').update(block).digest('hex').slice(0, 8);
-				const firstLine = block.split('\n')[1] ?? '';
-				expect(
-					mirror.includes(block),
-					`README block ${digest} ("${firstLine.slice(0, 60)}…") is not in ${region.target}.\n` +
-						'The README is the source: copy the block across, do not edit it there.',
-				).toBe(true);
+			if (file === null && !checkoutPresent) {
+				// Not `it.skip`: a skip in a summary line reads as a pass. This states the reason.
+				it.todo(`${name} — checkout not present, byte-identity NOT verified in this run`);
+				continue;
 			}
-		});
+
+			it(`${name} — carries exactly the source's blocks, in order`, () => {
+				expect(file, `${target} is named by README.md but is not there — fix the path, or drop the mirror on purpose`).not.toBeNull();
+				const text = readFileSync(file as string, 'utf8');
+				const claimed = [...text.matchAll(mirrorRegion(region.id))].flatMap((m) => shellBlocks(m[1]));
+				expect(claimed.length, `${target} has no MIRRORED-FROM ${region.id} region — the mirror stopped declaring itself`).toBeGreaterThan(0);
+				// Equality, not inclusion: this is what catches a block the mirror grew on its own.
+				expect(claimed, `${target} does not carry exactly the blocks README.md marks as mirrored.\nThe README is the source: change it there, then copy across.`).toEqual(region.blocks);
+			});
+		}
 	}
 });
