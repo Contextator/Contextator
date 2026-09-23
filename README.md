@@ -684,8 +684,13 @@ DETAIL:  The data directory was initialized by PostgreSQL version 16, which is n
 ```
 
 The container exits 1, `restart: unless-stopped` starts it again, and it exits 1 again. **Nothing is
-damaged** — the old cluster is untouched and the old image still reads it — which is what makes the
-rollback below one block.
+damaged**: the old cluster is untouched and the old image still reads it.
+
+**If that is where you are right now, this is the way out and it is one line.** Put `CONTEXTATOR_TAG`
+back to the major you were on, `docker compose up -d`, and you are exactly where you were — then do the
+upgrade below, in order, on the running old image. Do **not** start with the rollback block further
+down: that one restores a *parked copy* of the cluster, and on an accidental pull no copy has been
+made yet, so it has nothing to restore from.
 
 `pg_upgrade` is not the path, and it is worth knowing why: it needs the binaries of *both* majors
 present at once, and this image carries exactly one. So the path is a logical dump and a restore — the
@@ -703,6 +708,18 @@ disk, the `PG_VERSION` comparison fails on a short copy — and any of those sto
 `docker volume rm`. **The removal is deliberately the last link**, so "stopped" and "nothing was
 removed" are the same sentence. Pasting a whole block in one go is how this is actually used, so the
 guards are in the shell and not in the prose around it.
+
+**Read what `STOPPED:` actually says, because the two blocks say different things on purpose.** Each
+is the `||` of a chain, so it prints when *any* link fails, and what is true at that moment depends on
+which side of the deletion the chain stopped on. In step 3 the deletion is the last link, so stopping
+means the volume is still there. In the rollback it cannot be last — the volume has to be emptied
+before it can be refilled — so the emptying and the refilling are one container command, and the
+message states the only thing true in every failure of that chain: the parked copy was only read. A
+message that said "nothing has been deleted" in both places would be wrong in one of them.
+
+On an instance that keeps the cluster in a host directory (`CONTEXTATOR_PGDATA_PATH`) there is no
+volume in any of this: copy that directory aside with `cp -a` on the host, check the copy, and empty
+the original instead of removing a volume.
 
 ```bash
 PGVOL=${CONTEXTATOR_PGDATA_VOLUME:-contextator-pgdata}   # from your .env; the default is shown
@@ -750,6 +767,10 @@ docker compose restart contextator
 `volume rename`. Put `CONTEXTATOR_TAG` back to the version you were on, then:
 
 ```bash
+# Re-stated here on purpose: a rollback is run later, and often in a shell that never saw step 1.
+PGVOL=${CONTEXTATOR_PGDATA_VOLUME:-contextator-pgdata}
+OLD=16
+
 docker compose down
 # The emptying and the refilling are one container command, so no link here deletes something the
 # next link then fails to replace. `$PGVOL-pg$OLD` is only ever read.
