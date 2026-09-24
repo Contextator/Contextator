@@ -717,13 +717,12 @@ missing key before it writes anything** instead of leaving you with a half-loade
 back. Keep the key where the archive is not.
 
 That key is rotatable — a four-step runbook (`npm run rotate-secret` is step 3, ADR-0075 is the record
-of why) — which gives the paragraph above a second edge: **a rotation makes every archive taken before
-it unrestorable by this instance, from step 2 onward, not step 4.** The old archive's fingerprint names
-the retired key, the environment holds the new one, and `restore` refuses — correctly, because the
-ciphertexts in that dump were written under the key that was retired. So a rotation has a fifth step
-that is about backups rather than keys, and the moment to decide it is *before* step 2: take a fresh
-archive right after step 2 and call that one the oldest restorable, or keep the retired key with the
-archives that still need it, labelled and stored somewhere those archives are not.
+of why) — which gives the paragraph above a second edge: **rotating the key, and then retiring the old
+one, invalidates every archive taken before the rotation.** The old archive's fingerprint names a key
+the environment no longer holds, and `restore` refuses — correctly, because the ciphertexts in that
+dump were written under the key that was retired. Exactly when in the four steps that refusal starts,
+and what to do about backups from before a rotation, is the runbook's business, not this paragraph's —
+see [wiki/Security#rotating-secret_key](https://github.com/Contextator/Contextator/wiki/Security#rotating-secret_key).
 
 The restore also refuses a dump taken from a newer PostgreSQL major version than the server it is going
 into; going the other way, 16 to 17, is the documented upgrade and is what the command exists for.
