@@ -1,16 +1,43 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { eq } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import type pg from 'pg';
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
 import { SESSION_COOKIE } from '../../src/auth/cookies.js';
 import { apiTokens, auditEvents, users, userFederatedIdentities, userSessions, type AuditEventRow } from '../../src/db/schema.js';
-import { createUser } from '../../src/services/auth/users.js';
+import { linkFederatedIdentity, provisionFederatedUser, unlinkFederatedIdentity } from '../../src/services/auth/federated-identities.js';
+import { revokeSessionsOfUser } from '../../src/services/auth/sessions.js';
+import { createUser, deleteUser, SSO_ONLY_PASSWORD_HASH, setPassword, updateUser, withUserRowLock } from '../../src/services/auth/users.js';
+import { PromotionRefusedError } from '../../src/services/errors.js';
+import { ConflictError } from '../../src/services/projects.js';
 import { applySchema, createTestDatabase, dropTestDatabase, type TestDatabase } from './support/postgres.js';
 import { startMcpInstance, type LiveInstance } from './support/mcp-instance.js';
 import { startLocalOidcProvider, type LocalOidcProvider } from './support/oidc-provider.js';
+
+/**
+ * Counts every scrypt derivation the in-process server runs ([ADR-0081](../../.ssot/ADR.md#adr-0081)
+ * §2, FR-602): a password sign-in to an SSO-only account has to cost the same one derivation an
+ * unknown username does, and a counter proves that where a stopwatch on a shared CI runner could not.
+ * Everything else in `node:crypto` is the real module; `scrypt` itself still runs, only counted.
+ */
+const scryptCalls = vi.hoisted(() => ({ n: 0 }));
+vi.mock(import('node:crypto'), async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    scrypt: ((...args: unknown[]) => {
+      scryptCalls.n++;
+      return Reflect.apply(actual.scrypt, undefined, args);
+    }) as typeof actual.scrypt,
+  };
+});
+
+/** The checkout this file runs from — `public/` is read as the browser would receive it. */
+const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
 /**
  * **A browser signing in through a local OIDC provider, end to end** ([ADR-0077](../../.ssot/ADR.md#adr-0077)).
@@ -119,6 +146,22 @@ async function driveOidcLogin(origin: string, next?: string): Promise<{ callback
 const events = (): Promise<AuditEventRow[]> => database.db.select().from(auditEvents);
 
 /**
+ * Waits until at least `atLeast` audit rows match. The callback's own events are written from its
+ * route's `onResponse` ([F14-MINOR-2]) and the backstop's from the reply's `finish`
+ * ([F14-T5-MINOR-2]) — both only once the response has gone, which can be a beat after `fetch` has
+ * already resolved on its headers — so `settled()` alone could run before `record()` was even called.
+ */
+async function waitForEvents(match: (e: AuditEventRow) => boolean, atLeast = 1, timeoutMs = 5_000): Promise<AuditEventRow[]> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    await live.ctx.audit.settled();
+    const rows = (await events()).filter(match);
+    if (rows.length >= atLeast || Date.now() > deadline) return rows;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+/**
  * A promise a test can resolve from the outside — the barrier primitive the [T6-MAJOR-1] race test
  * uses to park the login callback mid-flight (inside its row lock) and then resume it on cue, instead
  * of guessing at a `setTimeout` window that either flakes or races nothing at all.
@@ -130,6 +173,38 @@ function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => voi
   });
   return { promise, resolve };
 }
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Waits until some backend connected to `pool`'s database is queued on a lock — the observable proof
+ * that a request is blocked behind a row a test is holding, rather than a guess that 200 ms was long
+ * enough for it to get there. Returns `false` if nothing ever queued within `timeoutMs`.
+ */
+async function waitForLockWaiter(pool: pg.Pool, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const res = await pool.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'",
+    );
+    if ((res.rows[0]?.n ?? 0) > 0) return true;
+    if (Date.now() > deadline) return false;
+    await sleep(20);
+  }
+}
+
+/** The SQLSTATE of a driver error, whether it arrives bare or wrapped in Drizzle's query error. */
+const pgCode = (err: unknown): string | undefined => {
+  const e = err as { code?: unknown; cause?: { code?: unknown } } | null;
+  if (typeof e?.code === 'string') return e.code;
+  return typeof e?.cause?.code === 'string' ? e.cause.code : undefined;
+};
+
+/** `DELETE /api/auth/oidc/link`'s refusal, word for word as [ADR-0081](../../.ssot/ADR.md#adr-0081) §1 fixes it. */
+const LAST_SIGN_IN_METHOD_BODY = {
+  error: 'last_sign_in_method',
+  message: 'This account has no password of its own; unlinking SSO would leave it with no way to sign in. Ask an admin to set a password first.',
+};
 
 beforeAll(async () => {
   database = await createTestDatabase(baseUrl, 'oidc_sso');
@@ -175,6 +250,10 @@ describe('signing in through a local OIDC provider', () => {
     expect(user.username).toBe('firsttimer');
     expect(user.role).toBe('member');
     expect(user.isActive).toBe(true);
+    // No password of its own, and a hash no password can ever verify against ([ADR-0081], FR-602).
+    expect(user.passwordHash).toBe(SSO_ONLY_PASSWORD_HASH);
+    // An SSO sign-in is a sign-in: `last_login_at` moves just as a password one does ([F14-MINOR-3]).
+    expect(user.lastLoginAt).toBeInstanceOf(Date);
 
     const me = await fetch(`${live.origin}/api/auth/me`, { headers: { cookie: cookieHeader(jar) } });
     expect(me.status).toBe(200);
@@ -268,11 +347,13 @@ describe('signing in through a local OIDC provider', () => {
   it('records the sign-in in the audit log with the provider attached', async () => {
     provider.setNextIdentity({ sub: 'audited-user', email: 'audited@example.test', preferred_username: 'audited' });
     const { jar } = await driveOidcLogin(live.origin);
-    await live.ctx.audit.settled();
 
     const [link] = await database.db.select().from(userFederatedIdentities).where(eq(userFederatedIdentities.subject, 'audited-user'));
-    const rows = (await events()).filter((e) => e.actorUserId === link.userId && e.action === 'GET /api/auth/oidc/callback');
+    const rows = await waitForEvents((e) => e.actorUserId === link.userId && e.action === 'GET /api/auth/oidc/callback');
     expect(rows).toHaveLength(1);
+    // The status the browser actually got — the redirect — not a number fixed before the reply existed
+    // ([F14-MINOR-2]).
+    expect(rows[0].statusCode).toBe(302);
     expect(rows[0].actorLabel).toBe(`audited · sso:${new URL(provider.issuer).hostname}`);
     expect(rows[0].detail).toMatchObject({ provider: new URL(provider.issuer).hostname, newAccount: true });
     expect(jar[SESSION_COOKIE]).toBeTruthy();
@@ -504,11 +585,11 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
     expect(link).toBeTruthy();
     expect(link.userId).toBe(userId); // the live session's own account — never one named by the flow cookie
 
-    await live.ctx.audit.settled();
-    const rows = (await events()).filter(
+    const rows = await waitForEvents(
       (e) => e.actorUserId === userId && e.action === 'GET /api/auth/oidc/callback' && (e.detail as { linked?: boolean } | null)?.linked === true,
     );
     expect(rows).toHaveLength(1);
+    expect(rows[0].statusCode).toBe(302);
   });
 
   it('returns to the tokens page fragment after linking, matching what public/tokens.js actually sends ([T3-MINOR-2], tur 3 review)', async () => {
@@ -516,15 +597,21 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
     provider.setNextIdentity({ sub: 'linker-next-fragment-identity', preferred_username: 'irrelevant-here' });
 
     const cookie = cookieHeader(jar);
-    // `public/tokens.js`'s `linkOidc()` sends this exact literal. A bare `#/~tokens` (no leading `/`)
-    // fails `safeNext`'s `startsWith('/')` check and silently collapses to `/`, losing the
-    // return-to-tokens-page destination — this proves the fixed literal survives the round trip.
-    const { jar: flowJar, callbackUrl } = await startOidcFlow(live.origin, { startPath: '/api/auth/oidc/link', cookie, next: '/#/~tokens' });
+    // The value comes from `public/tokens.js` itself rather than a copy of it here ([F14-T4-MINOR-3]):
+    // `linkOidc()` sends `TOKENS_RETURN_PATH`, so a change there is what this test exercises. A bare
+    // `#/~tokens` (no leading `/`) fails `safeNext`'s `startsWith('/')` check and silently collapses
+    // to `/`, losing the return-to-tokens-page destination.
+    const tokensJs = await readFile(path.join(REPO_ROOT, 'public', 'tokens.js'), 'utf8');
+    const returnPath = /export const TOKENS_RETURN_PATH = '([^']+)';/.exec(tokensJs)?.[1];
+    expect(returnPath).toBeTruthy();
+    expect(tokensJs).toMatch(/\/api\/auth\/oidc\/link', \{ method: 'POST', body: \{ next: TOKENS_RETURN_PATH \} \}/);
+
+    const { jar: flowJar, callbackUrl } = await startOidcFlow(live.origin, { startPath: '/api/auth/oidc/link', cookie, next: returnPath });
     const merged = { ...jar, ...flowJar };
     const callback = await hitCallback(callbackUrl, merged);
 
     expect(callback.status).toBe(302);
-    expect(callback.headers.get('location')).toBe('/#/~tokens');
+    expect(callback.headers.get('location')).toBe(returnPath);
   });
 
   it('refuses to link an identity that is already linked to a different account', async () => {
@@ -779,15 +866,16 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
       .where(eq(userFederatedIdentities.subject, 'root-promoted-after-link-identity'));
     expect(after).toHaveLength(1);
 
-    await live.ctx.audit.settled();
-    const rows = (await events()).filter(
+    const rows = await waitForEvents(
       (e) =>
         e.actorUserId === userId &&
         e.action === 'GET /api/auth/oidc/callback' &&
         (e.detail as { refused?: string } | null)?.refused === 'root_local_only',
     );
     expect(rows).toHaveLength(1);
-    expect(rows[0].statusCode).toBe(403);
+    // Written with the status the browser actually received — the refusal's redirect — rather than a
+    // `403` the handler picked before any reply existed ([F14-MINOR-2]).
+    expect(rows[0].statusCode).toBe(302);
   });
 
   it("revokes and clears a session whose account reads root through a path other than updateUser's promotion gate, instead of leaving it able to act as root ([T4-MAJOR-1], tur 4 review; backstop kept, tur 6 addendum of ADR-0077)", async () => {
@@ -828,6 +916,56 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
     // same (now-cleared) cookie would find nothing live either.
     const revoked = await database.db.select().from(userSessions).where(eq(userSessions.userId, link.userId));
     expect(revoked.every((s) => s.revokedAt !== null)).toBe(true);
+
+    // And the cut-off is on record ([F14-T5-MINOR-2]): which request, whose session, with the status the
+    // anonymous request actually got.
+    const refusals = await waitForEvents(
+      (e) => e.actorUserId === link.userId && (e.detail as { refused?: string } | null)?.refused === 'root_local_only',
+    );
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0].action).toBe('POST /api/users');
+    expect(refusals[0].statusCode).toBe(401);
+    expect((refusals[0].detail as { authMethod?: string }).authMethod).toBe('sso');
+  });
+
+  it('leaves a root-reading SSO session alone on the public routes and /metrics, and cuts it off on the first route that needs a principal ([F14-T5-MINOR-1])', async () => {
+    provider.setNextIdentity({ sub: 'backstop-exemptions', preferred_username: 'backstopexemptions' });
+    const { callback, jar } = await driveOidcLogin(live.origin);
+    expect(callback.status).toBe(302);
+    const [link] = await database.db.select().from(userFederatedIdentities).where(eq(userFederatedIdentities.subject, 'backstop-exemptions'));
+    await database.db.update(users).set({ role: 'root' }).where(eq(users.id, link.userId));
+
+    const liveSessions = async (): Promise<number> =>
+      (await database.db.select().from(userSessions).where(eq(userSessions.userId, link.userId))).filter((s) => s.revokedAt === null).length;
+    const clearsCookie = (res: Response): boolean => res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=;`));
+    const backstopRows = async (): Promise<AuditEventRow[]> => {
+      await live.ctx.audit.settled();
+      return (await events()).filter(
+        (e) => e.actorUserId === link.userId && (e.detail as { refused?: string } | null)?.refused === 'root_local_only',
+      );
+    };
+
+    for (const route of ['/api/health', '/api/setup/status']) {
+      const res = await fetch(`${live.origin}${route}`, { headers: { cookie: cookieHeader(jar) } });
+      expect(res.status, route).toBe(200);
+      expect(clearsCookie(res), route).toBe(false);
+    }
+    const metrics = await fetch(`${live.origin}/metrics`, { headers: { cookie: cookieHeader(jar) } });
+    expect(metrics.status).not.toBe(401);
+    expect(clearsCookie(metrics)).toBe(false);
+
+    expect(await liveSessions()).toBeGreaterThan(0);
+    expect(await backstopRows()).toHaveLength(0);
+
+    // The exemption is exactly those routes: the next ordinary request is where the backstop bites.
+    const me = await fetch(`${live.origin}/api/auth/me`, { headers: { cookie: cookieHeader(jar) } });
+    expect(me.status).toBe(401);
+    expect(clearsCookie(me)).toBe(true);
+    expect(await liveSessions()).toBe(0);
+    const rows = await waitForEvents(
+      (e) => e.actorUserId === link.userId && (e.detail as { refused?: string } | null)?.refused === 'root_local_only',
+    );
+    expect(rows.map((r) => r.action)).toEqual(['GET /api/auth/me']);
   });
 
   it('reports canLinkOidc as false for root and true for a member on GET /api/auth/me (mutation M7, tur 3 review)', async () => {
@@ -935,6 +1073,9 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
           .where(eq(userFederatedIdentities.subject, 'race-login-vs-unlink-identity'));
         expect(link).toHaveLength(0);
       } finally {
+        // Released on every path ([F14-T7-MINOR-3]): an assertion failing above while the callback is
+        // still parked inside its row lock would otherwise hold that lock until `afterAll` times out.
+        release.resolve();
         live.ctx.testHooks = undefined;
       }
     });
@@ -1064,6 +1205,252 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
       }
     });
   });
+
+  describe('unlinking refuses to remove the last way in ([ADR-0081], FR-602)', () => {
+    const unlinkWith = (jar: Record<string, string>): Promise<Response> =>
+      fetch(`${live.origin}/api/auth/oidc/link`, {
+        method: 'DELETE',
+        headers: { cookie: cookieHeader(jar), 'sec-fetch-site': 'same-origin' },
+        redirect: 'manual',
+      });
+    const linksOf = (userId: string) => database.db.select().from(userFederatedIdentities).where(eq(userFederatedIdentities.userId, userId));
+
+    it('answers 409 last_sign_in_method for a passwordless account with one link, and changes nothing — then 204 once an admin has set a password', async () => {
+      provider.setNextIdentity({ sub: 'k8-single-link', preferred_username: 'k8singlelink' });
+      const { callback, jar } = await driveOidcLogin(live.origin);
+      expect(callback.status).toBe(302);
+      const [link] = await database.db.select().from(userFederatedIdentities).where(eq(userFederatedIdentities.subject, 'k8-single-link'));
+      const userId = link.userId;
+      const [account] = await database.db.select().from(users).where(eq(users.id, userId));
+      expect(account.passwordHash).toBe(SSO_ONLY_PASSWORD_HASH);
+
+      const mint = await fetch(`${live.origin}/api/tokens`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', cookie: cookieHeader(jar) },
+        body: JSON.stringify({ name: 'k8-probe', scope: ['GET /api/auth/me'] }),
+      });
+      expect(mint.status).toBe(201);
+      const secret = (await mint.json()).secret as string;
+
+      const refused = await unlinkWith(jar);
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toEqual(LAST_SIGN_IN_METHOD_BODY);
+
+      // The refusal changed nothing: the link, the session and the token all survive it.
+      expect(await linksOf(userId)).toHaveLength(1);
+      const me = await fetch(`${live.origin}/api/auth/me`, { headers: { cookie: cookieHeader(jar) } });
+      expect(me.status).toBe(200);
+      const meByToken = await fetch(`${live.origin}/api/auth/me`, { headers: { authorization: `Bearer ${secret}` } });
+      expect(meByToken.status).toBe(200);
+      const sessions = await database.db.select().from(userSessions).where(eq(userSessions.userId, userId));
+      expect(sessions.length).toBeGreaterThan(0);
+      expect(sessions.every((s) => s.revokedAt === null)).toBe(true);
+      const tokens = await database.db.select().from(apiTokens).where(eq(apiTokens.userId, userId));
+      expect(tokens.every((t) => t.revokedAt === null)).toBe(true);
+      await live.ctx.audit.settled();
+      expect((await events()).filter((e) => e.actorUserId === userId && e.action === 'DELETE /api/auth/oidc/link')).toHaveLength(0);
+
+      // What ADR-0081 tells the user to do: an admin sets a password, which replaces the sentinel.
+      await setPassword(database.db, userId, 'a-long-enough-password-7!', false);
+      const allowed = await unlinkWith(jar);
+      expect(allowed.status).toBe(204);
+      expect(await linksOf(userId)).toHaveLength(0);
+    });
+
+    it('answers 409 for a passwordless account with several links too, and keeps every one of them — the route would have removed them all at once', async () => {
+      provider.setNextIdentity({ sub: 'k8-multi-link', preferred_username: 'k8multilink' });
+      const { callback, jar } = await driveOidcLogin(live.origin);
+      expect(callback.status).toBe(302);
+      const [link] = await database.db.select().from(userFederatedIdentities).where(eq(userFederatedIdentities.subject, 'k8-multi-link'));
+      await database.db
+        .insert(userFederatedIdentities)
+        .values({ userId: link.userId, provider: 'second', issuer: 'https://second-idp.example', subject: 'k8-multi-link-second' });
+      expect(await linksOf(link.userId)).toHaveLength(2);
+
+      const refused = await unlinkWith(jar);
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toEqual(LAST_SIGN_IN_METHOD_BODY);
+      expect(await linksOf(link.userId)).toHaveLength(2);
+    });
+
+    it('answers a no-op 204 for an account with no link at all, with a password or without one, and revokes nothing', async () => {
+      const withPassword = await signInLocalUser('k8-nolink-password');
+      const withoutPassword = await signInLocalUser('k8-nolink-sentinel');
+      await database.db.update(users).set({ passwordHash: SSO_ONLY_PASSWORD_HASH }).where(eq(users.id, withoutPassword.userId));
+
+      for (const account of [withPassword, withoutPassword]) {
+        const res = await unlinkWith(account.jar);
+        expect(res.status).toBe(204);
+        const me = await fetch(`${live.origin}/api/auth/me`, { headers: { cookie: cookieHeader(account.jar) } });
+        expect(me.status).toBe(200);
+      }
+    });
+
+    it('answers 204 for an account with a password of its own and removes its link (the existing unlink path, unchanged)', async () => {
+      const { jar, userId } = await signInLocalUser('k8-password-link');
+      provider.setNextIdentity({ sub: 'k8-password-link-identity', preferred_username: 'irrelevant-here' });
+      const { jar: flowJar, callbackUrl } = await startOidcFlow(live.origin, { startPath: '/api/auth/oidc/link', cookie: cookieHeader(jar) });
+      expect((await hitCallback(callbackUrl, { ...jar, ...flowJar })).status).toBe(302);
+      expect(await linksOf(userId)).toHaveLength(1);
+
+      const res = await unlinkWith(jar);
+      expect(res.status).toBe(204);
+      expect(await linksOf(userId)).toHaveLength(0);
+    });
+  });
+
+  it('refuses a password sign-in to an SSO-only account exactly as it refuses an unknown username — same body, and one password derivation paid for each ([ADR-0081] §2)', async () => {
+    provider.setNextIdentity({ sub: 'k8-sentinel-login', preferred_username: 'k8sentinellogin' });
+    const { callback } = await driveOidcLogin(live.origin);
+    expect(callback.status).toBe(302);
+    const [account] = await database.db.select().from(users).where(eq(users.username, 'k8sentinellogin'));
+    expect(account.passwordHash).toBe(SSO_ONLY_PASSWORD_HASH);
+
+    const login = (username: string): Promise<Response> =>
+      fetch(`${live.origin}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ username, password: 'whatever-password-1!' }),
+      });
+    /** Runs one sign-in attempt and counts how many `scrypt` derivations it paid for. */
+    const derivationsOf = async (username: string): Promise<{ res: Response; body: unknown; derivations: number }> => {
+      const before = scryptCalls.n;
+      const res = await login(username);
+      const body = await res.json();
+      return { res, body, derivations: scryptCalls.n - before };
+    };
+
+    // The first unknown-username attempt also builds the lazy dummy hash (one extra derivation, once
+    // per process) — spent here so both measured attempts below start from the same state.
+    expect((await login('k8-unknown-warmup')).status).toBe(401);
+
+    const unknown = await derivationsOf('k8-no-such-user');
+    const sentinel = await derivationsOf('k8sentinellogin');
+
+    expect(unknown.res.status).toBe(401);
+    expect(sentinel.res.status).toBe(401);
+    expect(sentinel.body).toEqual({ error: 'invalid_credentials', message: 'Wrong username or password' });
+    expect(sentinel.body).toEqual(unknown.body);
+    // A counter, not a stopwatch: the unknown-username path pays exactly one derivation, and so must
+    // the sentinel path — without `burnPasswordTime` it would pay none and answer measurably faster.
+    expect(unknown.derivations).toBe(1);
+    expect(sentinel.derivations).toBe(1);
+  });
+
+  describe('each SSO write re-decides under the account row lock, whichever side takes it first ([F14-T7-MINOR-3]: L-b, L-e, L-f, L-g)', () => {
+    it('a login callback queued behind an unlink that already holds the row sees the link gone and writes no session (L-b)', async () => {
+      const { jar: ownerJar, userId } = await signInLocalUser('lb-unlink-first');
+      provider.setNextIdentity({ sub: 'lb-unlink-first-identity', preferred_username: 'irrelevant-here' });
+      const { jar: linkFlowJar, callbackUrl: linkCallbackUrl } = await startOidcFlow(live.origin, {
+        startPath: '/api/auth/oidc/link',
+        cookie: cookieHeader(ownerJar),
+      });
+      expect((await hitCallback(linkCallbackUrl, { ...ownerJar, ...linkFlowJar })).status).toBe(302);
+
+      provider.setNextIdentity({ sub: 'lb-unlink-first-identity', preferred_username: 'irrelevant-here' });
+      const { jar: loginFlowJar, callbackUrl: loginCallbackUrl } = await startOidcFlow(live.origin);
+
+      // The unlink's own transaction, parked while it holds the row: it has deleted the link and revoked
+      // the sessions, and not yet committed — so the callback's pre-lock lookup still finds the link.
+      const entered = deferred<void>();
+      const release = deferred<void>();
+      const holder = withUserRowLock(database.db, userId, async (tx) => {
+        await unlinkFederatedIdentity(tx, userId);
+        await revokeSessionsOfUser(tx, userId);
+        entered.resolve();
+        await release.promise;
+      });
+      try {
+        await entered.promise;
+        const callbackPromise = hitCallback(loginCallbackUrl, loginFlowJar);
+        expect(await waitForLockWaiter(database.pool)).toBe(true);
+        release.resolve();
+        await holder;
+        const callback = await callbackPromise;
+
+        expect(callback.status).toBe(302);
+        expect(callback.headers.get('location')).toBe('/login?oidc_error=no_account');
+        expect(loginFlowJar[SESSION_COOKIE]).toBeFalsy();
+        const sessions = await database.db.select().from(userSessions).where(eq(userSessions.userId, userId));
+        expect(sessions.every((s) => s.revokedAt !== null)).toBe(true);
+      } finally {
+        release.resolve();
+        await holder.catch(() => undefined);
+      }
+    });
+
+    it('a link callback queued behind a promotion to root that already holds the row sees root and refuses to link (L-f, L-g)', async () => {
+      const { jar, userId } = await signInLocalUser('lfg-promote-first');
+      provider.setNextIdentity({ sub: 'lfg-promote-first-identity', preferred_username: 'irrelevant-here' });
+      const { jar: flowJar, callbackUrl } = await startOidcFlow(live.origin, { startPath: '/api/auth/oidc/link', cookie: cookieHeader(jar) });
+
+      const entered = deferred<void>();
+      const release = deferred<void>();
+      const promotion = updateUser(
+        database.db,
+        userId,
+        { role: 'root' },
+        {
+          onRowLocked: async () => {
+            entered.resolve();
+            await release.promise;
+          },
+        },
+      );
+      try {
+        await entered.promise;
+        let settled = false;
+        const callbackPromise = hitCallback(callbackUrl, { ...jar, ...flowJar }).finally(() => {
+          settled = true;
+        });
+        // The callback is queued on the row the promotion holds — observed, not assumed.
+        expect(await waitForLockWaiter(database.pool)).toBe(true);
+        expect(settled).toBe(false);
+        release.resolve();
+
+        const promoted = await promotion;
+        expect(promoted.role).toBe('root');
+        const callback = await callbackPromise;
+        expect(callback.status).toBe(302);
+        expect(callback.headers.get('location')).toBe('/login?oidc_error=root_local_only');
+        const links = await database.db.select().from(userFederatedIdentities).where(eq(userFederatedIdentities.userId, userId));
+        expect(links).toHaveLength(0);
+      } finally {
+        release.resolve();
+        await promotion.catch(() => undefined);
+      }
+    });
+
+    it('a promotion to root queued behind a link that already holds the row sees the link and is refused (L-e)', async () => {
+      const { userId } = await signInLocalUser('le-link-first');
+      const lookup = { issuer: provider.issuer, subject: 'le-link-first-identity' };
+
+      const entered = deferred<void>();
+      const release = deferred<void>();
+      const holder = withUserRowLock(database.db, userId, async (tx) => {
+        await linkFederatedIdentity(tx, { userId, provider: 'local', ...lookup });
+        entered.resolve();
+        await release.promise;
+      });
+      try {
+        await entered.promise;
+        const promotion = updateUser(database.db, userId, { role: 'root' });
+        promotion.catch(() => undefined);
+        expect(await waitForLockWaiter(database.pool)).toBe(true);
+        release.resolve();
+        await holder;
+
+        await expect(promotion).rejects.toBeInstanceOf(PromotionRefusedError);
+        const [row] = await database.db.select().from(users).where(eq(users.id, userId));
+        expect(row.role).toBe('member');
+        const links = await database.db.select().from(userFederatedIdentities).where(eq(userFederatedIdentities.userId, userId));
+        expect(links).toHaveLength(1);
+      } finally {
+        release.resolve();
+        await holder.catch(() => undefined);
+      }
+    });
+  });
 });
 
 describe('root cannot be reached through a linked SSO identity (tur 6 addendum of ADR-0077)', () => {
@@ -1101,6 +1488,13 @@ describe('root cannot be reached through a linked SSO identity (tur 6 addendum o
     });
     expect(mint.status).toBe(201);
     const secret = (await mint.json()).secret as string;
+
+    // An auto-provisioned account has no password of its own, and unlinking its only way in is refused
+    // (`409 last_sign_in_method`, [ADR-0081], FR-602 — proven on its own below). Giving it one first is
+    // exactly what ADR-0081 tells an administrator to do; it goes straight to the service here, since
+    // the admin route also revokes every session and token, which is what this test wants the unlink
+    // itself to be seen doing.
+    await setPassword(database.db, link.userId, 'a-long-enough-password-4!', false);
 
     // Both credentials work before the unlink.
     const sessionBefore = await fetch(`${live.origin}/api/auth/me`, { headers: { cookie: cookieHeader(jar) } });
@@ -1248,6 +1642,187 @@ describe('root cannot be reached through a linked SSO identity (tur 6 addendum o
         live.ctx.testHooks = undefined;
       }
     });
+  });
+});
+
+describe('a "next" outside Latin-1 ([F14-T2-MINOR-1])', () => {
+  it('redirects to the percent-encoded path instead of failing to write the Location header', async () => {
+    provider.setNextIdentity({ sub: 'non-latin1-next', preferred_username: 'nonlatin1next' });
+    const turkish = await driveOidcLogin(live.origin, '/ş');
+    expect(turkish.callback.status).toBe(302);
+    expect(turkish.callback.headers.get('location')).toBe('/%C5%9F');
+    expect(turkish.jar[SESSION_COOKIE]).toBeTruthy();
+
+    provider.setNextIdentity({ sub: 'non-latin1-next', preferred_username: 'nonlatin1next' });
+    const cjk = await driveOidcLogin(live.origin, '/文書');
+    expect(cjk.callback.status).toBe(302);
+    expect(cjk.callback.headers.get('location')).toBe('/%E6%96%87%E6%9B%B8');
+  });
+});
+
+describe('federated identity writes under concurrency ([F14-MINOR-1], [F14-T2-MINOR-2])', () => {
+  it('provisions the account and its identity row in one transaction: losing the identity insert leaves no orphan account behind', async () => {
+    const owner = await createUser(database.db, { username: 'provision-owner', role: 'member', password: 'a-long-enough-password-6!' });
+    const lookup = { issuer: 'https://provision-probe.example', subject: 'provision-probe-subject' };
+    // The identity is already taken — exactly what a concurrent first sign-in that committed first
+    // looks like from this attempt's side, once its own account row is already written.
+    await database.db.insert(userFederatedIdentities).values({ userId: owner.id, provider: 'probe', ...lookup });
+
+    const result = await provisionFederatedUser(database.db, { provider: 'probe', ...lookup, role: 'member', preferredUsername: 'orphan-probe' });
+
+    expect(result.created).toBe(false);
+    expect(result.user.id).toBe(owner.id);
+    const orphans = await database.db.select().from(users).where(eq(users.username, 'orphan-probe'));
+    expect(orphans).toHaveLength(0);
+  });
+
+  it('answers a link that loses the unique-index race with ConflictError, not a raw constraint error', async () => {
+    const loser = await createUser(database.db, { username: 'link-race-loser', role: 'member', password: 'a-long-enough-password-6!' });
+    const winner = await createUser(database.db, { username: 'link-race-winner', role: 'member', password: 'a-long-enough-password-6!' });
+    const lookup = { issuer: 'https://link-race.example', subject: 'link-race-subject' };
+
+    // The winner's insert, left uncommitted: the loser's fast-path read finds nothing, and its own
+    // insert then waits on the unique index until the winner commits — and trips it.
+    const client = await database.pool.connect();
+    let committed = false;
+    try {
+      await client.query('BEGIN');
+      await client.query('INSERT INTO user_federated_identities (user_id, provider, issuer, subject) VALUES ($1, $2, $3, $4)', [
+        winner.id,
+        'probe',
+        lookup.issuer,
+        lookup.subject,
+      ]);
+      const link = linkFederatedIdentity(database.db, { userId: loser.id, provider: 'probe', ...lookup });
+      link.catch(() => undefined);
+      expect(await waitForLockWaiter(database.pool)).toBe(true);
+      await client.query('COMMIT');
+      committed = true;
+
+      await expect(link).rejects.toBeInstanceOf(ConflictError);
+      const rows = await database.db.select().from(userFederatedIdentities).where(eq(userFederatedIdentities.subject, lookup.subject));
+      expect(rows.map((r) => r.userId)).toEqual([winner.id]);
+    } finally {
+      if (!committed) await client.query('ROLLBACK').catch(() => undefined);
+      client.release();
+    }
+  });
+});
+
+describe('removing root accounts: one lock order, and the last active root stays ([F14-T7-MINOR-1], [F14-T10-MINOR-1])', () => {
+  // A database of its own: these tests count active roots, and the shared one has roots other tests
+  // created and left behind.
+  let rootsDb: TestDatabase;
+  const password = 'a-long-enough-password-8!';
+
+  beforeAll(async () => {
+    rootsDb = await createTestDatabase(baseUrl, 'oidc_root_locks');
+    await applySchema(rootsDb);
+  });
+
+  afterAll(async () => {
+    if (rootsDb) await dropTestDatabase(baseUrl, rootsDb);
+  });
+
+  beforeEach(async () => {
+    await rootsDb.db.update(users).set({ role: 'member' }).where(eq(users.role, 'root'));
+  });
+
+  const activeRoots = async (): Promise<string[]> =>
+    (await rootsDb.db.select().from(users).where(eq(users.role, 'root'))).filter((u) => u.isActive).map((u) => u.id);
+
+  /**
+   * Parks each caller right after it holds its account row, until all `parties` are parked or
+   * `fallbackMs` passes. Under the old order (row first, then the root set) both removers get here
+   * holding their own row and then each asks for the other's — a guaranteed deadlock. Under the fixed
+   * order the second remover is still queued on the root set, never arrives, and the first moves on
+   * after the fallback.
+   */
+  function rowLockedBarrier(parties: number, fallbackMs = 750): () => Promise<void> {
+    let arrived = 0;
+    const all = deferred<void>();
+    return async () => {
+      arrived += 1;
+      if (arrived >= parties) all.resolve();
+      await Promise.race([all.promise, sleep(fallbackMs)]);
+    };
+  }
+
+  /** Exactly one remover wins, the other is refused as the last root — and neither is a deadlock. */
+  function expectOneWinnerNoDeadlock(results: PromiseSettledResult<unknown>[]): void {
+    const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    for (const r of rejected) expect(pgCode(r.reason), String(r.reason)).not.toBe('40P01');
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBeInstanceOf(ConflictError);
+  }
+
+  it('demotes one of two roots demoted at the same moment and refuses the other, without a deadlock (40P01)', async () => {
+    const x = await createUser(rootsDb.db, { username: 'deadlock-root-x', role: 'root', password });
+    const y = await createUser(rootsDb.db, { username: 'deadlock-root-y', role: 'root', password });
+    const onRowLocked = rowLockedBarrier(2);
+
+    const results = await Promise.allSettled([
+      updateUser(rootsDb.db, x.id, { role: 'member' }, { onRowLocked }),
+      updateUser(rootsDb.db, y.id, { role: 'member' }, { onRowLocked }),
+    ]);
+
+    expectOneWinnerNoDeadlock(results);
+    expect(await activeRoots()).toHaveLength(1);
+  });
+
+  it('takes the locks in the same order for a delete racing a demotion, without a deadlock', async () => {
+    const x = await createUser(rootsDb.db, { username: 'deadlock-delete-x', role: 'root', password });
+    const y = await createUser(rootsDb.db, { username: 'deadlock-delete-y', role: 'root', password });
+    const onRowLocked = rowLockedBarrier(2);
+
+    const results = await Promise.allSettled([
+      deleteUser(rootsDb.db, x.id, { onRowLocked }),
+      updateUser(rootsDb.db, y.id, { role: 'member' }, { onRowLocked }),
+    ]);
+
+    expectOneWinnerNoDeadlock(results);
+    expect(await activeRoots()).toHaveLength(1);
+  });
+
+  it('refuses to demote, disable or delete the last active root, and leaves it an active root', async () => {
+    const only = await createUser(rootsDb.db, { username: 'last-root', role: 'root', password });
+
+    await expect(updateUser(rootsDb.db, only.id, { role: 'member' })).rejects.toBeInstanceOf(ConflictError);
+    await expect(updateUser(rootsDb.db, only.id, { isActive: false })).rejects.toBeInstanceOf(ConflictError);
+    await expect(deleteUser(rootsDb.db, only.id)).rejects.toBeInstanceOf(ConflictError);
+
+    expect(await activeRoots()).toEqual([only.id]);
+  });
+
+  it('demotes a root while another active root remains', async () => {
+    const x = await createUser(rootsDb.db, { username: 'spare-root-x', role: 'root', password });
+    const y = await createUser(rootsDb.db, { username: 'spare-root-y', role: 'root', password });
+
+    const demoted = await updateUser(rootsDb.db, x.id, { role: 'member' });
+
+    expect(demoted.role).toBe('member');
+    expect(await activeRoots()).toEqual([y.id]);
+  });
+
+  it('decides losesRoot from the read under the lock: the other root demoted in between makes this the last one', async () => {
+    const x = await createUser(rootsDb.db, { username: 'stale-root-x', role: 'root', password });
+    const y = await createUser(rootsDb.db, { username: 'stale-root-y', role: 'root', password });
+
+    const demotion = updateUser(
+      rootsDb.db,
+      x.id,
+      { role: 'member' },
+      {
+        // After the unlocked pre-read (which saw two roots), before any lock: the other root goes.
+        onBeforeLock: async () => {
+          await rootsDb.db.update(users).set({ role: 'member' }).where(eq(users.id, y.id));
+        },
+      },
+    );
+
+    await expect(demotion).rejects.toBeInstanceOf(ConflictError);
+    expect(await activeRoots()).toEqual([x.id]);
   });
 });
 

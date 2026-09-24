@@ -28,26 +28,6 @@ export type Principal =
       /** The single project this token is restricted to, or `null` for every project the owner reaches. */
       projectId: string | null;
       mustChangePassword: boolean;
-    }
-  | {
-      /**
-       * A federated (OIDC) sign-in ([ADR-0077](../../.ssot/ADR.md#adr-0077)), used **only** as the
-       * `AuditContext.principal` for the audit row the callback route writes directly — the callback's
-       * GET method means the automatic audit hook never fires for it (`policy.ts`'s `SAFE_METHODS`). It
-       * is never assigned to `req.principal`: the moment sign-in succeeds, the callback calls the same
-       * `signIn()` helper password login uses, and the request carries an ordinary `kind: 'session'`
-       * principal from then on. The policy table never sees this kind — SSO says who arrived, not what
-       * they may do.
-       */
-      kind: 'federated';
-      role: UserRole;
-      userId: string;
-      /** `"<username> · sso:<provider>"`, so the audit row names both without a schema change. */
-      username: string;
-      sessionId: string;
-      mustChangePassword: false;
-      /** The configured OIDC provider's short name — what tells this row apart from a password sign-in. */
-      provider: string;
     };
 
 declare module 'fastify' {

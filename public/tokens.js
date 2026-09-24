@@ -5,6 +5,20 @@
 
 import { $, ApiError, api, closeDialog, copyText, el, emit, fmt, icon, openDialog, relativeTime, state, toast } from './core.js';
 
+/**
+ * Where a linking flow started from this page comes back to. `safeNext` (src/auth/safe-next.ts)
+ * requires a leading `/`; a bare `#...` fragment fails that check and collapses to `/`, silently losing
+ * the return-to-tokens-page destination ([T3-MINOR-2], tur 3 review). Exported and named so
+ * `test/integration/oidc.itest.ts` reads this exact value instead of repeating it ([T4-MINOR-3]).
+ */
+export const TOKENS_RETURN_PATH = '/#/~tokens';
+
+/**
+ * The server's explanation of the last refused unlink ([ADR-0081](../.ssot/ADR.md#adr-0081) §3), kept
+ * so the SSO panel can show it under the link that is still there. Cleared once a link is gone.
+ */
+let unlinkRefusal = null;
+
 export async function loadApiTokens(force = false) {
   if (!force && state.apiTokensLoaded) return;
   try {
@@ -58,11 +72,12 @@ export function renderTokensView() {
 
   if (tokens.length === 0) {
     wrap.append(el('p', { class: 'users-empty', text: 'No tokens yet — create one to give a script or CI job its own scoped credential.' }));
-    return wrap;
+  } else {
+    wrap.append(el('section', { class: 'panel' }, [el('div', { class: 'panel-body' }, tokens.map(tokenRow))]));
   }
 
-  wrap.append(el('section', { class: 'panel' }, [el('div', { class: 'panel-body' }, tokens.map(tokenRow))]));
-
+  // Rendered whether or not this account has any tokens: the SSO panel is not about tokens, and an
+  // early return above used to hide it from every account that had none.
   const sso = renderSsoPanel();
   if (sso) wrap.append(sso);
 
@@ -83,19 +98,20 @@ function renderSsoPanel() {
   const label = me.oidc.buttonLabel || 'your identity provider';
   const body = [];
 
-  if (!me.canLinkOidc) {
-    // The root account stays local — ADR-0077 and the server both refuse this, so the UI never even
-    // offers the control ([MAJOR-4], tur 3 review).
-    body.push(el('p', { class: 'users-lead', text: 'The root account stays local and cannot connect single sign-on.' }));
-  } else if (me.federatedProviders.length > 0) {
+  const providers = [...new Set(me.federatedProviders)];
+  if (providers.length === 0) unlinkRefusal = null;
+
+  if (providers.length > 0) {
+    // Offered to root too ([T4-MINOR-2]): an account promoted after it linked keeps a dormant link it
+    // cannot sign in with, and the server lets it remove that link — so the page must as well.
     const confirming = state.confirmUnlinkOidc;
+    const sub = !me.canLinkOidc
+      ? 'Linked before this account became root. Root signs in with its password only, so this link is unused — remove it to tidy up.'
+      : 'Connected — you can also sign in with this identity provider. Remove disconnects every identity linked to this account.';
     body.push(
       el('div', { class: 'user-row token-row' }, [
         el('span', { class: 'source-glyph token', 'aria-hidden': 'true', text: 'SSO' }),
-        el('span', { class: 'source-cell' }, [
-          el('span', { text: me.federatedProviders.join(', ') }),
-          el('span', { class: 'sub', text: 'Connected — you can also sign in with this identity provider' }),
-        ]),
+        el('span', { class: 'source-cell' }, [el('span', { text: `Linked: ${providers.join(', ')}` }), el('span', { class: 'sub', text: sub })]),
         el('span', { class: 'source-actions' }, [
           el('button', {
             type: 'button',
@@ -106,6 +122,11 @@ function renderSsoPanel() {
         ]),
       ]),
     );
+    if (unlinkRefusal) body.push(el('p', { class: 'users-lead', role: 'alert', text: unlinkRefusal }));
+  } else if (!me.canLinkOidc) {
+    // The root account stays local — ADR-0077 and the server both refuse this, so the UI never even
+    // offers the control ([MAJOR-4], tur 3 review).
+    body.push(el('p', { class: 'users-lead', text: 'The root account stays local and cannot connect single sign-on.' }));
   } else {
     body.push(
       el('p', { class: 'users-lead', text: `Connect your account to ${label} to sign in without a password.` }),
@@ -189,9 +210,7 @@ async function revoke(t) {
  */
 async function linkOidc() {
   try {
-    // `safeNext` (src/auth/safe-next.ts) requires a leading `/`; a bare `#...` fragment fails that check
-    // and collapses to `/`, silently losing the return-to-tokens-page destination ([T3-MINOR-2], tur 3 review).
-    const { url } = await api('/api/auth/oidc/link', { method: 'POST', body: { next: '/#/~tokens' } });
+    const { url } = await api('/api/auth/oidc/link', { method: 'POST', body: { next: TOKENS_RETURN_PATH } });
     location.href = url;
   } catch (err) {
     toast(err.message);
@@ -214,10 +233,19 @@ async function unlinkOidc() {
   state.confirmUnlinkOidc = false;
   try {
     await api('/api/auth/oidc/link', { method: 'DELETE' });
+    unlinkRefusal = null;
     toast('Single sign-on disconnected');
     emit('refresh'); // refetches /api/auth/me so state.me.federatedProviders drops the removed identity
   } catch (err) {
-    toast(err.message);
+    if (err instanceof ApiError && err.status === 409 && err.body?.error === 'last_sign_in_method') {
+      // ADR-0081 §3: not a bare error. Nothing was removed and this session is still live, so the page
+      // stays where it is and says why, and what would make the removal possible.
+      unlinkRefusal =
+        'This account has no password of its own, so removing single sign-on would leave it with no way to sign in. Ask an admin to set a password for it; after that you can remove the link here.';
+      toast('Single sign-on was not removed');
+    } else {
+      toast(err.message);
+    }
     emit('render');
   }
 }

@@ -1,13 +1,20 @@
-import { randomUUID } from 'node:crypto';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { userFederatedIdentities, users, type UserRow } from '../../db/schema.js';
 import { ConflictError } from '../projects.js';
-import { createUser, normalizeUsername, USERNAME_RE } from './users.js';
+import { createSsoOnlyUser, normalizeUsername, uniqueViolationConstraint, USERNAME_RE } from './users.js';
 
 export interface FederatedIdentityLookup {
   issuer: string;
   subject: string;
+}
+
+const IDENTITY_UNIQUE = 'user_federated_identities_issuer_subject_key';
+
+/** True when `err` is the `(issuer, subject)` unique index refusing a second row for one identity. */
+function isIdentityTaken(err: unknown): boolean {
+  const constraint = uniqueViolationConstraint(err);
+  return constraint === IDENTITY_UNIQUE;
 }
 
 /**
@@ -61,34 +68,57 @@ export interface ProvisionFederatedUserInput {
   displayName?: string;
 }
 
+export interface ProvisionedFederatedUser {
+  user: UserRow;
+  /** `false` when a concurrent first sign-in of the same identity provisioned the account first. */
+  created: boolean;
+}
+
 /**
  * Creates a brand-new local account for a federated identity that has never signed in before, and
  * links it via `(issuer, subject)`. Retries the username once with a random suffix on a collision
  * ([ADR-0077](../../.ssot/ADR.md#adr-0077)) — the same pattern `createUser` callers elsewhere in this
  * codebase use for auto-generated names, since two providers (or two humans) can plausibly agree on
  * the same `preferred_username`.
+ *
+ * The account has **no local password**: it stores `SSO_ONLY_PASSWORD_HASH`, which no password can
+ * match and which is what lets `DELETE /api/auth/oidc/link` refuse to strand it
+ * ([ADR-0081](../../.ssot/ADR.md#adr-0081) §2, FR-602).
+ *
+ * The account and its identity row are written in **one transaction** ([F14-MINOR-1]): a failure
+ * between the two used to leave an account behind with no identity pointing at it — an orphan nobody
+ * could sign in to. When the identity insert loses to a concurrent first sign-in of the same
+ * `(issuer, subject)`, the transaction rolls this attempt's account back and the account the winner
+ * created is returned instead (`created: false`), so both sign-ins land on one account.
  */
-export async function provisionFederatedUser(db: Db, input: ProvisionFederatedUserInput): Promise<UserRow> {
+export async function provisionFederatedUser(db: Db, input: ProvisionFederatedUserInput): Promise<ProvisionedFederatedUser> {
+  const lookup = { issuer: input.issuer, subject: input.subject };
   const baseUsername = deriveUsername({ preferredUsername: input.preferredUsername, email: input.email });
-  const attempt = async (username: string): Promise<UserRow> => {
-    // The password is a throwaway: a federated account never authenticates with it, but every row in
-    // `users` needs a hash, and a random one keeps password sign-in from ever working for this account.
-    const throwawayPassword = randomUUID() + randomUUID();
-    const user = await createUser(db, {
-      username,
-      password: throwawayPassword,
-      role: input.role,
-      displayName: input.displayName ?? username,
-      email: input.email ?? null,
-      mustChangePassword: false,
-    });
-    await db.insert(userFederatedIdentities).values({
-      userId: user.id,
-      provider: input.provider,
-      issuer: input.issuer,
-      subject: input.subject,
-    });
-    return user;
+  const attempt = async (username: string): Promise<ProvisionedFederatedUser> => {
+    try {
+      const user = await db.transaction(async (tx) => {
+        const created = await createSsoOnlyUser(tx as unknown as Db, {
+          username,
+          role: input.role,
+          displayName: input.displayName ?? username,
+          email: input.email ?? null,
+          mustChangePassword: false,
+        });
+        await tx.insert(userFederatedIdentities).values({
+          userId: created.id,
+          provider: input.provider,
+          issuer: input.issuer,
+          subject: input.subject,
+        });
+        return created;
+      });
+      return { user, created: true };
+    } catch (err) {
+      if (!isIdentityTaken(err)) throw err;
+      const existing = await findUserByFederatedIdentity(db, lookup);
+      if (!existing) throw err;
+      return { user: existing, created: false };
+    }
   };
 
   try {
@@ -113,22 +143,35 @@ export interface LinkFederatedIdentityInput {
  * never from anything the flow cookie says, since that cookie is unsigned by design.
  *
  * A no-op when this exact `(issuer, subject)` is already linked to this same account (re-linking is
- * harmless); refuses with `ConflictError` when it is linked to a *different* account — the unique
- * index on `(issuer, subject)` would refuse the insert anyway, but this turns that into a clear error
- * instead of a raw constraint violation surfacing out of the route.
+ * harmless); refuses with `ConflictError` when it is linked to a *different* account. The read above
+ * the insert is only a fast path: two concurrent links of one identity can both find nothing, and the
+ * loser's insert then trips the unique index on `(issuer, subject)` ([F14-T2-MINOR-2]). That violation
+ * is caught inside a savepoint — so a caller's surrounding transaction, e.g. `withUserRowLock`'s, stays
+ * usable — and answered the same way: re-read, and either it is this account's (no-op) or another's
+ * (`ConflictError`), never a raw constraint error surfacing out of the route as a `500`.
  */
 export async function linkFederatedIdentity(db: Db, input: LinkFederatedIdentityInput): Promise<void> {
-  const existing = await findUserByFederatedIdentity(db, { issuer: input.issuer, subject: input.subject });
+  const lookup = { issuer: input.issuer, subject: input.subject };
+  const existing = await findUserByFederatedIdentity(db, lookup);
   if (existing) {
     if (existing.id === input.userId) return;
     throw new ConflictError('That SSO identity is already linked to a different account');
   }
-  await db.insert(userFederatedIdentities).values({
-    userId: input.userId,
-    provider: input.provider,
-    issuer: input.issuer,
-    subject: input.subject,
-  });
+  try {
+    await db.transaction(async (sp) => {
+      await sp.insert(userFederatedIdentities).values({
+        userId: input.userId,
+        provider: input.provider,
+        issuer: input.issuer,
+        subject: input.subject,
+      });
+    });
+  } catch (err) {
+    if (!isIdentityTaken(err)) throw err;
+    const winner = await findUserByFederatedIdentity(db, lookup);
+    if (winner?.id === input.userId) return;
+    throw new ConflictError('That SSO identity is already linked to a different account');
+  }
 }
 
 /**

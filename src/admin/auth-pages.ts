@@ -73,8 +73,13 @@ export const authPageRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (ap
       const session = await whoIsThis(req);
 
       if (page.slug === 'setup' && !ctx.setup.needsSetup) return reply.redirect('/login', 302);
-      if (page.slug === 'login' && session && !session.mustChangePassword)
-        return reply.redirect(safeNext(String((req.query as { next?: string }).next ?? '/')), 302);
+      // A signed-in visitor is sent on — unless an SSO flow brought them here to read why it failed
+      // ([T2-MINOR-4], Faz 15b): a failed *link* (`link_conflict`, `link_requires_session`,
+      // `root_local_only`) ends on `/login?oidc_error=…` while its session is still live, and
+      // redirecting that away swallowed the only explanation the visitor would get.
+      const query = req.query as { next?: string; oidc_error?: string };
+      if (page.slug === 'login' && session && !session.mustChangePassword && !query.oidc_error)
+        return reply.redirect(safeNext(String(query.next ?? '/')), 302);
       if (page.slug === 'change-password') {
         if (!session) return reply.redirect('/login?next=%2Fchange-password', 302);
         if (!session.mustChangePassword) return reply.redirect('/', 302);

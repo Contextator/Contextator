@@ -167,6 +167,13 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'PUT', url: '/api/projects/:id/members/:userId', actor: as('member'), membership: 'editor', allowed: false },
   { method: 'PUT', url: '/api/projects/:id/members/:userId', actor: as('admin'), membership: null, allowed: true },
   { method: 'DELETE', url: '/api/projects/:id/members/:userId', actor: as('member'), membership: 'editor', allowed: false },
+
+  // Unlinking SSO ([ADR-0081](../.ssot/ADR.md#adr-0081)): no role stands between an account and its
+  // own unlink — root included, whose only link is a dormant one it may tidy away. Whether the unlink
+  // happens or is refused `409 last_sign_in_method` is decided by the handler on the account's own
+  // row, so the matrix must let every signed-in role reach it.
+  { method: 'DELETE', url: '/api/auth/oidc/link', actor: as('member'), membership: null, allowed: true },
+  { method: 'DELETE', url: '/api/auth/oidc/link', actor: as('root'), membership: null, allowed: true },
 ];
 
 function allows(actor: Principal, membership: 'viewer' | 'editor' | null, method: string, url: string): boolean {
@@ -215,6 +222,15 @@ describe('API tokens (ADR-0076)', () => {
     host: 'example.test',
     principal: null,
     ...over,
+  });
+
+  it('keeps the SSO unlink, and with it the 409 last_sign_in_method answer, to a signed-in session', () => {
+    // Positive: the 409 is an answer about the caller's own account, so the caller is a session.
+    expect(requireSession({ principal: as('member') } as never).userId).toBe('id-member');
+    // Negative: a machine credential never reaches the handler that could answer it — ADMIN_TOKEN has
+    // no account to unlink, and an API token must not be a way to strip its owner's sign-in methods.
+    expect(() => requireSession({ principal: token } as never)).toThrow(ForbiddenError);
+    expect(() => requireSession({ principal: asApiToken({ scope: ['DELETE /api/auth/oidc/link'] }) } as never)).toThrow(ForbiddenError);
   });
 
   it('requireSession accepts a session and refuses ADMIN_TOKEN and an API token', () => {

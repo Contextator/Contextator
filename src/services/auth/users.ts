@@ -75,7 +75,24 @@ export interface CreateUserInput {
   createdBy?: string | null;
 }
 
+/**
+ * What `users.password_hash` holds for an account that has **no local password** — one minted by SSO
+ * auto-provisioning ([ADR-0081](../../.ssot/ADR.md#adr-0081) §2, FR-602). It is not in the
+ * `VERSION.N.R.P.salt.hash` wire format, so `verifyPassword` can never match it; an account has a local
+ * password exactly when its hash is anything else. An admin setting a password replaces it.
+ */
+export const SSO_ONLY_PASSWORD_HASH = '!sso-only';
+
 export async function createUser(db: Db, input: CreateUserInput): Promise<UserRow> {
+  return insertUser(db, input, await hashPassword(input.password));
+}
+
+/** Creates an account that has no local password (`SSO_ONLY_PASSWORD_HASH`) — auto-provisioning only. */
+export async function createSsoOnlyUser(db: Db, input: Omit<CreateUserInput, 'password'>): Promise<UserRow> {
+  return insertUser(db, input, SSO_ONLY_PASSWORD_HASH);
+}
+
+async function insertUser(db: Db, input: Omit<CreateUserInput, 'password'>, passwordHash: string): Promise<UserRow> {
   const username = normalizeUsername(input.username);
   if (!USERNAME_RE.test(username)) {
     throw new ValidationError('Username must be 2-63 characters of lowercase letters, digits, ".", "-" or "_", and start with a letter or digit');
@@ -88,41 +105,68 @@ export async function createUser(db: Db, input: CreateUserInput): Promise<UserRo
         email: input.email?.trim() || null,
         displayName: input.displayName?.trim() ?? '',
         role: input.role,
-        passwordHash: await hashPassword(input.password),
+        passwordHash,
         mustChangePassword: input.mustChangePassword ?? false,
         createdBy: input.createdBy ?? null,
       })
       .returning();
     return row;
   } catch (err) {
-    if (isUniqueViolation(err)) throw new ConflictError(`A user named "${username}" already exists`);
+    if (uniqueViolationConstraint(err) !== undefined) throw new ConflictError(`A user named "${username}" already exists`);
     throw err;
   }
 }
 
-function isUniqueViolation(err: unknown): boolean {
-  if (typeof err !== 'object' || err === null) return false;
-  const e = err as { code?: string; cause?: { code?: string } };
-  return e.code === '23505' || e.cause?.code === '23505';
+/**
+ * The name of the unique constraint a Postgres `23505` error violated (`''` when the driver did not
+ * say which), or `undefined` when `err` is not a unique violation at all. Drizzle wraps the driver's
+ * error in its own, so this looks at `err` and at `err.cause`.
+ */
+export function uniqueViolationConstraint(err: unknown): string | undefined {
+  for (const e of [err, (err as { cause?: unknown } | null)?.cause]) {
+    if (typeof e !== 'object' || e === null) continue;
+    const pg = e as { code?: string; constraint?: string };
+    if (pg.code === '23505') return pg.constraint ?? '';
+  }
+  return undefined;
+}
+
+/**
+ * **Lock order — the one rule every writer in this file follows** ([T7-MINOR-1], Faz 15b): the
+ * active-root set first, in `id` order, and only then the single account row `withUserRowLock` takes.
+ * A caller never asks for the root set while it already holds an account row lock.
+ *
+ * Both locks are plain `FOR UPDATE` row locks on `users`, so the rule is about *which rows a
+ * transaction may still wait for once it holds some*. A transaction that holds one account row and
+ * then asks for every active root can wait on a second demotion that holds *its* account row and asks
+ * for the same set — Postgres aborts one with `40P01` and the caller used to get a `500`. Taking the
+ * root set first (sorted, so two root-set takers queue on the same first row) and the account row
+ * second leaves no cycle: a root-set holder waits only for single-row holders, and a single-row holder
+ * (an SSO callback, an unlink, a token mint, a promotion) never waits for another user row at all.
+ *
+ * Callers that may *remove* a root — a demotion, a disable, a delete — cannot know that until the
+ * fresh read under the row lock, so they take the root set whenever the request *could* remove one,
+ * and decide under both locks whether it does. That costs a demotion of an ordinary account a lock on
+ * the handful of root rows; it is the price of never taking that lock second.
+ */
+async function lockActiveRoots(tx: Db): Promise<void> {
+  await tx.execute(sql`SELECT id FROM users WHERE role = 'root' AND is_active = true ORDER BY id FOR UPDATE`);
 }
 
 /**
  * The one invariant that keeps an instance reachable: there is always at least one root account
- * that can sign in. Counted and mutated inside the same transaction, with the surviving rows
- * locked, so two administrators cannot each remove "the other" root at the same moment.
+ * that can sign in. Must run inside a transaction that already holds `lockActiveRoots` — the count is
+ * only worth anything while no other remover can change the set under it, so two administrators cannot
+ * each remove "the other" root at the same moment.
  */
-async function withLastRootGuard<T>(db: Db, targetId: string, run: (tx: Db) => Promise<T>): Promise<T> {
-  return db.transaction(async (tx) => {
-    await tx.execute(sql`SELECT id FROM users WHERE role = 'root' AND is_active = true FOR UPDATE`);
-    const [row] = await tx
-      .select({ n: count() })
-      .from(users)
-      .where(and(eq(users.role, 'root'), eq(users.isActive, true), ne(users.id, targetId)));
-    if (Number(row?.n ?? 0) === 0) {
-      throw new ConflictError('The last active root account cannot be removed, demoted or disabled');
-    }
-    return run(tx as unknown as Db);
-  });
+async function assertAnotherActiveRoot(tx: Db, targetId: string): Promise<void> {
+  const [row] = await tx
+    .select({ n: count() })
+    .from(users)
+    .where(and(eq(users.role, 'root'), eq(users.isActive, true), ne(users.id, targetId)));
+  if (Number(row?.n ?? 0) === 0) {
+    throw new ConflictError('The last active root account cannot be removed, demoted or disabled');
+  }
 }
 
 /**
@@ -137,24 +181,37 @@ async function withLastRootGuard<T>(db: Db, targetId: string, run: (tx: Db) => P
  *
  * `FOR UPDATE` on the account's own row closes that gap: whichever caller gets here first holds the
  * row until its transaction commits or rolls back, and every other caller queued behind it sees that
- * result rather than the stale state it started with. This locks a different, narrower set of rows
- * than `withLastRootGuard` above (one account vs. every active root, for a different invariant), so
- * nesting a `withLastRootGuard(tx, ...)` call inside this one's `run` is intentional and safe: calling
- * `db.transaction()` on an already-open drizzle transaction issues a `SAVEPOINT`, not a fresh
- * transaction (`node-postgres/session.cjs`), so it neither escapes this lock nor deadlocks against it.
+ * result rather than the stale state it started with. Called on an already-open transaction it issues
+ * a `SAVEPOINT` rather than a fresh transaction (`node-postgres/session.cjs`), so the lock is taken on
+ * — and held until the end of — the caller's transaction.
+ *
+ * **Lock order.** This is the *second* lock in `lockActiveRoots`'s rule: a caller that also needs the
+ * active-root set takes it before calling this, never inside `run`. Asking for the root set while this
+ * row is held is the order that let two concurrent root demotions deadlock ([T7-MINOR-1]).
  *
  * Every write inside `run` must go through the `tx` handle it is given, never the outer `db` closed
  * over from the caller ([L-h], tur 7 review of [T7-MAJOR-1]): `db` opens its own connection and its
- * own transaction, which then blocks on the very row `FOR UPDATE` above already holds open on *this*
- * connection — the request deadlocks against its own lock and only returns once Postgres's
- * `statement_timeout` or the caller gives up. There is nothing that catches this at the type level;
- * it is a convention, and the only guard against it is this comment and review.
+ * own transaction, which then waits for the very row `FOR UPDATE` above already holds on *this*
+ * connection. Postgres cannot see that wait — one side of it is this process, not a lock — so it is
+ * never reported as a deadlock: the request hangs until the pool or the client gives up (`src` sets no
+ * `statement_timeout`). Nothing catches this at the type level; it is a convention, and the only guard
+ * against it is this comment and review.
  */
 export async function withUserRowLock<T>(db: Db, userId: string, run: (tx: Db) => Promise<T>): Promise<T> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`);
     return run(tx as unknown as Db);
   });
+}
+
+/**
+ * Instrumentation for deterministic integration tests only — no route or process passes anything but
+ * `onBeforeLock` (and that only from `ctx.testHooks`). `onRowLocked` is awaited right after the
+ * account row lock is held, the window a second remover needs to be in for the lock order to matter.
+ */
+export interface UserWriteHooks {
+  onBeforeLock?: () => Promise<void>;
+  onRowLocked?: () => Promise<void>;
 }
 
 export interface UpdateUserInput {
@@ -164,7 +221,7 @@ export interface UpdateUserInput {
   isActive?: boolean;
 }
 
-export async function updateUser(db: Db, id: string, input: UpdateUserInput, hooks?: { onBeforeLock?: () => Promise<void> }): Promise<UserRow> {
+export async function updateUser(db: Db, id: string, input: UpdateUserInput, hooks?: UserWriteHooks): Promise<UserRow> {
   const before = await getUserById(db, id);
   if (!before) throw new NotFoundError('User not found');
 
@@ -203,23 +260,36 @@ export async function updateUser(db: Db, id: string, input: UpdateUserInput, hoo
   // ([T6-MAJOR-1]/[T6-MINOR-1], tur 6 review; [T7-MINOR-2], tur 10 review), so whichever of them commits
   // first is what this sees, and a callback that started before this lock but has not yet committed
   // simply waits for it.
+  //
+  // `mayLoseRoot` is known from the request alone, before any read: whether the target *is* root is
+  // only decided under the row lock, but the active-root set has to be locked before that row
+  // (`lockActiveRoots`'s order rule, [T7-MINOR-1]), so every request that could remove a root takes it.
+  const mayLoseRoot = (input.role !== undefined && input.role !== 'root') || input.isActive === false;
   await hooks?.onBeforeLock?.();
-  return withUserRowLock(db, id, async (tx) => {
-    const fresh = await getUserById(tx, id);
-    if (!fresh) throw new NotFoundError('User not found');
-    const promotesToRoot = fresh.role !== 'root' && input.role === 'root';
-    const losesRoot = fresh.role === 'root' && ((input.role !== undefined && input.role !== 'root') || input.isActive === false);
-    if (promotesToRoot) {
-      const [identity] = await tx
-        .select({ id: userFederatedIdentities.id })
-        .from(userFederatedIdentities)
-        .where(eq(userFederatedIdentities.userId, id))
-        .limit(1);
-      if (identity) {
-        throw new PromotionRefusedError('root_requires_unlink', 'This account has a linked SSO identity; unlink it before granting the root role');
+  const underRowLock = (outer: Db): Promise<UserRow> =>
+    withUserRowLock(outer, id, async (tx) => {
+      await hooks?.onRowLocked?.();
+      const fresh = await getUserById(tx, id);
+      if (!fresh) throw new NotFoundError('User not found');
+      const promotesToRoot = fresh.role !== 'root' && input.role === 'root';
+      const losesRoot = fresh.role === 'root' && mayLoseRoot;
+      if (promotesToRoot) {
+        const [identity] = await tx
+          .select({ id: userFederatedIdentities.id })
+          .from(userFederatedIdentities)
+          .where(eq(userFederatedIdentities.userId, id))
+          .limit(1);
+        if (identity) {
+          throw new PromotionRefusedError('root_requires_unlink', 'This account has a linked SSO identity; unlink it before granting the root role');
+        }
       }
-    }
-    return losesRoot ? withLastRootGuard(tx, id, apply) : apply(tx);
+      if (losesRoot) await assertAnotherActiveRoot(tx, id);
+      return apply(tx);
+    });
+  if (!mayLoseRoot) return underRowLock(db);
+  return db.transaction(async (tx) => {
+    await lockActiveRoots(tx as unknown as Db);
+    return underRowLock(tx as unknown as Db);
   });
 }
 
@@ -238,14 +308,22 @@ export async function setPassword(db: Db, id: string, plain: string, mustChange:
   if (result.length === 0) throw new NotFoundError('User not found');
 }
 
-export async function deleteUser(db: Db, id: string): Promise<UserRow> {
-  const row = await getUserById(db, id);
-  if (!row) throw new NotFoundError('User not found');
-  const run = async (tx: Db) => {
-    await tx.delete(users).where(eq(users.id, id));
-    return row;
-  };
-  return row.role === 'root' ? withLastRootGuard(db, id, run) : run(db);
+/**
+ * Takes the same two locks as a demotion, in the same order (`lockActiveRoots`, then the account row),
+ * and decides from a read taken under both whether this is a root the instance cannot lose.
+ */
+export async function deleteUser(db: Db, id: string, hooks?: Pick<UserWriteHooks, 'onRowLocked'>): Promise<UserRow> {
+  return db.transaction(async (outer) => {
+    await lockActiveRoots(outer as unknown as Db);
+    return withUserRowLock(outer as unknown as Db, id, async (tx) => {
+      await hooks?.onRowLocked?.();
+      const row = await getUserById(tx, id);
+      if (!row) throw new NotFoundError('User not found');
+      if (row.role === 'root' && row.isActive) await assertAnotherActiveRoot(tx, id);
+      await tx.delete(users).where(eq(users.id, id));
+      return row;
+    });
+  });
 }
 
 // ---------- sign-in bookkeeping ----------

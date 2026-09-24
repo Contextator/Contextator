@@ -5,7 +5,7 @@
  */
 
 export class UnauthorizedError extends Error {
-  /** Machine-readable reason: `unauthorized` or `setup_required`. */
+  /** Machine-readable reason: `unauthorized`, `setup_required`, `invalid_credentials` or `session_revoked`. */
   readonly code: string;
   constructor(code = 'unauthorized', message = 'Sign in to continue') {
     super(message);

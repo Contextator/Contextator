@@ -119,6 +119,33 @@ export function installAuth(app: FastifyInstance, ctx: AppContext): void {
     if (session.authMethod === 'sso' && session.role === 'root' && !PUBLIC_ROUTES.has(routeUrl) && routeUrl !== METRICS_ROUTE) {
       await revokeSession(db, session.sessionId).catch((err: unknown) => req.log.warn({ err }, 'failed to revoke a root/sso session'));
       clearSessionCookie(reply, req, config);
+      // Audited ([T5-MINOR-2], Faz 15b): the policy hook only records successes, and this request goes
+      // on anonymous and is refused downstream, so it would otherwise leave no trace that a live SSO
+      // session was found holding root and cut off. Written once the reply has gone, with the status it
+      // actually got — the same moment and the same truth the policy hook's `onResponse` uses.
+      reply.raw.once('finish', () => {
+        ctx.audit.record(
+          {
+            action: `${req.method} ${routeUrl || '(unmatched)'}`,
+            projectId: null,
+            targetType: 'user',
+            targetId: session.userId,
+            detail: { refused: 'root_local_only', authMethod: 'sso' },
+          },
+          {
+            principal: {
+              kind: 'session',
+              role: session.role,
+              userId: session.userId,
+              username: session.username,
+              sessionId: session.sessionId,
+              mustChangePassword: session.mustChangePassword,
+            },
+            ip: req.ip || null,
+            statusCode: reply.statusCode,
+          },
+        );
+      });
       return;
     }
     req.principal = {

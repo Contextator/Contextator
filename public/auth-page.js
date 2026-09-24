@@ -28,10 +28,11 @@ function safeNext(raw) {
   try {
     const base = 'http://safe-next.invalid';
     if (new URL(value, base).origin !== base) return '/';
+    // Encoded, like the server copy: a fixed point under a second pass, and plain ASCII.
+    return encodeURI(value);
   } catch {
     return '/';
   }
-  return value;
 }
 
 async function post(path, body) {
@@ -104,7 +105,13 @@ const OIDC_ERROR_MESSAGES = {
   no_account: 'No account is linked to this identity yet. Ask an administrator for access.',
   provision_failed: 'Could not create an account for this identity.',
   account_disabled: 'This account has been disabled.',
+  root_local_only: 'The root account signs in with its password only; single sign-on cannot be used or linked for it.',
+  link_conflict: 'That single sign-on identity is already linked to a different account.',
+  link_requires_session: 'Linking single sign-on needs the same signed-in session that started it. Sign in and start again from your account page.',
 };
+
+/** The codes a *linking* flow ends with: the visitor is usually still signed in, so offer the way back. */
+const OIDC_LINK_ERRORS = new Set(['root_local_only', 'link_conflict', 'link_requires_session']);
 
 // Somebody who lands on /login before anyone has set the instance up needs pointing at /setup.
 if ($('#login-form')) {
@@ -127,6 +134,12 @@ if ($('#login-form')) {
   if (oidcError) {
     const errorNode = $('#login-error');
     errorNode.textContent = OIDC_ERROR_MESSAGES[oidcError] || 'Single sign-on failed.';
+    if (OIDC_LINK_ERRORS.has(oidcError)) {
+      const back = document.createElement('a');
+      back.href = '/#/~tokens';
+      back.textContent = 'Back to your account';
+      errorNode.append(' ', back);
+    }
     errorNode.hidden = false;
   }
 }

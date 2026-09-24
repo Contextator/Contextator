@@ -2,7 +2,8 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
-import type { UserRole } from '../auth/types.js';
+import type { Principal, UserRole } from '../auth/types.js';
+import type { AuditSubject } from '../auth/policy.js';
 import type { SessionAuthMethod, UserRow } from '../db/schema.js';
 import {
   clearOidcFlowCookie,
@@ -30,6 +31,7 @@ import {
   recordLoginFailure,
   recordLoginSuccess,
   setPassword,
+  SSO_ONLY_PASSWORD_HASH,
   toUserView,
   withUserRowLock,
 } from '../services/auth/users.js';
@@ -161,7 +163,17 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
     const lockedFor = lockRemainingSec(user);
     if (lockedFor > 0) throw new RateLimitedError(lockedFor, 'Too many failed attempts; this account is locked for a while');
 
-    const ok = await verifyPassword(body.password, user.passwordHash);
+    // An SSO-only account ([ADR-0081](../../.ssot/ADR.md#adr-0081) §2) has no password to match, and
+    // `verifyPassword` rejects its sentinel before deriving anything — which would answer in
+    // microseconds and tell the caller this username exists and is SSO-only. Pay for one derivation,
+    // exactly as the unknown-username branch above does, then fail the ordinary way.
+    let ok: boolean;
+    if (user.passwordHash === SSO_ONLY_PASSWORD_HASH) {
+      await burnPasswordTime(body.password);
+      ok = false;
+    } else {
+      ok = await verifyPassword(body.password, user.passwordHash);
+    }
     if (!ok) {
       await recordLoginFailure(db, user, config.AUTH_LOGIN_MAX_ATTEMPTS, config.AUTH_LOGIN_WINDOW_MIN);
       log.warn({ username: user.username, ip: clientIp(req) }, 'failed sign-in');
@@ -220,7 +232,8 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
       projects: user.role === 'member' ? await membershipMap(db, user.id) : {},
       oidc,
       canLinkOidc: user.role !== 'root',
-      federatedProviders: (await listFederatedIdentitiesOfUser(db, user.id)).map((r) => r.provider),
+      // One entry per provider name, however many identities of it are linked ([T3-MINOR-4]).
+      federatedProviders: [...new Set((await listFederatedIdentitiesOfUser(db, user.id)).map((r) => r.provider))],
     };
   });
 
@@ -324,229 +337,269 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
    * this same account re-checks the link and writes its session under the same lock, so this either
    * finishes first — and the callback's re-check then sees no link and refuses — or waits for the
    * callback's transaction to commit and then revokes exactly the session it just created.
+   *
+   * **Refused when it would remove the last way in** ([ADR-0081](../../.ssot/ADR.md#adr-0081),
+   * FR-602): an account whose `password_hash` is the SSO-only sentinel has no password of its own, so
+   * dropping its links would leave nothing it could sign in with — and the next SSO login would
+   * auto-provision a second, unrelated account for the same person. That account gets
+   * `409 last_sign_in_method` instead, and the refusal changes nothing: no row is deleted, no session
+   * or token is revoked, and — being a 4xx — the automatic audit hook writes no event for it. Both
+   * facts are read under the same row lock as the delete, through `tx`, so an admin setting a password
+   * (which replaces the sentinel) and this check can never interleave. An account with no link at all
+   * is still a no-op `204`, sentinel or not: there is nothing to lose.
    */
   app.delete('/api/auth/oidc/link', async (req, reply) => {
     const principal = requireSession(req);
-    await withUserRowLock(db, principal.userId, async (tx) => {
+    const refused = await withUserRowLock(db, principal.userId, async (tx): Promise<boolean> => {
+      const fresh = await getUserById(tx, principal.userId);
+      if (fresh?.passwordHash === SSO_ONLY_PASSWORD_HASH) {
+        const links = await listFederatedIdentitiesOfUser(tx, principal.userId);
+        if (links.length > 0) return true;
+      }
       const removed = await unlinkFederatedIdentity(tx, principal.userId);
       if (removed > 0) {
         await revokeSessionsOfUser(tx, principal.userId);
         await revokeApiTokensOfUser(tx, principal.userId);
       }
+      return false;
     });
+    if (refused) {
+      return reply.code(409).send({
+        error: 'last_sign_in_method',
+        message:
+          'This account has no password of its own; unlinking SSO would leave it with no way to sign in. Ask an admin to set a password first.',
+      });
+    }
     return reply.code(204).send();
   });
 
+  /**
+   * The callback's own audit events, held until its response has gone out ([MINOR-2], Faz 14 review):
+   * the automatic audit hook never runs for this route — it is a GET, and `auditSubject` only records
+   * state-changing methods — so the handler names the event itself, and this route's `onResponse`
+   * writes it with the status the browser actually received (the `302` of the redirect) instead of a
+   * number the handler guessed before the reply existed.
+   */
+  const pendingCallbackAudit = new WeakMap<FastifyRequest, { subject: AuditSubject; principal: Principal }>();
+  const auditCallbackAfterResponse = (req: FastifyRequest, subject: AuditSubject, principal: Principal): void => {
+    pendingCallbackAudit.set(req, { subject, principal });
+  };
+  /** The principal a callback event is written under: the account, tagged with the provider it came through. */
+  const ssoPrincipal = (user: { id: string; username: string; role: UserRole }, sessionId: string): Principal => ({
+    kind: 'session',
+    role: user.role,
+    userId: user.id,
+    username: `${user.username} · sso:${providerName(config)}`,
+    // A refused sign-in creates no session, so it passes `''`; `buildAuditRow` reads
+    // `principal.kind`/`userId`/`username` only, never `sessionId`.
+    sessionId,
+    mustChangePassword: false,
+  });
+
   /** The identity provider's redirect back, with a code — or an error the provider itself reports. */
-  app.get('/api/auth/oidc/callback', async (req, reply) => {
-    const refuse = (code: string): FastifyReply => {
-      clearOidcFlowCookie(reply, req, config);
-      return reply.header('cache-control', 'no-store').redirect(`/login?oidc_error=${encodeURIComponent(code)}`, 302);
-    };
+  app.get(
+    '/api/auth/oidc/callback',
+    {
+      onResponse: async (req, reply) => {
+        const pending = pendingCallbackAudit.get(req);
+        if (!pending) return;
+        pendingCallbackAudit.delete(req);
+        ctx.audit.record(pending.subject, { principal: pending.principal, ip: clientIp(req), statusCode: reply.statusCode });
+      },
+    },
+    async (req, reply) => {
+      const refuse = (code: string): FastifyReply => {
+        clearOidcFlowCookie(reply, req, config);
+        return reply.header('cache-control', 'no-store').redirect(`/login?oidc_error=${encodeURIComponent(code)}`, 302);
+      };
 
-    if (!isOidcEnabled(config)) return refuse('not_configured');
-    const flow: OidcFlowState | undefined = readOidcFlowCookie(req);
-    if (!flow) return refuse('flow_expired');
+      if (!isOidcEnabled(config)) return refuse('not_configured');
+      const flow: OidcFlowState | undefined = readOidcFlowCookie(req);
+      if (!flow) return refuse('flow_expired');
 
-    const query = req.query as Record<string, unknown>;
-    if (typeof query.error === 'string') {
-      log.warn({ error: query.error }, 'oidc provider returned an error');
-      return refuse('provider_denied');
-    }
-
-    let claims: Awaited<ReturnType<typeof completeAuthorizationCodeGrant>>;
-    try {
-      const currentUrl = new URL(req.url, resolveRedirectUri(config, req));
-      claims = await completeAuthorizationCodeGrant(config, currentUrl, flow);
-    } catch (err) {
-      log.warn({ err }, 'oidc code exchange failed');
-      return refuse('exchange_failed');
-    }
-
-    const issuer = claims.iss;
-    const subject = claims.sub;
-    const provider = providerName(config);
-
-    if (flow.intent === 'link') {
-      // The flow cookie is unsigned by design ([cookies.ts](../auth/cookies.ts)) — it says *that* this
-      // is a linking flow, never on its own *whose* account it is for. What pins it to one account is
-      // `linkSessionId`, set to the initiating session's id when the flow started: the live session
-      // read fresh right here must be that exact same session, not merely *some* signed-in session
-      // ([BLOCKER], tur 2 review). Without this comparison, a cookie planted in a victim's browser
-      // (forgeable, since it is unsigned) with a forged `intent: 'link'` would let an attacker complete
-      // their own provider login and have the callback link their external identity to whichever
-      // account happened to hold the live session — the victim's, root included.
-      const principal = req.principal;
-      if (!principal || principal.kind !== 'session' || !flow.linkSessionId || principal.sessionId !== flow.linkSessionId) {
-        return refuse('link_requires_session');
+      const query = req.query as Record<string, unknown>;
+      if (typeof query.error === 'string') {
+        log.warn({ error: query.error }, 'oidc provider returned an error');
+        return refuse('provider_denied');
       }
-      // Defense in depth alongside the `POST /api/auth/oidc/link` check above ([MAJOR-4], tur 3
-      // review): root cannot start a link flow, but a role can in principle change between start and
-      // this callback (e.g. a promotion mid-flow), so the invariant is re-checked at the step that
-      // actually writes the row — against a fresh read taken under the same row lock `updateUser`'s
-      // promotion path takes, not the `principal.role` captured at `onRequest` time before the
-      // provider round trip above ([T6-MINOR-1], tur 6 review: that capture is stale by the time this
-      // runs, and a promotion racing this callback needs to serialize against it, not just be
-      // rechecked against equally stale data).
-      type LinkOutcome = { ok: true } | { ok: false; code: 'root_local_only' | 'link_conflict' };
-      const outcome = await withUserRowLock(db, principal.userId, async (tx): Promise<LinkOutcome> => {
-        const fresh = await getUserById(tx, principal.userId);
-        if (!fresh) throw new NotFoundError('User not found');
-        if (fresh.role === 'root') return { ok: false, code: 'root_local_only' };
-        try {
-          await linkFederatedIdentity(tx, { userId: principal.userId, provider, issuer, subject });
-        } catch (err) {
-          if (err instanceof ConflictError) return { ok: false, code: 'link_conflict' };
-          throw err;
-        }
-        return { ok: true };
-      });
-      if (!outcome.ok) return refuse(outcome.code);
-      clearOidcFlowCookie(reply, req, config);
-      // The automatic audit hook never runs for this route: it is a GET, and `auditSubject` only
-      // records state-changing methods — the same reason the login branch below writes its own event.
-      ctx.audit.record(
-        {
-          action: 'GET /api/auth/oidc/callback',
-          projectId: null,
-          targetType: 'user',
-          targetId: principal.userId,
-          detail: { provider, linked: true },
-        },
-        { principal, ip: clientIp(req), statusCode: 200 },
-      );
-      return reply.header('cache-control', 'no-store').redirect(safeNext(flow.next), 302);
-    }
 
-    const emailClaim = typeof claims.email === 'string' ? claims.email : undefined;
-    const preferredUsernameClaim = typeof claims.preferred_username === 'string' ? claims.preferred_username : undefined;
-    const nameClaim = typeof claims.name === 'string' ? claims.name : undefined;
-
-    let user = await findUserByFederatedIdentity(db, { issuer, subject });
-    let isNewAccount = false;
-    if (user) {
-      await touchFederatedIdentityLogin(db, { issuer, subject });
-    } else {
-      if (!config.OIDC_AUTO_PROVISION) return refuse('no_account');
+      let claims: Awaited<ReturnType<typeof completeAuthorizationCodeGrant>>;
       try {
-        user = await provisionFederatedUser(db, {
-          provider,
-          issuer,
-          subject,
-          role: config.OIDC_DEFAULT_ROLE,
-          preferredUsername: preferredUsernameClaim,
-          email: emailClaim,
-          displayName: nameClaim,
-        });
-        isNewAccount = true;
+        const currentUrl = new URL(req.url, resolveRedirectUri(config, req));
+        claims = await completeAuthorizationCodeGrant(config, currentUrl, flow);
       } catch (err) {
-        log.error({ err }, 'oidc auto-provisioning failed');
-        return refuse('provision_failed');
+        log.warn({ err }, 'oidc code exchange failed');
+        return refuse('exchange_failed');
       }
-    }
 
-    // Everything from here re-reads and writes this account under its row lock ([T6-MAJOR-1], tur 6
-    // review): an unlink or a promotion racing this sign-in serializes against the exact same lock
-    // `DELETE /api/auth/oidc/link` and `updateUser`'s promotion path take, so whichever of them commits
-    // first is what this callback sees — never a session issued for a link that was already gone by
-    // the time this runs, and never a login that outraces a promotion into holding a session over a
-    // now-root account. `user`/`isNewAccount` above are only the *lookup* that picked which account
-    // this flow is even about; everything that decides whether to actually sign in happens on a fresh
-    // read taken after the lock is held.
-    type LoginOutcome =
-      | { ok: true; user: UserRow }
-      | { ok: false; code: 'no_account' | 'account_disabled' }
-      | { ok: false; code: 'root_local_only'; user: UserRow };
-    const outcome = await withUserRowLock(db, user.id, async (tx): Promise<LoginOutcome> => {
-      // Re-confirms the identity resolved above is still linked to this account: a concurrent unlink
-      // that already committed — whether it landed before this lock was requested or is what this
-      // callback was queued behind — must not let this callback go on to open a session for an account
-      // it no longer has any claim on. Reuses `no_account`: from this callback's point of view, an
-      // identity that was just unlinked is indistinguishable from one that was never linked.
-      const stillLinked = await findUserByFederatedIdentity(tx, { issuer, subject });
-      if (!stillLinked || stillLinked.id !== user.id) return { ok: false, code: 'no_account' };
-      if (!stillLinked.isActive) return { ok: false, code: 'account_disabled' };
+      const issuer = claims.iss;
+      const subject = claims.sub;
+      const provider = providerName(config);
 
-      // Root stays local ([ADR-0077]): the two role checks that guard *linking* an identity
-      // (`POST /api/auth/oidc/link` above and the callback's `link` branch) never stopped an account
-      // that links first and is promoted to root afterwards from signing in here — nothing rechecked
-      // the role at sign-in time ([T3-MAJOR-1], tur 3 review). `stillLinked.role` is read fresh, under
-      // the same lock `updateUser`'s promotion path takes, not a value captured before the provider
-      // round trip above — so a promotion racing this very callback is caught too, not just one that
-      // finished earlier ([T6-MAJOR-1], tur 6 review). The federated identity row itself is left alone:
-      // whether it may currently be used to sign in is not the same question as whether it exists, and
-      // it becomes usable again the moment the account is demoted — no separate cleanup or re-link is
-      // needed either way.
-      if (stillLinked.role === 'root') return { ok: false, code: 'root_local_only', user: stillLinked };
-
-      // Deterministic pause point for the race test ([T6-MAJOR-1], tur 7): everything above has
-      // already re-read its own fresh state under the lock, so this is equivalent to pausing anywhere
-      // between "still linked" and "session written" — and it is the last point before the write. A
-      // no-op outside `test/integration/oidc.itest.ts`.
-      await ctx.testHooks?.onOidcLoginBeforeSignIn?.();
-
-      await signIn(reply, req, stillLinked, 'sso', tx);
-      return { ok: true, user: stillLinked };
-    });
-
-    if (!outcome.ok) {
-      if (outcome.code === 'root_local_only') {
-        ctx.audit.record(
+      if (flow.intent === 'link') {
+        // The flow cookie is unsigned by design ([cookies.ts](../auth/cookies.ts)) — it says *that* this
+        // is a linking flow, never on its own *whose* account it is for. What pins it to one account is
+        // `linkSessionId`, set to the initiating session's id when the flow started: the live session
+        // read fresh right here must be that exact same session, not merely *some* signed-in session
+        // ([BLOCKER], tur 2 review). Without this comparison, a cookie planted in a victim's browser
+        // (forgeable, since it is unsigned) with a forged `intent: 'link'` would let an attacker complete
+        // their own provider login and have the callback link their external identity to whichever
+        // account happened to hold the live session — the victim's, root included.
+        const principal = req.principal;
+        if (!principal || principal.kind !== 'session' || !flow.linkSessionId || principal.sessionId !== flow.linkSessionId) {
+          return refuse('link_requires_session');
+        }
+        // Defense in depth alongside the `POST /api/auth/oidc/link` check above ([MAJOR-4], tur 3
+        // review): root cannot start a link flow, but a role can in principle change between start and
+        // this callback (e.g. a promotion mid-flow), so the invariant is re-checked at the step that
+        // actually writes the row — against a fresh read taken under the same row lock `updateUser`'s
+        // promotion path takes, not the `principal.role` captured at `onRequest` time before the
+        // provider round trip above ([T6-MINOR-1], tur 6 review: that capture is stale by the time this
+        // runs, and a promotion racing this callback needs to serialize against it, not just be
+        // rechecked against equally stale data).
+        type LinkOutcome = { ok: true } | { ok: false; code: 'root_local_only' | 'link_conflict' };
+        const outcome = await withUserRowLock(db, principal.userId, async (tx): Promise<LinkOutcome> => {
+          const fresh = await getUserById(tx, principal.userId);
+          if (!fresh) throw new NotFoundError('User not found');
+          if (fresh.role === 'root') return { ok: false, code: 'root_local_only' };
+          try {
+            await linkFederatedIdentity(tx, { userId: principal.userId, provider, issuer, subject });
+          } catch (err) {
+            if (err instanceof ConflictError) return { ok: false, code: 'link_conflict' };
+            throw err;
+          }
+          return { ok: true };
+        });
+        if (!outcome.ok) return refuse(outcome.code);
+        clearOidcFlowCookie(reply, req, config);
+        auditCallbackAfterResponse(
+          req,
           {
             action: 'GET /api/auth/oidc/callback',
             projectId: null,
             targetType: 'user',
-            targetId: outcome.user.id,
-            detail: { provider, refused: 'root_local_only' },
+            targetId: principal.userId,
+            detail: { provider, linked: true },
           },
-          {
-            principal: {
-              kind: 'federated',
-              role: outcome.user.role,
-              userId: outcome.user.id,
-              username: `${outcome.user.username} · sso:${provider}`,
-              // No session is created for a refused sign-in, so there is no real id to put here;
-              // `buildAuditRow` reads `principal.kind`/`userId`/`username` only, never `sessionId`.
-              sessionId: '',
-              mustChangePassword: false,
-              provider,
-            },
-            ip: clientIp(req),
-            statusCode: 403,
-          },
+          principal,
         );
+        return reply.header('cache-control', 'no-store').redirect(safeNext(flow.next), 302);
       }
-      return refuse(outcome.code);
-    }
 
-    clearOidcFlowCookie(reply, req, config);
-    // The automatic audit hook never runs for this route: it is a GET, and `auditSubject` only
-    // records state-changing methods. This is the one write the callback must do itself — who signed
-    // in, through which provider, straight after `signIn()` filled `req.auditActor` for it.
-    ctx.audit.record(
-      {
-        action: 'GET /api/auth/oidc/callback',
-        projectId: null,
-        targetType: 'user',
-        targetId: outcome.user.id,
-        detail: { provider, newAccount: isNewAccount },
-      },
-      {
-        principal: {
-          kind: 'federated',
-          role: outcome.user.role,
-          userId: outcome.user.id,
-          username: `${outcome.user.username} · sso:${provider}`,
-          sessionId: (req.auditActor as Extract<typeof req.auditActor, { kind: 'session' }>).sessionId,
-          mustChangePassword: false,
-          provider,
+      const emailClaim = typeof claims.email === 'string' ? claims.email : undefined;
+      const preferredUsernameClaim = typeof claims.preferred_username === 'string' ? claims.preferred_username : undefined;
+      const nameClaim = typeof claims.name === 'string' ? claims.name : undefined;
+
+      // No write happens here: the identity's `last_login_at` is touched only once the sign-in below has
+      // passed every check under the row lock ([T4-NIT-1]) — a refused root login must not look used.
+      let user = await findUserByFederatedIdentity(db, { issuer, subject });
+      let isNewAccount = false;
+      if (!user) {
+        if (!config.OIDC_AUTO_PROVISION) return refuse('no_account');
+        try {
+          const provisioned = await provisionFederatedUser(db, {
+            provider,
+            issuer,
+            subject,
+            role: config.OIDC_DEFAULT_ROLE,
+            preferredUsername: preferredUsernameClaim,
+            email: emailClaim,
+            displayName: nameClaim,
+          });
+          user = provisioned.user;
+          // `false` when a concurrent callback for the same identity won the race and this one found
+          // its account instead of creating one.
+          isNewAccount = provisioned.created;
+        } catch (err) {
+          log.error({ err }, 'oidc auto-provisioning failed');
+          return refuse('provision_failed');
+        }
+      }
+
+      // Everything from here re-reads and writes this account under its row lock ([T6-MAJOR-1], tur 6
+      // review): an unlink or a promotion racing this sign-in serializes against the exact same lock
+      // `DELETE /api/auth/oidc/link` and `updateUser`'s promotion path take, so whichever of them commits
+      // first is what this callback sees — never a session issued for a link that was already gone by
+      // the time this runs, and never a login that outraces a promotion into holding a session over a
+      // now-root account. `user`/`isNewAccount` above are only the *lookup* that picked which account
+      // this flow is even about; everything that decides whether to actually sign in happens on a fresh
+      // read taken after the lock is held.
+      type LoginOutcome =
+        | { ok: true; user: UserRow }
+        | { ok: false; code: 'no_account' | 'account_disabled' }
+        | { ok: false; code: 'root_local_only'; user: UserRow };
+      const lookedUp = user;
+      const outcome = await withUserRowLock(db, lookedUp.id, async (tx): Promise<LoginOutcome> => {
+        // Re-confirms the identity resolved above is still linked to this account: a concurrent unlink
+        // that already committed — whether it landed before this lock was requested or is what this
+        // callback was queued behind — must not let this callback go on to open a session for an account
+        // it no longer has any claim on. Reuses `no_account`: from this callback's point of view, an
+        // identity that was just unlinked is indistinguishable from one that was never linked.
+        const stillLinked = await findUserByFederatedIdentity(tx, { issuer, subject });
+        if (!stillLinked || stillLinked.id !== lookedUp.id) return { ok: false, code: 'no_account' };
+        if (!stillLinked.isActive) return { ok: false, code: 'account_disabled' };
+
+        // Root stays local ([ADR-0077]): the two role checks that guard *linking* an identity
+        // (`POST /api/auth/oidc/link` above and the callback's `link` branch) never stopped an account
+        // that links first and is promoted to root afterwards from signing in here — nothing rechecked
+        // the role at sign-in time ([T3-MAJOR-1], tur 3 review). `stillLinked.role` is read fresh, under
+        // the same lock `updateUser`'s promotion path takes, not a value captured before the provider
+        // round trip above — so a promotion racing this very callback is caught too, not just one that
+        // finished earlier ([T6-MAJOR-1], tur 6 review). The federated identity row itself is left alone:
+        // whether it may currently be used to sign in is not the same question as whether it exists, and
+        // it becomes usable again the moment the account is demoted — no separate cleanup or re-link is
+        // needed either way.
+        if (stillLinked.role === 'root') return { ok: false, code: 'root_local_only', user: stillLinked };
+
+        // Deterministic pause point for the race test ([T6-MAJOR-1], tur 7): everything above has
+        // already re-read its own fresh state under the lock, so this is equivalent to pausing anywhere
+        // between "still linked" and "session written" — and it is the last point before the write. A
+        // no-op outside `test/integration/oidc.itest.ts`.
+        await ctx.testHooks?.onOidcLoginBeforeSignIn?.();
+
+        await signIn(reply, req, stillLinked, 'sso', tx);
+        // Only a sign-in that actually happened counts as one: the account's `last_login_at` ([MINOR-3],
+        // same column the password path keeps) and the identity's own ([T4-NIT-1] — after the root
+        // refusal above, not before it).
+        await recordLoginSuccess(tx, stillLinked.id);
+        await touchFederatedIdentityLogin(tx, { issuer, subject });
+        return { ok: true, user: stillLinked };
+      });
+
+      if (!outcome.ok) {
+        if (outcome.code === 'root_local_only') {
+          auditCallbackAfterResponse(
+            req,
+            {
+              action: 'GET /api/auth/oidc/callback',
+              projectId: null,
+              targetType: 'user',
+              targetId: outcome.user.id,
+              detail: { provider, refused: 'root_local_only' },
+            },
+            ssoPrincipal(outcome.user, ''),
+          );
+        }
+        return refuse(outcome.code);
+      }
+
+      clearOidcFlowCookie(reply, req, config);
+      // Who signed in, through which provider — `signIn()` just filled `req.auditActor` with the new
+      // session's id.
+      auditCallbackAfterResponse(
+        req,
+        {
+          action: 'GET /api/auth/oidc/callback',
+          projectId: null,
+          targetType: 'user',
+          targetId: outcome.user.id,
+          detail: { provider, newAccount: isNewAccount },
         },
-        ip: clientIp(req),
-        statusCode: 200,
-      },
-    );
-    return reply.header('cache-control', 'no-store').redirect(safeNext(flow.next), 302);
-  });
+        ssoPrincipal(outcome.user, (req.auditActor as Extract<typeof req.auditActor, { kind: 'session' }>).sessionId),
+      );
+      return reply.header('cache-control', 'no-store').redirect(safeNext(flow.next), 302);
+    },
+  );
 
   app.get('/api/auth/sessions', async (req) => {
     const principal = requireSession(req);
