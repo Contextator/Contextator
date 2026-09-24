@@ -719,10 +719,10 @@ the one case that is unambiguously safe. Keep the key where the archive is not.
 
 That key is rotatable — a four-step runbook (`npm run rotate-secret` is step 3, ADR-0075 is the record
 of why) — which gives the paragraph above a second edge: **rotating the key, and then retiring the old
-one, invalidates every archive taken before the rotation that carries a sync credential — a private git
-or Notion token — encrypted under it.** The old archive's fingerprint names a key the environment no
-longer holds, and for that archive `restore` refuses, because the credential's ciphertext was written
-under the key that was retired and cannot be re-derived; an archive with no such credential restores
+one, invalidates every archive taken before the rotation that carries a source's sync credential — a
+private git, Notion or Confluence token — encrypted under it.** The old archive's fingerprint names a
+key the environment no longer holds, and for that archive `restore` refuses, because the credential's
+ciphertext was written under the key that was retired and cannot be re-derived; an archive with no such credential restores
 anyway. Exactly when in the four steps that refusal starts, and what to do about backups from before a
 rotation, is the runbook's business, not this paragraph's —
 see [wiki/Security#rotating-secret_key](https://github.com/Contextator/Contextator/wiki/Security#rotating-secret_key).
