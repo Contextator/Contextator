@@ -716,13 +716,14 @@ a fingerprint of the key — 128 bits of keyed HMAC — which is what lets `rest
 missing key before it writes anything** instead of leaving you with a half-loaded instance and no way
 back. Keep the key where the archive is not.
 
-That key is rotatable — `npm run rotate-secret`, and ADR-0075 is the record of why — which gives
-the paragraph above a second edge: **a rotation makes every archive taken before it unrestorable by this
-instance.** The old archive's fingerprint names the retired key, the environment holds the new one, and
-`restore` refuses — correctly, because the ciphertexts in that dump were written under the key that was
-retired. So a rotation ends with a backup decision: take a fresh archive right after it and call that
-one the oldest restorable, or keep the retired key with the archives that still need it, labelled and
-stored somewhere those archives are not.
+That key is rotatable — a four-step runbook (`npm run rotate-secret` is step 3, ADR-0075 is the record
+of why) — which gives the paragraph above a second edge: **a rotation makes every archive taken before
+it unrestorable by this instance, from step 2 onward, not step 4.** The old archive's fingerprint names
+the retired key, the environment holds the new one, and `restore` refuses — correctly, because the
+ciphertexts in that dump were written under the key that was retired. So a rotation has a fifth step
+that is about backups rather than keys, and the moment to decide it is *before* step 2: take a fresh
+archive right after step 2 and call that one the oldest restorable, or keep the retired key with the
+archives that still need it, labelled and stored somewhere those archives are not.
 
 The restore also refuses a dump taken from a newer PostgreSQL major version than the server it is going
 into; going the other way, 16 to 17, is the documented upgrade and is what the command exists for.
