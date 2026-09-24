@@ -23,9 +23,10 @@ const CreateBody = z.object({
   scope: z.array(ScopeEntry).min(1).max(50),
   // A single project this token may reach, or `null` for every project its owner already reaches.
   // Not checked against the owner's memberships here: a project id the account cannot reach only
-  // ever narrows the token to nothing, the same way it would for a stale or mistyped id — the
-  // request-time membership check ([ADR-0076](../../.ssot/ADR.md#adr-0076)) is what actually decides,
-  // on every request, off the owner's live role rather than a snapshot taken at mint time.
+  // ever narrows the token to nothing — the request-time membership check
+  // ([ADR-0076](../../.ssot/ADR.md#adr-0076)) is what actually decides, on every request, off the
+  // owner's live role rather than a snapshot taken at mint time. An id no project has at all is
+  // refused with a 400 by `createApiToken`, from the foreign key, rather than stored.
   projectId: z.uuid().nullable().default(null),
   expiresAt: z.coerce.date().nullable().default(null),
 });

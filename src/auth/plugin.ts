@@ -51,7 +51,18 @@ export function installAuth(app: FastifyInstance, ctx: AppContext): void {
     // expiry, revocable on its own. `verifyApiToken` reads the owner's role fresh on every call, so a
     // demotion or deactivation reaches every token that account holds without touching a row of theirs.
     if (bearer) {
-      const identity = await verifyApiToken(db, bearer);
+      let identity: Awaited<ReturnType<typeof verifyApiToken>>;
+      try {
+        identity = await verifyApiToken(db, bearer);
+      } catch (err) {
+        // A token is a row too, so this is the session lookup's rule below, for the same reasons: on
+        // a public route and on `/metrics` an unreachable database leaves the caller anonymous rather
+        // than answering 500; everywhere else the 500 stands.
+        const routeUrl = req.routeOptions.url ?? '';
+        if (!PUBLIC_ROUTES.has(routeUrl) && routeUrl !== METRICS_ROUTE) throw err;
+        req.log.warn({ err }, 'could not resolve the API token; answering this route anonymously');
+        return;
+      }
       if (identity) {
         req.principal = {
           kind: 'apiToken',

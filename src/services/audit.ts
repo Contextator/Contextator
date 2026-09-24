@@ -49,7 +49,8 @@ export interface AuditContext {
  * `Principal.username` already holds for it — machine access is recorded as machine access rather than
  * as a person nobody can name. An [ADR-0076](../../.ssot/ADR.md#adr-0076) API token is `actorKind:
  * 'api_token'`, with its owner's real `userId` and the `"<token name> · <owner>"` label
- * `Principal.username` already carries for it — unlike `ADMIN_TOKEN`, it does name somebody.
+ * `Principal.username` already carries for it — unlike `ADMIN_TOKEN`, it does name somebody — and
+ * the token's own id in `detail.tokenId`, since a label cannot tell two same-named tokens apart.
  */
 export function buildAuditRow(subject: AuditSubject, context: AuditContext): AuditEventInsert {
   const { principal } = context;
@@ -62,7 +63,10 @@ export function buildAuditRow(subject: AuditSubject, context: AuditContext): Aud
     projectId: subject.projectId,
     targetType: subject.targetType,
     targetId: subject.targetId,
-    detail: subject.detail,
+    // The label names the token, but not uniquely: two tokens of one owner can share a name, and a
+    // revoked one's name can be reused. The id is what tells them apart — the one to revoke — and it
+    // is the principal's own, never a value from the request, so `detail` stays a closed set.
+    detail: principal.kind === 'apiToken' ? { ...subject.detail, tokenId: principal.tokenId } : subject.detail,
     statusCode: context.statusCode,
   };
 }

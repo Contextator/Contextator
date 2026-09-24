@@ -83,6 +83,22 @@ describe('the row an audit event becomes', () => {
     expect(row.actorLabel).toBe('deploy · dana');
   });
 
+  it('names the acting API token by its id in detail, beside what the request itself recorded', () => {
+    const subject = subjectOf('PATCH', '/api/projects/:id/mcp-auth', { id: 'p-1' }, { mode: 'token' });
+    const row = buildAuditRow(subject, { principal: apiToken, ip: null, statusCode: 200 });
+    // The label cannot tell two tokens of one owner that share a name apart; the id can. It comes from
+    // the principal, which is what `verifyApiToken` resolved, and is added to — not in place of — the
+    // body's own allowlisted fields.
+    expect(row.detail).toEqual({ ...subject.detail, tokenId: 't-1' });
+    expect(row.detail).toMatchObject({ mode: 'token' });
+
+    for (const principal of [session, machine]) {
+      const other = buildAuditRow(subject, { principal, ip: null, statusCode: 200 });
+      expect(other.detail).toEqual(subject.detail);
+      expect(other.detail).not.toHaveProperty('tokenId');
+    }
+  });
+
   /**
    * **There is no shape of input that produces an unattributed row.** `AuditContext.principal` is not
    * optional, so a caller cannot leave the actor out; the label is derived from it rather than passed

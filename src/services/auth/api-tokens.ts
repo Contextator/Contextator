@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { and, asc, eq, isNull, or, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { apiTokens, users, type ApiTokenRow, type UserRole } from '../../db/schema.js';
-import { NotFoundError } from '../projects.js';
+import { NotFoundError, ValidationError } from '../projects.js';
 
 /**
  * Bearer credentials for the admin API, scoped to one account ([ADR-0076](../../../.ssot/ADR.md#adr-0076)).
@@ -68,6 +68,20 @@ export interface CreateApiTokenInput {
   createdBy: string | null;
 }
 
+/**
+ * The insert naming a project that is not there: never created, or deleted since the form was drawn.
+ * Postgres says so as a foreign-key violation on `api_tokens_project_id_fkey`, and that is the
+ * caller's mistake, not the server's — so it is a 400, not the 500 an unmapped driver error becomes.
+ * Only this constraint: a vanished *owner* (`api_tokens_user_id_fkey`) is not something the request
+ * body said, and stays the error it is.
+ */
+function isMissingProject(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const e = err as { code?: string; constraint?: string; cause?: { code?: string; constraint?: string } };
+  const pg = e.code === '23503' ? e : e.cause?.code === '23503' ? e.cause : null;
+  return pg?.constraint === 'api_tokens_project_id_fkey';
+}
+
 export async function createApiToken(db: Db, input: CreateApiTokenInput): Promise<{ token: string; view: ApiTokenView }> {
   const token = newApiToken();
   const [row] = await db
@@ -82,7 +96,13 @@ export async function createApiToken(db: Db, input: CreateApiTokenInput): Promis
       expiresAt: input.expiresAt,
       createdBy: input.createdBy,
     })
-    .returning();
+    .returning()
+    .catch((err: unknown) => {
+      if (isMissingProject(err)) {
+        throw new ValidationError('No project has that id. A token can be restricted to an existing project, or to none.');
+      }
+      throw err;
+    });
   return { token, view: toApiTokenView(row) };
 }
 

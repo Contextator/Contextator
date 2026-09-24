@@ -113,6 +113,15 @@ describe('a row as a sentence', () => {
     expect(summarizeAuditEvent({ ...base, actorLabel: 'ADMIN_TOKEN' })).toBe('ADMIN_TOKEN deleted a source from handbook (source 5f2c0a1b…)');
   });
 
+  it('names the API token an action was taken with, since its label does not tell same-named tokens apart', () => {
+    const sentence = summarizeAuditEvent({
+      ...base,
+      actorLabel: 'deploy · dana',
+      detail: { tokenId: '0d7a3b52-0000-4000-8000-000000000003' },
+    });
+    expect(sentence).toBe('deploy · dana deleted a source from handbook (source 5f2c0a1b…, via token 0d7a3b52…)');
+  });
+
   /**
    * `src/auth/policy.ts` refuses to give an action a name somebody has to assign, because the next
    * route would not have one. This panel's phrase table is the other end of that argument and has to

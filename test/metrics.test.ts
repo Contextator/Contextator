@@ -113,7 +113,17 @@ const stubDb = {
   select: () => ({ from: () => ({ orderBy: () => ({ limit: async () => [] }) }) }),
 } as unknown as Db;
 
-async function buildApi(config: Record<string, unknown> = {}): Promise<FastifyInstance> {
+/** A database that is not there: every question to it fails the way a refused connection does. */
+const downDb = new Proxy(
+  {},
+  {
+    get: () => () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:5432');
+    },
+  },
+) as unknown as Db;
+
+async function buildApi(config: Record<string, unknown> = {}, db: Db = stubDb): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   await app.register(cookie);
   const ctx = {
@@ -126,7 +136,7 @@ async function buildApi(config: Record<string, unknown> = {}): Promise<FastifyIn
       METRICS_TOKEN: undefined,
       ...config,
     },
-    db: stubDb,
+    db,
     log: app.log,
     embeddings: { id: 'local:stub:fp32', ready: true },
     indexer: { stats: () => ({ interactive: 0, scheduled: 0, running: 0 }) },
@@ -136,7 +146,7 @@ async function buildApi(config: Record<string, unknown> = {}): Promise<FastifyIn
     setup: new SetupGate(),
     loginLimiter: new SlidingWindow(10, 1000),
     metrics: new MetricsRegistry(),
-    audit: new AuditWriter(stubDb, app.log),
+    audit: new AuditWriter(db, app.log),
     version: '0.0.0-test',
     startedAt: Date.now(),
   } as unknown as AppContext;
@@ -185,6 +195,27 @@ describe('the route in front of it', () => {
   it('refuses the wrong scrape token, and one presented when none is configured', async () => {
     expect((await scrape({ METRICS_TOKEN: SCRAPE_TOKEN }, { authorization: 'Bearer not-the-scrape-token' })).statusCode).toBe(401);
     expect((await scrape({}, { authorization: `Bearer ${SCRAPE_TOKEN}` })).statusCode).toBe(401);
+  });
+
+  /**
+   * An `ctxk_` bearer is the one credential on this route that needs a row to be checked. With the
+   * database gone, `/metrics` — which exists to be read precisely then — answers as it would to an
+   * anonymous caller, and a route that needs a principal still answers the 500 it always has.
+   */
+  it('answers an API token as anonymous rather than 500 while the database is down', async () => {
+    const bearer = { authorization: `Bearer ctxk_${'0'.repeat(64)}` };
+    const app = await buildApi({ METRICS_PUBLIC: true }, downDb);
+    const metrics = await app.inject({ method: 'GET', url: METRICS_ROUTE, headers: bearer });
+    const elsewhere = await app.inject({ method: 'GET', url: '/api/projects', headers: bearer });
+    await app.close();
+    expect(metrics.statusCode).toBe(200);
+    expect(metrics.body).toContain('contextator_db_up 0');
+    expect(elsewhere.statusCode).toBe(500);
+
+    const closed = await buildApi({}, downDb);
+    const refused = await closed.inject({ method: 'GET', url: METRICS_ROUTE, headers: bearer });
+    await closed.close();
+    expect(refused.statusCode).toBe(401);
   });
 
   it('answers anybody once METRICS_PUBLIC is on', async () => {

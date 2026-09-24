@@ -56,7 +56,7 @@ interface AuditPage {
     createdAt: string;
     action: string;
     summary: string;
-    actor: { kind: string; label: string; userId: string | null; accountGone: boolean };
+    actor: { kind: string; label: string; userId: string | null; accountGone: boolean; tokenId: string | null };
     project: { id: string; name: string | null } | null;
     target: { type: string; id: string } | null;
     statusCode: number;
@@ -177,6 +177,8 @@ describe('what a page says about rows that outlived what they name', () => {
     for (const event of living.events) {
       expect(event.actor.userId).toBe(admin.id);
       expect(event.actor.accountGone).toBe(false);
+      // A session acted, not an ADR-0076 token: there is no token to name.
+      expect(event.actor.tokenId).toBeNull();
     }
   });
 

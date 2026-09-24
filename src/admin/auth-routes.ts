@@ -227,7 +227,9 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
       email: user.email,
       role: user.role,
       mustChangePassword: user.mustChangePassword,
-      authKind: 'session' as const,
+      // [ADR-0080](../../.ssot/ADR.md#adr-0080), FR-601: how this request was authenticated, not only who
+      // it names — an API token answers as its owner, so the owner's fields alone cannot say which.
+      authKind: principal.kind === 'apiToken' ? ('apiToken' as const) : ('session' as const),
       // Only a member needs the map; for root and admin every project reads as editor anyway.
       projects: user.role === 'member' ? await membershipMap(db, user.id) : {},
       oidc,
