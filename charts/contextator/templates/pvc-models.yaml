@@ -1,0 +1,26 @@
+{{- if and .Values.persistence.models.enabled (not .Values.persistence.models.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "contextator.fullname" . }}-models
+  labels:
+    {{- include "contextator.labels" . | nindent 4 }}
+  {{- if or .Values.persistence.retainOnUninstall .Values.persistence.models.annotations }}
+  annotations:
+    {{- if .Values.persistence.retainOnUninstall }}
+    helm.sh/resource-policy: keep
+    {{- end }}
+    {{- with .Values.persistence.models.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.models.accessModes | nindent 4 }}
+  {{- if .Values.persistence.models.storageClassName }}
+  storageClassName: {{ .Values.persistence.models.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.models.size }}
+{{- end }}

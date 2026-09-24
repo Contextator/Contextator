@@ -1,0 +1,259 @@
+# Default values for the contextator chart.
+# Everything an installer can reasonably need to change lives here. Anything not listed here is
+# the chart's own decision (see charts/contextator/README.md).
+
+# -----------------------------------------------------------------------------------------------
+# Replicas — deliberately not a setting.
+# -----------------------------------------------------------------------------------------------
+# This chart always deploys exactly one Pod and does not expose a `replicaCount` value. MCP
+# sessions are held in the process's memory (src/mcp/sessions.ts) and the indexer runs in-process
+# — a second replica would not share either, so scaling this Deployment would silently split
+# sessions and indexing state across pods rather than scale anything. Horizontal scaling is
+# out of scope (ROADMAP.md, "Deliberately not"). See ADR-0070.
+#
+# If you need more headroom, raise `resources` below rather than replicas.
+
+# -----------------------------------------------------------------------------------------------
+# Image
+# -----------------------------------------------------------------------------------------------
+image:
+  # The `slim` build target (ADR-0069): no embedded PostgreSQL, requires an external DATABASE_URL.
+  # This chart only ever deploys the slim image — the full/embedded-Postgres image is a
+  # single-host (docker-compose) topology and is out of scope here.
+  repository: contextator/contextator
+  # No default: as of this chart version, `contextator/contextator` on Docker Hub does not publish
+  # a `-slim` tag yet (only `latest`, `0.1`, `0.1.0`, none built from the slim target — ADR-0062
+  # names the scheme, publishing it is a separate, not-yet-made decision). Defaulting to a tag that
+  # does not exist would fail silently as ImagePullBackOff; defaulting to one that does exist would
+  # silently deploy the wrong (embedded-Postgres) topology. Set this explicitly — to a `-slim` tag
+  # once one is published, or to an image you built and pushed yourself.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+# - name: my-registry-secret
+
+nameOverride: ""
+fullnameOverride: ""
+
+# -----------------------------------------------------------------------------------------------
+# Database — required, external only.
+# -----------------------------------------------------------------------------------------------
+# The slim image carries no PostgreSQL of its own (ADR-0069). This chart refuses to install
+# without a way to reach one: set `database.url`, or point `database.existingSecret` at a Secret
+# you already manage (e.g. from an operator-managed PostgreSQL, or a secrets manager integration).
+database:
+  # postgres://user:password@host:5432/dbname — pgvector extension required, PostgreSQL 16+.
+  # Leave empty only if `existingSecret` is set instead.
+  url: ""
+
+  # Name of a pre-existing Secret carrying the connection string, as an alternative to `url`.
+  # When set, `url` above is ignored and no Secret is created for the database by this chart.
+  existingSecret: ""
+  # Key inside `existingSecret` that holds the connection string.
+  existingSecretKey: "DATABASE_URL"
+
+# -----------------------------------------------------------------------------------------------
+# SECRET_KEY — encrypts source credentials (git/Notion tokens) at rest. Never plaintext here.
+# -----------------------------------------------------------------------------------------------
+# Exactly one of `existingSecret` or `value` should be set for a production install. If neither is
+# set, the chart generates a random 44-character key on first install and — because Helm's
+# `lookup` re-reads the existing Secret's data on every subsequent `helm upgrade` — keeps that same
+# value stable across upgrades. It is NOT stable across `helm uninstall` + reinstall, and it is not
+# backed up anywhere: if you lose it, previously stored source tokens (git/Notion credentials)
+# become undecryptable and those sources need reconnecting. Set `existingSecret` and manage the
+# value in your own secrets tooling if that matters to you.
+secretKey:
+  existingSecret: ""
+  existingSecretKey: "SECRET_KEY"
+  # Only for local/dev convenience. If you set this, do not commit the real value to a values
+  # file that lands in version control — pass it with `--set secretKey.value=...` or
+  # `--set-file` instead, or use `existingSecret`.
+  value: ""
+
+# -----------------------------------------------------------------------------------------------
+# Networking
+# -----------------------------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 80
+  # Container listens on this port (matches the image's PORT env, ADR-0069's slim Dockerfile).
+  targetPort: 3444
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  #   cert-manager.io/cluster-issuer: letsencrypt
+  hosts:
+    - host: contextator.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #   - secretName: contextator-tls
+  #     hosts:
+  #       - contextator.example.com
+
+# Set when installing behind an Ingress/reverse proxy: without it, OAuth metadata is built from
+# the request's own Host header, and the auth cookie's `Secure` flag depends on Fastify's proxy
+# detection guessing right. See src/config.ts PUBLIC_BASE_URL / TRUST_PROXY.
+config:
+  # e.g. "https://contextator.example.com" — leave empty for a ClusterIP-only / port-forward setup.
+  publicBaseUrl: ""
+  # Fastify trust-proxy setting (ADR-0060, src/config.ts parseTrustProxy). Off by default (empty
+  # here maps to the app's own TRUST_PROXY default of "0") and never inferred from
+  # `ingress.enabled` — ADR-0060 requires an operator to name what is in front. If this chart is
+  # installed behind an Ingress/reverse proxy, set it explicitly: "1" trusts every hop's
+  # X-Forwarded-For (not just one), or supply a comma-separated list of trusted proxy IPs/CIDRs/
+  # subnet names (loopback, linklocal, uniquelocal) to trust only those.
+  trustProxy: ""
+
+# -----------------------------------------------------------------------------------------------
+# Persistence
+# -----------------------------------------------------------------------------------------------
+persistence:
+  # Both PVCs below carry `helm.sh/resource-policy: keep` by default, so `helm uninstall` leaves
+  # them (and their data) behind — see chart README "Uninstall". Set this to `false` if you want
+  # `helm uninstall` to delete the PVCs, and the data on them, along with the release.
+  retainOnUninstall: true
+
+  # DATA_DIR: materialised sources (git checkouts, Notion pulls) and uploaded files. Required for
+  # uploads to survive a pod restart (see chart README, acceptance criterion 5).
+  data:
+    enabled: true
+    storageClassName: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 5Gi
+    existingClaim: ""
+    annotations: {}
+
+  # MODEL_CACHE_DIR: the downloaded embedding model (~470MB at the default fp32 dtype, ~235MB at
+  # fp16, ~120MB at q8 — see EMBEDDING_DTYPE below). Not required, but without it every pod restart
+  # re-downloads the model from Hugging Face and re-pays ~70s of load time (measured, see chart
+  # README "Kaynak ölçümü").
+  models:
+    enabled: true
+    storageClassName: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 2Gi
+    existingClaim: ""
+    annotations: {}
+
+# -----------------------------------------------------------------------------------------------
+# Resources — measured, not guessed (see charts/contextator/README.md "Kaynak ölçümü" for the
+# exact measurement this comes from: docker stats against the slim image, external pgvector 16,
+# default fp32 embedding model, idle vs. a 41-document indexing burst).
+# -----------------------------------------------------------------------------------------------
+resources:
+  requests:
+    # Idle/query-serving baseline measured at ~770-820MiB RSS with the fp32 model warm; this
+    # leaves headroom without over-requesting on small clusters.
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    # Embedding inference is CPU-bound and briefly parallel (ONNX Runtime uses all visible cores
+    # for a batch): a measured indexing burst hit ~10 cores for 2-3 seconds on a 12-core host.
+    # The limit below caps that burst rather than reserving it, so indexing is slower under
+    # contention instead of starving neighbours; raise it if this instance indexes large corpora
+    # often.
+    cpu: "2"
+    memory: 2Gi
+
+# If you switch EMBEDDING_DTYPE to fp16 or q8 (via `env` below) to shrink the model's memory
+# footprint, lower `resources` accordingly — the numbers above are for the fp32 default.
+
+# -----------------------------------------------------------------------------------------------
+# Probes
+# -----------------------------------------------------------------------------------------------
+# Liveness is a bare TCP check on the app port: it must not depend on the database, or an outage
+# there would crash-loop a process that is otherwise fine and would recover the moment the
+# database comes back. Readiness and startup call GET /api/health, which reports HTTP 503 the
+# moment the database is unreachable (src/admin/routes.ts) — that is what keeps a DB-down pod out
+# of Service endpoints (acceptance criterion 7) without restarting it.
+probes:
+  liveness:
+    enabled: true
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 6
+  readiness:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  startup:
+    # Generous: covers a cold model download (~470MB from Hugging Face at fp32) on first start.
+    # The image's own HEALTHCHECK uses a 180s start-period for the same reason.
+    enabled: true
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30
+
+# -----------------------------------------------------------------------------------------------
+# Pod-level knobs
+# -----------------------------------------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}
+
+# The container must start as root (uid 0): the image's own entrypoint (contextator-entrypoint)
+# checks `id -u = 0`, refuses otherwise, then `chown -R node:node` on the mounted DATA_DIR /
+# MODEL_CACHE_DIR volumes and finally re-execs the app as "node" itself via `gosu node`. This is
+# a real constraint found by installing this chart against a live cluster, not a default carried
+# over from elsewhere: `runAsNonRoot: true` / a non-zero `runAsUser` makes the container exit
+# immediately with "the container must start as root", and dropping all Linux capabilities takes
+# away the CAP_CHOWN/CAP_SETUID/CAP_SETGID root needs to do that chown-then-gosu handoff, with the
+# same result. There is currently no image variant that starts directly as "node", so this chart
+# cannot offer a non-root securityContext by default; `allowPrivilegeEscalation: false` costs
+# nothing here since the handoff is `setuid()`/`setgid()` by a root-owned process, not an exec of a
+# setuid binary.
+podSecurityContext: {}
+
+securityContext:
+  allowPrivilegeEscalation: false
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -----------------------------------------------------------------------------------------------
+# Environment passthrough
+# -----------------------------------------------------------------------------------------------
+# Contextator has ~80 optional environment variables (.env.example) — OAuth/SSO, rate limits,
+# upload caps, embedding provider/model/dtype, webhook settings, and so on. Anything not already
+# modelled above (image, database, secretKey, service, ingress, persistence, resources, probes)
+# is deliberately left to these two passthrough maps rather than mirrored one-by-one into this
+# chart, so the chart does not drift out of sync with the application's own env surface.
+#
+# Plain, non-secret values:
+env: {}
+#   EMBEDDING_DTYPE: fp16
+#   RATE_LIMIT_MAX: "600"
+
+# Values that must not be plaintext in this file: each key becomes an env var sourced from
+# `secretRef.name` / `secretRef.key` via `secretKeyRef` — the Secret itself is not managed by
+# this chart and must already exist (e.g. OPENAI_API_KEY, OAUTH client secrets).
+envSecret: {}
+#   OPENAI_API_KEY:
+#     secretName: contextator-openai
+#     secretKey: api-key
+
+extraVolumes: []
+extraVolumeMounts: []
+
+# -----------------------------------------------------------------------------------------------
+# Helm test
+# -----------------------------------------------------------------------------------------------
+tests:
+  enabled: true

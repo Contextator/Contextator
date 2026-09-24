@@ -1,0 +1,42 @@
+Contextator {{ .Chart.AppVersion }} kuruldu ({{ include "contextator.fullname" . }}, {{ .Release.Namespace }} namespace'i).
+
+1) Pod'un hazır olmasını bekleyin:
+   kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "contextator.fullname" . }}
+
+2) Dashboard'a erişin:
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+   http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else if contains "NodePort" .Values.service.type }}
+   export NODE_PORT=$(kubectl -n {{ .Release.Namespace }} get svc {{ include "contextator.fullname" . }} -o jsonpath="{.spec.ports[0].nodePort}")
+   export NODE_IP=$(kubectl -n {{ .Release.Namespace }} get nodes -o jsonpath="{.items[0].status.addresses[0].address}")
+   echo http://$NODE_IP:$NODE_PORT
+{{- else if contains "LoadBalancer" .Values.service.type }}
+   kubectl -n {{ .Release.Namespace }} get svc {{ include "contextator.fullname" . }} -w
+{{- else }}
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "contextator.fullname" . }} 3444:{{ .Values.service.port }}
+   http://localhost:3444
+{{- end }}
+
+3) İlk kurulum (needsSetup) adımını dashboard üzerinden tamamlayın.
+
+{{- if and (not .Values.secretKey.value) (not .Values.secretKey.existingSecret) }}
+
+NOT: SECRET_KEY belirtilmediği için chart onu ilk kurulumda kendisi üretti ve
+"{{ include "contextator.secretKeySecretName" . }}" adlı Secret içine yazdı. Bu değer
+"helm upgrade" sırasında korunur (bkz. templates/secret.yaml, lookup ile). Yine de
+elle silinmesi ya da namespace'in yeniden kurulması, özel kaynaklar (git/Notion) için
+saklanan token'ların çözülemez hale gelmesine yol açar — bu Secret'ı kaybetmeyin:
+
+   kubectl -n {{ .Release.Namespace }} get secret {{ include "contextator.secretKeySecretName" . }} -o jsonpath='{.data.SECRET_KEY}' | base64 -d
+{{- end }}
+
+4) Sağlık durumunu kontrol edin (image içinde yalnızca node var; wget/curl yok):
+   kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "contextator.fullname" . }} -- node -e "fetch('http://127.0.0.1:{{ .Values.service.targetPort }}/api/health').then(r=>r.text()).then(console.log)"
+
+   ya da chart'ın kendi Helm test'ini çalıştırın:
+   helm test {{ .Release.Name }}
+
+Bu chart tek replica ile çalışır (bkz. README.md "Replicas" bölümü) ve harici bir
+PostgreSQL (pgvector) veritabanı gerektirir; embedded PostgreSQL desteği yoktur.

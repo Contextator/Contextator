@@ -1,0 +1,32 @@
+apiVersion: v2
+name: contextator
+description: >-
+  Contextator — self-hosted documentation search server (MCP + REST + dashboard).
+  Installs a single replica against an external PostgreSQL (pgvector) database.
+  MCP sessions are held in memory and the indexer runs in-process, so this chart
+  does not offer horizontal scaling.
+type: application
+
+# Chart version (SemVer2), bump on any template/values change.
+version: 0.1.0
+
+# Matches the application's `contextator/contextator` image tag this chart defaults to.
+# See values.yaml `image.tag`.
+appVersion: "0.1.0"
+
+kubeVersion: ">=1.24.0-0"
+
+keywords:
+  - documentation
+  - search
+  - mcp
+  - rag
+  - pgvector
+
+home: https://github.com/Contextator/Contextator
+sources:
+  - https://github.com/Contextator/Contextator
+
+maintainers:
+  - name: Contextator
+    url: https://github.com/Contextator/Contextator

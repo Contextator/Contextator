@@ -160,6 +160,25 @@ projects, documents, embeddings, accounts, MCP tokens, the audit and query logs 
 whatever covers that server, and by nothing this image ships. The `contextator-data` volume needs
 backing up on both topologies: an uploaded source's content is not in the database at all.
 
+### Running on Kubernetes
+
+For operators who already run Kubernetes rather than a single Docker host, `charts/contextator/` is a
+Helm chart for the same `-slim` + external-database topology above:
+
+```bash
+helm install ctx ./charts/contextator \
+  --set database.url="postgres://user:password@db.example.com:5432/contextator" \
+  --set image.tag="<your-slim-image-tag>"
+```
+
+It deploys exactly one Pod — this chart does not expose a `replicaCount` value at all, because MCP
+sessions and the indexer both live in that one process (same reason horizontal scaling is out of scope
+generally, below) — and, like the `-slim` image itself, it refuses to install without `DATABASE_URL` or
+an equivalent Secret. `image.tag` has no default either: `contextator/contextator` does not publish a
+`-slim` tag on Docker Hub yet, so point it at an image you built and pushed yourself until one is. See
+`charts/contextator/README.md` for the full install guide, including the `SECRET_KEY`/persistence/probe
+design and measured resource sizing, and [ADR-0078](../.ssot/ADR.md#adr-0078) for the reasoning.
+
 ## Document sources
 
 A project is a set of **sources**. Each one is added in the dashboard (**Add source**), carries a

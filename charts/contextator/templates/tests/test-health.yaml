@@ -1,0 +1,35 @@
+{{- if .Values.tests.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "contextator.fullname" . }}-test-health
+  labels:
+    {{- include "contextator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  containers:
+    - name: health-check
+      image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+      command:
+        - node
+        - -e
+        - |
+          // The slim image is Debian-based with only Node.js installed (no wget/curl/busybox —
+          // confirmed by inspecting the image directly), so the health check uses Node's own
+          // built-in fetch rather than a shell HTTP client.
+          const url = "http://{{ include "contextator.fullname" . }}:{{ .Values.service.port }}/api/health";
+          console.log("GET " + url);
+          fetch(url, { signal: AbortSignal.timeout(10000) })
+            .then(async (res) => {
+              const body = await res.text();
+              console.log(res.status, body);
+              if (!res.ok) process.exit(1);
+            })
+            .catch((err) => {
+              console.error(err);
+              process.exit(1);
+            });
+{{- end }}

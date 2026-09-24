@@ -1,0 +1,155 @@
+{{- include "contextator.requireDatabase" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "contextator.fullname" . }}
+  labels:
+    {{- include "contextator.labels" . | nindent 4 }}
+spec:
+  # Always exactly one replica — see values.yaml's "Replicas" note and ADR-0070. Not a template
+  # value on purpose: MCP sessions live in this process's memory and the indexer runs in-process,
+  # so a second replica would not share either one.
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate: two pods would briefly both hold the one PVC this Deployment
+    # mounts ReadWriteOnce, and would briefly duplicate in-memory MCP sessions and indexing state
+    # for the reason above. A short restart gap is the correct trade-off for a single-replica app.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "contextator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "contextator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "contextator.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: contextator
+          image: "{{ .Values.image.repository }}:{{ required "contextator: image.tag must be set — no `-slim` tag is published yet, and falling back to the chart's appVersion would silently deploy the wrong (embedded-Postgres) image topology. See charts/contextator/README.md." .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "contextator.databaseSecretName" . }}
+                  key: {{ include "contextator.databaseSecretKey" . }}
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "contextator.secretKeySecretName" . }}
+                  key: {{ include "contextator.secretKeySecretKey" . }}
+            {{- if .Values.config.publicBaseUrl }}
+            - name: PUBLIC_BASE_URL
+              value: {{ .Values.config.publicBaseUrl | quote }}
+            {{- end }}
+            {{- if .Values.config.trustProxy }}
+            - name: TRUST_PROXY
+              value: {{ .Values.config.trustProxy | quote }}
+            {{- end }}
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- range $key, $ref := .Values.envSecret }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $ref.secretName }}
+                  key: {{ $ref.secretKey }}
+            {{- end }}
+          volumeMounts:
+            {{- if .Values.persistence.data.enabled }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+            {{- if .Values.persistence.models.enabled }}
+            - name: models
+              mountPath: /app/.cache/models
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.probes.liveness.enabled }}
+          livenessProbe:
+            # TCP only, deliberately not /api/health: liveness must not depend on the database,
+            # or a database outage this process cannot fix would also crash-loop the process
+            # (see values.yaml probes comment).
+            tcpSocket:
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.probes.readiness.enabled }}
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: {{ .Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        {{- if .Values.persistence.data.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.data.existingClaim | default (printf "%s-data" (include "contextator.fullname" .)) }}
+        {{- end }}
+        {{- if .Values.persistence.models.enabled }}
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.models.existingClaim | default (printf "%s-models" (include "contextator.fullname" .)) }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
