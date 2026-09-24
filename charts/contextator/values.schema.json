@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "contextator chart values",
+  "description": "Deliberately narrow: it rejects the one value this chart must never accept (replicaCount other than 1, ADR-0078) and checks the shape of the top-level maps. It does not mark image.tag or the database as required and does not type scalar values such as image.tag or config.trustProxy, because `--set` infers types (`--set image.tag=0.1` is a number) and the templates' own `required`/`fail` checks already produce the specific error messages for those. Draft-07 because Helm v3 validates with gojsonschema, which supports drafts 4, 6 and 7 only.",
+  "type": "object",
+  "properties": {
+    "replicaCount": {
+      "description": "Not a setting: the chart always renders exactly one replica (ADR-0078). MCP sessions live in process memory and the indexer runs in-process, so a second Pod would split both. The key is absent from values.yaml; any value other than 1 is rejected here so `--set replicaCount=2` fails instead of being silently ignored.",
+      "const": 1
+    },
+    "image": { "type": "object" },
+    "database": { "type": "object" },
+    "secretKey": { "type": "object" },
+    "service": { "type": "object" },
+    "ingress": { "type": "object" },
+    "config": { "type": "object" },
+    "persistence": { "type": "object" },
+    "resources": { "type": "object" },
+    "probes": { "type": "object" },
+    "env": { "type": "object" },
+    "envSecret": { "type": "object" },
+    "imagePullSecrets": { "type": "array" },
+    "extraVolumes": { "type": "array" },
+    "extraVolumeMounts": { "type": "array" },
+    "tests": { "type": "object" }
+  }
+}

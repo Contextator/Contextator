@@ -27,6 +27,12 @@ jobs:
   lint-and-template:
     name: helm lint and helm template
     runs-on: ubuntu-latest
+    # An explicit `shell: bash` is what makes Actions run each step as `bash -eo pipefail` (the
+    # implicit default is `bash -e`, no pipefail); each step also says `set -euo pipefail` itself so
+    # it behaves the same when pasted into a local shell.
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
 
@@ -41,12 +47,14 @@ jobs:
       # configuration. Neither is a real value; nothing here talks to a database or pulls an image.
       - name: helm lint
         run: |
+          set -euo pipefail
           helm lint charts/contextator \
             --set image.tag="ci-test" \
             --set database.url="postgres://user:pass@db.example.internal:5432/contextator"
 
       - name: helm template (database.url and image.tag set)
         run: |
+          set -euo pipefail
           helm template ctx charts/contextator \
             --set image.tag="ci-test" \
             --set database.url="postgres://user:pass@db.example.internal:5432/contextator"
@@ -57,6 +65,7 @@ jobs:
       # database.url reason under test, not because of the separate image.tag guard below.
       - name: helm template fails without database.url or database.existingSecret
         run: |
+          set -euo pipefail
           if output=$(helm template ctx charts/contextator --set image.tag="ci-test" 2>&1); then
             echo "helm template succeeded with no database.* value set — expected it to fail (ADR-0078)."
             exit 1
@@ -67,11 +76,13 @@ jobs:
             exit 1
           fi
 
-      # image.tag has no default (ADR-0078): no `-slim` tag is published yet, and falling back to the
-      # chart's appVersion would silently deploy the wrong (embedded-Postgres) image topology. Mirrors
-      # the database.url guard above — image.tag is the one left unset here.
+      # image.tag has no default (ADR-0078): falling back to the chart's appVersion would silently
+      # deploy the full image, i.e. the wrong (embedded-Postgres) topology — the slim build is only
+      # published under the `-slim` tags. Mirrors the database.url guard above — image.tag is the one
+      # left unset here.
       - name: helm template fails without image.tag
         run: |
+          set -euo pipefail
           if output=$(helm template ctx charts/contextator \
               --set database.url="postgres://user:pass@db.example.internal:5432/contextator" 2>&1); then
             echo "helm template succeeded with no image.tag set — expected it to fail (ADR-0078)."
@@ -87,26 +98,44 @@ jobs:
       # asserting `replicas: 1` here is a regression guard against ever adding a way to raise it.
       - name: Exactly one replica in the rendered Deployment
         run: |
-          helm template ctx charts/contextator \
+          set -euo pipefail
+          rendered=$(helm template ctx charts/contextator \
             --set image.tag="ci-test" \
             --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
-            --show-only templates/deployment.yaml | grep -E '^\s*replicas:\s*1\s*$'
+            --show-only templates/deployment.yaml)
+          grep -E '^\s*replicas:\s*1\s*$' <<< "$rendered"
 
-      # Same guard, restated against an attempted override: replicaCount isn't wired to anything, so
-      # setting it must not change the rendered replica count either.
-      - name: replicaCount override is ignored — still exactly one replica
+      # values.schema.json accepts replicaCount only as 1, so asking for more fails the render instead
+      # of producing one Pod while appearing to accept three. Checked in both directions: 3 must be
+      # refused, for the replicaCount reason, and 1 (a no-op) must still render.
+      - name: replicaCount other than 1 is rejected by the values schema
         run: |
+          set -euo pipefail
+          if output=$(helm template ctx charts/contextator \
+              --set image.tag="ci-test" \
+              --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
+              --set replicaCount=3 2>&1); then
+            echo "helm template accepted replicaCount=3 — expected values.schema.json to reject it (ADR-0078)."
+            exit 1
+          fi
+          if ! grep -q "replicaCount" <<< "$output"; then
+            echo "helm template failed, but not for the expected replicaCount reason:"
+            echo "$output"
+            exit 1
+          fi
           helm template ctx charts/contextator \
             --set image.tag="ci-test" \
             --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
-            --set replicaCount=3 \
-            --show-only templates/deployment.yaml | grep -E '^\s*replicas:\s*1\s*$'
+            --set replicaCount=1 >/dev/null
 
       # TRUST_PROXY must never be inferred from ingress.enabled (ADR-0060, ADR-0078) — it is only ever
       # rendered when config.trustProxy is set explicitly. This regression-tests the tur 2 fix against
-      # the one values combination most likely to tempt an "ingress implies a proxy" shortcut.
+      # the one values combination most likely to tempt an "ingress implies a proxy" shortcut. The
+      # render is its own command, outside any `if`, so a render error fails the step instead of
+      # reading as "no match"; the second render is the control that the grep can match at all.
       - name: TRUST_PROXY is not inferred from ingress.enabled
         run: |
+          set -euo pipefail
           cat > /tmp/helm-chart-ci-ingress.yaml <<'EOF'
           ingress:
             enabled: true
@@ -116,12 +145,23 @@ jobs:
                   - path: /
                     pathType: Prefix
           EOF
-          if helm template ctx charts/contextator \
-              --set image.tag="ci-test" \
-              --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
-              -f /tmp/helm-chart-ci-ingress.yaml \
-              --show-only templates/deployment.yaml | grep -q 'name: TRUST_PROXY'; then
+          rendered=$(helm template ctx charts/contextator \
+            --set image.tag="ci-test" \
+            --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
+            -f /tmp/helm-chart-ci-ingress.yaml \
+            --show-only templates/deployment.yaml)
+          if grep -q 'name: TRUST_PROXY' <<< "$rendered"; then
             echo "TRUST_PROXY was rendered with ingress.enabled=true and no config.trustProxy set — expected it to stay unset (ADR-0060, ADR-0078)."
+            exit 1
+          fi
+          control=$(helm template ctx charts/contextator \
+            --set image.tag="ci-test" \
+            --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
+            -f /tmp/helm-chart-ci-ingress.yaml \
+            --set config.trustProxy=loopback \
+            --show-only templates/deployment.yaml)
+          if ! grep -q 'name: TRUST_PROXY' <<< "$control"; then
+            echo "TRUST_PROXY was not rendered even with config.trustProxy set — the check above cannot see it."
             exit 1
           fi
 
@@ -129,12 +169,72 @@ jobs:
       # defaults to true) — `helm uninstall` must not silently delete stored data or models.
       - name: Both PVCs default to helm.sh/resource-policy keep
         run: |
+          set -euo pipefail
           for tmpl in templates/pvc-data.yaml templates/pvc-models.yaml; do
-            helm template ctx charts/contextator \
+            rendered=$(helm template ctx charts/contextator \
               --set image.tag="ci-test" \
               --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
-              --show-only "$tmpl" | grep -q 'helm.sh/resource-policy: keep' || {
+              --show-only "$tmpl")
+            grep -q 'helm.sh/resource-policy: keep' <<< "$rendered" || {
                 echo "$tmpl did not render helm.sh/resource-policy: keep with default values."
                 exit 1
               }
           done
+
+      # Liveness is TCP and never touches the database; readiness and startup call GET /api/health,
+      # which answers 503 while the database is down — that is what takes a DB-down Pod out of the
+      # Service without restarting it (ADR-0078, acceptance criteria 7). A probe that swaps type in
+      # either direction is a regression: HTTP liveness crash-loops the Pod during a database outage,
+      # TCP readiness keeps sending it traffic. `block` prints the lines nested under one key, so
+      # each probe is judged on its own lines and not on its neighbours'.
+      - name: Probes — liveness is TCP, readiness and startup are GET /api/health
+        run: |
+          set -euo pipefail
+          rendered=$(helm template ctx charts/contextator \
+            --set image.tag="ci-test" \
+            --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
+            --show-only templates/deployment.yaml)
+          block() {
+            awk -v key="$1:" '
+              !on { line = $0; sub(/^[ \t]*/, "", line); if (line == key) { on = 1; ind = length($0) - length(line); next } }
+              on  { line = $0; sub(/^[ \t]*/, "", line); if (line != "" && length($0) - length(line) <= ind) exit; print }
+            ' <<< "$rendered"
+          }
+          liveness=$(block livenessProbe)
+          if ! grep -qE '^\s*tcpSocket:\s*$' <<< "$liveness" || grep -q 'httpGet:' <<< "$liveness"; then
+            echo "livenessProbe is not a bare tcpSocket check:"; echo "${liveness:-<missing>}"; exit 1
+          fi
+          for probe in readinessProbe startupProbe; do
+            body=$(block "$probe")
+            if ! grep -qE '^\s*httpGet:\s*$' <<< "$body" \
+              || ! grep -qE '^\s*path:\s*/api/health\s*$' <<< "$body" \
+              || grep -q 'tcpSocket:' <<< "$body"; then
+              echo "$probe is not GET /api/health:"; echo "${body:-<missing>}"; exit 1
+            fi
+          done
+
+      # DATA_DIR is /data in the image, and uploaded files survive a Pod restart only because the data
+      # PVC is mounted there (ADR-0078, acceptance criterion 5). `items` folds each YAML list item under
+      # volumeMounts/volumes onto one line, so a name and its mountPath are matched as one entry.
+      - name: The data PVC is mounted at /data
+        run: |
+          set -euo pipefail
+          rendered=$(helm template ctx charts/contextator \
+            --set image.tag="ci-test" \
+            --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
+            --show-only templates/deployment.yaml)
+          block() {
+            awk -v key="$1:" '
+              !on { line = $0; sub(/^[ \t]*/, "", line); if (line == key) { on = 1; ind = length($0) - length(line); next } }
+              on  { line = $0; sub(/^[ \t]*/, "", line); if (line != "" && length($0) - length(line) <= ind) exit; print }
+            ' <<< "$rendered"
+          }
+          items() {
+            awk '/^[ \t]*- / { if (item != "") print item; item = "" } { sub(/^[ \t]*(- )?/, ""); item = item " " $0 } END { if (item != "") print item }'
+          }
+          mounts=$(block volumeMounts | items)
+          volumes=$(block volumes | items)
+          grep -E '(^| )name: data( |$)' <<< "$mounts" | grep -qE '(^| )mountPath: /data( |$)' || {
+            echo "no volumeMount named data at /data:"; echo "${mounts:-<missing>}"; exit 1; }
+          grep -E '(^| )name: data( |$)' <<< "$volumes" | grep -qE '(^| )claimName: ctx-contextator-data( |$)' || {
+            echo "volume data is not the chart's data PVC:"; echo "${volumes:-<missing>}"; exit 1; }

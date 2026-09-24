@@ -1,9 +1,9 @@
-Contextator {{ .Chart.AppVersion }} kuruldu ({{ include "contextator.fullname" . }}, {{ .Release.Namespace }} namespace'i).
+Contextator {{ .Chart.AppVersion }} has been installed ({{ include "contextator.fullname" . }}, namespace {{ .Release.Namespace }}).
 
-1) Pod'un hazır olmasını bekleyin:
+1) Wait for the Pod to become ready:
    kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "contextator.fullname" . }}
 
-2) Dashboard'a erişin:
+2) Open the dashboard:
 {{- if .Values.ingress.enabled }}
 {{- range .Values.ingress.hosts }}
    http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
@@ -18,25 +18,32 @@ Contextator {{ .Chart.AppVersion }} kuruldu ({{ include "contextator.fullname" .
    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "contextator.fullname" . }} 3444:{{ .Values.service.port }}
    http://localhost:3444
 {{- end }}
+{{- if and .Values.ingress.enabled (not .Values.config.trustProxy) }}
 
-3) İlk kurulum (needsSetup) adımını dashboard üzerinden tamamlayın.
+   The Ingress is enabled but config.trustProxy is not set, so TRUST_PROXY stays off: the app
+   will not honour X-Forwarded-* headers. Set config.trustProxy (and config.publicBaseUrl) to
+   match what actually sits in front of the Pod — see the chart README, "Ingress and reverse
+   proxies".
+{{- end }}
+
+3) Complete the first-run setup (needsSetup) in the dashboard.
 
 {{- if and (not .Values.secretKey.value) (not .Values.secretKey.existingSecret) }}
 
-NOT: SECRET_KEY belirtilmediği için chart onu ilk kurulumda kendisi üretti ve
-"{{ include "contextator.secretKeySecretName" . }}" adlı Secret içine yazdı. Bu değer
-"helm upgrade" sırasında korunur (bkz. templates/secret.yaml, lookup ile). Yine de
-elle silinmesi ya da namespace'in yeniden kurulması, özel kaynaklar (git/Notion) için
-saklanan token'ların çözülemez hale gelmesine yol açar — bu Secret'ı kaybetmeyin:
-
-   kubectl -n {{ .Release.Namespace }} get secret {{ include "contextator.secretKeySecretName" . }} -o jsonpath='{.data.SECRET_KEY}' | base64 -d
+NOTE: no SECRET_KEY was provided, so the chart generated one on first install and stored it in
+the Secret "{{ include "contextator.secretKeySecretName" . }}". `helm upgrade` keeps that value
+(templates/secret.yaml reads it back with `lookup`), but `helm uninstall`, deleting the Secret,
+or rendering with `helm template` / a GitOps controller (where `lookup` returns nothing)
+replaces it — and stored source tokens (git/Notion) then become undecryptable. Back the Secret
+up with your cluster's secret tooling, or pin the key with secretKey.existingSecret; see the
+chart README, "SECRET_KEY", for how to do that and how to recover if the key is lost.
 {{- end }}
 
-4) Sağlık durumunu kontrol edin (image içinde yalnızca node var; wget/curl yok):
+4) Check health (the image ships Node.js only, no wget/curl):
    kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "contextator.fullname" . }} -- node -e "fetch('http://127.0.0.1:{{ .Values.service.targetPort }}/api/health').then(r=>r.text()).then(console.log)"
 
-   ya da chart'ın kendi Helm test'ini çalıştırın:
+   or run the chart's own Helm test:
    helm test {{ .Release.Name }}
 
-Bu chart tek replica ile çalışır (bkz. README.md "Replicas" bölümü) ve harici bir
-PostgreSQL (pgvector) veritabanı gerektirir; embedded PostgreSQL desteği yoktur.
+This chart runs a single replica (see the chart README, "Replicas") and requires an external
+PostgreSQL (pgvector) database; there is no embedded PostgreSQL.

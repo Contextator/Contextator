@@ -9,9 +9,11 @@
 # sessions are held in the process's memory (src/mcp/sessions.ts) and the indexer runs in-process
 # — a second replica would not share either, so scaling this Deployment would silently split
 # sessions and indexing state across pods rather than scale anything. Horizontal scaling is
-# out of scope (ROADMAP.md, "Deliberately not"). See ADR-0070.
+# out of scope (ROADMAP.md, "Deliberately not"). See ADR-0078.
 #
-# If you need more headroom, raise `resources` below rather than replicas.
+# There is no `replicaCount` key in this file, and values.schema.json rejects any value other than
+# 1 for it, so `--set replicaCount=2` fails at install/template time instead of being silently
+# ignored. If you need more headroom, raise `resources` below rather than replicas.
 
 # -----------------------------------------------------------------------------------------------
 # Image
@@ -21,12 +23,13 @@ image:
   # This chart only ever deploys the slim image — the full/embedded-Postgres image is a
   # single-host (docker-compose) topology and is out of scope here.
   repository: contextator/contextator
-  # No default: as of this chart version, `contextator/contextator` on Docker Hub does not publish
-  # a `-slim` tag yet (only `latest`, `0.1`, `0.1.0`, none built from the slim target — ADR-0062
-  # names the scheme, publishing it is a separate, not-yet-made decision). Defaulting to a tag that
-  # does not exist would fail silently as ImagePullBackOff; defaulting to one that does exist would
-  # silently deploy the wrong (embedded-Postgres) topology. Set this explicitly — to a `-slim` tag
-  # once one is published, or to an image you built and pushed yourself.
+  # No default — set this explicitly to a `-slim` tag. The release workflow publishes the slim
+  # target as `<version>-slim`, `<major>.<minor>-slim` and `latest-slim`; the plain tags
+  # (`<version>`, `<major>.<minor>`, `latest`) are the full image with embedded PostgreSQL, the
+  # wrong topology for this chart. v0.1.0 was released before the slim tags were added and has no
+  # `-slim` tag; for it, build the `slim` target and push it yourself. A default would either fail
+  # as ImagePullBackOff (a tag that does not exist) or, falling back to the chart's appVersion,
+  # silently deploy the embedded-Postgres image.
   tag: ""
   pullPolicy: IfNotPresent
 
@@ -133,7 +136,7 @@ persistence:
   # MODEL_CACHE_DIR: the downloaded embedding model (~470MB at the default fp32 dtype, ~235MB at
   # fp16, ~120MB at q8 — see EMBEDDING_DTYPE below). Not required, but without it every pod restart
   # re-downloads the model from Hugging Face and re-pays ~70s of load time (measured, see chart
-  # README "Kaynak ölçümü").
+  # README "Resource sizing").
   models:
     enabled: true
     storageClassName: ""
@@ -144,7 +147,7 @@ persistence:
     annotations: {}
 
 # -----------------------------------------------------------------------------------------------
-# Resources — measured, not guessed (see charts/contextator/README.md "Kaynak ölçümü" for the
+# Resources — measured, not guessed (see charts/contextator/README.md "Resource sizing" for the
 # exact measurement this comes from: docker stats against the slim image, external pgvector 16,
 # default fp32 embedding model, idle vs. a 41-document indexing burst).
 # -----------------------------------------------------------------------------------------------
@@ -241,9 +244,10 @@ env: {}
 #   EMBEDDING_DTYPE: fp16
 #   RATE_LIMIT_MAX: "600"
 
-# Values that must not be plaintext in this file: each key becomes an env var sourced from
-# `secretRef.name` / `secretRef.key` via `secretKeyRef` — the Secret itself is not managed by
-# this chart and must already exist (e.g. OPENAI_API_KEY, OAUTH client secrets).
+# Values that must not be plaintext in this file: each key becomes an env var sourced via
+# `secretKeyRef` from the entry's `secretName` / `secretKey` (see the example below) — the Secret
+# itself is not managed by this chart and must already exist (e.g. OPENAI_API_KEY, OAUTH client
+# secrets).
 envSecret: {}
 #   OPENAI_API_KEY:
 #     secretName: contextator-openai

@@ -1,10 +1,10 @@
 # contextator (Helm chart)
 
 Deploys Contextator on Kubernetes: one Pod, against a PostgreSQL (pgvector) database you already run.
-This chart does not bundle a database and does not offer more than one replica — both are deliberate,
-see [ADR-0078](../../../.ssot/ADR.md#adr-0078). For the two Docker paths (embedded PostgreSQL, or `slim` +
-`DATABASE_URL`), see the product root `README.md` and `.ssot/OPERATIONS.md` §1 instead; this chart only
-ever deploys the `slim` image, i.e. the external-database topology.
+This chart does not bundle a database and does not offer more than one replica — both are deliberate
+(project decision record ADR-0078). For the two Docker paths (embedded PostgreSQL, or `slim` +
+`DATABASE_URL`), see the product root `README.md` instead; this chart only ever deploys the `slim`
+image, i.e. the external-database topology.
 
 ## Prerequisites
 
@@ -19,7 +19,7 @@ ever deploys the `slim` image, i.e. the external-database topology.
 ```sh
 helm install ctx ./charts/contextator \
   --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
-  --set image.tag="<your-slim-image-tag>"
+  --set image.tag="<version>-slim"
 ```
 
 Or, pointing at a Secret you already manage instead of passing the URL on the command line:
@@ -28,21 +28,22 @@ Or, pointing at a Secret you already manage instead of passing the URL on the co
 helm install ctx ./charts/contextator \
   --set database.existingSecret=my-db-secret \
   --set database.existingSecretKey=DATABASE_URL \
-  --set image.tag="<your-slim-image-tag>"
+  --set image.tag="<version>-slim"
 ```
 
 Either `database.url` or `database.existingSecret` is **required**. If neither is set, the chart fails
 `helm install`/`helm template` immediately with an explicit error, rather than rendering a Pod that
 would crash-loop on a missing `DATABASE_URL` — this chart carries no embedded PostgreSQL to fall back
-to (unlike the product's own Docker default image; see [ADR-0069](../../../.ssot/ADR.md#adr-0069)).
+to (unlike the product's own Docker default image; decision record ADR-0069).
 Verified: `helm install ctx ./charts/contextator` with no `database.*` set exits non-zero with a message
 naming the missing value, before any Kubernetes object is created.
 
-`image.tag` is **also required** and has no default. `contextator/contextator` on Docker Hub does not
-publish a `-slim` tag yet (only `latest`, `0.1`, `0.1.0`, none built from the slim target — ADR-0062
-names the tag scheme, but publishing an image under it is a separate, not-yet-made decision; see
-[ADR-0078](../../../.ssot/ADR.md#adr-0078)). Point `image.tag` (and `image.repository`, if needed) at a
-`slim`-target image you built and pushed yourself until one is published under the default repository.
+`image.tag` is **also required** and has no default. Set it to a `-slim` tag: every release publishes
+the `slim` build target to `contextator/contextator` as `<version>-slim`, `<major>.<minor>-slim` and
+`latest-slim`. The plain tags (`<version>`, `<major>.<minor>`, `latest`) are the full image with an
+embedded PostgreSQL — the wrong topology for this chart, which is why the chart does not fall back to
+its `appVersion` either. `v0.1.0` was released before the `-slim` tags were added and has none; for that
+version, build the `slim` target yourself and point `image.repository`/`image.tag` at your registry.
 
 After install, `helm test ctx` runs a hook Pod that calls `GET /api/health` on the Service and prints
 the response — the same check described under "No `wget`/`curl` in the image" below.
@@ -50,9 +51,10 @@ the response — the same check described under "No `wget`/`curl` in the image" 
 ## Replicas
 
 **Not a value you can set.** This chart always deploys exactly one Pod (`replicas: 1`, hardcoded in
-`templates/deployment.yaml`) and does not expose a `replicaCount` key in `values.yaml` at all — not a
-value that is validated and rejected, a value that was never offered. `--set replicaCount=2` has no
-effect on the rendered manifests; there is nothing named `replicaCount` for it to set.
+`templates/deployment.yaml`) and does not offer a `replicaCount` key in `values.yaml`. So that nobody
+mistakes the missing key for an oversight, `values.schema.json` rejects any `replicaCount` other than
+`1`: `--set replicaCount=2` makes `helm install`/`helm upgrade`/`helm template` fail with a schema
+error naming `replicaCount`, instead of rendering one Pod while appearing to accept two.
 
 This is not an arbitrary limit: MCP sessions live in the application process's own memory
 (`src/mcp/sessions.ts`) and the indexer runs a single in-process queue (ADR-0009). A second replica
@@ -100,6 +102,90 @@ Confirmed by grep across `values.yaml` and every file under `templates/`: `SECRE
 a literal string value anywhere in the chart, only as a key name and as the target of a
 `secretKeyRef`/`stringData` reference built from the values above.
 
+### GitOps and `helm template`: pin the key
+
+The generated key is only stable when Helm itself talks to the cluster (`helm install` / `helm
+upgrade`), because that is the only time `lookup` can read the existing Secret back. Anything that
+renders the chart **without** cluster access gets an empty `lookup` and therefore a **new random key
+on every render**:
+
+- Argo CD, which renders Helm charts with `helm template` and applies the output itself, and any other
+  GitOps tool that renders manifests instead of running `helm upgrade` against the cluster;
+- `helm template … | kubectl apply -f -`, and any pipeline that commits rendered manifests.
+
+(Flux's helm-controller runs real `helm install`/`helm upgrade` releases, so `lookup` works there.)
+
+Each sync then overwrites the Secret with a different key. Stored git/Notion tokens and webhook secrets
+that were encrypted under the previous key stop decrypting, and every private source stops syncing. On
+those install paths, do not let the chart generate the key — create it once and point the chart at it:
+
+```sh
+kubectl -n <namespace> create secret generic contextator-secret-key \
+  --from-literal=SECRET_KEY="$(openssl rand -hex 32)"
+```
+
+```yaml
+secretKey:
+  existingSecret: contextator-secret-key
+  existingSecretKey: SECRET_KEY
+```
+
+With `existingSecret` set the chart renders no `SECRET_KEY` Secret at all, so a render can no longer
+change the key. Keep that Secret (or its value) in your own secrets tooling — a sealed/external secret,
+a vault — and back it up; the chart does not. The same applies to an ordinary `helm install` if you
+want the key to survive `helm uninstall` (see "Uninstall").
+
+### If the key has already changed
+
+- **You still have the old key** (a backup of the Secret, the value from before a GitOps sync, a
+  secrets-manager history). Rotate onto the new key instead of re-entering tokens: pin the new key with
+  `existingSecret` as above, give the process the old one as `SECRET_KEY_PREVIOUS` (for example via
+  `envSecret`, from a second Secret you create), let the Pod restart, then run the rotation inside it:
+
+  ```sh
+  kubectl -n <namespace> exec deploy/<release>-contextator -- npm run rotate-secret
+  ```
+
+  When it reports nothing left to convert, remove `SECRET_KEY_PREVIOUS` again and let the Pod restart —
+  that removal is what retires the old key. The root `README.md` (`SECRET_KEY` and
+  `SECRET_KEY_PREVIOUS`, and its security section) describes the rotation in full; the decision record
+  is ADR-0075.
+- **The old key is gone.** Nothing can decrypt what it wrote. Pin a new key with `existingSecret` so
+  it does not happen again, then reconnect each private source by entering its token again in the
+  dashboard. Public sources and already-indexed content are not affected.
+
+## Ingress and reverse proxies
+
+Enabling `ingress` does **not** make the application trust the Ingress controller. `TRUST_PROXY` is
+set only from `config.trustProxy`, never inferred from `ingress.enabled`: the chart cannot know what
+actually sits in front of the Pod (an ingress controller, a cloud load balancer, a CDN, or all three),
+and a trust setting that is guessed is one a caller can exploit. Left empty, the app's own default
+applies (`0`: `X-Forwarded-*` headers are ignored).
+
+Behind an Ingress, set these together:
+
+```yaml
+config:
+  publicBaseUrl: "https://contextator.example.com"
+  trustProxy: "10.244.0.0/16"   # the address range your ingress controller Pods connect from
+env:
+  AUTH_COOKIE_SECURE: "1"
+```
+
+Leaving `config.trustProxy` empty behind an Ingress breaks three things silently: the per-IP sign-in
+limit becomes instance-wide (every request carries the controller's address), MCP connectors fail to
+authorize with `invalid_target` when `publicBaseUrl` is also unset (published URLs read `http` while
+clients use `https`), and the session cookie loses its `Secure` flag. The root `README.md`, *Running
+behind a reverse proxy*, explains each one.
+
+**Name the proxy, not the network your clients are on.** The list is matched against every hop, not
+just the socket's peer. In a cluster, the Pod network range also covers every other Pod that can reach
+this Service, so trusting the whole range is only as safe as a NetworkPolicy that lets nothing but the
+ingress controller reach this Pod's port. `"1"` trusts whoever wrote the header, every hop of it — use
+it only when that NetworkPolicy exists. A hop count is not accepted. Also check that your ingress
+controller **replaces** an incoming `X-Forwarded-For` rather than appending to what the client sent;
+no setting here can tell the difference.
+
 ## Persistence
 
 Two `ReadWriteOnce` PVCs, both enabled by default:
@@ -135,7 +221,7 @@ database back up recovered the Pod to `READY 1/1` with endpoints repopulated aut
 zero restarts — the Pod was never killed, only taken out of rotation and put back.
 
 The startup probe's generous `failureThreshold` (30 × 10s ≈ 5 minutes) exists to cover a cold embedding
-model download from Hugging Face on first start; see "Kaynak ölçümü" below for the measured figure.
+model download from Hugging Face on first start; see "Resource sizing" below for the measured figure.
 
 ## Security context / running as root
 
@@ -166,7 +252,7 @@ real `helm test ctx --logs` run afterwards, which reported `Phase: Succeeded` wi
 inside the cluster without `helm test`, see `templates/NOTES.txt`'s step 4 for the `node -e` one-liner —
 there is no shell HTTP client to fall back to.
 
-## Kaynak ölçümü (resource sizing methodology)
+## Resource sizing
 
 `values.yaml`'s `resources.requests`/`resources.limits` are measured, not guessed. Source: `docker
 stats` against the `slim` image, run in an earlier rehearsal of this same install (external pgvector 16,
@@ -211,4 +297,4 @@ contract. The sections above explain the *why* behind the values that are not se
 
 This chart is currently install-from-local-path only (`helm install ctx ./charts/contextator`). Whether
 to publish it to an OCI registry or a `gh-pages` chart index is a separate product decision, not yet
-made — see [ADR-0078](../../../.ssot/ADR.md#adr-0078)'s Decision section, last bullet.
+made (decision record ADR-0078, Decision section, last bullet).
