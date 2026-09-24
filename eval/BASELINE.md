@@ -1722,17 +1722,22 @@ the top five**. Of the questions whose top hit is under 0.82, the right article 
 nothing) or 0.793 / 0.773 (refusing at most 1 %). The first half of Item 17 is therefore **not**
 closed: a single instance-wide number is right for documentation and wrong for prose.
 
-**What would have closed it**, recorded so the next measurement is judged by the same bar: on every
-measured corpus, 0.82 refusing at most 2 % of the answerable questions whose answer was in the top five,
-and the ≤1 % fitted floor within 0.02 of 0.82. halyard (0 %, 0.804) and wiki (3.3 %, 0.811) are on the
-edge of it; xquad-tr (7.1 %, 0.793) and xquad-en (12.2 %, 0.773) are well outside.
+**What would have closed it**, recorded so the next measurement is judged by the same bar — the one
+bar this question is reopened or closed by: on every measured corpus, the server floor refusing at most
+2 % of the answerable questions (counting only those whose answer was in the top five), and the ≤1 %
+fitted floor within 0.02 of the server floor. Only halyard is inside it (0 %, 0.804). wiki is outside
+on the first half (1 of 30, 3.3 %; its floor 0.811 is inside the second), and xquad-tr (84 of 1190,
+7.1 %, 0.793) and xquad-en (145 of 1190, 12.2 %, 0.773) are well outside on both.
 
-**A relative criterion is worse than the absolute score, not better.** The absolute top score separates
-answerable from off-domain better than any relative feature on every corpus (AUC 0.967–0.997), and
-pooled across all four — which is what one global threshold has to split — it is still the best
-(0.974 against 0.932 for the spread of the top ten, 0.881 for the gap to the second hit). None of the
-relative features, fitted globally to refuse no answerable question, refuses more than 10 % of any
-corpus's off-domain questions. A hit-level drop ratio cannot refuse anything — the top hit always
+**A relative criterion is worse than the absolute score, not better — where it has to work.** Pooled
+across all four corpora, which is what one global threshold has to split, the absolute top score
+separates answerable from off-domain best (AUC 0.974 against 0.932 for the spread of the top ten, 0.881
+for the gap to the second hit, 0.864 for the z-score). Corpus by corpus it is not always ahead: on
+xquad-en the spread separates off-domain slightly better (0.977 against 0.968), and on the wiki the
+z-score separates absent-feature questions better (0.828 against 0.778, on 12 of them). Neither helps
+a single threshold: fitted globally to refuse no answerable question, no relative feature catches more
+than 11.1 % of any corpus's off-domain questions (the z-score on halyard, 12 of 108), where the absolute
+score catches 14.8 % and 25.0 % on the documentation corpora. A hit-level drop ratio cannot refuse anything — the top hit always
 passes it — and trims answers out of the top five as it tightens (xquad-tr loses 6 at 0.97, 13 at
 0.99). Candidate (b) is not worth building.
 
@@ -1781,7 +1786,11 @@ the relevance floor's price on a corpus of a different shape, in the last two co
 ```bash
 npx tsx scripts/eval-external.ts                                        # report only
 npx tsx scripts/eval-external.ts --min-recall5=0.98 --min-heading5=0.95  # exits 2 when short
+npx tsx scripts/eval-external.ts --min-recall5=0.98 --min-heading5=0.95 \
+  --min-recall5-en=0.985 --min-heading5-en=0.97                          # a bar per language
 ```
 
 The run above used those two floors and passed. They are candidates, not a gate: nothing in CI runs
-this script on `main`.
+this script on `main`. They were read off the Turkish numbers; English sits higher (99.9 % / 98.5 %),
+so one bar for both leaves English 1.9 and 3.5 points of room — the per-language flags are there so a
+gate can hold each language to its own height.

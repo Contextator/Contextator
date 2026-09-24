@@ -30,7 +30,9 @@ import { aggregate, scoreRow, type Metrics, type RowResult } from './eval-scorin
  * would pick for it (tr → turkish, en → simple). The relevance floor is reported the way `eval.ts`
  * reports it — how many answerable questions `SEARCH_SCORE_FLOOR` would refuse, and how many of those
  * had the answer in the top five — and gates nothing. With `--min-recall5` / `--min-heading5` a run
- * whose numbers are short in either language exits 2, as `eval.ts` does.
+ * whose numbers are short in either language exits 2, as `eval.ts` does; `--min-recall5-<lang>` /
+ * `--min-heading5-<lang>` set one language's bar apart from the other's, since the two languages do
+ * not sit at the same height (en is closer to saturation than tr).
  */
 
 const USAGE = `Usage: npx tsx scripts/eval-external.ts [options]
@@ -40,6 +42,9 @@ const USAGE = `Usage: npx tsx scripts/eval-external.ts [options]
   --json=<file>            Also write the numbers as JSON.
   --min-recall5=<0..1>     Fail (exit 2) when recall@5 of any language is below this.
   --min-heading5=<0..1>    The same for heading@5 (the right paragraph of the right article).
+  --min-recall5-<lang>=<0..1>, --min-heading5-<lang>=<0..1>
+                           The same for one language only (tr or en); overrides the flag above
+                           for that language.
   -h, --help               This.
 
   EVAL_DATABASE_URL, or DATABASE_URL, points at a PostgreSQL to carve throwaway databases out of.
@@ -51,6 +56,8 @@ interface Options {
   json: string | null;
   minRecall5: number | null;
   minHeading5: number | null;
+  /** Per-language bars; a language listed here is judged by these, not by the two above. */
+  perLanguage: Partial<Record<XquadLanguage, { minRecall5?: number; minHeading5?: number }>>;
 }
 
 function parseFloor(flag: string, value: string): number {
@@ -62,7 +69,14 @@ function parseFloor(flag: string, value: string): number {
 }
 
 function parseArgs(argv: readonly string[]): Options {
-  const options: Options = { languages: [...XQUAD_LANGUAGES], markdown: null, json: null, minRecall5: null, minHeading5: null };
+  const options: Options = {
+    languages: [...XQUAD_LANGUAGES],
+    markdown: null,
+    json: null,
+    minRecall5: null,
+    minHeading5: null,
+    perLanguage: {},
+  };
   for (const arg of argv) {
     if (arg === '-h' || arg === '--help') {
       process.stdout.write(`${USAGE}\n`);
@@ -93,8 +107,17 @@ function parseArgs(argv: readonly string[]): Options {
       case '--min-heading5':
         options.minHeading5 = parseFloor(flag, value);
         break;
-      default:
-        throw new Error(`Unknown option ${arg}\n\n${USAGE}`);
+      default: {
+        const perLanguage = /^--min-(recall5|heading5)-([a-z]+)$/.exec(flag ?? '');
+        if (!perLanguage) throw new Error(`Unknown option ${arg}\n\n${USAGE}`);
+        const lang = perLanguage[2] as string;
+        if (!(XQUAD_LANGUAGES as readonly string[]).includes(lang))
+          throw new Error(`${flag}: no XQuAD language "${lang}" (${XQUAD_LANGUAGES.join(', ')})`);
+        const bars = options.perLanguage[lang as XquadLanguage] ?? {};
+        if (perLanguage[1] === 'recall5') bars.minRecall5 = parseFloor(flag as string, value);
+        else bars.minHeading5 = parseFloor(flag as string, value);
+        options.perLanguage[lang as XquadLanguage] = bars;
+      }
     }
   }
   return options;
@@ -181,15 +204,22 @@ async function main(): Promise<void> {
   }
 
   const short: string[] = [];
+  let gated = false;
   for (const r of runs) {
-    if (options.minRecall5 !== null && r.metrics.recall5 < options.minRecall5) {
-      short.push(`xquad-${r.lang} recall@5 ${pct(r.metrics.recall5)} is below the ${pct(options.minRecall5)} floor`);
+    const minRecall5 = options.perLanguage[r.lang]?.minRecall5 ?? options.minRecall5;
+    const minHeading5 = options.perLanguage[r.lang]?.minHeading5 ?? options.minHeading5;
+    if (minRecall5 !== null) {
+      gated = true;
+      if (r.metrics.recall5 < minRecall5) short.push(`xquad-${r.lang} recall@5 ${pct(r.metrics.recall5)} is below the ${pct(minRecall5)} floor`);
     }
-    if (options.minHeading5 !== null && r.metrics.headingRecall5 < options.minHeading5) {
-      short.push(`xquad-${r.lang} heading@5 ${pct(r.metrics.headingRecall5)} is below the ${pct(options.minHeading5)} floor`);
+    if (minHeading5 !== null) {
+      gated = true;
+      if (r.metrics.headingRecall5 < minHeading5) {
+        short.push(`xquad-${r.lang} heading@5 ${pct(r.metrics.headingRecall5)} is below the ${pct(minHeading5)} floor`);
+      }
     }
   }
-  if (options.minRecall5 !== null || options.minHeading5 !== null) {
+  if (gated) {
     if (short.length > 0) {
       process.stdout.write(`The external gate failed.\n${short.map((s) => `  ${s}`).join('\n')}\n`);
       process.exitCode = 2;
