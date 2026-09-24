@@ -134,7 +134,13 @@ export function renderQueries(project) {
           'judge, and nothing is hidden by a threshold.',
       }),
     ]),
-    el('div', { class: 'panel-body' }, [controls(project), configurationLine(data), body(data, q), foot(project, data, mayManage)]),
+    el('div', { class: 'panel-body' }, [
+      controls(project),
+      configurationLine(data),
+      body(data, q),
+      foot(project, data, mayManage),
+      floorLine(project, data, mayManage),
+    ]),
   ]);
 }
 
@@ -467,6 +473,44 @@ function foot(project, data, mayManage) {
   ]);
 }
 
+/**
+ * The relevance floor these searches were decided against, and — for a manager — a choice of this
+ * project's own. A select and not a number box: app.js rebuilds the panel on every poll, and a select
+ * survives that where a half-typed number would not. The presets span what eval/BASELINE.md measured
+ * the right floor to be across corpus shapes (0.773 on English prose to 0.811 on a product guide);
+ * a value set through the API outside them is kept as an option of its own so it is never misread.
+ */
+const FLOOR_PRESETS = [0.84, 0.83, 0.82, 0.81, 0.8, 0.79, 0.78, 0.77, 0.76, 0.75];
+
+function floorLine(project, data, mayManage) {
+  if (!data || !data.scoreFloor) return null;
+  const { project: own, instance, effective } = data.scoreFloor;
+  const source = own === null ? `this server’s default` : `set for this project; the server’s default is ${instance}`;
+  const hint = el('span', {
+    class: 'field-hint',
+    text: `Relevance floor ${effective === 0 ? 'off' : effective} (${source}). Below it an agent is told “no good match” instead of the hits.`,
+  });
+  if (!mayManage) return el('div', { class: 'token-foot' }, [hint]);
+  const values = new Set(FLOOR_PRESETS);
+  if (own !== null && own > 0) values.add(own);
+  const options = [
+    el('option', { value: '', selected: own === null || undefined, text: `Server default (${instance})` }),
+    ...[...values].sort((a, b) => b - a).map((v) => el('option', { value: String(v), selected: own === v || undefined, text: String(v) })),
+    el('option', { value: '0', selected: own === 0 || undefined, text: 'Off (0)' }),
+  ];
+  return el('div', { class: 'token-foot' }, [
+    el(
+      'select',
+      {
+        'aria-label': `Relevance floor for ${project.name}`,
+        onchange: (event) => void setFloor(project, event.target.value === '' ? null : Number(event.target.value)),
+      },
+      options,
+    ),
+    hint,
+  ]);
+}
+
 // ---------- actions ----------
 
 function askPurge() {
@@ -483,6 +527,16 @@ async function setRecording(project, enabled) {
   try {
     await api(`/api/projects/${project.id}/query-log`, { method: 'PATCH', body: { enabled } });
     toast(enabled ? `${project.name} is recording searches again` : `${project.name} stopped recording searches`);
+    await loadQuerySummary(true);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+async function setFloor(project, floor) {
+  try {
+    await api(`/api/projects/${project.id}/score-floor`, { method: 'PATCH', body: { floor } });
+    toast(floor === null ? `${project.name} uses the server’s relevance floor again` : `${project.name}’s relevance floor is now ${floor}`);
     await loadQuerySummary(true);
   } catch (err) {
     toast(err.message);

@@ -44,6 +44,10 @@ export interface SearchDeps {
    * and **unset it is off**, which is deliberately not the schema's default: a caller with no
    * configuration in hand — a test, the harness that measures what the floor would cost — must get the
    * retrieval result rather than a refusal it did not ask for.
+   *
+   * Set, it is the **instance's** floor: a project whose `score_floor` column holds a value uses that
+   * instead, and one whose column is `null` — every project, until an operator sets one — uses this.
+   * Unset stays off regardless of the column, so the harness measures retrieval and not a refusal.
    */
   scoreFloor?: number;
   /**
@@ -102,7 +106,19 @@ export type SearchOutcome =
    * ([ADR-0042](../../.ssot/ADR.md#adr-0042)); the dashboard shows them *under* the notice, because an
    * operator asking why an agent was refused needs to see what was withheld.
    */
-  | { status: 'ok'; project: ProjectRow; hits: SearchHit[]; belowFloor: boolean }
+  | {
+      status: 'ok';
+      project: ProjectRow;
+      hits: SearchHit[];
+      belowFloor: boolean;
+      /**
+       * The floor `belowFloor` was decided against — the project's own when it has one, the instance's
+       * otherwise, `0` when the caller passed none. A caller that cites the number must cite this one.
+       */
+      scoreFloor: number;
+      /** Whether `scoreFloor` came from the project's own `score_floor` rather than the instance's. */
+      scoreFloorOverridden: boolean;
+    }
   /** The `source` filter named something this project does not have; `available` is what it does have. */
   | { status: 'unknown_source'; project: ProjectRow; requested: string; available: string[] }
   /** `path_prefix` was not a relative path — absolute, or climbing out with `..`. */
@@ -205,7 +221,12 @@ export async function searchProject(
     // it takes a vector rather than a provider, and binding it here is what keeps the model out of it.
     rerank: rerank ? (query, passages) => rerank.score(query, passages) : undefined,
   });
-  const belowFloor = belowRelevanceFloor(input.query, hits, scoreFloor ?? 0);
+  // The project's own floor wins over the instance's, and only when the caller passed a floor at all:
+  // `scoreFloor` unset is "off", and a column cannot turn on a refusal the caller did not ask for.
+  // `project` is the row re-read at the top, so the override costs no query.
+  const scoreFloorOverridden = scoreFloor !== undefined && project.scoreFloor !== null;
+  const effectiveFloor = scoreFloor === undefined ? 0 : (project.scoreFloor ?? scoreFloor);
+  const belowFloor = belowRelevanceFloor(input.query, hits, effectiveFloor);
 
   // **One seam, three callers** ([ADR-0047](../../.ssot/ADR.md#adr-0047)). The MCP tool and the
   // dashboard route pass a sink; the evaluation harness does not, and that is the whole of why it
@@ -247,5 +268,5 @@ export async function searchProject(
     });
   }
 
-  return { status: 'ok', project, hits, belowFloor };
+  return { status: 'ok', project, hits, belowFloor, scoreFloor: effectiveFloor, scoreFloorOverridden };
 }

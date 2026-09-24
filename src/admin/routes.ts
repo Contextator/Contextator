@@ -402,7 +402,10 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       // What the agent would have been told instead of these hits, and the number that decided it
       // (ADR-0042). Additive, like the three fusion fields: a script parsing the old shape is unaffected.
       belowFloor: outcome.belowFloor,
-      scoreFloor: config.SEARCH_SCORE_FLOOR,
+      // The floor this project's search was decided against: its own when an operator set one, the
+      // instance's otherwise. Additive: `scoreFloorOverridden` is new, `scoreFloor` keeps its meaning.
+      scoreFloor: outcome.scoreFloor,
+      scoreFloorOverridden: outcome.scoreFloorOverridden,
       // The raw score and the path, deliberately: a score an operator cannot see is a score they
       // cannot reason about, and the path is what read_document takes next.
       //

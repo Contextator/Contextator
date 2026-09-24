@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
-import { NotFoundError, getProjectById } from '../services/projects.js';
+import { NotFoundError, getProjectById, setProjectScoreFloor } from '../services/projects.js';
 import { buildExport, toJsonl } from '../services/query-export.js';
 import {
   DEFAULT_EXPORT_ROWS,
@@ -65,6 +65,12 @@ const ExportQuery = z
   .refine(bothOrNeither, PAIRING);
 
 const SwitchBody = z.object({ enabled: z.boolean() });
+
+/**
+ * A project's own relevance floor, or `null` for the instance's. The bounds are the column's check and
+ * `SEARCH_SCORE_FLOOR`'s own: a cosine similarity, `0` meaning off.
+ */
+const FloorBody = z.object({ floor: z.number().min(0).max(1).nullable() });
 
 /**
  * Which configuration the figures describe when the caller named none: **the one with the most
@@ -138,6 +144,16 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
       actor: query.actor,
       logEnabled: project?.queryLogEnabled === true,
       instanceLogEnabled: config.SEARCH_QUERY_LOG,
+      /**
+       * The relevance floor this project's searches are decided against, and where it comes from. The
+       * panel is where the operator reads `below_floor` rows, so it is where the number that set them
+       * is shown — and where a manager changes it.
+       */
+      scoreFloor: {
+        project: project?.scoreFloor ?? null,
+        instance: config.SEARCH_SCORE_FLOOR,
+        effective: project?.scoreFloor ?? config.SEARCH_SCORE_FLOOR,
+      },
       configurations,
       configuration,
       /** Searches in the window that the figures below do **not** describe. */
@@ -209,6 +225,19 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
     // It takes effect on the next search and deletes nothing — the same two sentences OPERATIONS §5.17
     // gives an operator doing this with `psql`.
     return { queryLogEnabled };
+  });
+
+  /**
+   * `manager`, by its row in `PROJECT_ROUTE_OVERRIDES`: what this project refuses to answer is the same
+   * class of decision as whether it records what it was asked. `null` returns the project to the
+   * instance's `SEARCH_SCORE_FLOOR`; the next search reads the new value.
+   */
+  app.patch('/api/projects/:id/score-floor', async (req) => {
+    const { id } = ProjectParams.parse(req.params);
+    const { floor } = FloorBody.parse(req.body);
+    const row = await setProjectScoreFloor(db, id, floor);
+    if (!row) throw new NotFoundError('Project not found');
+    return { scoreFloor: row.scoreFloor, instanceScoreFloor: config.SEARCH_SCORE_FLOOR };
   });
 
   /** Also `manager`: deleting evidence is not an editorial act. */

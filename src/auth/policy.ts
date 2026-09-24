@@ -88,6 +88,9 @@ const PROJECT_ROUTE_OVERRIDES: ReadonlyArray<{ method: string; url: string; need
   // `requiredProjectAccess` is a lookup — a row matching no route costs nothing and refuses nothing.
   { method: 'PATCH', url: '/api/projects/:id/query-log', need: 'manager' },
   { method: 'DELETE', url: '/api/projects/:id/query-log', need: 'manager' },
+  // A project's own relevance floor. What an agent is told "no good match" instead of an answer is the
+  // same class of decision as whether its questions are recorded — not a day-to-day editorial change.
+  { method: 'PATCH', url: '/api/projects/:id/score-floor', need: 'manager' },
   // The project export ([ADR-0051](../../.ssot/ADR.md#adr-0051)). **A `GET`, and deliberately not a
   // viewer's.** A viewer can already read any one document, any excerpt and every source's settings
   // through the dashboard, which is the argument the `GET` default makes — and what the default cannot

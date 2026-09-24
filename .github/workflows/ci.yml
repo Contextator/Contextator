@@ -378,13 +378,35 @@ jobs:
         if: steps.relevant.outputs.run == 'true'
         run: npm run eval -- --markdown="$GITHUB_STEP_SUMMARY" --json=eval-report.json --min-recall5="$MIN_RECALL5" --min-heading5="$MIN_HEADING5"
 
+      # The external set (eval/external/xquad), scored apart from the golden set and gated on its own
+      # floors. `always()` so a golden-set failure above does not hide what the same change did to a
+      # corpus of a different shape; the two gates are two numbers each and never pooled. The floors are
+      # looser than ADR-0044's "less one question" rule would give (99.0 % / 96.0 % from the measured
+      # 99.3 % / 96.2 % Turkish figures): this container is new, and a first gate that fails on the
+      # rounding of a different CPU is a gate somebody deletes. `eval/BASELINE.md` carries the run.
+      - name: Score the external set, and fail below its floor
+        if: always() && steps.relevant.outputs.run == 'true'
+        run: npx tsx scripts/eval-external.ts --markdown=eval-external.md --json=eval-external.json --min-recall5="$MIN_EXTERNAL_RECALL5" --min-heading5="$MIN_EXTERNAL_HEADING5"
+        env:
+          MIN_EXTERNAL_RECALL5: "0.98"
+          MIN_EXTERNAL_HEADING5: "0.95"
+
+      - name: Add the external set to the run summary
+        if: always() && steps.relevant.outputs.run == 'true'
+        run: |
+          if [ -f eval-external.md ]; then
+            { echo; echo '### External set — XQuAD (reported apart from the golden set)'; echo; cat eval-external.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       # `always()` and not the step condition alone: the report is most worth having on the run where
       # the gate failed. Still inside the path filter, so a skipped job uploads nothing.
       - uses: actions/upload-artifact@v4
         if: always() && steps.relevant.outputs.run == 'true'
         with:
           name: eval-report
-          path: eval-report.json
+          path: |
+            eval-report.json
+            eval-external.json
 
 # This job gates. It reported and did not gate for the whole of Phase 1, on the stated understanding that
 # it would become a gate once there was a floor worth failing a build over (ADR-0034); Phase 1 set one and
