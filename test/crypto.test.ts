@@ -14,6 +14,9 @@ import {
   secretKeyId,
   storedKeyId,
 } from '../src/services/crypto.js';
+import type { IndexerDeps } from '../src/services/indexer.js';
+import type { SchedulerDeps } from '../src/services/scheduler.js';
+import type { DriverContext } from '../src/services/sources/driver.js';
 
 const KEY = 'a'.repeat(40);
 const OLD_KEY = 'b'.repeat(40);
@@ -165,5 +168,38 @@ describe('keyringOf', () => {
   it('carries both configured keys', () => {
     expect(keyringOf({ SECRET_KEY: KEY, SECRET_KEY_PREVIOUS: OLD_KEY })).toEqual({ current: KEY, previous: OLD_KEY });
     expect(keyringOf({})).toEqual({ current: undefined, previous: undefined });
+  });
+});
+
+/**
+ * A driver is built from whatever config its caller holds: `IndexerDeps` for a sync, `SchedulerDeps`
+ * for a probe. `DriverContext` asks for the whole ring, and the field being optional is exactly why the
+ * compiler would stay quiet if either caller's `Pick` left `SECRET_KEY_PREVIOUS` out — the first narrowed
+ * literal handed to one of them would drop the retired key in the rotation window, and every source
+ * still under it would read as `unreadable` ([ADR-0075](../../.ssot/ADR.md#adr-0075)).
+ *
+ * Two layers, because either alone would pass a broken tree: the type-level assertions fail
+ * `npm run typecheck` when a caller's `Pick` is narrower than `DriverContext`'s, and the runtime ones
+ * show that a config typed as each caller's own carries the key a rotation still needs.
+ */
+describe('the config a driver is built from', () => {
+  type Missing<Caller> = Exclude<keyof DriverContext['config'], keyof Caller>;
+  // `[never] extends [Missing<…>]` is only true when nothing is missing; the tuple stops distribution.
+  const indexerCarriesTheDriverConfig: [Missing<IndexerDeps['config']>] extends [never] ? true : false = true;
+  const schedulerCarriesTheDriverConfig: [Missing<SchedulerDeps['config']>] extends [never] ? true : false = true;
+
+  it('is never narrower in the indexer or the scheduler than a driver needs', () => {
+    expect(indexerCarriesTheDriverConfig).toBe(true);
+    expect(schedulerCarriesTheDriverConfig).toBe(true);
+  });
+
+  it('opens a value the retired key wrote, from a config typed as the indexer holds it', () => {
+    const config: Pick<IndexerDeps['config'], 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS'> = { SECRET_KEY: KEY, SECRET_KEY_PREVIOUS: OLD_KEY };
+    expect(decryptSecret(encryptSecret('git-token', { current: OLD_KEY }), keyringOf(config))).toBe('git-token');
+  });
+
+  it('opens a value the retired key wrote, from a config typed as the scheduler holds it', () => {
+    const config: Pick<SchedulerDeps['config'], 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS'> = { SECRET_KEY: KEY, SECRET_KEY_PREVIOUS: OLD_KEY };
+    expect(decryptSecret(encryptSecret('confluence-token', { current: OLD_KEY }), keyringOf(config))).toBe('confluence-token');
   });
 });

@@ -99,6 +99,7 @@ export interface IndexerDeps {
     | 'EMBEDDING_BATCH_SIZE'
     | 'DATA_DIR'
     | 'SECRET_KEY'
+    | 'SECRET_KEY_PREVIOUS'
     | 'MAX_STORED_DOCUMENT_BYTES'
     | 'MAX_CONVERTED_FILE_BYTES'
     | 'MAX_SPEC_FILE_BYTES'

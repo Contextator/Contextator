@@ -576,4 +576,44 @@ describe('what the command says out loud', () => {
     expect(storedKeyId((await sourceRow(wikiId)).secretEnc ?? '')).toBe(secretKeyId(NEW_KEY));
     expect(decryptSecret((await sourceRow(wikiId)).secretEnc ?? '', keyringOf({ SECRET_KEY: NEW_KEY }))).toBe(CONFLUENCE_TOKEN);
   }, 120_000);
+
+  it('exits 1 when a value is still owed, and only after the whole report is out', async () => {
+    // The branch the operator most needs to read: `process.exit(1)` inside the `try` used to skip the
+    // pool's `finally`, and on a pipe could cut the last lines — the ones that say what to do next.
+    const [orphan] = await db
+      .insert(documentSources)
+      .values({
+        projectId,
+        type: 'git',
+        name: 'orphan-for-the-command',
+        config: { url: 'https://git.example.test/acme/orphan.git', branch: 'main', extensions: ['md'] },
+        secretEnc: encryptSecret(LOST_TOKEN, ring(LOST_KEY)),
+      })
+      .returning({ id: documentSources.id });
+
+    try {
+      const root = fileURLToPath(new URL('../../', import.meta.url));
+      const failure = await promisify(execFile)(path.join(root, 'node_modules', '.bin', 'tsx'), ['scripts/rotate-secret.ts'], {
+        cwd: root,
+        timeout: 90_000,
+        env: { ...process.env, DATABASE_URL: database.url, SECRET_KEY: NEW_KEY, SECRET_KEY_PREVIOUS: OLD_KEY },
+      }).then(
+        () => null,
+        (err: unknown) => err as { code?: number; killed?: boolean; stdout: string; stderr: string },
+      );
+
+      expect(failure).not.toBeNull();
+      expect(failure?.killed).toBe(false);
+      expect(failure?.code).toBe(1);
+      expectNoPlaintext(failure?.stdout ?? '');
+      expectNoPlaintext(failure?.stderr ?? '');
+      expect(failure?.stdout).toContain(orphan.id);
+      expect(failure?.stdout).toContain('1 value(s) are still not under the current key');
+      expect(failure?.stdout).toContain('Run this again; if the number does not move');
+      // Exiting through `exitCode` rather than past `finally` is also what keeps an error out of stderr.
+      expect(failure?.stderr).toBe('');
+    } finally {
+      await db.delete(documentSources).where(eq(documentSources.id, orphan.id));
+    }
+  }, 120_000);
 });

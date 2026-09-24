@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { getTableColumns, getTableName } from 'drizzle-orm';
-import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
+import { getTableColumns, getTableName, is } from 'drizzle-orm';
+import { type PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
+import * as schema from '../src/db/schema.js';
 import { ENCRYPTED_FIELDS, UNENCRYPTED_SECRET_COLUMNS } from '../src/services/encrypted-fields.js';
 
 /**
@@ -13,41 +14,54 @@ import { ENCRYPTED_FIELDS, UNENCRYPTED_SECRET_COLUMNS } from '../src/services/en
  * call site, and the next rotation leaves it under a key the operator believes is retired. Nothing in
  * the type system notices that.
  *
- * So this test does not read the list — it reads `src/db/schema.ts` as text, picks out every column
- * whose *name* looks like a secret, and demands that each one be accounted for: encrypted, or written
- * down in `UNENCRYPTED_SECRET_COLUMNS` with a reason. Adding a secret column then has exactly two
+ * So this test does not read the list — it walks every column of every table `src/db/schema.ts`
+ * declares, of any type that could hold a value at all (`text`, `jsonb`, an enum, a custom `bytea` —
+ * not only the `text(…)` calls a pattern over the file would find), picks out each one whose *name*
+ * looks like a secret, and demands that each be accounted for: encrypted, or written down in
+ * `UNENCRYPTED_SECRET_COLUMNS` with a reason.
+ *
+ * **What it cannot see is a secret with an innocent name.** The match is on the column name and
+ * nothing else: `sources.auth` or `settings.value` holding a credential passes this test. That is the
+ * limit of any check that does not read the data, and the reason the name list below errs towards
+ * asking — `settings.key` is exempt for exactly that. Within that limit a new secret column has two
  * outcomes, and both of them are deliberate.
  */
 const SCHEMA = readFileSync(fileURLToPath(new URL('../src/db/schema.ts', import.meta.url)), 'utf8');
 
-/** `pgTable('<name>'` — the position of each declaration, so a column can be attributed to one. */
-const TABLE_DECLARATIONS = [...SCHEMA.matchAll(/pgTable\(\s*'([a-z_0-9]+)'/g)].map((m) => ({ at: m.index ?? 0, name: m[1] }));
-
-/** Every `text('…')` / `varchar('…')` column in the file, in declaration order. */
-const TEXT_COLUMNS = /(?:^|\W)(?:text|varchar)\(\s*'([a-z_0-9]+)'/g;
+/** `pgTable('<name>'` as written in the file — the count the runtime walk below has to reach. */
+const TABLE_DECLARATIONS = [...SCHEMA.matchAll(/pgTable\(\s*'([a-z_0-9]+)'/g)].map((m) => m[1]);
 
 /**
- * Names that mean "this holds a credential". Matched on whole underscore-separated words so that
- * `token_count` is a column about counting and `mcp_token_id` is a foreign key, while `token_hash`
- * and `secret_enc` are questions this test insists on an answer to.
+ * Every table the schema module exports, by its runtime identity rather than by a pattern over its
+ * source text — so a column built with any builder, today's or one added later, is in the walk.
  */
-const SECRET_SHAPED = /(?:^|_)(?:secret|token|password|passphrase|credential|key)(?:_|$)/;
+const TABLES: PgTable[] = (Object.values(schema) as unknown[]).filter((value): value is PgTable => is(value, PgTable));
 
-function tableAt(position: number): string {
-  let name = '';
-  for (const t of TABLE_DECLARATIONS) {
-    if (t.at > position) break;
-    name = t.name;
-  }
-  return name;
+/**
+ * Names that mean "this holds a credential". Matched on whole underscore-separated words, singular or
+ * plural, so that `keyword` and `tokenizer` are not asked about while `token_hash`, `secret_enc` and
+ * `oauth_tokens` are questions this test insists on an answer to.
+ */
+const SECRET_SHAPED = /(?:^|_)(?:secret|token|password|passphrase|credential|key)s?(?:_|$)/;
+
+/**
+ * Column types that cannot carry a credential whatever they are called: a count, a flag, a timestamp,
+ * a uuid. This is what keeps `chunks.token_count`, `users.must_change_password` and the foreign key
+ * `search_queries.mcp_token_id` out of the question without exempting them by name. Everything else —
+ * text, json, an enum, a vector, a custom type such as `bytea` — is walked.
+ */
+const CANNOT_HOLD_A_SECRET = new Set(['number', 'bigint', 'boolean', 'date']);
+
+function canHoldASecret(column: PgColumn): boolean {
+  return !CANNOT_HOLD_A_SECRET.has(column.dataType.split(' ')[0]) && column.columnType !== 'PgUUID';
 }
 
 function secretShapedColumnsInSchema(): string[] {
   const found: string[] = [];
-  for (const m of SCHEMA.matchAll(TEXT_COLUMNS)) {
-    const column = m[1];
-    if (!SECRET_SHAPED.test(column)) continue;
-    found.push(`${tableAt(m.index ?? 0)}.${column}`);
+  for (const table of TABLES) {
+    for (const column of Object.values(getTableColumns(table)) as PgColumn[]) {
+      if (canHoldASecret(column) && SECRET_SHAPED.test(column.name)) found.push(`${getTableName(table)}.${column.name}`);
+    }
   }
   return found;
 }
@@ -56,6 +70,19 @@ describe('the list of encrypted columns', () => {
   it('finds the schema at all — a silent zero here would make every assertion below vacuous', () => {
     expect(TABLE_DECLARATIONS.length).toBeGreaterThan(10);
     expect(secretShapedColumnsInSchema().length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('walks every table the schema declares — one left unexported would be a table nobody checks', () => {
+    expect(TABLES.map((table) => getTableName(table)).sort()).toEqual([...TABLE_DECLARATIONS].sort());
+  });
+
+  it('asks about a secret-shaped name in either number', () => {
+    for (const name of ['secret_enc', 'token_hash', 'oauth_tokens', 'api_secrets', 'client_credentials', 'signing_keys', 'passwords']) {
+      expect(SECRET_SHAPED.test(name), name).toBe(true);
+    }
+    for (const name of ['keyword', 'tokenizer', 'monkeys', 'secretary', 'passwordless', 'turkey']) {
+      expect(SECRET_SHAPED.test(name), name).toBe(false);
+    }
   });
 
   it('accounts for every secret-shaped column in src/db/schema.ts', () => {

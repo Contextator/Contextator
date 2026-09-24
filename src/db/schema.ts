@@ -258,6 +258,11 @@ export const documentSources = pgTable(
     config: jsonb('config').notNull().$type<Record<string, unknown>>().default({}),
     /** Encrypted token (services/crypto.ts); never returned by the API. */
     secretEnc: text('secret_enc'),
+    /**
+     * Encrypted under `SECRET_KEY` when the instance has one (ADR-0075), registered in
+     * `services/encrypted-fields.ts`; never returned by the API. Rows written before ADR-0075 may still
+     * hold the plaintext, which `crypto.decryptWebhookSecret` reads as is and the `rotate-secret` pass seals.
+     */
     webhookSecret: text('webhook_secret'),
     /** `plain` | `obsidian` | `notion-export` */
     flavor: text('flavor').notNull().default('plain'),
@@ -899,6 +904,9 @@ export const auditEvents = pgTable(
      * The handful of body fields the policy table lets an action record, each restricted to a closed
      * set of values — `{"mode":"account"}` for the MCP access switch. A field that is not named there,
      * or a value outside its set, is dropped rather than stored, so free text cannot reach this column.
+     * One field comes from the actor rather than the body: an `api_token` row carries `tokenId`, the
+     * id of the token that acted ([ADR-0076](../../.ssot/ADR.md#adr-0076)), which its label alone
+     * cannot tell apart from another token of the same name.
      */
     detail: jsonb('detail').notNull().default({}),
     /** The status the request answered with. Only successes are written, so this is 2xx by contract. */

@@ -232,7 +232,10 @@ async function main(): Promise<void> {
   try {
     const report = await rotateSecrets(db, keys);
     for (const line of reportLines(report)) console.log(line);
-    if (report.remaining > 0) process.exit(1);
+    // `exitCode`, not `exit()`: the pool has to close in `finally`, and stdout is asynchronous when it
+    // is a pipe (`… | tee rotation.log`), so exiting here could cut off the very lines that name the
+    // rows still owed — the branch where the operator most needs to read them (ADR-0075).
+    if (report.remaining > 0) process.exitCode = 1;
   } finally {
     await pool.end();
   }
