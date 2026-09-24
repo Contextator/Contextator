@@ -713,15 +713,18 @@ may be gigabytes.
 **`SECRET_KEY` is not in it and never will be.** A backup carrying the key would be the whole instance
 in one file, on a volume with a weaker access story than the environment it came from. What travels is
 a fingerprint of the key — 128 bits of keyed HMAC — which is what lets `restore` **refuse a wrong or
-missing key before it writes anything** instead of leaving you with a half-loaded instance and no way
-back. Keep the key where the archive is not.
+missing key before it writes anything, when that key would cost something real** — an archive whose
+sources hold no sync credential encrypted under it restores anyway, with a note, instead of stopping
+the one case that is unambiguously safe. Keep the key where the archive is not.
 
 That key is rotatable — a four-step runbook (`npm run rotate-secret` is step 3, ADR-0075 is the record
 of why) — which gives the paragraph above a second edge: **rotating the key, and then retiring the old
-one, invalidates every archive taken before the rotation.** The old archive's fingerprint names a key
-the environment no longer holds, and `restore` refuses — correctly, because the ciphertexts in that
-dump were written under the key that was retired. Exactly when in the four steps that refusal starts,
-and what to do about backups from before a rotation, is the runbook's business, not this paragraph's —
+one, invalidates every archive taken before the rotation that carries a sync credential — a private git
+or Notion token — encrypted under it.** The old archive's fingerprint names a key the environment no
+longer holds, and for that archive `restore` refuses, because the credential's ciphertext was written
+under the key that was retired and cannot be re-derived; an archive with no such credential restores
+anyway. Exactly when in the four steps that refusal starts, and what to do about backups from before a
+rotation, is the runbook's business, not this paragraph's —
 see [wiki/Security#rotating-secret_key](https://github.com/Contextator/Contextator/wiki/Security#rotating-secret_key).
 
 The restore also refuses a dump taken from a newer PostgreSQL major version than the server it is going
