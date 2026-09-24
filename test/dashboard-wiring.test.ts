@@ -87,6 +87,19 @@ describe('the dashboard markup and its modules agree', () => {
     expect(html).not.toMatch(/\.md, \.mdx, \.txt, \.html/);
   });
 
+  it('sends a failed linking flow back to the same account page the tokens view starts it from', async () => {
+    // auth-page.js cannot import tokens.js (it must not pull the dashboard in), so it keeps a copy.
+    const authPage = await readFile(new URL('auth-page.js', PUBLIC), 'utf8');
+    const tokens = await readFile(new URL('tokens.js', PUBLIC), 'utf8');
+    const returnPath = /export const TOKENS_RETURN_PATH = '([^']+)';/.exec(tokens)?.[1];
+    const accountPage = /const ACCOUNT_PAGE_PATH = '([^']+)';/.exec(authPage)?.[1];
+    expect(returnPath).toBeTruthy();
+    expect(accountPage).toBe(returnPath);
+    expect(authPage).toContain('back.href = ACCOUNT_PAGE_PATH;');
+    // ...and that copy is the only place the path is written in auth-page.js.
+    expect(authPage.match(/~tokens/g)).toHaveLength(1);
+  });
+
   it('keeps the auth pages free of dashboard ids, since they load a different script', async () => {
     const authPage = await readFile(new URL('auth-page.js', PUBLIC), 'utf8');
     const bodies = await Promise.all(['login', 'setup', 'change-password'].map((slug) => readFile(new URL(`pages/${slug}.html`, PUBLIC), 'utf8')));

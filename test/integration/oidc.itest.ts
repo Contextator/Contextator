@@ -865,6 +865,10 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
       .from(userFederatedIdentities)
       .where(eq(userFederatedIdentities.subject, 'root-promoted-after-link-identity'));
     expect(after).toHaveLength(1);
+    // And it is not counted as a sign-in of that identity either ([T4-NIT-1]): the touch comes after
+    // the root refusal, so a refused attempt leaves the identity's `last_login_at` as it was.
+    expect(before[0].lastLoginAt).toBeNull();
+    expect(after[0].lastLoginAt).toBeNull();
 
     const rows = await waitForEvents(
       (e) =>
@@ -1805,7 +1809,7 @@ describe('removing root accounts: one lock order, and the last active root stays
     expect(await activeRoots()).toEqual([y.id]);
   });
 
-  it('decides losesRoot from the read under the lock: the other root demoted in between makes this the last one', async () => {
+  it('counts the other active roots under the lock: the other root demoted in between makes this the last one', async () => {
     const x = await createUser(rootsDb.db, { username: 'stale-root-x', role: 'root', password });
     const y = await createUser(rootsDb.db, { username: 'stale-root-y', role: 'root', password });
 
@@ -1823,6 +1827,32 @@ describe('removing root accounts: one lock order, and the last active root stays
 
     await expect(demotion).rejects.toBeInstanceOf(ConflictError);
     expect(await activeRoots()).toEqual([x.id]);
+  });
+
+  it('decides losesRoot from the read under the lock, not the pre-lock read: an admin promoted to last root in between is refused the demotion and the disable ([F14-T10-MINOR-1])', async () => {
+    for (const [label, input] of [
+      ['demotion', { role: 'member' }],
+      ['disable', { isActive: false }],
+    ] as const) {
+      await rootsDb.db.update(users).set({ role: 'member' }).where(eq(users.role, 'root'));
+      const x = await createUser(rootsDb.db, { username: `promoted-root-x-${label}`, role: 'admin', password });
+      const y = await createUser(rootsDb.db, { username: `promoted-root-y-${label}`, role: 'root', password });
+
+      const change = updateUser(rootsDb.db, x.id, input, {
+        // The unlocked pre-read saw X as an admin — nothing for this request to protect. Before any lock,
+        // X becomes root and the only other root goes, so X is now the last root: only a `losesRoot`
+        // decided from the read under the lock still sees that.
+        onBeforeLock: async () => {
+          await rootsDb.db.update(users).set({ role: 'root' }).where(eq(users.id, x.id));
+          await rootsDb.db.update(users).set({ role: 'member' }).where(eq(users.id, y.id));
+        },
+      });
+
+      await expect(change, label).rejects.toBeInstanceOf(ConflictError);
+      const [row] = await rootsDb.db.select().from(users).where(eq(users.id, x.id));
+      expect({ role: row.role, isActive: row.isActive }, label).toEqual({ role: 'root', isActive: true });
+      expect(await activeRoots(), label).toEqual([x.id]);
+    }
   });
 });
 

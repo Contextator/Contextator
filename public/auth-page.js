@@ -110,8 +110,15 @@ const OIDC_ERROR_MESSAGES = {
   link_requires_session: 'Linking single sign-on needs the same signed-in session that started it. Sign in and start again from your account page.',
 };
 
-/** The codes a *linking* flow ends with: the visitor is usually still signed in, so offer the way back. */
+/** The codes a *linking* flow ends with: the visitor may still be signed in, so offer the way back. */
 const OIDC_LINK_ERRORS = new Set(['root_local_only', 'link_conflict', 'link_requires_session']);
+
+/**
+ * The account page a linking flow starts from. A copy of `TOKENS_RETURN_PATH` in `public/tokens.js`:
+ * this file stays standalone (see the top of the file), so it cannot import it —
+ * `test/dashboard-wiring.test.ts` fails if the two ever differ.
+ */
+const ACCOUNT_PAGE_PATH = '/#/~tokens';
 
 // Somebody who lands on /login before anyone has set the instance up needs pointing at /setup.
 if ($('#login-form')) {
@@ -134,13 +141,21 @@ if ($('#login-form')) {
   if (oidcError) {
     const errorNode = $('#login-error');
     errorNode.textContent = OIDC_ERROR_MESSAGES[oidcError] || 'Single sign-on failed.';
-    if (OIDC_LINK_ERRORS.has(oidcError)) {
-      const back = document.createElement('a');
-      back.href = '/#/~tokens';
-      back.textContent = 'Back to your account';
-      errorNode.append(' ', back);
-    }
     errorNode.hidden = false;
+    // `root_local_only` also ends a plain SSO *sign-in* by a root account, whose visitor has no session
+    // and no account page to go back to — so the way back is offered only to a visitor who is actually
+    // signed in, whichever flow brought them here.
+    if (OIDC_LINK_ERRORS.has(oidcError)) {
+      void fetch('/api/auth/me', { headers: { accept: 'application/json' } })
+        .then((r) => {
+          if (!r.ok) return;
+          const back = document.createElement('a');
+          back.href = ACCOUNT_PAGE_PATH;
+          back.textContent = 'Back to your account';
+          errorNode.append(' ', back);
+        })
+        .catch(() => undefined);
+    }
   }
 }
 

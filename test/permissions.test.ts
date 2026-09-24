@@ -224,15 +224,6 @@ describe('API tokens (ADR-0076)', () => {
     ...over,
   });
 
-  it('keeps the SSO unlink, and with it the 409 last_sign_in_method answer, to a signed-in session', () => {
-    // Positive: the 409 is an answer about the caller's own account, so the caller is a session.
-    expect(requireSession({ principal: as('member') } as never).userId).toBe('id-member');
-    // Negative: a machine credential never reaches the handler that could answer it — ADMIN_TOKEN has
-    // no account to unlink, and an API token must not be a way to strip its owner's sign-in methods.
-    expect(() => requireSession({ principal: token } as never)).toThrow(ForbiddenError);
-    expect(() => requireSession({ principal: asApiToken({ scope: ['DELETE /api/auth/oidc/link'] }) } as never)).toThrow(ForbiddenError);
-  });
-
   it('requireSession accepts a session and refuses ADMIN_TOKEN and an API token', () => {
     const session = as('member');
     expect(requireSession({ principal: session } as never)).toBe(session);
