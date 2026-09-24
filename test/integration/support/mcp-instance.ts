@@ -131,7 +131,10 @@ export interface LiveInstance {
  * the product does by default and the only way to get it right here: routes have to be registered
  * before Fastify will listen, and the port is not known until it has.
  */
-export async function startMcpInstance(database: TestDatabase, opts: { dataDir: string; docRoot: string }): Promise<LiveInstance> {
+export async function startMcpInstance(
+  database: TestDatabase,
+  opts: { dataDir: string; docRoot: string; env?: Record<string, string> },
+): Promise<LiveInstance> {
   const config = loadConfig({
     DATABASE_URL: database.url,
     // `1`, which is **not** the product default ([ADR-0060](../../../.ssot/ADR.md#adr-0060)). It is
@@ -151,6 +154,9 @@ export async function startMcpInstance(database: TestDatabase, opts: { dataDir: 
     // against `multilingual-e5-small` ([ADR-0042](../../../.ssot/ADR.md#adr-0042)). These suites are
     // about who may search, not about what a search returns, so the gate is off rather than tuned.
     SEARCH_SCORE_FLOOR: '0',
+    // Lets a suite (`oidc.itest.ts`) point this instance's OIDC client at a local provider fixture
+    // without this helper knowing anything about OIDC — plain env overrides, same shape as the rest.
+    ...opts.env,
   });
 
   // The product's own options ([ADR-0060](../../../.ssot/ADR.md#adr-0060)), so `trustProxy` here is

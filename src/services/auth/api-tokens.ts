@@ -97,6 +97,20 @@ export async function revokeApiToken(db: Db, userId: string, tokenId: string): P
 }
 
 /**
+ * Every live token an account holds, revoked in one statement — the `revokeSessionsOfUser` of this
+ * table ([ADR-0077], tur 6 addendum). Used when an SSO identity is unlinked: `verifyApiToken` already
+ * reads the owner's role fresh on every call, so a token surviving an unlink would silently pick up
+ * `root` the moment the account is later promoted, with nothing on the token itself to say it was
+ * minted under a since-removed identity. Revoking here forces a fresh mint after such a change.
+ */
+export async function revokeApiTokensOfUser(db: Db, userId: string): Promise<void> {
+  await db
+    .update(apiTokens)
+    .set({ revokedAt: new Date() })
+    .where(and(eq(apiTokens.userId, userId), isNull(apiTokens.revokedAt)));
+}
+
+/**
  * What a presented credential turned out to be, joined against the owner's **live** account row —
  * never the values at mint time. A demoted, deactivated or password-reset owner narrows or disables
  * every token they hold on their very next request, with nothing stored on the token itself to go stale.

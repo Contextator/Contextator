@@ -3,6 +3,9 @@ import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import { requireSession } from '../auth/plugin.js';
 import { createApiToken, listApiTokens, revokeApiToken } from '../services/auth/api-tokens.js';
+import { isSessionLive } from '../services/auth/sessions.js';
+import { withUserRowLock } from '../services/auth/users.js';
+import { UnauthorizedError } from '../services/errors.js';
 
 const TokenParams = z.object({ tokenId: z.uuid() });
 
@@ -49,13 +52,36 @@ export const tokensRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     if (body.expiresAt && body.expiresAt.getTime() <= Date.now()) {
       return reply.code(400).send({ error: 'expiresAt must be in the future' });
     }
-    const { token, view } = await createApiToken(db, {
-      userId: principal.userId,
-      name: body.name,
-      scope: body.scope,
-      projectId: body.projectId,
-      expiresAt: body.expiresAt,
-      createdBy: principal.userId,
+    /**
+     * Minted inside `withUserRowLock` ([T7-MAJOR-1], tur 8 fix of [ADR-0077](../../.ssot/ADR.md#adr-0077)):
+     * `DELETE /api/auth/oidc/link` revokes this account's sessions and tokens together, under the same
+     * lock, so a mint racing it must serialize against it too — otherwise a session unlink was about to
+     * revoke could still mint a token in the gap, and that token would outlive the link the same way
+     * [T6-MAJOR-1]'s session did before tur 7. The re-check below reads this request's own session row
+     * fresh, under the lock: if the session lost the race, it was revoked before this transaction could
+     * commit, and no token is minted. `createApiToken` is called with `tx`, never `db` — see the warning
+     * on `withUserRowLock` about why a `db` write here would deadlock the request against its own lock.
+     *
+     * The re-check only matters when unlink's `withUserRowLock` transaction commits and releases the
+     * row lock *before* this call below ever acquires it — a mint that already holds the lock can only
+     * ever make a racing unlink queue behind it instead ([T8-MAJOR-1], tur 9 fix): that order is what
+     * `ctx.testHooks.onTokenMintBeforeLock` below pauses to produce deterministically in
+     * `test/integration/oidc.itest.ts`, since a randomized race cannot be relied on to hit it.
+     */
+    await ctx.testHooks?.onTokenMintBeforeLock?.();
+    const { token, view } = await withUserRowLock(db, principal.userId, async (tx) => {
+      if (!(await isSessionLive(tx, principal.sessionId))) {
+        throw new UnauthorizedError('session_revoked', 'Your session was revoked; sign in again to create a token');
+      }
+      await ctx.testHooks?.onTokenMintBeforeInsert?.();
+      return createApiToken(tx, {
+        userId: principal.userId,
+        name: body.name,
+        scope: body.scope,
+        projectId: body.projectId,
+        expiresAt: body.expiresAt,
+        createdBy: principal.userId,
+      });
     });
     // Returned once and never again: the database holds only its hash (ADR-0017).
     return reply.code(201).send({ token: view, secret: token });

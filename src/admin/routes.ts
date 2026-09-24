@@ -9,7 +9,7 @@ import { pingDb } from '../db/client.js';
 import type { ProjectRow } from '../db/schema.js';
 import { keyringOf, SecretDecryptError, SecretKeyMissingError } from '../services/crypto.js';
 import { removeProjectDir } from '../services/data-dir.js';
-import { ForbiddenError, RateLimitedError, SearchUnavailableError, UnauthorizedError } from '../services/errors.js';
+import { ForbiddenError, PromotionRefusedError, RateLimitedError, SearchUnavailableError, UnauthorizedError } from '../services/errors.js';
 import { PathNotAllowedError } from '../services/fs-scan.js';
 import { latestIndexRun, listIndexRuns } from '../services/index-runs.js';
 import { type MetricsSnapshot, renderPrometheus } from '../services/metrics.js';
@@ -136,6 +136,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       return reply.code(409).send({ error: err.code, message: err.message });
     }
     if (err instanceof SearchUnavailableError) return reply.code(409).send({ error: err.code, message: err.message });
+    if (err instanceof PromotionRefusedError) return reply.code(409).send({ error: err.code, message: err.message });
     const e = err as { statusCode?: number; message?: string };
     const status = typeof e.statusCode === 'number' ? e.statusCode : 500;
     if (status >= 500) req.log.error({ err }, 'admin api error');

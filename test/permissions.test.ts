@@ -764,7 +764,14 @@ describe('what the audit log records', () => {
 
 describe('the allowlists', () => {
   it('opens exactly the routes that must work before anyone is signed in', () => {
-    expect([...PUBLIC_ROUTES].sort()).toEqual(['/api/auth/login', '/api/health', '/api/setup', '/api/setup/status']);
+    expect([...PUBLIC_ROUTES].sort()).toEqual([
+      '/api/auth/login',
+      '/api/auth/oidc/callback',
+      '/api/auth/oidc/login',
+      '/api/health',
+      '/api/setup',
+      '/api/setup/status',
+    ]);
   });
 
   it('leaves only the password-change loop reachable while a temporary password stands', () => {

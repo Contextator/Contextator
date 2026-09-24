@@ -4,7 +4,7 @@ import type { AppContext } from '../context.js';
 import { ForbiddenError, UnauthorizedError } from '../services/errors.js';
 import { resolveProjectAccess } from '../services/auth/memberships.js';
 import { verifyApiToken } from '../services/auth/api-tokens.js';
-import { findSessionUser, touchSession } from '../services/auth/sessions.js';
+import { findSessionUser, revokeSession, touchSession } from '../services/auth/sessions.js';
 import { checkProjectAccess, checkRequest } from './authorize.js';
 import { auditCreatedTarget, auditReadsResponse, auditSubject, METRICS_ROUTE, PUBLIC_ROUTES } from './policy.js';
 import { clearSessionCookie, readSessionCookie } from './cookies.js';
@@ -90,6 +90,34 @@ export function installAuth(app: FastifyInstance, ctx: AppContext): void {
       return;
     }
     if (!session) {
+      clearSessionCookie(reply, req, config);
+      return;
+    }
+    // Root stays local ([ADR-0077]): `session.role` is read fresh on every request (see
+    // `findSessionUser`), so a promotion to root reaches an already-open session immediately — and
+    // that is exactly the problem for one opened over SSO. Closing the login-time gap (root refused
+    // an SSO sign-in even for an account promoted *after* it linked a provider identity) still left a
+    // session opened **before** the promotion able to go on acting as root afterwards, because nothing
+    // re-checked how the session began ([T4-MAJOR-1], tur 4 review). This check is what "the role is
+    // read live" is for: it does not matter which of the several ways an account can reach `root` was
+    // used, because none of them touch this session row — `session.authMethod` still says `sso`.
+    //
+    // Tur 6 addendum: `updateUser` now refuses the promotion itself while an identity is still linked
+    // ([ADR-0077]), so this is a **backstop**, not the primary gate — it only fires if a session was
+    // already open when that promotion happened, or a path outside `updateUser` ever manages one. A
+    // backstop must not be able to lock the account out of its own browser, which throwing did
+    // ([T5-MAJOR-2], tur 5 review): `/api/auth/logout` is not a public route, so the throw answered the
+    // very request meant to clear this cookie with the same 403 it was trying to escape. Clearing the
+    // cookie and falling through anonymous — the same shape as the `!session` branch just above —
+    // fixes that: the request continues unauthenticated, which a route with a policy answers 401 for
+    // and a public route answers normally, and the next request carries no cookie at all.
+    //
+    // Checked here, at resolution, rather than in `policy.ts`: this is not a rule about what a role may
+    // do (the policy table stays untouched, per this phase's scope), it is a rule about which sessions
+    // may carry that role at all.
+    const routeUrl = req.routeOptions.url ?? '';
+    if (session.authMethod === 'sso' && session.role === 'root' && !PUBLIC_ROUTES.has(routeUrl) && routeUrl !== METRICS_ROUTE) {
+      await revokeSession(db, session.sessionId).catch((err: unknown) => req.log.warn({ err }, 'failed to revoke a root/sso session'));
       clearSessionCookie(reply, req, config);
       return;
     }

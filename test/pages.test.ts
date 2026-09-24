@@ -117,6 +117,16 @@ describe('safeNext', () => {
     expect(safeNext('https://evil.example/')).toBe('/');
     expect(safeNext('%E0%A4%A')).toBe('/'); // malformed percent-encoding must not throw
   });
+
+  it('rejects a tab (and other control characters) hidden ahead of a scheme-relative host, not just a leading "//"', () => {
+    // A WHATWG URL parser strips ASCII tab/CR/LF before it looks at slashes, so a same-origin-looking
+    // "/\t/evil.example" resolves to "//evil.example" once a browser actually parses it ([MAJOR-2], tur 2
+    // review of [ADR-0077](../../.ssot/ADR.md#adr-0077)). `%09` is the wire form the reviewer asked for.
+    expect(safeNext('/%09/evil.example')).toBe('/');
+    expect(safeNext('/\t/evil.example')).toBe('/');
+    expect(safeNext('/%0d/evil.example')).toBe('/'); // CR
+    expect(safeNext('/%0a/evil.example')).toBe('/'); // LF
+  });
 });
 
 describe('authPageRoutes', () => {

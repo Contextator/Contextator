@@ -107,7 +107,7 @@ export const usersRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     }
     if (body.isActive === false) assertNotSelf(principal.userId, id, 'disable');
 
-    const row = await updateUser(db, id, body);
+    const row = await updateUser(db, id, body, { onBeforeLock: ctx.testHooks?.onUserUpdateBeforeLock });
     // The role is read from the database on every request, so a change already applies to the
     // sessions this account has open. Ending them anyway is what an operator expects when someone
     // loses standing — but a promotion is no reason to throw them out of the dashboard.

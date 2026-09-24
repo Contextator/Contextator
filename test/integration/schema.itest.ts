@@ -53,6 +53,8 @@ const EXPECTED_TABLES = [
   'search_queries',
   'search_query_hits',
   'settings',
+  // Which account a federated (OIDC) identity signs in as ([ADR-0077](../../.ssot/ADR.md#adr-0077)).
+  'user_federated_identities',
   'user_sessions',
   'users',
 ];
@@ -225,16 +227,21 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     // `chunks.text_search_config` and rebuilds `chunks_project_generation_idx` around it; and
     // `0014_api_tokens` ([ADR-0076](../../../.ssot/ADR.md#adr-0076)), one whole new table anchored by
     // `^api_tokens`, plus the `audit_events` CHECK constraints it widens, already covered by
-    // `^audit_events`. So the claim is no longer "nothing changed": it is that nothing changed
-    // *except* what those migrations say they change, and the lines that moved are checked by name
-    // rather than counted.
+    // `^audit_events`; and `0015_oidc_federated_identities`
+    // ([ADR-0077](../../../.ssot/ADR.md#adr-0077)), one whole new table anchored by
+    // `^user_federated_identities`; and `0016_session_auth_method`
+    // ([ADR-0077](../../../.ssot/ADR.md#adr-0077)), a single additive column on `user_sessions`, the
+    // same shape as `0012_mcp_auth_default_token`'s: `user_sessions \| \d+ \| auth_method \|` names the
+    // table and column position, and `user_sessions_auth_method_check` names its CHECK constraint. So
+    // the claim is no longer "nothing changed": it is that nothing changed *except* what those
+    // migrations say they change, and the lines that moved are checked by name rather than counted.
     await applySchema(database);
     const changed = snapshotDifference(afterLadder, await captureSchema(db));
     expect(changed).not.toHaveLength(0);
     expect(
       changed.filter(
         (line) =>
-          !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config/.test(
+          !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config|^user_federated_identities|user_sessions \| \d+ \| auth_method \||user_sessions_auth_method_check/.test(
             line,
           ),
       ),

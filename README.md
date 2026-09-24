@@ -495,6 +495,44 @@ example). The secret is shown once, at creation. A token can never do more than 
 it can be revoked on its own — unlike `ADMIN_TOKEN`, which is all-or-nothing and requires an environment-variable
 edit and a restart to retire.
 
+Setting `OIDC_ISSUER_URL` adds a second door: `/login` shows an SSO button (`OIDC_BUTTON_LABEL`) beside
+the password form, and the password form never goes away. A federated sign-in is matched to an account
+by the provider's `sub` claim, never its e-mail claim — an e-mail is exactly what a misconfigured or
+compromised provider could forge into reaching a different local account. By default
+(`OIDC_AUTO_PROVISION=0`) SSO only signs in accounts an admin already created; turn it on and a first
+successful sign-in mints one with `OIDC_DEFAULT_ROLE` (`admin` or `member` — never `root`, since the
+one account this product cannot recreate from a provider claim stays a local password sign-in). Once
+signed in, a federated account is governed by the same role table above as any other, and a provider
+outage never blocks local password sign-in. See [Configuration](#configuration) for the full variable
+list.
+
+An existing local account can also **link** the provider to itself from its own account page — signing
+in either way afterwards reaches the same account — and **unlink** it again, both self-service and both
+requiring the caller's own session. `root` is refused a link (`403 root_local_only`), the same rule that
+keeps `OIDC_DEFAULT_ROLE` from ever being `root`: the one account this product cannot recreate from a
+provider claim never signs in over SSO.
+
+**A linked account cannot be promoted to root, full stop.** `PATCH /api/users/:id` (and every other path
+that changes a role — there is exactly one, `updateUser`) refuses with `409 root_requires_unlink` the
+moment `role: "root"` is requested for an account that still has an SSO identity attached, regardless of
+which credential is doing the promoting — a session, an API token, `ADMIN_TOKEN`. This is checked ahead
+of the write, not after: the account's role never becomes `root` while the link exists, so there is
+nothing for the "acts as root over SSO" case below to ever actually catch in normal operation — it is a
+backstop, not the primary defence, kept in case some future path someday writes a role outside
+`updateUser`. If it ever did fire, every request re-reads the session's role, and one that reads `root`
+on a session opened over SSO is revoked and its cookie cleared right there, falling through to an
+anonymous request rather than completing it.
+
+**Unlinking is self-service and revokes the account's standing credentials in the same request:** every
+session and every API token that account holds is invalidated the moment `DELETE /api/auth/oidc/link`
+removes the identity — including the very session making that call — because unlinking is also what
+clears the way for a later promotion, and nothing opened while the account was still provably tied to an
+external identity provider should outlive that link. Sign back in (locally, since the link is gone) to
+get a working session again. Only after unlinking can another root account grant this one the `root`
+role.
+See `POST /api/auth/oidc/link` and `DELETE
+/api/auth/oidc/link` in [wiki/Admin-API](https://github.com/Contextator/Contextator/wiki/Admin-API#single-sign-on).
+
 Accounts govern the dashboard and the admin API. The MCP endpoints have their own door — see
 [MCP access](#mcp-access) below.
 
@@ -1190,6 +1228,13 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `AUTH_LOGIN_WINDOW_MIN` | `15` | The IP window, and the first lockout step (it doubles, capped at an hour) |
 | `PASSWORD_MIN_LENGTH` | `12` | Applies to every password, temporary ones included. No composition rules |
 | `SETUP_CODE` | – | The code `/setup` asks for once. Set it and you never have to read it out of the log; leave it empty and the server generates one and prints it at every start until the first account exists. Ignored from then on. Case, dashes and punctuation are ignored when it is checked, so give it enough letters and digits |
+| `OIDC_ISSUER_URL` | – | **On/off switch for federated sign-in.** Set to the provider's issuer URL and `/login` grows a second, SSO button; left empty, no discovery request is ever made and the button never renders, but the SSO routes stay registered (`/api/auth/oidc/login` answers `404`, the callback redirects to `/login?oidc_error=not_configured`). Discovery is fetched once and cached |
+| `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | – | Issued by the provider. `OIDC_CLIENT_SECRET` is a process secret like `ADMIN_TOKEN` — read from the environment, never written to the database, so no backup or dump ever carries it |
+| `OIDC_REDIRECT_URI` | – | The callback URL registered with the provider, e.g. `https://docs.example.com/api/auth/oidc/callback` |
+| `OIDC_SCOPES` | `openid profile email` | Space-separated scopes requested at the provider |
+| `OIDC_BUTTON_LABEL` | `Single sign-on` | Text on the `/login` SSO button |
+| `OIDC_AUTO_PROVISION` | `0` | `1` lets a first successful provider sign-in create an account here on its own. Off by default: an unmapped provider identity is refused rather than silently handed an account. A federated identity is always matched by the provider's `sub` claim, never by an e-mail claim |
+| `OIDC_DEFAULT_ROLE` | `member` | Role a provisioned account gets. `admin` or `member` only — never `root`, which stays a local, provider-independent sign-in |
 | `ALLOWED_ORIGINS` | – | Extra browser origins allowed on `/mcp/*` (non-browser clients are always allowed) |
 | `PUBLIC_BASE_URL` | – | e.g. `https://docs.example.com` for the URLs shown in the dashboard |
 | `TRUST_PROXY` | `0` | **Which peers may tell this server where a request came from.** It decides `req.ip` — the key of the per-IP sign-in limit, of `/oauth/register`'s per-host budget and of the address beside an audit event — and `req.protocol`, which three places build published URLs from when `PUBLIC_BASE_URL` is unset. `0` reads the socket's own peer address and ignores `X-Forwarded-*`, which is right for the shipped `docker compose` shape: nothing is in front of it, so a caller writing those headers would otherwise choose its own rate-limit key. **Put a reverse proxy in front and you must set this** — see *Running behind a reverse proxy* below for what breaks if you do not, including MCP connectors being answered `invalid_target`. Name the **proxy**: an IP, a CIDR block, or the subnet names `loopback` / `linklocal` / `uniquelocal`, comma-separated (`TRUST_PROXY=loopback`, `TRUST_PROXY=172.18.0.0/16`). The range is matched against **every hop**, not just the peer, so a range your clients are also inside (`uniquelocal` on a LAN) protects nothing. `1` trusts whoever wrote the header and is only safe when nothing but the proxy can open a socket to this port. A hop count is **not** accepted — it is a claim the server cannot check and goes silently wrong the day a CDN appears in front of the proxy |
