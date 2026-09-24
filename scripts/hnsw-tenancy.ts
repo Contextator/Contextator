@@ -63,6 +63,8 @@ const INSERT_BATCH = 1_000;
 const HUNDRED = 100;
 /** Latency samples are every probe this many times. */
 const LATENCY_REPEATS = 3;
+/** How many projects each creation-cost figure is taken over. */
+const CREATE_SAMPLES = 5;
 
 /** Retrieval, not selection: the per-document cap would hold every page of a one-document-a-half fixture to two rows. */
 const WHOLE_PAGE = { maxPerDocument: MAX_SEARCH_LIMIT, neighborContext: 0 };
@@ -225,6 +227,20 @@ async function inTransaction<T>(pool: pg.Pool, fn: (client: pg.PoolClient) => Pr
   }
 }
 
+/**
+ * Which of `names` are HNSW indexes, by access method rather than by name: a partitioned table's index
+ * is cloned onto each partition as `<partition>_embedding_idx`, which says nothing about HNSW.
+ */
+async function hnswAmong(client: pg.PoolClient, names: string[]): Promise<Set<string>> {
+  if (names.length === 0) return new Set();
+  const result = await client.query<{ name: string }>(
+    `SELECT i.relname AS name FROM pg_class i JOIN pg_am am ON am.oid = i.relam
+     WHERE am.amname = 'hnsw' AND i.relkind = 'i' AND i.relname = ANY($1)`,
+    [names],
+  );
+  return new Set(result.rows.map((r) => r.name));
+}
+
 /** The dense candidate statement of `searchChunks`, over `table`. Parameters, not literals — as drizzle sends them. */
 const denseText = (table: string): string =>
   `SELECT c.chunk_index, (c.embedding <=> $3::vector)::float8 AS distance FROM ${table} c
@@ -259,7 +275,9 @@ async function dense(pool: pg.Pool, table: string, projectId: string, generation
     const params = [projectId, generation, vectorLiteral(query)];
     const plan = await client.query<{ 'QUERY PLAN': string }>(`EXPLAIN ${denseText(table)}`, params);
     const [result, ms] = await timed(() => client.query<{ chunk_index: number; distance: number }>(denseText(table), params));
-    const index = plan.rows.map((r) => /Index Scan using (\S+)/.exec(r['QUERY PLAN'])?.[1]).find((name) => name?.includes('hnsw')) ?? null;
+    const scanned = plan.rows.flatMap((r) => /Index Scan using (\S+)/.exec(r['QUERY PLAN'])?.[1] ?? []);
+    const hnsw = await hnswAmong(client, scanned);
+    const index = scanned.find((name) => hnsw.has(name)) ?? null;
     const top = [...result.rows]
       .sort((a, b) => a.distance - b.distance || a.chunk_index - b.chunk_index)
       .slice(0, K)
@@ -286,16 +304,23 @@ async function analyze(pool: pg.Pool, table: string, projectId: string, generati
     ]);
     const raw = result.rows[0]['QUERY PLAN'];
     const [doc] = (typeof raw === 'string' ? JSON.parse(raw) : raw) as Array<{ Plan: PlanNode; 'Planning Time': number; 'Execution Time': number }>;
-    let removed = 0;
-    let returned = 0;
+    const nodes: PlanNode[] = [];
     const walk = (node: PlanNode): void => {
-      if (node['Index Name']?.includes('hnsw')) {
-        removed += node['Rows Removed by Filter'] ?? 0;
-        returned += node['Actual Rows'] ?? 0;
-      }
+      nodes.push(node);
       for (const child of node.Plans ?? []) walk(child);
     };
     walk(doc.Plan);
+    const hnsw = await hnswAmong(
+      client,
+      nodes.flatMap((node) => node['Index Name'] ?? []),
+    );
+    let removed = 0;
+    let returned = 0;
+    for (const node of nodes) {
+      if (node['Index Name'] === undefined || !hnsw.has(node['Index Name'])) continue;
+      removed += node['Rows Removed by Filter'] ?? 0;
+      returned += node['Actual Rows'] ?? 0;
+    }
     return { rowsRemovedByFilter: removed, rowsReturned: returned, planningMs: doc['Planning Time'], executionMs: doc['Execution Time'] };
   });
 }
@@ -528,13 +553,18 @@ async function rebuild(
 }
 
 interface Creation {
-  /** Creating one project, including whatever DDL the arm needs for it. */
+  /**
+   * Creating one project the way the arm would ship it, DDL included — `CREATE INDEX CONCURRENTLY` for
+   * `partial`, as `createProjectVectorIndex` runs it; the plain DDL elsewhere. Median and slowest of
+   * `CREATE_SAMPLES`.
+   */
   createMs: number;
-  /** The same, without blocking writers: `CREATE INDEX CONCURRENTLY` for `partial`; not applicable elsewhere. */
-  concurrentMs: number | null;
-  /** The lock that DDL holds on the chunks table for its duration. */
+  createMaxMs: number;
+  /** The same with the plain, writer-blocking DDL, for comparison: median of `CREATE_SAMPLES`; `null` where that is what ships. */
+  plainMs: number | null;
+  /** The lock the plain DDL holds on the chunks table for its duration. */
   lock: string;
-  /** Creating the projects that take the instance to a hundred: mean and slowest. */
+  /** Creating the projects that take the instance to a hundred, the way the arm would ship it: mean and slowest. */
   toHundredMeanMs: number;
   toHundredMaxMs: number;
   /** With a hundred tenants: the target's dense statement, planning time and p50 execution. */
@@ -759,38 +789,49 @@ async function creationCost(
 ): Promise<Creation & { insert1000AtSixMs: number }> {
   const pool = database.pool;
   const table = ddl.table;
-  const createOne = async (name: string): Promise<string> => {
+  // What ships: the concurrent build where the arm has one, which is what `createProjectVectorIndex` runs.
+  const shipped = ddl.createConcurrently ?? ddl.create;
+  const createWith = async (name: string, statement: ((projectId: string) => string) | null): Promise<string> => {
     const id = await emptyProject(database, name);
-    if (ddl.create) await pool.query(ddl.create(id));
+    if (statement) await pool.query(statement(id));
     return id;
   };
+  const createOne = (name: string): Promise<string> => createWith(name, shipped);
   const created: string[] = [];
 
-  // One project created and written into at six tenants.
-  const [newcomer, createMs] = await timed(() => createOne('newcomer'));
-  created.push(newcomer);
+  // Projects created the way the arm ships; the first is written into at six tenants.
+  const shippedTimes: number[] = [];
+  for (let i = 0; i < CREATE_SAMPLES; i++) {
+    const [id, took] = await timed(() => createOne(i === 0 ? 'newcomer' : `newcomer-${i}`));
+    created.push(id);
+    shippedTimes.push(took);
+  }
+  const newcomer = created[0];
   const insert1000AtSixMs = await insertNewcomerRows(pool, table, newcomer, await newcomerDocument(database, newcomer), NEWCOMER_SEEDS.atSix);
 
-  // The lock that DDL holds, and the variant that does not block writers.
+  // The plain DDL beside it, and the lock it holds while it runs.
+  let plainMs: number | null = null;
+  if (ddl.create && ddl.createConcurrently) {
+    const plainTimes: number[] = [];
+    for (let i = 0; i < CREATE_SAMPLES; i++) {
+      const [id, took] = await timed(() => createWith(`newcomer-plain-${i}`, ddl.create));
+      created.push(id);
+      plainTimes.push(took);
+    }
+    plainMs = percentile(plainTimes, 50);
+  }
   let lock = 'none: a row in projects';
   if (ddl.create) {
     const locked = await emptyProject(database, 'newcomer-lock');
     created.push(locked);
     [lock] = await lockTaken(pool, table, ddl.create(locked));
   }
-  let concurrentMs: number | null = null;
-  if (ddl.createConcurrently) {
-    const concurrent = await emptyProject(database, 'newcomer-concurrent');
-    created.push(concurrent);
-    const statement = ddl.createConcurrently(concurrent);
-    [, concurrentMs] = await timed(() => pool.query(statement));
-  }
 
   const times: number[] = [];
   while (tenants.length + created.length < HUNDRED - 1) {
-    const [id, ms] = await timed(() => createOne(`filler-${created.length}`));
+    const [id, took] = await timed(() => createOne(`filler-${created.length}`));
     created.push(id);
-    times.push(ms);
+    times.push(took);
   }
   // The hundredth: a project that is written to, so the insert below pays whatever a hundred tenants cost a write.
   const last = await createOne('newcomer-hundred');
@@ -806,8 +847,9 @@ async function creationCost(
   await pool.query('DELETE FROM projects WHERE id = ANY($1::uuid[])', [created]);
   await pool.query(`VACUUM ANALYZE ${table}`);
   return {
-    createMs,
-    concurrentMs,
+    createMs: percentile(shippedTimes, 50),
+    createMaxMs: Math.max(...shippedTimes),
+    plainMs,
     lock,
     toHundredMeanMs: mean(times),
     toHundredMaxMs: Math.max(...times),
@@ -870,7 +912,7 @@ function formatMarkdown(results: ScaleResult[], version: string): string {
   lines.push('### Recall of the crowded project');
   lines.push('');
   lines.push(
-    `| scale | instance | \`${TARGET}\` | rows ahead (min / median / max) | arm | recall@${K} | full pages | empty pages | through \`searchChunks\` | plan | p50 | p95 |`,
+    `| scale | instance | \`${TARGET}\` | rows ahead (min / median / max) | arm | recall@${K} | exact pages | empty pages | through \`searchChunks\` | plan | p50 | p95 |`,
   );
   lines.push('|--:|--:|--:|--:|---|--:|--:|--:|--:|---|--:|--:|');
   for (const r of results) {
@@ -890,15 +932,15 @@ function formatMarkdown(results: ScaleResult[], version: string): string {
   lines.push('### What each strategy costs');
   lines.push('');
   lines.push(
-    '| scale | arm | HNSW indexes | total size | build | table copy | rows removed by filter / returned | planning | rebuild: write next gen | live / next recall during | sweep | create a project | lock held | create, no write lock |',
+    '| scale | arm | HNSW indexes | total size | build | table copy | rows removed by filter / returned | planning | rebuild: write next gen | live / next recall during | sweep | create a project, as shipped (median / max) | plain DDL, writers blocked (median) | lock the plain DDL holds |',
   );
-  lines.push('|--:|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|--:|');
+  lines.push('|--:|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---|');
   for (const r of results) {
     for (const a of [r.today, r.partial, r.partitioned]) {
       const rb = a.rebuild;
       const c = a.creation;
       lines.push(
-        `| ${r.scale}× | ${a.arm} | ${a.indexes} | ${mb(a.indexBytes)} | ${ms(a.buildMs)} | ${ms(a.copyMs)} | ${a.analyzed.rowsRemovedByFilter} / ${a.analyzed.rowsReturned} | ${ms(a.analyzed.planningMs)} | ${rb ? `${ms(rb.writeMs)} (${rb.rows} rows)` : '–'} | ${rb ? `${pct(rb.liveRecallDuring)} / ${pct(rb.nextRecallDuring)}` : '–'} | ${rb ? ms(rb.sweepMs) : '–'} | ${c ? ms(c.createMs) : '–'} | ${c?.lock ?? '–'} | ${c ? ms(c.concurrentMs) : '–'} |`,
+        `| ${r.scale}× | ${a.arm} | ${a.indexes} | ${mb(a.indexBytes)} | ${ms(a.buildMs)} | ${ms(a.copyMs)} | ${a.analyzed.rowsRemovedByFilter} / ${a.analyzed.rowsReturned} | ${ms(a.analyzed.planningMs)} | ${rb ? `${ms(rb.writeMs)} (${rb.rows} rows)` : '–'} | ${rb ? `${pct(rb.liveRecallDuring)} / ${pct(rb.nextRecallDuring)}` : '–'} | ${rb ? ms(rb.sweepMs) : '–'} | ${c ? `${ms(c.createMs)} / ${ms(c.createMaxMs)}` : '–'} | ${c ? ms(c.plainMs) : '–'} | ${c?.lock ?? '–'} |`,
       );
     }
   }
@@ -906,7 +948,7 @@ function formatMarkdown(results: ScaleResult[], version: string): string {
   lines.push('### At a hundred tenants');
   lines.push('');
   lines.push(
-    '| scale | arm | HNSW indexes | creating one (mean / max) | planning the search | search p50 | 1 000 chunks written, at 6 tenants → at 100 |',
+    '| scale | arm | HNSW indexes | creating one, as shipped (mean / max) | planning the search | search p50 | 1 000 chunks written, at 6 tenants → at 100 |',
   );
   lines.push('|--:|---|--:|--:|--:|--:|--:|');
   for (const r of results) {

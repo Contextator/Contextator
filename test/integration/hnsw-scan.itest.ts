@@ -563,12 +563,17 @@ describe('a project the shared index crowded out, answered from its own', () => 
   });
 
   it('is reached through its own index at the candidate count the product asks for', async () => {
-    // The opposite of what ADR-0041 found for the shared index. There, fifty candidates made reading
-    // `small`'s thousand rows and sorting them cheaper than an HNSW descent through twenty thousand, so
-    // the planner stepped around the post-filter. Its own index is a thousand-row graph: costed at
-    // 823.67..1 016.61 on every build measured, against an exact path `ANALYZE` has never sampled below
-    // ≈1 300. Nothing is being stepped around any more, because there is nothing to step around.
-    expect(await usesVectorIndex(ids.small, { limit: DENSE_CANDIDATES })).toBe(true);
+    // The opposite of what ADR-0041 found for the shared index. There, fifty candidates made reading a
+    // project's rows and sorting them cheaper than an HNSW descent through twenty thousand, so the
+    // planner stepped around the post-filter. `beta`'s own index is a five-thousand-row graph, costed at
+    // 1 020.98..1 197.53 against 5 757.35 for reading and sorting its rows, on each of four builds.
+    //
+    // **Not asserted for `small`**, whose thousand rows sit on the crossover described above
+    // `forceVectorIndex`: its own graph is costed at 823.67..1 016.61, and the exact path at whatever
+    // `ANALYZE` sampled for `chunks_project_idx`'s correlation — 2 008.07..2 576.08 over four builds of
+    // this file alone, and under the index cost in one full-suite run in four. Either plan answers `small` correctly, and which one the planner picks is not
+    // this file's question; that its own index is the one a vector scan of it uses is asserted, forced,
+    // in the case above.
     expect(await usesVectorIndex(ids.beta, { limit: DENSE_CANDIDATES })).toBe(true);
   });
 

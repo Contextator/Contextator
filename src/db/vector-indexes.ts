@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 
 import type { Logger } from '../context.js';
+import { KeyedMutex } from '../services/locks.js';
 import type { Db } from './client.js';
 
 /**
@@ -12,13 +13,14 @@ import type { Db } from './client.js';
  * the instance's tuples, and pgvector's own memory cap (`hnsw.scan_mem_multiplier` × `work_mem`) ends it
  * sooner still — so a project whose best rows sit behind enough of its neighbours' is answered short,
  * or not at all, and nothing says so. Measured on `scripts/hnsw-tenancy.ts`'s corpus at 210 500 chunks:
- * the crowded project's recall@10 was 1 % with nine empty pages in ten, and the same project alone in its
- * database scored 88 %. Its own index scores the 88 %.
+ * the crowded project's recall@10 was 0–1 % with nine empty pages in ten, and the same project alone in
+ * its database scored 88–89 %. Its own index scores 87–88 %.
  *
  * **What it costs, and where it is paid.** Creating a project builds an index over nothing, but a partial
- * index is built by scanning the whole table, so the cost grows with the *instance*: 39 ms at 210 500
- * chunks with writes blocked, 90 ms `CONCURRENTLY` without. Creation is done concurrently, because
- * blocking every other project's indexing to create an empty one is the wrong way round.
+ * index is built by scanning the whole table, so the cost grows with the *instance*: 100 ms at 210 500
+ * chunks `CONCURRENTLY` (median of five), 17 ms at 21 050. A plain build is 38 ms at 210 500 but blocks
+ * every writer for all of it; creation is done concurrently, because blocking every other project's
+ * indexing to create an empty one is the wrong way round.
  *
  * **Not declared in `schema.ts`**, for the global index's old reason: an HNSW index needs the dimension
  * the bootstrap settles, and a per-project index has a name drizzle's snapshot could never describe.
@@ -68,28 +70,55 @@ function createStatement(projectId: string, concurrently: boolean): string {
 }
 
 /**
+ * One line for every concurrent DDL statement on `chunks` this process issues.
+ *
+ * Two `CREATE INDEX CONCURRENTLY` on one table deadlock: the second waits for the first's
+ * `SHARE UPDATE EXCLUSIVE` lock while holding a snapshot, and the first, in its wait phase, waits for
+ * that snapshot to go. PostgreSQL's detector breaks the cycle after `deadlock_timeout` by aborting one of
+ * them — every time, not occasionally (`test/integration/vector-indexes.itest.ts`, "two DDL statements on
+ * chunks at once"). `DROP INDEX CONCURRENTLY` joins the same cycle. So they queue here, in the process, where a
+ * waiter holds no snapshot. A queue in the database would not do: a session waiting on
+ * `pg_advisory_lock` holds a snapshot of its own, and the build it waits for waits for that.
+ *
+ * Every caller is this process ([ADR-0078](../../.ssot/ADR.md#adr-0078): one instance, one replica); the
+ * bootstrap's reconcile runs before anything serves and builds plainly, inside its own transaction.
+ */
+const concurrentDdl = new KeyedMutex();
+const CHUNKS = 'chunks';
+
+/**
  * Builds a new project's index, without blocking anybody else's writes to `chunks`.
  *
  * `CONCURRENTLY` cannot run inside a transaction, so this takes the pooled handle, never a `tx`. A
  * concurrent build that fails leaves an `INVALID` index behind, which `IF NOT EXISTS` would then treat
  * as done forever — so a failure drops what it left before rethrowing. If that cleanup fails too, the
  * original error is still the one that matters, and the bootstrap drops invalid indexes on the next start.
+ *
+ * It waits, as every concurrent build does, for each transaction that was open when it started — a
+ * running `pg_dump` among them, so a project created during a backup is created when the backup ends.
  */
 export async function createProjectVectorIndex(db: Db, projectId: string): Promise<void> {
-  try {
-    await db.execute(sql.raw(createStatement(projectId, true)));
-  } catch (err) {
-    await db.execute(sql.raw(`DROP INDEX CONCURRENTLY IF EXISTS ${projectVectorIndexName(projectId)}`)).catch(() => undefined);
-    throw err;
-  }
+  const name = projectVectorIndexName(projectId);
+  await concurrentDdl.runExclusive(CHUNKS, async () => {
+    try {
+      await db.execute(sql.raw(createStatement(projectId, true)));
+    } catch (err) {
+      await db.execute(sql.raw(`DROP INDEX CONCURRENTLY IF EXISTS ${name}`)).catch(() => undefined);
+      throw err;
+    }
+  });
 }
 
 /**
  * Drops a project's index. `CONCURRENTLY`, because a plain `DROP INDEX` takes `ACCESS EXCLUSIVE` on
- * `chunks` and would queue every other project's searches behind whatever is reading the table.
+ * `chunks` and would queue every other project's searches behind whatever is reading the table. It waits
+ * for open transactions the way a concurrent build does, and in the same line.
  */
 export async function dropProjectVectorIndex(db: Db, projectId: string): Promise<void> {
-  await db.execute(sql.raw(`DROP INDEX CONCURRENTLY IF EXISTS ${projectVectorIndexName(projectId)}`));
+  const name = projectVectorIndexName(projectId);
+  await concurrentDdl.runExclusive(CHUNKS, async () => {
+    await db.execute(sql.raw(`DROP INDEX CONCURRENTLY IF EXISTS ${name}`));
+  });
 }
 
 interface ExistingIndex {

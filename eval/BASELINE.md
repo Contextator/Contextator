@@ -1459,43 +1459,56 @@ statement (fifty candidates) against an index-free scan of the same project and 
 
 ## The numbers
 
+Re-run on 2026-09-25 after review: project creation is now measured the way the product runs it
+(`CREATE INDEX CONCURRENTLY`, five samples, and the hundred-tenant loop too), and the plan column
+recognises an HNSW index by its access method, so a partition's cloned index reads as one. The
+24 September run had costed creation with a plain, writer-blocking `CREATE INDEX` and labelled the
+partitioned arm "exact sort". HNSW graphs are not built identically twice, so recall moves by a point
+or two between runs (88 → 87 % for partial, 1 → 0 % today).
+
 ### Recall of the crowded project (`small`)
 
-| scale | rows ahead (min / median / max) | arm | recall@10 | full pages | empty pages | plan | p50 |
-|--:|--:|---|--:|--:|--:|---|--:|
-| 1× | 1 658 / 1 912 / 2 576 | every arm, today's included | 100 % | 10/10 | 0/10 | exact sort; own partial for partial | ≤ 0.63 ms |
-| 10× | 15 714 / 16 942 / 25 876 | `small` alone in its database | **88 %** | 4/10 | 0/10 | HNSW | 1.00 ms |
-| 10× | | **today**: one global index | **1 %** | 0/10 | **9/10** | global HNSW | 66 ms |
-| 10× | | today, `max_scan_tuples` = 40 000 | 1 % | 0/10 | 9/10 | global HNSW | 67 ms |
-| 10× | | today, `max_scan_tuples` = 80 000 | 1 % | 0/10 | 9/10 | global HNSW | 66 ms |
-| 10× | | today, 80 000 and `hnsw.scan_mem_multiplier` = 8 | 1 % | 0/10 | 0/10 | global HNSW | 265 ms |
-| 10× | | **partial**: one index per project | **88 %** | 3/10 | 0/10 | own partial | 1.14 ms |
-| 10× | | **partitioned**: one partition per project | **89 %** | 4/10 | 0/10 | exact sort | 1.07 ms |
+"Exact pages" counts the questions whose ten results equalled the exact scan's ten, as a set.
 
-`searchChunks` itself, run against the same databases, agrees with the script's own statement: 1 % today, 88 % with per-project indexes, 88 % alone.
+| scale | rows ahead (min / median / max) | arm | recall@10 | exact pages | empty pages | plan | p50 |
+|--:|--:|---|--:|--:|--:|---|--:|
+| 1× | 1 658 / 1 912 / 2 576 | every arm but partial | 100 % | 10/10 | 0/10 | exact sort | ≤ 0.53 ms |
+| 1× | | partial | 100 % | 10/10 | 0/10 | own partial | 0.53 ms |
+| 10× | 15 714 / 16 942 / 25 876 | `small` alone in its database | **89 %** | 4/10 | 0/10 | HNSW | 0.92 ms |
+| 10× | | **today**: one global index | **0 %** | 0/10 | **9/10** | global HNSW | 68 ms |
+| 10× | | today, `max_scan_tuples` = 40 000 | 0 % | 0/10 | 9/10 | global HNSW | 67 ms |
+| 10× | | today, `max_scan_tuples` = 80 000 | 0 % | 0/10 | 9/10 | global HNSW | 67 ms |
+| 10× | | today, 80 000 and `hnsw.scan_mem_multiplier` = 8 | 0 % | 0/10 | 0/10 | global HNSW | 269 ms |
+| 10× | | **partial**: one index per project | **87 %** | 4/10 | 0/10 | own partial | 0.98 ms |
+| 10× | | **partitioned**: one partition per project | **88 %** | 4/10 | 0/10 | own partition | 1.05 ms |
+
+`searchChunks` itself, run against the same databases, agrees with the script's own statement: 0 % today, 87 % with per-project indexes, 89 % alone.
 
 **The defect is real and it is silent.** At 10× the crowded project gets an empty page for nine
 questions in ten, and nothing in the response says so. Alone in its own database, the same project and
-the same questions score 88 % — which is the HNSW graph's own ceiling on this corpus, not a tenancy
+the same questions score 88–89 % — which is the HNSW graph's own ceiling on this corpus, not a tenancy
 effect, and the number every candidate is judged against.
 
 **Raising `max_scan_tuples` does nothing, and the reason is a second limit.** The global scan stops at
-about 21 000 visited tuples whatever `max_scan_tuples` says, because pgvector 0.8 also caps an
-iterative scan's memory at `hnsw.scan_mem_multiplier` × `work_mem`. Lifting that cap too fills the
-pages — with the wrong rows: still 1 %, at four times the latency. The rows `small` needs are behind
-16 000 better ones from other projects, and no scan budget an interactive search can afford reaches
-them through a graph that is mostly other projects.
+about 21 000 visited tuples whatever `max_scan_tuples` says (21 133 rows removed by the filter, none
+returned), because pgvector 0.8 also caps an iterative scan's memory at `hnsw.scan_mem_multiplier` ×
+`work_mem`. Lifting that cap too fills the pages — with the wrong rows: still 0 %, at four times the
+latency. The rows `small` needs are behind 16 000 better ones from other projects, and no scan budget
+an interactive search can afford reaches them through a graph that is mostly other projects.
 
 ### What each strategy costs
 
-| scale | arm | HNSW indexes | total size | build | rebuild: next generation written | live / next recall during rebuild | create a project | lock taken on `chunks` |
-|--:|---|--:|--:|--:|--:|--:|--:|---|
-| 1× | today | 1 | 45.0 MB | 1 535 ms | 1 473 ms (1 000 rows) | 100 / 100 % | 1.29 ms | none |
-| 1× | partial | 6 | 41.2 MB | 1 389 ms | 223 ms | 100 / 100 % | 17 ms (`CONCURRENTLY` 17 ms) | ShareLock (none concurrently) |
-| 1× | partitioned | 6 | 41.2 MB | 1 420 ms + 66 ms copy | 210 ms | 100 / 100 % | 2.37 ms | AccessExclusiveLock on the parent |
-| 10× | today | 1 | 430.7 MB | 116.5 s | 20.1 s (10 000 rows) | **1** / 100 % | 2.23 ms | none |
-| 10× | partial | 6 | 411.2 MB | 63.6 s | 7.5 s | 88 / 100 % | 38 ms (`CONCURRENTLY` 95 ms) | ShareLock (none concurrently) |
-| 10× | partitioned | 6 | 411.2 MB | 64.2 s + 608 ms copy | 7.5 s | 88 / 100 % | 2.44 ms | AccessExclusiveLock on the parent |
+"Create a project" is what ships: the project row plus, for partial, `CREATE INDEX CONCURRENTLY`, as
+`createProjectVectorIndex` runs it. The plain `CREATE INDEX` beside it is for comparison only.
+
+| scale | arm | HNSW indexes | total size | build | rebuild: next generation written | live / next recall during rebuild | create a project, as shipped (median / max of 5) | plain `CREATE INDEX` (median of 5) | lock the plain DDL takes on `chunks` |
+|--:|---|--:|--:|--:|--:|--:|--:|--:|---|
+| 1× | today | 1 | 45.0 MB | 1 464 ms | 1 444 ms (1 000 rows) | 100 / 100 % | 0.94 / 2.02 ms | – | none |
+| 1× | partial | 6 | 41.2 MB | 1 314 ms | 215 ms | 100 / 100 % | 17 / 18 ms | 15 ms | ShareLock |
+| 1× | partitioned | 6 | 41.2 MB | 1 361 ms + 58 ms copy | 208 ms | 100 / 100 % | 1.38 / 2.17 ms | – | AccessExclusiveLock on the parent |
+| 10× | today | 1 | 430.7 MB | 117.0 s | 20.5 s (10 000 rows) | **0** / 100 % | 0.48 / 1.15 ms | – | none |
+| 10× | partial | 6 | 411.2 MB | 63.3 s | 7.5 s | 86 / 100 % | **100 / 104 ms** | 38 ms | ShareLock |
+| 10× | partitioned | 6 | 411.2 MB | 63.6 s + 604 ms copy | 7.4 s | 86 / 100 % | 1.45 / 2.25 ms | – | AccessExclusiveLock on the parent |
 
 "Rebuild" is [ADR-0039](../../.ssot/ADR.md#adr-0039)'s generation swap, measured: `small`'s next
 generation written beside the live one, the live generation searched while both exist, the swap, and
@@ -1504,32 +1517,42 @@ are rows of one project, so they share that project's index or partition, and `i
 stays the post-filter it always was, over one project's rows instead of the instance's. Writing is
 2.7× faster under either, because each insert maintains a graph of one project rather than of all six.
 
+**Concurrently is two and a half times the plain build, and it is the one that ships.** A plain
+`CREATE INDEX` holds `ShareLock` on `chunks` for its whole run, so every other project's indexing
+waits behind an empty project's creation; `CONCURRENTLY` blocks no writer, and pays for it with a
+second pass and a wait for the transactions open when it started — a running `pg_dump` among them.
+
 ### At a hundred tenants
 
-94 empty projects added to the 10× instance, then the same search and the same 1 000-chunk write.
+94 empty projects added to each instance, created as shipped, then the same search and the same
+1 000-chunk write.
 
-| scale | arm | HNSW indexes | creating one (mean / max) | planning the search | search p50 | 1 000 chunks written, 6 → 100 tenants |
+| scale | arm | HNSW indexes | creating one, as shipped (mean / max) | planning the search | search p50 | 1 000 chunks written, 6 → 100 tenants |
 |--:|---|--:|--:|--:|--:|--:|
-| 10× | today | 1 | 0.33 / 1.30 ms | 0.11 ms | 65 ms | 1 929 → 1 954 ms |
-| 10× | partial | 100 | 38 / 42 ms | 0.33 ms | 1.23 ms | 929 → 878 ms |
-| 10× | partitioned | 100 | 1.18 / 2.36 ms | 0.14 ms | 0.96 ms | 915 → 873 ms |
+| 1× | today | 1 | 0.34 / 2.23 ms | 0.08 ms | 0.56 ms | 1 282 → 1 420 ms |
+| 1× | partial | 100 | 17 / 20 ms | 0.18 ms | 0.68 ms | 861 → 833 ms |
+| 1× | partitioned | 100 | 1.34 / 5.65 ms | 0.20 ms | 0.55 ms | 860 → 837 ms |
+| 10× | today | 1 | 0.35 / 1.45 ms | 0.11 ms | 64 ms | 1 998 → 1 967 ms |
+| 10× | partial | 100 | **94 / 104 ms** | 0.24 ms | 1.04 ms | 919 → 879 ms |
+| 10× | partitioned | 100 | 1.25 / 2.72 ms | 0.14 ms | 0.85 ms | 906 → 864 ms |
 
 **A per-project index is built by scanning the whole table**, so creating an empty project costs in
-proportion to the *instance*: 17 ms at 21 000 chunks, 38 ms at 210 000 — about 0.18 µs a row — and a
-hundred of them cost 3.8 s at 10× in total. A hundred indexes cost the planner 0.33 ms a search, and
-writes do not slow at all: an insert maintains only the index whose predicate it satisfies.
+proportion to the *instance*: 17 ms at 21 050 chunks, 100 ms at 210 500 — about 0.44 µs a chunk past
+a small fixed cost — and taking the 10× instance to a hundred projects cost about 94 ms each. A hundred
+indexes cost the planner 0.24 ms a search, and writes do not slow at all: an insert maintains only the
+index whose predicate it satisfies.
 
 ### Why partitioning is not the answer, in its own numbers
 
-Partitioning matches partial indexes on recall (89 % vs 88 %) and latency (1.07 ms vs 1.14 ms), and
-creates a project fifteen times faster. It loses on what it asks of everything else:
+Partitioning matches partial indexes on recall (88 % vs 87 %) and latency (1.05 ms vs 0.98 ms), and
+creates a project seventy times faster. It loses on what it asks of everything else:
 
 - **`CREATE TABLE … PARTITION OF` takes `AccessExclusiveLock` on `chunks`** — every project's searches
   and writes stop behind every project creation, and behind any long search already running. A
   partial index built `CONCURRENTLY` blocks nobody.
 - **The primary key has to become `(id, project_id)`**, and `chunks_document_chunk_index_uq` has to
   carry `project_id`, because a partitioned table's unique constraints must include the partition key.
-- **The migration is a copy of the whole table** (608 ms at 210 500 chunks here, and a full rewrite
+- **The migration is a copy of the whole table** (604 ms at 210 500 chunks here, and a full rewrite
   of an operator's largest table) and drizzle cannot describe a partitioned table, so the schema would
   leave generated migrations for hand-written DDL.
 

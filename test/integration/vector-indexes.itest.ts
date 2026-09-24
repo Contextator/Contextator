@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { sql } from 'drizzle-orm';
+import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { WEB_LIMIT_DEFAULTS } from '../../src/config.js';
@@ -99,6 +100,154 @@ describe('a project and its vector index', () => {
     const before = await vectorIndexes(database.db);
     await expect(createProject(database.db, { name: 'second' }, [])).rejects.toThrow(/already exists/);
     expect(await vectorIndexes(database.db)).toEqual(before);
+  });
+});
+
+// --- Concurrent DDL ------------------------------------------------------------------------------
+
+/**
+ * The pid of the backend running a statement that starts with `prefix`, once it is waiting on a lock —
+ * which is how a test knows a concurrent build has reached the wait it is about, without sleeping.
+ */
+async function lockWaiter(db: Db, prefix: string): Promise<number> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const result = await db.execute(sql`
+      SELECT pid FROM pg_stat_activity
+      WHERE datname = current_database() AND wait_event_type = 'Lock' AND starts_with(ltrim(query), ${prefix})`);
+    const [row] = result.rows as Array<{ pid: number }>;
+    if (row) return row.pid;
+    if (Date.now() > deadline) throw new Error(`nothing starting with "${prefix}" came to wait on a lock`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+/** One document with one chunk in it, written on `client` — inside whatever transaction it has open. */
+async function writeChunk(client: pg.PoolClient, projectId: string, tag: string): Promise<void> {
+  await client.query(
+    `WITH d AS (INSERT INTO documents (project_id, relative_path, title, content_hash) VALUES ($1, $2, $2, $2) RETURNING id)
+     INSERT INTO chunks (project_id, document_id, chunk_index, content, token_count, embedding)
+     SELECT $1, d.id, 0, $2, 1, $3::vector FROM d`,
+    [
+      projectId,
+      tag,
+      `[${new Array<number>(DIMS)
+        .fill(0)
+        .map((_, i) => (i === 0 ? 1 : 0))
+        .join(',')}]`,
+    ],
+  );
+}
+
+/** What PostgreSQL said, under drizzle's "Failed query" wrapper. */
+function databaseMessage(err: unknown): string {
+  const e = err as { message?: string; cause?: { message?: string } };
+  return e.cause?.message ?? e.message ?? String(err);
+}
+
+describe('two DDL statements on chunks at once', () => {
+  let database: TestDatabase;
+
+  beforeAll(async () => {
+    database = await createTestDatabase(baseUrl, 'vector_indexes_concurrent');
+    await applySchema(database);
+  });
+
+  afterAll(async () => {
+    await dropTestDatabase(baseUrl, database);
+  });
+
+  const outcome = (result: PromiseSettledResult<unknown>) => (result.status === 'fulfilled' ? 'done' : databaseMessage(result.reason));
+
+  it('creates two projects asked for at once, every time', async () => {
+    // Without the queue in `vector-indexes.ts` every round of this lost one of the two to PostgreSQL's
+    // deadlock detector: two `CREATE INDEX CONCURRENTLY` on one table wait for each other by design.
+    const created: string[] = [];
+    for (let round = 0; round < 5; round++) {
+      const results = await Promise.allSettled([
+        createProject(database.db, { name: `pair-${round}-a` }, []),
+        createProject(database.db, { name: `pair-${round}-b` }, []),
+      ]);
+      expect(results.map(outcome)).toEqual(['done', 'done']);
+      for (const result of results) if (result.status === 'fulfilled') created.push(projectVectorIndexName(result.value.id));
+    }
+    const indexes = await vectorIndexes(database.db);
+    expect(indexes.map(({ name, valid }) => ({ name, valid }))).toEqual(created.sort().map((name) => ({ name, valid: true })));
+  });
+
+  it('creates one project while deleting another, every time', async () => {
+    for (let round = 0; round < 5; round++) {
+      const leaving = await createProject(database.db, { name: `leaving-${round}` }, []);
+      const results = await Promise.allSettled([
+        createProject(database.db, { name: `arriving-${round}` }, []),
+        deleteProject(database.db, leaving.id, () => false),
+      ]);
+      expect(results.map(outcome)).toEqual(['done', 'done']);
+    }
+    const projectIds = (await database.db.execute(sql`SELECT id::text AS id FROM projects`)).rows as Array<{ id: string }>;
+    const indexes = await vectorIndexes(database.db);
+    expect(indexes.map(({ name, valid }) => ({ name, valid }))).toEqual(
+      projectIds.map(({ id }) => ({ name: projectVectorIndexName(id), valid: true })).sort((a, b) => a.name.localeCompare(b.name)),
+    );
+  });
+
+  it("lets every other project write to chunks while a new project's index is built", async () => {
+    const neighbour = await createProject(database.db, { name: 'neighbour' }, []);
+    const indexing = await database.pool.connect();
+    const writer = await database.pool.connect();
+    let creating: Promise<unknown> | undefined;
+    try {
+      // An indexing run's transaction, open and holding rows it has written. The build waits for it,
+      // concurrently or not; what `CONCURRENTLY` changes is whether everybody else waits too.
+      await indexing.query('BEGIN');
+      await writeChunk(indexing, neighbour.id, 'in-flight');
+      creating = createProject(database.db, { name: 'newcomer' }, []);
+      await lockWaiter(database.db, 'CREATE INDEX');
+
+      await writer.query("SET lock_timeout = '2s'");
+      await expect(writeChunk(writer, neighbour.id, 'meanwhile')).resolves.toBeUndefined();
+
+      await indexing.query('COMMIT');
+      await expect(creating).resolves.toMatchObject({ name: 'newcomer' });
+    } finally {
+      await indexing.query('ROLLBACK').catch(() => undefined);
+      await creating?.catch(() => undefined);
+      indexing.release();
+      writer.release(true);
+    }
+  });
+
+  it('takes a project back, index and all, when its index cannot be built', async () => {
+    const backup = await database.pool.connect();
+    let creating: Promise<unknown> | undefined;
+    try {
+      // `pg_dump`'s transaction: one snapshot, held for as long as the dump runs. A concurrent build
+      // waits for it to end — which is also where this one is cancelled.
+      await backup.query('BEGIN ISOLATION LEVEL REPEATABLE READ');
+      await backup.query('SELECT count(*) FROM projects');
+      creating = createProject(database.db, { name: 'cancelled' }, []);
+      const pid = await lockWaiter(database.db, 'CREATE INDEX CONCURRENTLY');
+
+      // What a failed concurrent build leaves if nothing cleans up after it: an index, not valid.
+      const [row] = (await database.db.execute(sql`SELECT id::text AS id FROM projects WHERE name = 'cancelled'`)).rows as Array<{ id: string }>;
+      const name = projectVectorIndexName(row.id);
+      expect((await vectorIndexes(database.db)).find((index) => index.name === name)?.valid).toBe(false);
+
+      await database.db.execute(sql`SELECT pg_cancel_backend(${pid})`);
+      await backup.query('COMMIT');
+      const failure = await creating.then(
+        () => 'created',
+        (err: unknown) => databaseMessage(err),
+      );
+      expect(failure).toMatch(/canceling statement/);
+
+      expect((await database.db.execute(sql`SELECT 1 FROM projects WHERE name = 'cancelled'`)).rows).toEqual([]);
+      expect((await vectorIndexes(database.db)).map((index) => index.name)).not.toContain(name);
+    } finally {
+      await backup.query('ROLLBACK').catch(() => undefined);
+      await creating?.catch(() => undefined);
+      backup.release();
+    }
   });
 });
 
