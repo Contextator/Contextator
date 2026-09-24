@@ -141,6 +141,32 @@ const QUERY_TEXT = 'a phrase that appears in none of the seeded chunks';
  */
 const PROBE_QUERIES: number[][] = [QUERY, ...Array.from({ length: 4 }, (_, i) => normalize(gaussianVector(rng(900 + i))))];
 
+/**
+ * Five directions for the starvation case under the version filter, chosen so that the thing it
+ * claims is a property of the corpus rather than of the graph.
+ *
+ * `PROBE_QUERIES`' four random directions are nearly orthogonal to `QUERY`, and in that space every
+ * chunk is roughly as far from the query as every other: the bands in `CORPUS` say nothing about the
+ * order there, and a greedy walk through the graph is at its least reliable. Under a filter that
+ * rejects half of `small`, that is where the case used to fail — one build in several, one direction
+ * came back with a full page, not because the post-filter had stopped biting but because the walk had
+ * wandered into `small`'s own cluster and its hundred candidates happened to be that project's rows.
+ *
+ * These are the same four directions tilted towards `QUERY` (cosine 0.9 with it), so each is a
+ * different walk through the graph but every one of them still sees the corpus as it was built: the
+ * large projects' upper bands ahead, `small` two thousand rows down. **How far down is measured, not
+ * assumed** — the case asserts it for each direction with an index-free count, which is the same on
+ * every build because the vectors are, before it asks the index anything.
+ */
+const CROWDED_TILT = 0.9;
+const CROWDED_PROBES: number[][] = [
+  QUERY,
+  ...Array.from({ length: 4 }, (_, i) => {
+    const across = orthogonalTo(QUERY, gaussianVector(rng(900 + i)));
+    return normalize(QUERY.map((q, j) => CROWDED_TILT * q + Math.sqrt(1 - CROWDED_TILT ** 2) * across[j]));
+  }),
+];
+
 const sameOrder = (a: readonly number[], b: readonly number[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
 
 /**
@@ -310,6 +336,29 @@ async function bruteForce(
   } finally {
     client.release();
   }
+}
+
+/**
+ * How many live chunks, across **every** project in the index, are nearer to `query` than the best row
+ * of `projectId` that the filter keeps. No `ORDER BY`, so no plan can reach the HNSW index: this is a
+ * count over the vectors themselves and does not change between builds of the graph.
+ *
+ * It is the number a post-filter is up against. Without the iterative scan the index hands over about
+ * `ef_search` candidates, all of them — as far as the graph can tell — from the front of the global
+ * ordering; a project whose first surviving row stands behind ten times that many has nothing among
+ * them to survive.
+ */
+async function rowsAhead(projectId: string, query: number[], version: string): Promise<number> {
+  const result = await database.pool.query<{ ahead: string }>(
+    `SELECT count(*) AS ahead FROM chunks
+     WHERE index_generation = ${LIVE}
+       AND (embedding <=> $1::vector) < (
+         SELECT min(c.embedding <=> $1::vector) FROM chunks c
+         WHERE c.project_id = $2::uuid AND c.index_generation = ${LIVE}
+           AND c.document_id IN (SELECT id FROM documents WHERE project_id = $2::uuid AND index_generation = ${LIVE} AND version = $3))`,
+    [vectorLiteral(query), projectId, version],
+  );
+  return Number(result.rows[0].ahead);
 }
 
 /**
@@ -827,18 +876,27 @@ describe('a fourth predicate, which narrows the pool the same way and has to be 
     // filter, only the scan settings differ. A plan that read the project's own rows and sorted them
     // would answer both modes in full and could not produce this — so the difference is evidence that
     // what is being measured is a post-filter over index candidates. Over five directions and **every
-    // one of them**, for the reason `PROBE_QUERIES` gives.
+    // one of them**, for the reason `CROWDED_PROBES` gives.
     //
     // The predicate makes this strictly worse than the unfiltered starvation above, which is the
     // whole reason a new filter has to be measured here: a hundred candidates already did not contain
     // this project's rows, and now half of the ones they did contain are rejected as well.
+    //
+    // **Two statements per direction, and the first one decides whether the second can be true.** The
+    // first is about the corpus, counted without the index, and holds on every build or on none: the
+    // filtered project's best row stands behind at least ten times `ef_search` rows of the whole
+    // instance. The second is what the HNSW scan does with that, and is the claim: short, every time.
+    const { efSearch } = scan();
     const short: string[] = [];
-    for (const [i, query] of PROBE_QUERIES.entries()) {
+    for (const [i, query] of CROWDED_PROBES.entries()) {
+      const ahead = await rowsAhead(ids.small, query, V2);
+      expect(ahead, `direction #${i}: ${ahead} rows ahead of the filtered project's best`).toBeGreaterThanOrEqual(10 * efSearch);
+
       const off = await denseCandidates(ids.small, K, scan({ iterativeScan: 'off' }), query, { version: V2 });
       expect(off.throughVectorIndex).toBe(true);
-      if (off.rows.length < K) short.push(`#${i} returned ${off.rows.length} of ${K}`);
+      if (off.rows.length < K) short.push(`#${i} returned ${off.rows.length} of ${K} with ${ahead} rows ahead`);
     }
-    expect(short).toHaveLength(PROBE_QUERIES.length);
+    expect(short).toHaveLength(CROWDED_PROBES.length);
     console.log(`hnsw-scan: iterative_scan=off answered short under the version filter for ${short.join(', ')}`);
   });
 });
