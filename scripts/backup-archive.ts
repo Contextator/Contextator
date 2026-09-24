@@ -200,7 +200,8 @@ export type SecretKeyVerdict = { ok: true; note: string | null } | { ok: false; 
  * generated here and pasted into the repository for a git source, re-delivered into a verification
  * window the operator reopens for a Notion one ([ADR-0049](../.ssot/ADR.md#adr-0049)) — so losing one
  * costs a regeneration, not a credential. `regenerableSecrets` is therefore reported in the verdict's
- * note and never in the decision ([ADR-0075](../.ssot/ADR.md#adr-0075)) — the alternative, counting
+ * note — and in the refusal's message, when there is one — but never in the decision
+ * ([ADR-0075](../.ssot/ADR.md#adr-0075)) — the alternative, counting
  * both in one number, is what would make a single public repository with a webhook stop a restore
  * that costs nothing.
  */
@@ -209,12 +210,20 @@ export function checkSecretKey(manifest: Manifest, secretKey: string | undefined
   const atStake =
     `${encryptedSources} source${encryptedSources === 1 ? '' : 's'} in this backup ` +
     `${encryptedSources === 1 ? 'holds a sync credential' : 'hold sync credentials'} encrypted under it`;
+  const remedy =
+    'For a git source, regenerate the secret here and paste the new one into the repository; for a Notion source, ' +
+    'open a fresh verification window and re-verify from Notion.';
   const regenerable =
     regenerableSecrets === 0
       ? ''
-      : ` ${regenerableSecrets} webhook secret(s) in it were encrypted under that key too; those come back unreadable. ` +
-        'For a git source, regenerate the secret here and paste the new one into the repository; for a Notion source, ' +
-        'open a fresh verification window and re-verify from Notion.';
+      : ` ${regenerableSecrets} webhook secret(s) in it were encrypted under that key too; those come back unreadable. ${remedy}`;
+  // ADR-0075 point 7: named in the refusal as well as in the acceptance, and never the reason for either.
+  // A refusal has restored nothing yet, so this says what they will cost rather than that they were lost.
+  const regenerableInRefusal =
+    regenerableSecrets === 0
+      ? ''
+      : `It also holds ${regenerableSecrets} webhook secret(s) encrypted under that key. They are not why this stops — ` +
+        `each is re-established from this side — but a restore under any other key brings them back unreadable. ${remedy} `;
 
   if (!present || !fingerprint) {
     if (secretKey) {
@@ -240,6 +249,7 @@ export function checkSecretKey(manifest: Manifest, secretKey: string | undefined
         `This backup was taken from an instance with a SECRET_KEY, and ${atStake}. ` +
         'SECRET_KEY is not in the archive and never will be: a backup that carried it would be the whole instance in one file. ' +
         `Set SECRET_KEY to the value that instance used (fingerprint ${fingerprint}) and run this again. ` +
+        regenerableInRefusal +
         'Nothing has been written.',
     };
   }
@@ -262,6 +272,7 @@ export function checkSecretKey(manifest: Manifest, secretKey: string | undefined
         `The backup needs the key whose fingerprint is ${fingerprint}; this environment's is ${secretKeyFingerprint(secretKey)}. ` +
         'Restoring anyway would put back credentials that can never be decrypted, and each one would have to be issued again ' +
         'by its provider and re-entered here by hand. ' +
+        regenerableInRefusal +
         'Nothing has been written.',
     };
   }

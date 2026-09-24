@@ -234,7 +234,7 @@ async function landProject(
       name: s.name,
       type: s.type,
       files: carried.get(s.name) ?? 0,
-      needs: describeNeeds(manifest.sources.find((m) => m.name === s.name)?.needs ?? []),
+      needs: describeNeeds(manifest.sources.find((m) => m.name === s.name)?.needs ?? [], s.type),
     })),
     memberships: {
       carried: 0,

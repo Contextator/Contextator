@@ -21,7 +21,7 @@ import {
   secretKeyFingerprint,
   type Manifest,
 } from '../scripts/backup-archive.js';
-import { archiveDestination } from '../scripts/backup.js';
+import { archiveDestination, secretKeySentences } from '../scripts/backup.js';
 import { useEmbeddedDatabaseWhenNothingElseSays } from '../scripts/embedded-database.js';
 
 /**
@@ -154,6 +154,27 @@ describe('restoring with the wrong SECRET_KEY, or none', () => {
     expect(verdict.code).toBe('secret_key_mismatch');
     expect(verdict.message).toContain('1 source in this backup holds a sync credential');
     expect(verdict.message).toContain('issued again by its provider and re-entered here by hand');
+    // ADR-0075 point 7: named in the refusal too, never only in the acceptance — with both remedies.
+    expect(verdict.message).toContain('4 webhook secret(s)');
+    expect(verdict.message).toContain('regenerate the secret here and paste the new one into the repository');
+    expect(verdict.message).toContain('open a fresh verification window and re-verify from Notion');
+    expect(verdict.message).toMatch(/Nothing has been written\.$/);
+  });
+
+  it('names the webhook secrets in the missing-key refusal as well', () => {
+    const both = manifest({
+      secretKey: { present: true, fingerprint: secretKeyFingerprint(KEY), encryptedSources: 2, regenerableSecrets: 5 },
+    });
+    const verdict = checkSecretKey(both, undefined);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) throw new Error('unreachable');
+    expect(verdict.code).toBe('secret_key_missing');
+    expect(verdict.message).toContain('5 webhook secret(s)');
+    expect(verdict.message).toContain('open a fresh verification window and re-verify from Notion');
+    // …and says nothing about them when there are none.
+    const credentialsOnly = checkSecretKey(manifest(), undefined);
+    if (credentialsOnly.ok) throw new Error('unreachable');
+    expect(credentialsOnly.message).not.toContain('webhook secret');
   });
 
   /**
@@ -176,6 +197,33 @@ describe('restoring with the wrong SECRET_KEY, or none', () => {
     const withKey = checkSecretKey(none, KEY);
     if (!withKey.ok) throw new Error('unreachable');
     expect(withKey.note).toContain('no SECRET_KEY');
+  });
+});
+
+/**
+ * What `backup` prints at the end of every run (`secretKeySentences`). ADR-0075 point 7 asks for the
+ * webhook secrets to be named with their remedy, and they are the one number here that no refusal
+ * elsewhere would ever make an operator notice.
+ */
+describe('what a backup says about SECRET_KEY on the way out', () => {
+  it('names the webhook secrets and both ways of re-establishing them', () => {
+    const text = secretKeySentences(
+      manifest({ secretKey: { present: true, fingerprint: secretKeyFingerprint(KEY), encryptedSources: 3, regenerableSecrets: 2 } }),
+    ).join('\n');
+    expect(text).toContain(`only its fingerprint, ${secretKeyFingerprint(KEY)}`);
+    expect(text).toContain('3 source(s) in the dump hold a sync credential');
+    expect(text).toContain('2 source(s) hold a webhook secret encrypted under it');
+    expect(text).toContain('Those a restore does not stop for');
+    expect(text).toContain('For a git source, regenerate the secret here and paste the new one into the repository');
+    expect(text).toContain('for a Notion source, open a fresh verification window and re-verify from Notion');
+    expect(text).toContain('Keep the key where this archive is not');
+    expect(text).not.toContain(KEY);
+  });
+
+  it('says there is no key, and nothing about secrets under one, when the instance has none', () => {
+    const lines = secretKeySentences(manifest({ secretKey: { present: false, fingerprint: null, encryptedSources: 0, regenerableSecrets: 0 } }));
+    expect(lines.join('\n')).toContain('this instance has none set');
+    expect(lines.join('\n')).not.toContain('webhook secret');
   });
 });
 
@@ -392,14 +440,18 @@ describe('the tools on this process\u2019s own PATH', () => {
   const connection = { env: { PGDATABASE: 'from-the-connection' }, database: 'from-the-connection' };
   let bin: string;
   let empty: string;
+  /** A client installed halfway: `pg_dump` and nothing else. */
+  let half: string;
   let originalPath: string | undefined;
 
   beforeAll(async () => {
     const root = await mkdtemp(nodePath.join(tmpdir(), 'contextator-pgbin-'));
     bin = nodePath.join(root, 'bin');
     empty = nodePath.join(root, 'empty');
+    half = nodePath.join(root, 'half');
     await mkdir(bin, { recursive: true });
     await mkdir(empty, { recursive: true });
+    await mkdir(half, { recursive: true });
     // A `pg_dump` that answers `--version` and otherwise prints what libpq would have been told, so
     // the environment merge is observable from the child rather than asserted on the parent.
     await writeFile(
@@ -416,6 +468,7 @@ describe('the tools on this process\u2019s own PATH', () => {
     );
     // …and a `pg_restore` that fails the way a real one does when something goes wrong.
     await writeFile(nodePath.join(bin, 'pg_restore'), ['#!/bin/sh', 'echo boom >&2', 'exit 3', ''].join('\n'), { mode: 0o755 });
+    await writeFile(nodePath.join(half, 'pg_dump'), ['#!/bin/sh', 'echo "pg_dump (PostgreSQL) 99.9 (half)"', ''].join('\n'), { mode: 0o755 });
     originalPath = process.env.PATH;
   });
 
@@ -458,8 +511,13 @@ describe('the tools on this process\u2019s own PATH', () => {
   });
 
   it('looks for each tool under its own name, so a half-installed client is named correctly', async () => {
-    // `pg_dump` is on this path and `psql`-era leftovers are not; the refusal quotes the one asked for.
-    await expect(toolsWith(empty).version('pg_restore')).rejects.toThrow(/`pg_restore` is not on the PATH/);
+    // `pg_dump` is on this path and `pg_restore` is not: the one that is there is found, and the refusal
+    // quotes the one asked for rather than the first tool of the pair.
+    const tools = toolsWith(half);
+    await expect(tools.version('pg_dump')).resolves.toBe('pg_dump (PostgreSQL) 99.9 (half)');
+    await expect(tools.version('pg_restore')).rejects.toMatchObject({ code: 'no_pg_tools' });
+    await expect(tools.version('pg_restore')).rejects.toThrow(/`pg_restore` is not on the PATH/);
+    await expect(tools.version('pg_restore')).rejects.not.toThrow(/`pg_dump`/);
   });
 });
 

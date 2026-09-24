@@ -9,6 +9,7 @@ import {
   Manifest,
   checkManifest,
   dataPrefixFor,
+  describeNeeds,
   readmeFor,
 } from '../src/services/transfer/manifest.js';
 
@@ -244,6 +245,29 @@ describe('the prose the tarball carries', () => {
   it('says what each source needs here, in words', () => {
     expect(text).toContain('handbook (git): re-enter its access token');
     expect(text).toContain('paste it into the provider');
+  });
+
+  /**
+   * A Notion source's webhook secret is the `verification_token` Notion delivers, not one this
+   * instance mints — and the dashboard refuses to "generate" one for anything but git (ADR-0049).
+   */
+  it('tells a Notion source to re-verify from Notion, never to generate a secret it cannot have', () => {
+    const notion = readmeFor(
+      manifest({
+        counts: { sources: 2, documents: 3, chunks: 40, uploadFiles: 0, uploadBytes: 0 },
+        sources: [
+          { name: 'handbook', type: 'git', needs: ['credential', 'webhook-secret', 'never-scheduled'] },
+          { name: 'workspace', type: 'notion', needs: ['credential', 'webhook-secret'] },
+        ],
+      }),
+    );
+    const line = notion.split('\n').find((l) => l.includes('workspace (notion):')) ?? '';
+    expect(line).toContain('open a fresh verification window here and re-verify from Notion');
+    expect(line).not.toContain('generate a new webhook secret');
+    // The git line next to it is unchanged: the type decides only the webhook sentence.
+    expect(notion).toContain('handbook (git): re-enter its access token before syncing; generate a new webhook secret here');
+    expect(describeNeeds(['webhook-secret'], 'notion')).not.toContain('generate');
+    expect(describeNeeds(['webhook-secret'], 'git')).toBe('generate a new webhook secret here and paste it into the provider');
   });
 });
 

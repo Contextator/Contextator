@@ -1068,7 +1068,11 @@ describe('the backup command, and the instance it is asked to bring back', () =>
     });
 
     it('still refuses the wrong key, because a check that passes everything checks nothing', async () => {
-      await expect(runRestore(restoreDeps(WRONG_KEY), archive, { check: true })).rejects.toMatchObject({ code: 'secret_key_mismatch' });
+      const ran: PgTool[] = [];
+      await expect(runRestore(restoreDeps(WRONG_KEY, ran), archive, { check: true })).rejects.toMatchObject({ code: 'secret_key_mismatch' });
+      // The code alone would also be satisfied by a check that ran `pg_restore` first and refused
+      // afterwards; that is the one ordering `--check` promises never to have.
+      expect(ran).toEqual([]);
     });
   });
 

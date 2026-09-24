@@ -256,7 +256,7 @@ export function readmeFor(manifest: Manifest): string {
     'Its sources, and what each needs here:',
   ];
   for (const source of manifest.sources) {
-    lines.push(`  - ${source.name} (${source.type}): ${describeNeeds(source.needs)}`);
+    lines.push(`  - ${source.name} (${source.type}): ${describeNeeds(source.needs, source.type)}`);
   }
   lines.push('');
   return `${lines.join('\n')}\n`;
@@ -270,7 +270,15 @@ const NEED_TEXT: Record<SourceNeed, string> = {
   'never-scheduled': 'set a sync interval if you want one; it arrives unscheduled',
 };
 
-export function describeNeeds(needs: readonly SourceNeed[]): string {
+/**
+ * A Notion source's webhook secret is not one this instance mints: it is the `verification_token`
+ * Notion delivers into a verification window the operator opens ([ADR-0049](../../../.ssot/ADR.md#adr-0049)),
+ * and "generate a new webhook secret" is an action the dashboard refuses for anything but git.
+ */
+const NOTION_WEBHOOK_TEXT = 'point the Notion subscription at this instance, open a fresh verification window here and re-verify from Notion';
+
+/** The source's type decides only the webhook line; every other need reads the same for all of them. */
+export function describeNeeds(needs: readonly SourceNeed[], sourceType?: string): string {
   if (needs.length === 0) return 'nothing';
-  return needs.map((need) => NEED_TEXT[need]).join('; ');
+  return needs.map((need) => (need === 'webhook-secret' && sourceType === 'notion' ? NOTION_WEBHOOK_TEXT : NEED_TEXT[need])).join('; ');
 }
