@@ -168,16 +168,19 @@ Helm chart for the same `-slim` + external-database topology above:
 ```bash
 helm install ctx ./charts/contextator \
   --set database.url="postgres://user:password@db.example.com:5432/contextator" \
-  --set image.tag="<your-slim-image-tag>"
+  --set image.tag="<version>-slim"
 ```
 
-It deploys exactly one Pod — this chart does not expose a `replicaCount` value at all, because MCP
-sessions and the indexer both live in that one process (same reason horizontal scaling is out of scope
-generally, below) — and, like the `-slim` image itself, it refuses to install without `DATABASE_URL` or
-an equivalent Secret. `image.tag` has no default either: `contextator/contextator` does not publish a
-`-slim` tag on Docker Hub yet, so point it at an image you built and pushed yourself until one is. See
+It deploys exactly one Pod — this chart does not expose a `replicaCount` value (setting one anyway is
+ignored and still renders `replicas: 1`), because MCP sessions and the indexer both live in that one process
+(same reason horizontal scaling is out of scope generally, below) — and, like the `-slim` image itself,
+it refuses to install without `DATABASE_URL` or an equivalent Secret. `image.tag` has no default either:
+it must name a `slim` image. No `-slim` tag has been published yet — `<version>-slim`,
+`<major>.<minor>-slim` and `latest-slim` start with the first release after `v0.1.0` — so until then,
+build the `slim` target yourself and push it to your own registry. See
 `charts/contextator/README.md` for the full install guide, including the `SECRET_KEY`/persistence/probe
-design and measured resource sizing, and [ADR-0078](../.ssot/ADR.md#adr-0078) for the reasoning.
+design, running behind an Ingress, and measured resource sizing; the reasoning is decision record
+ADR-0078.
 
 ## Document sources
 
@@ -1606,12 +1609,14 @@ docker-compose.yml            the `contextator` container and its volumes; embed
 docker-compose.build.yml      overlay for docker-compose.yml that builds the image from source instead of pulling it
 docker-compose.slim.yml       the `-slim` image against a PostgreSQL you operate — a whole file rather than an overlay, because the pgdata mount has to be absent
 docker-compose.dev.yml        PostgreSQL only, for `npm run dev`
+charts/contextator/           Helm chart for Kubernetes: one Pod, the `-slim` image, an external PostgreSQL; `replicas: 1` is hardcoded, not a value
 DOCKERHUB.md                  what Docker Hub shows on the repository page; not this README, which is well past its 25,000-character limit
 biome.jsonc                   the one formatter and linter, and why each rule is set as it is
 tsconfig.test.json            typechecks test/ and scripts/, which the build's tsconfig cannot see
 .github/workflows/ci.yml      the gate on every pull request: lint, typecheck, tests, image build
 .github/workflows/cla.yml     the licence grant: the `Licence grant` required check, and the lock on a merged thread
 .github/workflows/release.yml on a `v*` tag: verify the image, then build and push it to Docker Hub for both architectures
+.github/workflows/helm-chart.yml lints and renders charts/contextator on every change to it, and asserts the decisions it encodes: one replica, the required values, probes, the data mount
 .github/workflows/dockerhub-description.yml pushes DOCKERHUB.md to Docker Hub's description whenever it changes
 .github/PULL_REQUEST_TEMPLATE.md   the FR/ADR reference, the checks, and the documented claims a change touches
 .github/ISSUE_TEMPLATE/       bug report, feature request, and the links the issue chooser offers first

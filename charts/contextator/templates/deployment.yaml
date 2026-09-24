@@ -6,7 +6,7 @@ metadata:
   labels:
     {{- include "contextator.labels" . | nindent 4 }}
 spec:
-  # Always exactly one replica — see values.yaml's "Replicas" note and ADR-0070. Not a template
+  # Always exactly one replica — see values.yaml's "Replicas" note and ADR-0078. Not a template
   # value on purpose: MCP sessions live in this process's memory and the indexer runs in-process,
   # so a second replica would not share either one.
   replicas: 1
@@ -41,7 +41,7 @@ spec:
       {{- end }}
       containers:
         - name: contextator
-          image: "{{ .Values.image.repository }}:{{ required "contextator: image.tag must be set — no `-slim` tag is published yet, and falling back to the chart's appVersion would silently deploy the wrong (embedded-Postgres) image topology. See charts/contextator/README.md." .Values.image.tag }}"
+          image: "{{ .Values.image.repository }}:{{ required "contextator: image.tag must be set to a `-slim` tag (e.g. <version>-slim) — falling back to the chart's appVersion would silently deploy the wrong (embedded-Postgres) image topology. See charts/contextator/README.md." .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           {{- with .Values.securityContext }}
           securityContext:
