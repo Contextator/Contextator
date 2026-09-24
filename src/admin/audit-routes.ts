@@ -207,6 +207,10 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
   'POST /api/auth/logout': { verb: 'signed out' },
   'POST /api/auth/password': { verb: 'changed their own password' },
   'DELETE /api/auth/sessions': { verb: 'signed their other sessions out' },
+  // Self-service SSO unlink ([MAJOR-1], tur 2 review of [ADR-0077](../../.ssot/ADR.md#adr-0077)) — the
+  // matching link happens inside `GET /api/auth/oidc/callback`, which records its own event manually
+  // since `auditSubject` never covers a GET.
+  'DELETE /api/auth/oidc/link': { verb: 'unlinked their SSO identity' },
   // A person granting a connector lasting read access to a project — the one refusal this log keeps,
   // because a `deny` is somebody deciding rather than the permission matrix declining.
   'POST /oauth/authorize': {

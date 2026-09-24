@@ -10,7 +10,17 @@ import type { Principal, ProjectAccess, UserRole } from './types.js';
  */
 
 /** Reachable without any principal at all. */
-export const PUBLIC_ROUTES = new Set(['/api/health', '/api/setup/status', '/api/setup', '/api/auth/login']);
+export const PUBLIC_ROUTES = new Set([
+  '/api/health',
+  '/api/setup/status',
+  '/api/setup',
+  '/api/auth/login',
+  // OIDC sign-in ([ADR-0077](../../.ssot/ADR.md#adr-0077)): the browser has no session yet when it
+  // asks for the redirect, and the identity provider itself calls the callback with the code — neither
+  // request can carry a Contextator cookie.
+  '/api/auth/oidc/login',
+  '/api/auth/oidc/callback',
+]);
 
 /**
  * The Prometheus exposition ([ADR-0055](../../.ssot/ADR.md#adr-0055)). Not in `PUBLIC_ROUTES`, and

@@ -362,6 +362,60 @@ export const EnvSchema = z
     /** Pins the first-run setup code instead of generating one. Ignored once an account exists. */
     SETUP_CODE: z.string().min(8).max(128).optional(),
 
+    // Federated sign-in (ADR-0077). SSO says who arrived, never what they may do — the role matrix in
+    // src/auth/policy.ts is untouched; only its PUBLIC_ROUTES set gained the two SSO routes below, the
+    // same way every other unauthenticated route (e.g. /api/auth/login) is listed there. A federated
+    // principal reaches exactly what an ordinary session principal of the same role reaches.
+    /**
+     * The identity provider's issuer URL — its presence is the on/off switch for OIDC sign-in.
+     *
+     * Unset (the default), the login page never renders an SSO button and no discovery request is ever
+     * made. The two routes stay registered either way, though: `GET /api/auth/oidc/login` answers
+     * `404`, `GET /api/auth/oidc/callback` redirects `302` to `/login?oidc_error=not_configured`, and
+     * `GET /api/setup/status` always reports an `oidc` field (`{ enabled: false }` when unset) — none of
+     * that is byte-for-byte silence ([MAJOR-4], tur 2 review of
+     * [ADR-0077](../../.ssot/ADR.md#adr-0077)). Discovery (`GET {issuer}/.well-known/openid-configuration`)
+     * runs once, lazily, on the first login attempt, and its result is cached for the process lifetime —
+     * a provider outage after that point fails only new sign-ins, never local password login.
+     */
+    OIDC_ISSUER_URL: z.url().optional(),
+    /** The client id this instance registered with the provider. Required when OIDC_ISSUER_URL is set. */
+    OIDC_CLIENT_ID: z.string().min(1).optional(),
+    /** The client secret paired with OIDC_CLIENT_ID. A process secret, like ADMIN_TOKEN — never stored in the database, so it is not a row in encrypted-fields.ts. */
+    OIDC_CLIENT_SECRET: z.string().min(1).optional(),
+    /**
+     * The redirect URI registered with the provider. Left unset, it is computed at request time as
+     * `<base>/api/auth/oidc/callback`, where `<base>` is `PUBLIC_BASE_URL` or, absent that, the
+     * request's own scheme and host (subject to TRUST_PROXY, same as every other derived URL in this
+     * product). Set it explicitly when the provider requires an exact, pre-registered match that the
+     * request's own host cannot be trusted to produce — for instance behind a load balancer that
+     * `TRUST_PROXY` is not pointed at.
+     */
+    OIDC_REDIRECT_URI: z.url().optional(),
+    /** Space-separated scopes requested at the authorization endpoint. `openid` is required by the provider regardless of what is listed here. */
+    OIDC_SCOPES: z.string().min(1).default('openid profile email'),
+    /** What the login page's SSO button says. Purely cosmetic — never parsed, never compared. */
+    OIDC_BUTTON_LABEL: z.string().min(1).max(80).default('Single sign-on'),
+    /**
+     * Whether a provider identity with no matching account gets one created on first sign-in.
+     *
+     * Off by default: an instance that has not opted in keeps SSO as a *second door* onto accounts an
+     * administrator already created, matched by the provider's own subject rather than by email — this
+     * product never links a federated identity to an existing account by email address, because an
+     * email claim is exactly what a provider misconfiguration or a compromised upstream account could
+     * forge into taking over a different local account.
+     */
+    OIDC_AUTO_PROVISION: z.string().default('0').transform(flag),
+    /**
+     * The role an auto-provisioned account is given. **`root` is deliberately not an accepted value** —
+     * the one account this product cannot recreate from a provider claim is the one with root, so the
+     * first account on every instance stays a local password sign-in, and SSO can only ever mint
+     * `admin` or `member`. The OIDC callback (`src/admin/auth-routes.ts`) backs this up at sign-in time
+     * too, not just here at provisioning time: an account promoted to `root` after linking a provider
+     * identity is refused an SSO sign-in from then on, the same as one that was never anything but root.
+     */
+    OIDC_DEFAULT_ROLE: z.enum(['admin', 'member']).default('member'),
+
     // MCP OAuth 2.1 (ADR-0054). What these switch on is a *second* way to present a credential at
     // /mcp/*, never a second set of rights: what an OAuth session reaches is the membership of the
     // account that approved it, checked on every request.
@@ -1016,6 +1070,16 @@ export const EnvSchema = z
         path: ['SECRET_KEY_PREVIOUS'],
         message: 'must differ from SECRET_KEY; set it to the key being retired, or unset it',
       });
+    }
+    // OIDC_ISSUER_URL is the feature's on/off switch; the two credentials are meaningless without it
+    // and it is meaningless without them, so all three are required together or not at all.
+    if (c.OIDC_ISSUER_URL !== undefined) {
+      if (!c.OIDC_CLIENT_ID) {
+        ctx.addIssue({ code: 'custom', path: ['OIDC_CLIENT_ID'], message: 'required when OIDC_ISSUER_URL is set' });
+      }
+      if (!c.OIDC_CLIENT_SECRET) {
+        ctx.addIssue({ code: 'custom', path: ['OIDC_CLIENT_SECRET'], message: 'required when OIDC_ISSUER_URL is set' });
+      }
     }
   });
 

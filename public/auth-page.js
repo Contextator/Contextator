@@ -5,18 +5,32 @@
 const $ = (sel) => document.querySelector(sel);
 
 /**
- * Only a path on this very server is an acceptable destination. `//evil.example` and `/\evil`
- * are protocol-relative URLs that browsers happily treat as another origin.
+ * Only a path on this very server is an acceptable destination. Kept in sync by hand with
+ * `src/auth/safe-next.ts` — this file ships to the browser unbundled, straight from `public/`, so
+ * it cannot `import` a server-side module ([MAJOR-2], tur 2 review of
+ * [ADR-0077](../../.ssot/ADR.md#adr-0077)).
+ *
+ * A same-origin-looking prefix check alone misses a control character elsewhere in the string: a
+ * WHATWG URL parser (what the browser itself uses to resolve a redirect) strips ASCII tab/CR/LF
+ * *before* it looks at slashes, so `/\t/evil.example` reads as same-origin here but resolves to
+ * `//evil.example` once parsed. Rejecting control characters/backslashes outright, then re-parsing
+ * against a fixed base and comparing origins, catches that the same way a browser would.
  */
 function safeNext(raw) {
-  if (!raw) return '/';
+  if (typeof raw !== 'string' || raw.length === 0) return '/';
   let value;
   try {
     value = decodeURIComponent(raw);
   } catch {
     return '/';
   }
-  if (!value.startsWith('/') || value.startsWith('//') || value.startsWith('/\\')) return '/';
+  if (!value.startsWith('/') || value.startsWith('//') || /[\u0000-\u001f\u007f\\]/.test(value)) return '/';
+  try {
+    const base = 'http://safe-next.invalid';
+    if (new URL(value, base).origin !== base) return '/';
+  } catch {
+    return '/';
+  }
   return value;
 }
 
@@ -82,15 +96,39 @@ wire({
   done: () => location.replace(next()),
 });
 
+const OIDC_ERROR_MESSAGES = {
+  not_configured: 'Single sign-on is not available on this instance.',
+  flow_expired: 'The sign-in link expired. Start again.',
+  provider_denied: 'The identity provider declined the sign-in.',
+  exchange_failed: 'Could not complete sign-in with the identity provider.',
+  no_account: 'No account is linked to this identity yet. Ask an administrator for access.',
+  provision_failed: 'Could not create an account for this identity.',
+  account_disabled: 'This account has been disabled.',
+};
+
 // Somebody who lands on /login before anyone has set the instance up needs pointing at /setup.
 if ($('#login-form')) {
   void fetch('/api/setup/status', { headers: { accept: 'application/json' } })
     .then((r) => (r.ok ? r.json() : null))
     .then((status) => {
       if (status?.needsSetup) $('#login-setup-hint').hidden = false;
+      if (status?.oidc?.enabled) {
+        const link = $('#login-sso-link');
+        link.textContent = status.oidc.buttonLabel || 'Single sign-on';
+        link.href = `/api/auth/oidc/login?next=${encodeURIComponent(next())}`;
+        link.hidden = false;
+        $('#login-sso-divider').hidden = false;
+      }
     })
     .catch(() => undefined);
   $('#login-form').elements.username.focus();
+
+  const oidcError = new URLSearchParams(location.search).get('oidc_error');
+  if (oidcError) {
+    const errorNode = $('#login-error');
+    errorNode.textContent = OIDC_ERROR_MESSAGES[oidcError] || 'Single sign-on failed.';
+    errorNode.hidden = false;
+  }
 }
 
 // ---------- /setup ----------

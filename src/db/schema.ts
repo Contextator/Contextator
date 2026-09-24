@@ -708,11 +708,18 @@ export const userSessions = pgTable(
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     userAgent: text('user_agent').notNull().default(''),
     ip: text('ip'),
+    // How this session was opened ([ADR-0077](../../.ssot/ADR.md#adr-0077)). `findSessionUser` reads
+    // this alongside the role on every request: a session opened over SSO is refused the moment the
+    // role it resolves to is `root`, no matter when — before or after this row was created — the
+    // promotion happened. Additive, defaults every existing row to `password`, which is what every
+    // session predating this column actually was.
+    authMethod: text('auth_method').notNull().default('password').$type<SessionAuthMethod>(),
   },
   (t) => [
     foreignKey({ name: 'user_sessions_user_id_fkey', columns: [t.userId], foreignColumns: [users.id] }).onDelete('cascade'),
     index('user_sessions_user_idx').on(t.userId),
     index('user_sessions_expires_idx').on(t.expiresAt),
+    check('user_sessions_auth_method_check', sql`${t.authMethod} in ('password', 'sso')`),
   ],
 );
 
@@ -757,6 +764,37 @@ export const apiTokens = pgTable(
     foreignKey({ name: 'api_tokens_created_by_fkey', columns: [t.createdBy], foreignColumns: [users.id] }).onDelete('set null'),
     index('api_tokens_user_idx').on(t.userId),
     index('api_tokens_expires_idx').on(t.expiresAt).where(sql`expires_at is not null`),
+  ],
+);
+
+/**
+ * Which account a federated (OIDC) identity signs in as ([ADR-0077](../../.ssot/ADR.md#adr-0077)).
+ *
+ * The unique key is `(issuer, subject)`, not `(provider, subject)`: `issuer` is the value the token
+ * itself is signed over and the thing two different provider *labels* could otherwise collide on,
+ * where `provider` is only the operator's display name for the same issuer. There is deliberately no
+ * `email` column here — this table is never consulted by email, only by the provider's own subject
+ * claim, so a provider-side email change or a second account sharing an address cannot repoint a
+ * sign-in at the wrong local account.
+ */
+export const userFederatedIdentities = pgTable(
+  'user_federated_identities',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id').notNull(),
+    /** The configured OIDC provider's short name (OIDC_BUTTON_LABEL is display-only; this is not it). */
+    provider: text('provider').notNull(),
+    /** The provider's issuer URL, exactly as discovery returned it — what `(issuer, subject)` keys on. */
+    issuer: text('issuer').notNull(),
+    /** The `sub` claim: stable, provider-scoped, never reused across accounts by the provider's own contract. */
+    subject: text('subject').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+  },
+  (t) => [
+    foreignKey({ name: 'user_federated_identities_user_id_fkey', columns: [t.userId], foreignColumns: [users.id] }).onDelete('cascade'),
+    unique('user_federated_identities_issuer_subject_key').on(t.issuer, t.subject),
+    index('user_federated_identities_user_idx').on(t.userId),
   ],
 );
 
@@ -918,6 +956,8 @@ export type McpTokenKind = 'static' | 'access' | 'refresh';
  */
 export type AuditActorKind = 'user' | 'token' | 'api_token';
 export type ProjectMemberRole = 'viewer' | 'editor';
+/** How a `user_sessions` row was opened — a password sign-in, or an OIDC provider. */
+export type SessionAuthMethod = 'password' | 'sso';
 
 export type UserRow = typeof users.$inferSelect;
 export type UserSessionRow = typeof userSessions.$inferSelect;
@@ -925,6 +965,7 @@ export type ProjectMemberRow = typeof projectMembers.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 export type McpTokenRow = typeof mcpTokens.$inferSelect;
 export type ApiTokenRow = typeof apiTokens.$inferSelect;
+export type UserFederatedIdentityRow = typeof userFederatedIdentities.$inferSelect;
 export type OauthClientRow = typeof oauthClients.$inferSelect;
 export type DocumentSourceRow = typeof documentSources.$inferSelect;
 export type DocumentRow = typeof documents.$inferSelect;

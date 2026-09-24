@@ -57,6 +57,7 @@ export const state = {
   confirmDeleteSource: null,
   confirmDeleteUser: null,
   confirmDeleteApiToken: null,
+  confirmUnlinkOidc: false, // the SSO panel's own confirm-before-destroy flag (public/tokens.js)
   filter: '',
   connectTab: 0,
   /**

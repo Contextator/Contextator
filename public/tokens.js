@@ -62,7 +62,64 @@ export function renderTokensView() {
   }
 
   wrap.append(el('section', { class: 'panel' }, [el('div', { class: 'panel-body' }, tokens.map(tokenRow))]));
+
+  const sso = renderSsoPanel();
+  if (sso) wrap.append(sso);
+
   return wrap;
+}
+
+/**
+ * Self-service link/unlink for the account's single sign-on identity ([MAJOR-2], tur 3 review of
+ * [ADR-0077](../.ssot/ADR.md#adr-0077)) — same panel/row/confirm-before-destroy shapes as the API
+ * tokens list above. `null` when this instance has no OIDC provider configured, or before the first
+ * `/api/auth/me` poll has resolved (`state.me` starts out `null` — see core.js), so the caller can
+ * skip appending it rather than rendering an empty panel.
+ */
+function renderSsoPanel() {
+  const me = state.me;
+  if (!me?.oidc?.enabled) return null;
+
+  const label = me.oidc.buttonLabel || 'your identity provider';
+  const body = [];
+
+  if (!me.canLinkOidc) {
+    // The root account stays local — ADR-0077 and the server both refuse this, so the UI never even
+    // offers the control ([MAJOR-4], tur 3 review).
+    body.push(el('p', { class: 'users-lead', text: 'The root account stays local and cannot connect single sign-on.' }));
+  } else if (me.federatedProviders.length > 0) {
+    const confirming = state.confirmUnlinkOidc;
+    body.push(
+      el('div', { class: 'user-row token-row' }, [
+        el('span', { class: 'source-glyph token', 'aria-hidden': 'true', text: 'SSO' }),
+        el('span', { class: 'source-cell' }, [
+          el('span', { text: me.federatedProviders.join(', ') }),
+          el('span', { class: 'sub', text: 'Connected — you can also sign in with this identity provider' }),
+        ]),
+        el('span', { class: 'source-actions' }, [
+          el('button', {
+            type: 'button',
+            class: `danger small${confirming ? ' confirm' : ''}`,
+            text: confirming ? 'Confirm' : 'Remove',
+            onclick: () => (confirming ? unlinkOidc() : askUnlinkOidc()),
+          }),
+        ]),
+      ]),
+    );
+  } else {
+    body.push(
+      el('p', { class: 'users-lead', text: `Connect your account to ${label} to sign in without a password.` }),
+      el('button', { type: 'button', class: 'primary', text: `Connect ${label}`, onclick: () => linkOidc() }),
+    );
+  }
+
+  return el('section', { class: 'panel' }, [
+    el('div', { class: 'panel-head' }, [
+      el('h3', { text: 'Single sign-on' }),
+      el('p', { text: "Link this account to your organization's identity provider, or remove an existing link." }),
+    ]),
+    el('div', { class: 'panel-body' }, body),
+  ]);
 }
 
 function tokenRow(t) {
@@ -118,6 +175,47 @@ async function revoke(t) {
     await api(`/api/tokens/${t.id}`, { method: 'DELETE' });
     toast(`Revoked ${t.name || t.prefix}`);
     await loadApiTokens(true);
+  } catch (err) {
+    toast(err.message);
+    emit('render');
+  }
+}
+
+/**
+ * Starts the link flow: `POST /api/auth/oidc/link` (a state-changing request, not `GET` — [MAJOR-1],
+ * tur 3 review) returns `{ url }` rather than a redirect precisely so this can navigate the whole tab
+ * itself; `api()`'s `fetch` would otherwise just follow a 302 in the background and the browser would
+ * never actually reach the provider.
+ */
+async function linkOidc() {
+  try {
+    // `safeNext` (src/auth/safe-next.ts) requires a leading `/`; a bare `#...` fragment fails that check
+    // and collapses to `/`, silently losing the return-to-tokens-page destination ([T3-MINOR-2], tur 3 review).
+    const { url } = await api('/api/auth/oidc/link', { method: 'POST', body: { next: '/#/~tokens' } });
+    location.href = url;
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+function askUnlinkOidc() {
+  state.confirmUnlinkOidc = true;
+  emit('render');
+  clearTimeout(state.confirmTimer);
+  state.confirmTimer = setTimeout(() => {
+    if (state.confirmUnlinkOidc) {
+      state.confirmUnlinkOidc = false;
+      emit('render');
+    }
+  }, 6000);
+}
+
+async function unlinkOidc() {
+  state.confirmUnlinkOidc = false;
+  try {
+    await api('/api/auth/oidc/link', { method: 'DELETE' });
+    toast('Single sign-on disconnected');
+    emit('refresh'); // refetches /api/auth/me so state.me.federatedProviders drops the removed identity
   } catch (err) {
     toast(err.message);
     emit('render');

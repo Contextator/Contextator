@@ -48,3 +48,20 @@ export class SearchUnavailableError extends Error {
     this.code = code;
   }
 }
+
+/**
+ * A role change that would hand `root` to an account with a live SSO identity ([ADR-0077], tur 6
+ * addendum: root must stay provable-local, and every promotion goes through `updateUser` so this is
+ * the one place that needs to say so). `409` rather than `403`: the request is well formed and the
+ * caller may otherwise grant this role, it is *this particular target* that cannot receive it right
+ * now — unlinking its SSO identity first is the remedy. Kept apart from `ConflictError`'s generic
+ * `conflict` so a caller can tell "you are the last root" apart from "unlink SSO first".
+ */
+export class PromotionRefusedError extends Error {
+  readonly code: string;
+  constructor(code: 'root_requires_unlink', message: string) {
+    super(message);
+    this.name = 'PromotionRefusedError';
+    this.code = code;
+  }
+}

@@ -2,8 +2,15 @@ import fs from 'node:fs/promises';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.js';
 import { readSessionCookie } from '../auth/cookies.js';
+import { safeNext } from '../auth/safe-next.js';
 import { findSessionUser } from '../services/auth/sessions.js';
 import { footerNav, renderPage, type PageMeta } from './pages.js';
+
+/** Re-exported for `test/pages.test.ts`; the real implementation lives in `../auth/safe-next.ts`
+ * now, shared with `src/admin/auth-routes.ts` — see that module's doc comment for why the three
+ * copies this used to be (here, `auth-routes.ts`, `public/auth-page.js`) were collapsed to one
+ * ([MAJOR-2], tur 2 review of [ADR-0077](../../.ssot/ADR.md#adr-0077)). */
+export { safeNext };
 
 /**
  * The pages a visitor sees before the dashboard is theirs, plus the guard on `/` itself.
@@ -21,19 +28,6 @@ export const AUTH_PAGES: readonly PageMeta[] = [
 
 const PAGES_DIR = new URL('../../public/pages/', import.meta.url);
 const INDEX_FILE = new URL('../../public/index.html', import.meta.url);
-
-/** Only a path on this server; `//host` and `/\host` are other origins to a browser. */
-export function safeNext(raw: string | undefined): string {
-  if (!raw) return '/';
-  let value: string;
-  try {
-    value = decodeURIComponent(raw);
-  } catch {
-    return '/';
-  }
-  if (!value.startsWith('/') || value.startsWith('//') || value.startsWith('/\\')) return '/';
-  return value;
-}
 
 export const authPageRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
   const { config, db, version } = ctx;

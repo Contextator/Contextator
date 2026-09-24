@@ -1,6 +1,7 @@
 import { and, asc, count, eq, ne, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { projectMembers, users, type UserRole, type UserRow } from '../../db/schema.js';
+import { projectMembers, userFederatedIdentities, users, type UserRole, type UserRow } from '../../db/schema.js';
+import { PromotionRefusedError } from '../errors.js';
 import { ConflictError, NotFoundError, ValidationError } from '../projects.js';
 import { hashPassword } from '../passwords.js';
 
@@ -124,6 +125,38 @@ async function withLastRootGuard<T>(db: Db, targetId: string, run: (tx: Db) => P
   });
 }
 
+/**
+ * Serializes every write that can race a promotion to root against this exact account
+ * ([T6-MAJOR-1]/[T6-MINOR-1], tur 6 review of [ADR-0077](../../.ssot/ADR.md#adr-0077)): an SSO login
+ * callback writing a session, `DELETE /api/auth/oidc/link` revoking sessions and tokens, `updateUser`
+ * granting root, and the SSO link callback inserting the identity row each read one fact about this
+ * account — still linked? still root? — and then act on it, sometimes a network round trip to the
+ * identity provider later. Without a shared lock, two of them can each read the "before" state and
+ * both go ahead, which is exactly how a session survived an unlink in the tur 6 review's uninstrumented
+ * run and, chained with a promotion, ended up holding root.
+ *
+ * `FOR UPDATE` on the account's own row closes that gap: whichever caller gets here first holds the
+ * row until its transaction commits or rolls back, and every other caller queued behind it sees that
+ * result rather than the stale state it started with. This locks a different, narrower set of rows
+ * than `withLastRootGuard` above (one account vs. every active root, for a different invariant), so
+ * nesting a `withLastRootGuard(tx, ...)` call inside this one's `run` is intentional and safe: calling
+ * `db.transaction()` on an already-open drizzle transaction issues a `SAVEPOINT`, not a fresh
+ * transaction (`node-postgres/session.cjs`), so it neither escapes this lock nor deadlocks against it.
+ *
+ * Every write inside `run` must go through the `tx` handle it is given, never the outer `db` closed
+ * over from the caller ([L-h], tur 7 review of [T7-MAJOR-1]): `db` opens its own connection and its
+ * own transaction, which then blocks on the very row `FOR UPDATE` above already holds open on *this*
+ * connection — the request deadlocks against its own lock and only returns once Postgres's
+ * `statement_timeout` or the caller gives up. There is nothing that catches this at the type level;
+ * it is a convention, and the only guard against it is this comment and review.
+ */
+export async function withUserRowLock<T>(db: Db, userId: string, run: (tx: Db) => Promise<T>): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`);
+    return run(tx as unknown as Db);
+  });
+}
+
 export interface UpdateUserInput {
   displayName?: string;
   email?: string | null;
@@ -131,11 +164,10 @@ export interface UpdateUserInput {
   isActive?: boolean;
 }
 
-export async function updateUser(db: Db, id: string, input: UpdateUserInput): Promise<UserRow> {
+export async function updateUser(db: Db, id: string, input: UpdateUserInput, hooks?: { onBeforeLock?: () => Promise<void> }): Promise<UserRow> {
   const before = await getUserById(db, id);
   if (!before) throw new NotFoundError('User not found');
 
-  const losesRoot = before.role === 'root' && ((input.role !== undefined && input.role !== 'root') || input.isActive === false);
   const patch: Partial<UserRow> = {};
   if (input.displayName !== undefined) patch.displayName = input.displayName.trim();
   if (input.email !== undefined) patch.email = input.email?.trim() || null;
@@ -151,7 +183,44 @@ export async function updateUser(db: Db, id: string, input: UpdateUserInput): Pr
     return row;
   };
 
-  return losesRoot ? withLastRootGuard(db, id, apply) : apply(db);
+  // Root must stay a local account regardless of which route or process changes a role
+  // ([ADR-0077], tur 6 addendum): an SSO identity is proof someone outside this database can already
+  // act as this user, and root is exactly the one role that must never depend on that. `updateUser`
+  // is the only place a role ever changes after creation (a fresh account cannot have linked an
+  // identity yet, since linking is a self-service step taken after sign-in), so this is the only
+  // place this needs checking, and every role-changing route goes through it.
+  //
+  // `promotesToRoot`/`losesRoot` are computed from a fresh read taken *inside* `withUserRowLock`, not
+  // from `before` above ([T7-MINOR-2], tur 10 fix): `before` is only a pre-lock existence check and the
+  // source for the empty-patch shortcut, both of which are safe to take unlocked because neither one
+  // decides anything a concurrent writer could invalidate. Deciding `promotesToRoot`/`losesRoot` from
+  // `before` instead let a PATCH that only looked like a no-op role change (the client always resends
+  // the current `role`, [public/users.js]) skip the identity check entirely whenever the account was
+  // already root at the time `before` was read, even if it had actually been demoted and relinked to
+  // an SSO identity in the race window since — the exact race the row lock exists to close, just moved
+  // one read earlier than the lock could see it. Computing both flags from a read taken under the lock
+  // means an SSO login or link callback racing this promotion serializes against it right here
+  // ([T6-MAJOR-1]/[T6-MINOR-1], tur 6 review; [T7-MINOR-2], tur 10 review), so whichever of them commits
+  // first is what this sees, and a callback that started before this lock but has not yet committed
+  // simply waits for it.
+  await hooks?.onBeforeLock?.();
+  return withUserRowLock(db, id, async (tx) => {
+    const fresh = await getUserById(tx, id);
+    if (!fresh) throw new NotFoundError('User not found');
+    const promotesToRoot = fresh.role !== 'root' && input.role === 'root';
+    const losesRoot = fresh.role === 'root' && ((input.role !== undefined && input.role !== 'root') || input.isActive === false);
+    if (promotesToRoot) {
+      const [identity] = await tx
+        .select({ id: userFederatedIdentities.id })
+        .from(userFederatedIdentities)
+        .where(eq(userFederatedIdentities.userId, id))
+        .limit(1);
+      if (identity) {
+        throw new PromotionRefusedError('root_requires_unlink', 'This account has a linked SSO identity; unlink it before granting the root role');
+      }
+    }
+    return losesRoot ? withLastRootGuard(tx, id, apply) : apply(tx);
+  });
 }
 
 export async function setPassword(db: Db, id: string, plain: string, mustChange: boolean): Promise<void> {

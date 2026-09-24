@@ -58,4 +58,48 @@ export interface AppContext {
   audit: AuditWriter;
   version: string;
   startedAt: number;
+  /**
+   * Instrumentation points for deterministic integration tests only ([T6-MAJOR-1], tur 7 fix). The
+   * composition root in `server.ts` never assigns this field, so it is `undefined` in every real
+   * deployment; every call site treats it as optional and a no-op when absent.
+   */
+  testHooks?: {
+    /**
+     * Awaited by the SSO login callback right after it re-confirms, under `withUserRowLock`, that the
+     * federated identity is still linked and the account is still usable — and right before it writes
+     * the session. That is the exact window an unlink racing the same callback needs to land in to be
+     * observable (`test/integration/oidc.itest.ts`'s deterministic race test pauses here).
+     */
+    onOidcLoginBeforeSignIn?: () => Promise<void>;
+    /**
+     * Awaited by `POST /api/tokens` right after it re-confirms, under `withUserRowLock`, that the
+     * calling session's `revoked_at` is still null — and right before it inserts the token row. That
+     * is the exact window an unlink racing the same mint needs to land in to be observable
+     * (`test/integration/oidc.itest.ts`'s batched, deterministic race test pauses here, [T7-MAJOR-1],
+     * tur 8 fix).
+     */
+    onTokenMintBeforeInsert?: () => Promise<void>;
+    /**
+     * Awaited by `POST /api/tokens` right before it ever calls `withUserRowLock` — before it even
+     * attempts to acquire the account row's lock. `onTokenMintBeforeInsert` above can only ever pause a
+     * mint that already holds the lock, so a racing unlink can only ever queue behind it; that order
+     * can never exercise the `revoked_at` re-check, since the session is still live at the moment the
+     * mint checked it ([T8-MAJOR-1], tur 9 review of [ADR-0077](../../.ssot/ADR.md#adr-0077)). Pausing
+     * here instead lets a racing unlink run to completion first — acquire the lock, revoke the session,
+     * commit, release it — before the mint ever tries to acquire that same lock, which is the one order
+     * the re-check exists to catch (`test/integration/oidc.itest.ts`'s deterministic
+     * unlink-before-mint test pauses here, [T8-MAJOR-1], tur 9 fix).
+     */
+    onTokenMintBeforeLock?: () => Promise<void>;
+    /**
+     * Awaited by `updateUser` right before it ever calls `withUserRowLock` — before it even attempts to
+     * acquire the account row's lock, and therefore before `promotesToRoot`/`losesRoot` are computed
+     * from the fresh, locked read. Pausing here lets a racing link (or unlink) run to completion first —
+     * acquire the lock, write its change, commit, release it — before this promotion's own lock attempt
+     * ever starts, which is the one order the fresh-read re-check exists to catch ([T7-MINOR-2], tur 10
+     * fix of [ADR-0077](../../.ssot/ADR.md#adr-0077); `test/integration/oidc.itest.ts`'s deterministic
+     * stale-promotion race test pauses here).
+     */
+    onUserUpdateBeforeLock?: () => Promise<void>;
+  };
 }

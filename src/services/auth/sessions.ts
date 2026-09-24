@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { userSessions, users, type UserRole } from '../../db/schema.js';
+import { userSessions, users, type SessionAuthMethod, type UserRole } from '../../db/schema.js';
 import type { Logger } from '../../context.js';
 
 /**
@@ -23,6 +23,8 @@ export interface SessionUser {
   displayName: string;
   role: UserRole;
   mustChangePassword: boolean;
+  /** How this session was opened — read alongside the role on every request ([ADR-0077]). */
+  authMethod: SessionAuthMethod;
 }
 
 export interface SessionMeta {
@@ -35,6 +37,7 @@ export async function createSession(
   userId: string,
   ttlDays: number,
   meta: SessionMeta,
+  authMethod: SessionAuthMethod = 'password',
 ): Promise<{ token: string; expiresAt: Date; sessionId: string }> {
   const token = newSessionToken();
   const expiresAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
@@ -48,6 +51,7 @@ export async function createSession(
       expiresAt,
       userAgent: (meta.userAgent ?? '').slice(0, 200),
       ip: meta.ip ?? null,
+      authMethod,
     })
     .returning({ id: userSessions.id });
   return { token, expiresAt, sessionId: row.id };
@@ -70,6 +74,7 @@ export async function findSessionUser(db: Db, rawToken: string, idleMs: number):
       role: users.role,
       isActive: users.isActive,
       mustChangePassword: users.mustChangePassword,
+      authMethod: userSessions.authMethod,
     })
     .from(userSessions)
     .innerJoin(users, eq(users.id, userSessions.userId))
@@ -92,7 +97,25 @@ export async function findSessionUser(db: Db, rawToken: string, idleMs: number):
     displayName: row.displayName,
     role: row.role,
     mustChangePassword: row.mustChangePassword,
+    authMethod: row.authMethod,
   };
+}
+
+/**
+ * Whether a session row is still live — `revoked_at IS NULL` — read fresh rather than trusting the
+ * request's `Principal`, which was built once at cookie resolution and does not see a revocation that
+ * lands afterwards. Meant to be called with a `tx` inside `withUserRowLock` ([T7-MAJOR-1], tur 8 fix):
+ * a session valid when the request started can be revoked — by an unlink, a sign-out-everywhere, a
+ * disable — while this request is still queued behind the row lock, and re-checking under that same
+ * lock is what stops a write from finishing on a session that had already lost the race.
+ */
+export async function isSessionLive(db: Db, sessionId: string): Promise<boolean> {
+  const rows = await db
+    .select({ id: userSessions.id })
+    .from(userSessions)
+    .where(and(eq(userSessions.id, sessionId), isNull(userSessions.revokedAt)))
+    .limit(1);
+  return rows.length > 0;
 }
 
 /**
