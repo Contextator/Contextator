@@ -34,28 +34,52 @@ jobs:
         with:
           version: v3.14.4
 
-      # database.url is required (ADR-0078) — the chart's own _helpers.tpl calls `fail` without it.
-      # `helm lint` itself doesn't fail when that fires (Helm renders best-effort for lint purposes),
-      # but it does print the `fail`/required-value message as noise, so the value below is set here
-      # too, for a clean pass against the chart's actual installable configuration. It is a
-      # placeholder connection string, never a real one; nothing here talks to a database.
+      # database.url and image.tag are both required (ADR-0078): the chart's own _helpers.tpl and
+      # deployment.yaml call `fail`/`required` without them. `helm lint` itself doesn't fail when that
+      # fires (Helm renders best-effort for lint purposes), but it does print the message as noise, so
+      # both values are set here too, for a clean pass against the chart's actual installable
+      # configuration. Neither is a real value; nothing here talks to a database or pulls an image.
       - name: helm lint
         run: |
           helm lint charts/contextator \
+            --set image.tag="ci-test" \
             --set database.url="postgres://user:pass@db.example.internal:5432/contextator"
 
-      - name: helm template (database.url set)
+      - name: helm template (database.url and image.tag set)
         run: |
           helm template ctx charts/contextator \
+            --set image.tag="ci-test" \
             --set database.url="postgres://user:pass@db.example.internal:5432/contextator"
 
       # The install-time guard from ADR-0078 is itself part of the chart's contract: no DATABASE_URL,
       # no rendered Pod. `helm template` must fail here, so the step inverts the exit code rather than
-      # letting a passing render go unnoticed.
+      # letting a passing render go unnoticed. image.tag is supplied so the render fails for the
+      # database.url reason under test, not because of the separate image.tag guard below.
       - name: helm template fails without database.url or database.existingSecret
         run: |
-          if helm template ctx charts/contextator > /dev/null 2>&1; then
+          if output=$(helm template ctx charts/contextator --set image.tag="ci-test" 2>&1); then
             echo "helm template succeeded with no database.* value set — expected it to fail (ADR-0078)."
+            exit 1
+          fi
+          if ! grep -qi "database.url" <<< "$output"; then
+            echo "helm template failed, but not for the expected database.url reason:"
+            echo "$output"
+            exit 1
+          fi
+
+      # image.tag has no default (ADR-0078): no `-slim` tag is published yet, and falling back to the
+      # chart's appVersion would silently deploy the wrong (embedded-Postgres) image topology. Mirrors
+      # the database.url guard above — image.tag is the one left unset here.
+      - name: helm template fails without image.tag
+        run: |
+          if output=$(helm template ctx charts/contextator \
+              --set database.url="postgres://user:pass@db.example.internal:5432/contextator" 2>&1); then
+            echo "helm template succeeded with no image.tag set — expected it to fail (ADR-0078)."
+            exit 1
+          fi
+          if ! grep -qi "image.tag" <<< "$output"; then
+            echo "helm template failed, but not for the expected image.tag reason:"
+            echo "$output"
             exit 1
           fi
 
@@ -64,5 +88,53 @@ jobs:
       - name: Exactly one replica in the rendered Deployment
         run: |
           helm template ctx charts/contextator \
+            --set image.tag="ci-test" \
             --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
             --show-only templates/deployment.yaml | grep -E '^\s*replicas:\s*1\s*$'
+
+      # Same guard, restated against an attempted override: replicaCount isn't wired to anything, so
+      # setting it must not change the rendered replica count either.
+      - name: replicaCount override is ignored — still exactly one replica
+        run: |
+          helm template ctx charts/contextator \
+            --set image.tag="ci-test" \
+            --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
+            --set replicaCount=3 \
+            --show-only templates/deployment.yaml | grep -E '^\s*replicas:\s*1\s*$'
+
+      # TRUST_PROXY must never be inferred from ingress.enabled (ADR-0060, ADR-0078) — it is only ever
+      # rendered when config.trustProxy is set explicitly. This regression-tests the tur 2 fix against
+      # the one values combination most likely to tempt an "ingress implies a proxy" shortcut.
+      - name: TRUST_PROXY is not inferred from ingress.enabled
+        run: |
+          cat > /tmp/helm-chart-ci-ingress.yaml <<'EOF'
+          ingress:
+            enabled: true
+            hosts:
+              - host: ctx.example.internal
+                paths:
+                  - path: /
+                    pathType: Prefix
+          EOF
+          if helm template ctx charts/contextator \
+              --set image.tag="ci-test" \
+              --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
+              -f /tmp/helm-chart-ci-ingress.yaml \
+              --show-only templates/deployment.yaml | grep -q 'name: TRUST_PROXY'; then
+            echo "TRUST_PROXY was rendered with ingress.enabled=true and no config.trustProxy set — expected it to stay unset (ADR-0060, ADR-0078)."
+            exit 1
+          fi
+
+      # Both PVCs default to helm.sh/resource-policy: keep (ADR-0078, persistence.retainOnUninstall
+      # defaults to true) — `helm uninstall` must not silently delete stored data or models.
+      - name: Both PVCs default to helm.sh/resource-policy keep
+        run: |
+          for tmpl in templates/pvc-data.yaml templates/pvc-models.yaml; do
+            helm template ctx charts/contextator \
+              --set image.tag="ci-test" \
+              --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
+              --show-only "$tmpl" | grep -q 'helm.sh/resource-policy: keep' || {
+                echo "$tmpl did not render helm.sh/resource-policy: keep with default values."
+                exit 1
+              }
+          done
