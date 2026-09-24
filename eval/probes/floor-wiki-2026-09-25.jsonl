@@ -1,0 +1,42 @@
+{"id":"probe-wiki-en-01","lang":"en","query":"How much disk space do the image and the default embedding model need?","expectFile":"Installation.md","expectHeading":"Requirements"}
+{"id":"probe-wiki-en-02","lang":"en","query":"Do I need a GPU to run the embedding model?","expectFile":"Installation.md","expectHeading":"Requirements"}
+{"id":"probe-wiki-en-03","lang":"en","query":"What should the reverse proxy do about response buffering for the SSE stream?","expectFile":"Installation.md","expectHeading":"Behind a reverse proxy"}
+{"id":"probe-wiki-en-04","lang":"en","query":"Where do I find the setup code for creating the first dashboard account?","expectFile":"Installation.md","expectHeading":"The first account"}
+{"id":"probe-wiki-en-05","lang":"en","query":"Does upgrading the container change my data or require running migrations by hand?","expectFile":"Installation.md","expectHeading":"Upgrading"}
+{"id":"probe-wiki-en-06","lang":"en","query":"What chunk size works better with the local MiniLM-class models?","expectFile":"Configuration.md","expectHeading":"Chunking"}
+{"id":"probe-wiki-en-07","lang":"en","query":"Which settings need more than a restart to take effect?","expectFile":"Configuration.md","expectHeading":"Applying changes"}
+{"id":"probe-wiki-en-08","lang":"en","query":"What is the largest archive I can upload by default?","expectFile":"Configuration.md","expectHeading":"Uploads"}
+{"id":"probe-wiki-en-09","lang":"en","query":"How do I switch embeddings to OpenAI's text-embedding-3-small?","expectFile":"Embedding-Models.md","expectHeading":"Using OpenAI instead"}
+{"id":"probe-wiki-en-10","lang":"en","query":"What happens to search after I change the embedding model to one with the same dimensions?","expectFile":"Embedding-Models.md","expectHeading":"Changing the model"}
+{"id":"probe-wiki-en-11","lang":"en","query":"How do I run the server with no outbound network access at all?","expectFile":"Embedding-Models.md","expectHeading":"Air-gapped installations"}
+{"id":"probe-wiki-en-12","lang":"en","query":"Does re-indexing an unchanged project embed everything again?","expectFile":"Indexing.md","expectHeading":"Incremental by default"}
+{"id":"probe-wiki-en-13","lang":"en","query":"Why is only one project indexed at a time?","expectFile":"Indexing.md","expectHeading":"The queue"}
+{"id":"probe-wiki-en-14","lang":"en","query":"How do I rotate the ADMIN_TOKEN without signing everyone out?","expectFile":"Security.md","expectHeading":"Rotating things"}
+{"id":"probe-wiki-en-15","lang":"en","query":"Is the MCP endpoint rate limited?","expectFile":"Security.md","expectHeading":"Things Contextator does not defend against"}
+{"id":"probe-wiki-en-16","lang":"en","query":"How is the access token for a private git repository stored?","expectFile":"Git-Repository-Source.md","expectHeading":"Private repositories"}
+{"id":"probe-wiki-en-17","lang":"en","query":"Which file do I put the server URL in to connect Cursor?","expectFile":"Connecting-AI-Clients.md","expectHeading":"Cursor"}
+{"id":"probe-wiki-en-18","lang":"en","query":"What does a token-protected project answer to a request without a bearer token?","expectFile":"Connecting-AI-Clients.md","expectHeading":"Projects that require a token"}
+{"id":"probe-wiki-en-19","lang":"en","query":"How many documents does list_topics return per page by default?","expectFile":"MCP-Tools.md","expectHeading":"`list_topics`"}
+{"id":"probe-wiki-en-20","lang":"en","query":"Can an agent trigger an index run through the MCP tools?","expectFile":"MCP-Tools.md","expectHeading":"What the tools cannot do"}
+{"id":"probe-wiki-en-21","lang":"en","query":"Which secret key must I copy along with the backup when moving to a new host?","expectFile":"Backup-and-Data.md","expectHeading":"Moving to another machine"}
+{"id":"probe-wiki-en-22","lang":"en","query":"How do I change the PostgreSQL password after the cluster was created?","expectFile":"Backup-and-Data.md","expectHeading":"Changing the database password"}
+{"id":"probe-wiki-en-23","lang":"en","query":"Is Confluence Data Center supported as a source?","expectFile":"Confluence.md","expectHeading":"Cloud, and not Data Center"}
+{"id":"probe-wiki-en-24","lang":"en","query":"Why does my new Notion integration see no pages?","expectFile":"Notion.md","expectHeading":"2. Share the pages with it"}
+{"id":"probe-wiki-tr-01","lang":"tr","query":"Obsidian kasasındaki .obsidian klasörü de indeksleniyor mu?","expectFile":"Obsidian-Vaults.md","expectHeading":"What is skipped"}
+{"id":"probe-wiki-tr-02","lang":"tr","query":"Bir projeyi silince bağlı yerel klasördeki dosyalarım da silinir mi?","expectFile":"Projects.md","expectHeading":"Deleting"}
+{"id":"probe-wiki-tr-03","lang":"tr","query":"Webhook gizli anahtarını yeniledikten sonra teslimatlar neden 401 dönüyor?","expectFile":"Push-Webhooks.md","expectHeading":"Rotating the secret"}
+{"id":"probe-wiki-tr-04","lang":"tr","query":"Yüklenebilecek tek bir dosyanın varsayılan boyut sınırı nedir?","expectFile":"Upload-Source.md","expectHeading":"Limits"}
+{"id":"probe-wiki-tr-05","lang":"tr","query":"Panel beni sürekli /setup sayfasına yönlendiriyor, ne yapmalıyım?","expectFile":"Troubleshooting.md","expectHeading":"Signing in"}
+{"id":"probe-wiki-tr-06","lang":"tr","query":"Dokümantasyondaki komut enjeksiyonuna karşı Contextator bir koruma sağlıyor mu?","expectFile":"Security.md","expectHeading":"Things Contextator does not defend against"}
+{"id":"probe-wiki-af-en-01","lang":"en","query":"Can I sign in to the dashboard with SAML single sign-on?","kind":"absent-feature","note":"The wiki documents local accounts and OIDC; SAML appears nowhere."}
+{"id":"probe-wiki-af-en-02","lang":"en","query":"How do I sync user accounts from an LDAP directory?","kind":"absent-feature","note":"No LDAP support is documented."}
+{"id":"probe-wiki-af-en-03","lang":"en","query":"How do I add a Google Drive folder as a document source?","kind":"absent-feature","note":"The sources are local directory, git, upload, documentation site, Obsidian, Notion and Confluence."}
+{"id":"probe-wiki-af-en-04","lang":"en","query":"Can I use a local Ollama server as the embedding provider?","kind":"absent-feature","note":"The providers are the local transformers models and OpenAI; Ollama is not mentioned."}
+{"id":"probe-wiki-af-en-05","lang":"en","query":"How do I get a Slack notification when an index run fails?","kind":"absent-feature","note":"No Slack integration and no failure notification channel is documented."}
+{"id":"probe-wiki-af-en-06","lang":"en","query":"Where is the Prometheus metrics endpoint for scraping?","kind":"absent-feature","note":"No metrics endpoint is documented; health is /api/health."}
+{"id":"probe-wiki-af-en-07","lang":"en","query":"How do I index a SharePoint document library?","kind":"absent-feature","note":"SharePoint appears nowhere in the wiki."}
+{"id":"probe-wiki-af-en-08","lang":"en","query":"Is there an official Python client for the admin API?","kind":"absent-feature","note":"The admin API is documented with curl only."}
+{"id":"probe-wiki-af-en-09","lang":"en","query":"Can search_docs take a regular expression instead of a natural-language query?","kind":"absent-feature","note":"search_docs takes a query string; regex matching is not documented."}
+{"id":"probe-wiki-af-en-10","lang":"en","query":"How do I set a per-user quota on how many searches an agent may run?","kind":"absent-feature","note":"Security.md says nothing but sign-in is rate limited; quotas do not exist."}
+{"id":"probe-wiki-af-en-11","lang":"en","query":"How do I connect a Dropbox folder so it re-indexes on change?","kind":"absent-feature","note":"Dropbox appears nowhere in the wiki."}
+{"id":"probe-wiki-af-en-12","lang":"en","query":"Can Contextator index Jira issues alongside the Confluence pages?","kind":"absent-feature","note":"Confluence Cloud is a source; Jira is not."}

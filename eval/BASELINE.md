@@ -1545,3 +1545,243 @@ npx tsx scripts/hnsw-tenancy.ts --scale 1 --probes 5 --json out.json # the quick
 
 The script starts its own `pgvector/pgvector:pg16` container unless `HNSW_TENANCY_DATABASE_URL` (or
 `EVAL_DATABASE_URL`) points at a server it may create databases on, and drops the databases it created.
+
+
+---
+
+# The relevance floor across corpus shapes (2026-09-25)
+
+ROADMAP Item 17. `SEARCH_SCORE_FLOOR=0.82` was set by [ADR-0042](../../.ssot/ADR.md#adr-0042) from one
+corpus, the synthetic product documentation in `eval/corpus/`, and its note said so: one model, one
+corpus. This asks whether the same number means the same thing on a corpus of a different shape, and
+measures two ways of letting it differ, before anything in the floor's mechanism changes.
+
+Measured with `scripts/floor-calibration.ts` (corpora and indexing in `scripts/eval-corpora.ts`) through
+`searchProject` itself with the floor off, deciding refusals with `belowRelevanceFloor` — the product's
+own function, escape hatch included — at whatever floor is being asked about. Nothing in `eval/corpus/`,
+`eval/golden.jsonl` or `eval/negative.jsonl` changed, and `scripts/eval.ts` did not change.
+
+Model local:Xenova/multilingual-e5-small:fp32:"query: "+"passage: "; chunking 96/24; max_per_document=2, neighbor_context=1; rerank off; 432 questions are identifier-shaped (the escape hatch can apply).
+
+**The four corpora.**
+
+- **halyard** — `eval/corpus/` with `golden.jsonl` and `negative.jsonl`: the control. Its golden
+  numbers here (recall@5 71.7 %, heading@5 69.6 %, one golden question refused at 0.804) are the same
+  to the digit as `npm run eval` on the same commit, which is the check that the two indexing loops
+  agree.
+- **wiki** — the Contextator wiki (28 pages, wiki commit `41e8837`) with
+  `eval/probes/floor-wiki-2026-09-25.jsonl`: 30 answerable questions (24 en, 6 tr) and 12
+  absent-feature questions, each with a note saying what the wiki would have to contain. Written for
+  this measurement by someone who had read the wiki, so read its answerable band as optimistic, and its
+  n as small.
+- **xquad-tr**, **xquad-en** — the external set (`eval/external/xquad/`, CC BY-SA 4.0): encyclopaedic
+  prose, one section per paragraph, 1190 questions per language written by other people.
+
+**Off-domain questions are borrowed across corpora.** halyard and wiki get `negative.jsonl`'s twelve
+off-domain rows plus the first question of every XQuAD article (48 tr + 48 en); the XQuAD corpora get
+those twelve plus the halyard golden questions and the wiki's answerable ones. Hand-written off-domain
+questions score noticeably higher than borrowed ones (on halyard, median 0.807 against 0.762 and 0.748), so the
+off-domain refusal rates below are flattered by the borrowed rows. The rows that matter for the floor's
+*price*, the answerable ones, are each corpus's own.
+
+## Corpora
+
+| corpus | shape | files | chunks | answerable | absent-feature | off-domain |
+|---|---|---:|---:|---:|---:|---:|
+| halyard | synthetic product documentation, en + tr, many short sections and identifiers | 26 | 577 | 92 | 12 | 108 |
+| wiki | real product user guide (Contextator wiki), en, prose + tables + config blocks | 28 | 1319 | 30 | 12 | 108 |
+| xquad-tr | encyclopaedic prose (XQuAD tr), 48 articles, one section per paragraph | 48 | 779 | 1190 | 0 | 134 |
+| xquad-en | encyclopaedic prose (XQuAD en), 48 articles, one section per paragraph | 48 | 764 | 1190 | 0 | 134 |
+
+## Top-hit cosine similarity, by class
+
+| corpus | class | n | min | p10 | median | p90 | max |
+|---|---|---:|---:|---:|---:|---:|---:|
+| halyard | answerable | 92 | 0.804 | 0.845 | 0.871 | 0.908 | 0.919 |
+| halyard | ↳ right file at rank 1 | 58 | 0.845 | 0.853 | 0.886 | 0.912 | 0.919 |
+| halyard | ↳ right file not at rank 1 | 34 | 0.804 | 0.833 | 0.858 | 0.872 | 0.887 |
+| halyard | absent-feature | 12 | 0.802 | 0.804 | 0.839 | 0.873 | 0.874 |
+| halyard | off-domain | 108 | 0.696 | 0.729 | 0.758 | 0.808 | 0.839 |
+| halyard | ↳ off-domain from negative.jsonl | 12 | 0.794 | 0.794 | 0.807 | 0.828 | 0.839 |
+| halyard | ↳ off-domain from xquad-tr | 48 | 0.719 | 0.739 | 0.762 | 0.799 | 0.835 |
+| halyard | ↳ off-domain from xquad-en | 48 | 0.696 | 0.720 | 0.748 | 0.793 | 0.836 |
+| wiki | answerable | 30 | 0.812 | 0.825 | 0.872 | 0.905 | 0.922 |
+| wiki | ↳ right file at rank 1 | 16 | 0.825 | 0.827 | 0.879 | 0.916 | 0.918 |
+| wiki | ↳ right file not at rank 1 | 14 | 0.812 | 0.821 | 0.863 | 0.899 | 0.922 |
+| wiki | absent-feature | 12 | 0.792 | 0.836 | 0.849 | 0.861 | 0.865 |
+| wiki | off-domain | 108 | 0.681 | 0.726 | 0.757 | 0.800 | 0.835 |
+| wiki | ↳ off-domain from negative.jsonl | 12 | 0.750 | 0.762 | 0.787 | 0.835 | 0.835 |
+| wiki | ↳ off-domain from xquad-tr | 48 | 0.681 | 0.720 | 0.742 | 0.780 | 0.797 |
+| wiki | ↳ off-domain from xquad-en | 48 | 0.724 | 0.735 | 0.776 | 0.808 | 0.829 |
+| xquad-tr | answerable | 1190 | 0.761 | 0.822 | 0.866 | 0.901 | 0.955 |
+| xquad-tr | ↳ right file at rank 1 | 1146 | 0.775 | 0.827 | 0.867 | 0.901 | 0.955 |
+| xquad-tr | ↳ right file not at rank 1 | 44 | 0.761 | 0.787 | 0.805 | 0.830 | 0.847 |
+| xquad-tr | off-domain | 134 | 0.740 | 0.757 | 0.795 | 0.818 | 0.846 |
+| xquad-tr | ↳ off-domain from negative.jsonl | 12 | 0.741 | 0.746 | 0.781 | 0.813 | 0.816 |
+| xquad-tr | ↳ off-domain from halyard-golden | 92 | 0.747 | 0.758 | 0.798 | 0.819 | 0.839 |
+| xquad-tr | ↳ off-domain from wiki-probes | 30 | 0.740 | 0.754 | 0.776 | 0.814 | 0.846 |
+| xquad-en | answerable | 1190 | 0.738 | 0.812 | 0.856 | 0.892 | 0.928 |
+| xquad-en | ↳ right file at rank 1 | 1158 | 0.748 | 0.816 | 0.857 | 0.893 | 0.928 |
+| xquad-en | ↳ right file not at rank 1 | 32 | 0.738 | 0.760 | 0.788 | 0.822 | 0.850 |
+| xquad-en | off-domain | 134 | 0.740 | 0.760 | 0.779 | 0.810 | 0.832 |
+| xquad-en | ↳ off-domain from negative.jsonl | 12 | 0.740 | 0.745 | 0.770 | 0.801 | 0.810 |
+| xquad-en | ↳ off-domain from halyard-golden | 92 | 0.742 | 0.760 | 0.776 | 0.805 | 0.820 |
+| xquad-en | ↳ off-domain from wiki-probes | 30 | 0.759 | 0.765 | 0.786 | 0.810 | 0.832 |
+
+## What 0.82 does on each corpus
+
+`belowRelevanceFloor` itself, escape hatch included. "…with the answer in the top 5" is a false refusal the ranking had right.
+
+| corpus | recall@5 (no floor) | heading@5 | answerable refused | …with the answer in the top 5 | absent-feature refused | off-domain refused |
+|---|---:|---:|---:|---:|---:|---:|
+| halyard | 0.717 | 0.696 | 1/92 (1.1%) | 0 | 1/12 (8.3%) | 94/108 (87.0%) |
+| wiki | 0.867 | 0.600 | 1/30 (3.3%) | 1 | 1/12 (8.3%) | 96/108 (88.9%) |
+| xquad-tr | 0.993 | 0.962 | 92/1190 (7.7%) | 84 | — | 104/134 (77.6%) |
+| xquad-en | 0.999 | 0.985 | 146/1190 (12.3%) | 145 | — | 114/134 (85.1%) |
+
+## Sweep — share refused per class
+
+| corpus | class | 0.78 | 0.79 | 0.80 | 0.81 | 0.82 | 0.83 | 0.84 | 0.85 | 0.86 | 0.87 | 0.88 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| halyard | answerable | 0% | 0% | 0% | 1% | 1% | 3% | 8% | 14% | 28% | 41% | 52% |
+| halyard | absent-feature | 0% | 0% | 0% | 8% | 8% | 17% | 25% | 33% | 33% | 33% | 42% |
+| halyard | off-domain | 60% | 67% | 77% | 83% | 87% | 87% | 90% | 90% | 90% | 90% | 90% |
+| wiki | answerable | 0% | 0% | 0% | 0% | 3% | 13% | 20% | 23% | 33% | 43% | 53% |
+| wiki | absent-feature | 0% | 0% | 8% | 8% | 8% | 8% | 17% | 33% | 58% | 58% | 58% |
+| wiki | off-domain | 67% | 78% | 83% | 86% | 89% | 93% | 94% | 94% | 94% | 94% | 94% |
+| xquad-tr | answerable | 0% | 0% | 3% | 4% | 8% | 13% | 19% | 28% | 38% | 49% | 61% |
+| xquad-tr | off-domain | 34% | 41% | 49% | 65% | 78% | 81% | 84% | 85% | 85% | 85% | 85% |
+| xquad-en | answerable | 2% | 4% | 5% | 8% | 12% | 19% | 27% | 37% | 48% | 59% | 69% |
+| xquad-en | off-domain | 45% | 58% | 72% | 79% | 85% | 87% | 87% | 87% | 87% | 87% | 87% |
+
+## The floor each corpus would have asked for
+
+Highest floor (0.001 grid) that refuses no answerable question, then at most 1% of them — and what each catches.
+
+| corpus | floor, 0 refused | off-domain caught | absent caught | floor, ≤1% refused | off-domain caught | absent caught |
+|---|---:|---:|---:|---:|---:|---:|
+| halyard | 0.804 | 85/108 (78.7%) | 1/12 (8.3%) | 0.804 | 85/108 (78.7%) | 1/12 (8.3%) |
+| wiki | 0.811 | 93/108 (86.1%) | 1/12 (8.3%) | 0.811 | 93/108 (86.1%) | 1/12 (8.3%) |
+| xquad-tr | 0.775 | 37/134 (27.6%) | — | 0.793 | 56/134 (41.8%) | — |
+| xquad-en | 0.738 | 0/134 (0.0%) | — | 0.773 | 44/134 (32.8%) | — |
+
+## Candidate (a′): a per-project floor set from probe questions the corpus cannot answer
+
+The floor is the highest top-hit score of `negative.jsonl`'s off-domain rows on that corpus (the calibration probes); it is scored on the corpus's answerable questions and on the off-domain rows **not** used to set it.
+
+| corpus | probe-derived floor | answerable refused | held-out off-domain refused | absent-feature refused |
+|---|---:|---:|---:|---:|
+| halyard | 0.839 | 6/92 (6.5%) | 86/96 (89.6%) | 2/12 (16.7%) |
+| wiki | 0.835 | 5/30 (16.7%) | 90/96 (93.8%) | 1/12 (8.3%) |
+| xquad-tr | 0.816 | 80/1190 (6.7%) | 85/122 (69.7%) | — |
+| xquad-en | 0.810 | 89/1190 (7.5%) | 94/122 (77.0%) | — |
+
+## Separation: the absolute score against three relative ones (AUC, answerable vs …)
+
+1.0 means some threshold on that feature splits the two classes perfectly on that corpus; 0.5 is a coin. `pooled` puts every corpus into one pool, which is what a **single global** threshold on that feature has to split.
+
+| corpus | vs | abs | gap | spread | zscore |
+|---|---|---:|---:|---:|---:|
+| halyard | off-domain | 0.997 | 0.776 | 0.687 | 0.830 |
+| halyard | absent-feature | 0.851 | 0.776 | 0.563 | 0.798 |
+| wiki | off-domain | 0.993 | 0.553 | 0.772 | 0.502 |
+| wiki | absent-feature | 0.778 | 0.764 | 0.608 | 0.828 |
+| xquad-tr | off-domain | 0.967 | 0.892 | 0.880 | 0.940 |
+| xquad-en | off-domain | 0.968 | 0.888 | 0.977 | 0.806 |
+| pooled | off-domain | 0.974 | 0.881 | 0.932 | 0.864 |
+
+## One global threshold per feature, fitted to refuse no answerable question in the pool
+
+| feature | threshold | halyard off-domain caught | wiki off-domain caught | xquad-tr off-domain caught | xquad-en off-domain caught |
+|---|---:|---:|---:|---:|---:|
+| abs | 0.7383 | 16/108 (14.8%) | 27/108 (25.0%) | 0/134 (0.0%) | 0/134 (0.0%) |
+| gap | -0.0810 | 0/108 (0.0%) | 0/108 (0.0%) | 0/134 (0.0%) | 0/134 (0.0%) |
+| spread | 0.0119 | 1/108 (0.9%) | 5/108 (4.6%) | 3/134 (2.2%) | 13/134 (9.7%) |
+| zscore | -0.1122 | 12/108 (11.1%) | 10/108 (9.3%) | 3/134 (2.2%) | 5/134 (3.7%) |
+
+## What a hit-level drop ratio would cost
+
+Keep only hits scoring at least `ratio × top`. It can never refuse a query — the top hit always passes — so this is only its price: answerable questions whose right file was in the top 5 and would be trimmed out of it, and hits kept on average.
+
+| corpus | 0.95 lost / kept | 0.97 lost / kept | 0.98 lost / kept | 0.99 lost / kept |
+|---|---:|---:|---:|---:|
+| halyard | 0 / 6.4 | 1 / 4.7 | 2 / 3.5 | 4 / 2.4 |
+| wiki | 0 / 7.5 | 1 / 5.7 | 1 / 4.3 | 3 / 3.0 |
+| xquad-tr | 0 / 2.8 | 6 / 1.9 | 8 / 1.6 | 13 / 1.4 |
+| xquad-en | 1 / 2.1 | 3 / 1.6 | 5 / 1.4 | 7 / 1.3 |
+
+## What it says
+
+**The band moves with the corpus's shape, and 0.82 does not travel.** On the two documentation corpora
+0.82 sits where ADR-0042 put it: under every answerable question but one, over most off-domain ones,
+and the floor either corpus would have asked for itself is 0.804 and 0.811. On encyclopaedic prose the
+answerable band sits lower — p10 0.822 (tr) and 0.812 (en) against 0.845 and 0.825 — and 0.82 refuses
+7.7 % of the Turkish questions and 12.3 % of the English ones, **84 and 145 of them with the answer in
+the top five**. Of the questions whose top hit is under 0.82, the right article is at rank 1 for 67 of
+102 (tr) and 139 of 167 (en). The floor those corpora would have asked for is 0.775 / 0.738 (refusing
+nothing) or 0.793 / 0.773 (refusing at most 1 %). The first half of Item 17 is therefore **not**
+closed: a single instance-wide number is right for documentation and wrong for prose.
+
+**What would have closed it**, recorded so the next measurement is judged by the same bar: on every
+measured corpus, 0.82 refusing at most 2 % of the answerable questions whose answer was in the top five,
+and the ≤1 % fitted floor within 0.02 of 0.82. halyard (0 %, 0.804) and wiki (3.3 %, 0.811) are on the
+edge of it; xquad-tr (7.1 %, 0.793) and xquad-en (12.2 %, 0.773) are well outside.
+
+**A relative criterion is worse than the absolute score, not better.** The absolute top score separates
+answerable from off-domain better than any relative feature on every corpus (AUC 0.967–0.997), and
+pooled across all four — which is what one global threshold has to split — it is still the best
+(0.974 against 0.932 for the spread of the top ten, 0.881 for the gap to the second hit). None of the
+relative features, fitted globally to refuse no answerable question, refuses more than 10 % of any
+corpus's off-domain questions. A hit-level drop ratio cannot refuse anything — the top hit always
+passes it — and trims answers out of the top five as it tightens (xquad-tr loses 6 at 0.97, 13 at
+0.99). Candidate (b) is not worth building.
+
+**A floor per project is the one that fits, set by the operator and not derived.** Deriving it from
+probe questions — the highest top score of `negative.jsonl`'s off-domain rows on that corpus
+(candidate a′) — lands at 0.839 and 0.835 on the documentation corpora and refuses 6.5 % and 16.7 % of
+their answerable questions: one hand-written probe that happens to score well decides the floor. On
+prose it lands at 0.816 / 0.810 and still refuses 6.7 % / 7.5 %. What the numbers support is a
+nullable per-project override of the global floor, with today's `SEARCH_SCORE_FLOOR` as the default,
+and the operator shown what it costs before changing it. It remains a query-level gate on the best
+hit, so it leaves ADR-0042's selection alone.
+
+## Reproducing it
+
+```bash
+npx tsx scripts/floor-calibration.ts --wiki=../wiki --json=floor.json    # Docker
+npx tsx scripts/floor-calibration.ts --corpora=halyard,xquad-tr          # a subset
+```
+
+Like `npm run eval`, it starts its own `pgvector` container unless `EVAL_DATABASE_URL` (or
+`DATABASE_URL`) points at a server it may create databases on. `--wiki` is a checkout of the
+Contextator wiki; without it the wiki corpus is skipped.
+
+---
+
+# The external set: XQuAD (2026-09-25)
+
+Retrieval on `eval/external/xquad/` — see its README for the source, the licence (CC BY-SA 4.0) and
+how the JSON becomes a corpus. **These numbers are not golden-set numbers and are never pooled with
+them**: 2380 questions beside 92 would be a pool that is almost all XQuAD, and the floors of
+[ADR-0044](../../.ssot/ADR.md#adr-0044) were argued from the golden set alone. Measured with
+`scripts/eval-external.ts`; each language is its own project in its own database.
+
+| set | articles | paragraphs | chunks | n | recall@1 | recall@5 | MRR@10 | heading@1 | heading@5 | refused at 0.82 | …with the answer in the top 5 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| xquad-tr | 48 | 240 | 779 | 1190 | 96.3% | 99.3% | 0.975 | 90.5% | 96.2% | 92 (7.7%) | 84 |
+| xquad-en | 48 | 240 | 764 | 1190 | 97.3% | 99.9% | 0.984 | 93.1% | 98.5% | 146 (12.3%) | 145 |
+
+Measured at local:Xenova/multilingual-e5-small:fp32:"query: "+"passage: " · CHUNK_MAX_TOKENS=96 · CHUNK_OVERLAP_TOKENS=24 · max_per_document=2, neighbor_context=1 · score_floor=0.82 · rerank off · tr → turkish, en → simple.
+
+Retrieval on prose with questions written against a single paragraph is close to saturated — recall@5
+99.3 % and 99.9 % — so this set's use is as a tripwire, not a scoreboard: a change that costs a point
+here has broken something the golden set cannot see. What it does show that the golden set does not is
+the relevance floor's price on a corpus of a different shape, in the last two columns.
+
+```bash
+npx tsx scripts/eval-external.ts                                        # report only
+npx tsx scripts/eval-external.ts --min-recall5=0.98 --min-heading5=0.95  # exits 2 when short
+```
+
+The run above used those two floors and passed. They are candidates, not a gate: nothing in CI runs
+this script on `main`.
