@@ -11,6 +11,7 @@ import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
 import { chunkMarkdown, embeddingText, estimateTokens } from '../../src/services/chunker.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
 import { setProjectScoreFloor } from '../../src/services/projects.js';
+import type { QueryLogEntry } from '../../src/services/query-log.js';
 import { belowRelevanceFloor } from '../../src/services/relevance.js';
 import { searchProject } from '../../src/services/search.js';
 import { type NewChunk, replaceDocument, storedDocumentContent } from '../../src/services/vector-store.js';
@@ -247,6 +248,60 @@ describe('a project with a floor of its own', () => {
     await setProjectScoreFloor(db, projectId, above);
     const text = await askThroughMcp(below);
     expect(text).toContain(`below this project's floor of ${above}`);
+  });
+});
+
+/**
+ * The server's `SEARCH_SCORE_FLOOR=0` is what the startup warning and the troubleshooting advice tell
+ * an operator to set when a model change makes every search answer "no good match". That advice has to
+ * work without first finding which projects carry a floor of their own, so `0` turns theirs off too.
+ */
+describe('the server’s 0, which turns every floor off', () => {
+  it.each([
+    ['a floor above the top score', () => above],
+    ['a floor of 1', () => 1],
+  ])('answers a project with %s', async (_label, column) => {
+    await setProjectScoreFloor(db, projectId, column());
+    const outcome = await okSearch(0);
+    expect(outcome.belowFloor).toBe(false);
+    expect(outcome.scoreFloor).toBe(0);
+    expect(outcome.scoreFloorOverridden).toBe(false);
+  });
+
+  it('decides exactly as the harness’s call without a floor does', async () => {
+    await setProjectScoreFloor(db, projectId, above);
+    const zero = await okSearch(0);
+    const none = await okSearch(undefined);
+    expect([zero.belowFloor, zero.scoreFloor, zero.scoreFloorOverridden]).toEqual([none.belowFloor, none.scoreFloor, none.scoreFloorOverridden]);
+  });
+
+  it('hands the agent the excerpts rather than the project’s refusal', async () => {
+    await setProjectScoreFloor(db, projectId, above);
+    const text = await askThroughMcp(0);
+    expect(text).not.toContain('floor of');
+    expect(text).toContain('handbook/delivery.md');
+  });
+});
+
+describe('what the log records beside the verdict', () => {
+  const logged = async (instanceFloor: number | undefined): Promise<QueryLogEntry> => {
+    const entries: QueryLogEntry[] = [];
+    const outcome = await searchProject(
+      { db, embeddings, scoreFloor: instanceFloor, queryLog: { record: (entry) => entries.push(entry) } },
+      { projectId, query: QUERY, limit: 5 },
+    );
+    if (outcome.status !== 'ok') throw new Error(`expected ok, got ${outcome.status}`);
+    expect(entries).toHaveLength(1);
+    return entries[0];
+  };
+
+  it('is the floor the search was decided against — the project’s, the server’s, or 0 for off', async () => {
+    await setProjectScoreFloor(db, projectId, above);
+    expect(await logged(below)).toMatchObject({ belowFloor: true, scoreFloor: above });
+    await setProjectScoreFloor(db, projectId, null);
+    expect(await logged(below)).toMatchObject({ belowFloor: false, scoreFloor: below });
+    await setProjectScoreFloor(db, projectId, above);
+    expect(await logged(0)).toMatchObject({ belowFloor: false, scoreFloor: 0 });
   });
 });
 

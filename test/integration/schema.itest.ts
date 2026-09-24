@@ -234,7 +234,8 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     // same shape as `0012_mcp_auth_default_token`'s: `user_sessions \| \d+ \| auth_method \|` names the
     // table and column position, and `user_sessions_auth_method_check` names its CHECK constraint; and
     // `0017_project_score_floor`, the same shape on `projects`: `projects \| \d+ \| score_floor \|` and
-    // `projects_score_floor_check`, a project's own relevance floor and the CHECK holding it in [0, 1]. So
+    // `projects_score_floor_check`, a project's own relevance floor and the CHECK holding it in [0, 1]
+    // (its `search_queries.score_floor` is inside `^search_quer` already). So
     // the claim is no longer "nothing changed": it is that nothing changed *except* what those
     // migrations say they change, and the lines that moved are checked by name rather than counted.
     await applySchema(database);

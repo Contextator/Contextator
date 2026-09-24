@@ -619,6 +619,13 @@ export const searchQueries = pgTable(
     topScore: doublePrecision('top_score'),
     /** Whether the agent was told "no good match" instead of being handed these hits (ADR-0042). */
     belowFloor: boolean('below_floor').notNull().default(false),
+    /**
+     * The relevance floor `below_floor` was decided against — the project's own or the server's, `0`
+     * when it was off. NULL on rows logged before the floor was recorded. Without it a window that
+     * spans a change of floor reads every refusal as the current floor's; with it the summary scopes
+     * to one floor the way it scopes to one model.
+     */
+    scoreFloor: doublePrecision('score_floor'),
     /** Wall clock of the whole search, embedding included. */
     durationMs: integer('duration_ms').notNull().default(0),
     /**

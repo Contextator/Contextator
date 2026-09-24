@@ -67,6 +67,8 @@ export interface QueryLogEntry {
   version?: string;
   hits: QueryLogHit[];
   belowFloor: boolean;
+  /** The floor `belowFloor` was decided against, `0` when it was off. */
+  scoreFloor: number;
   durationMs: number;
   /** The provider-qualified id of the encoder that answered, and the generation it answered from. */
   embeddingModel: string;
@@ -131,6 +133,7 @@ export function buildQueryLogRows(
       // average over a column where "no answer" reads as 0 is an average of two different things.
       topScore: entry.hits.length > 0 ? entry.hits[0].score : null,
       belowFloor: entry.belowFloor,
+      scoreFloor: entry.scoreFloor,
       durationMs: Math.max(0, Math.round(entry.durationMs)),
       embeddingModel: entry.embeddingModel,
       liveGeneration: entry.liveGeneration,

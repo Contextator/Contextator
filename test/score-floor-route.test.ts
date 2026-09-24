@@ -53,7 +53,7 @@ function stubDb(stub: Stub): Db {
   } as unknown as Db;
 }
 
-async function buildApi(db: Db): Promise<FastifyInstance> {
+async function buildApi(db: Db, instanceFloor: number): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
   await app.register(cookie);
   const ctx = {
@@ -65,7 +65,7 @@ async function buildApi(db: Db): Promise<FastifyInstance> {
       SECRET_KEY: undefined,
       SEARCH_QUERY_LOG: true,
       SEARCH_QUERY_LOG_RETENTION_DAYS: 30,
-      SEARCH_SCORE_FLOOR: INSTANCE_FLOOR,
+      SEARCH_SCORE_FLOOR: instanceFloor,
     },
     db,
     log: app.log,
@@ -102,8 +102,8 @@ function newStub(scoreFloor: number | null = null, found = true): Stub {
   };
 }
 
-async function call(stub: Stub, method: 'GET' | 'PATCH', url: string, payload?: unknown) {
-  const app = await buildApi(stubDb(stub));
+async function call(stub: Stub, method: 'GET' | 'PATCH', url: string, payload?: unknown, instanceFloor = INSTANCE_FLOOR) {
+  const app = await buildApi(stubDb(stub), instanceFloor);
   const res = await app.inject({
     method,
     url,
@@ -121,7 +121,7 @@ describe('setting a project’s relevance floor', () => {
     const stub = newStub();
     const res = await patch(stub, { floor });
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({ scoreFloor: floor, instanceScoreFloor: INSTANCE_FLOOR });
+    expect(res.json()).toEqual({ scoreFloor: floor, instanceScoreFloor: INSTANCE_FLOOR, effectiveScoreFloor: floor ?? INSTANCE_FLOOR });
     expect(stub.written).toEqual([floor]);
   });
 
@@ -159,5 +159,100 @@ describe('the floor the query summary reports', () => {
   it('is the project’s when it has one, including 0 for off', async () => {
     expect((await summary(newStub(0.78))).json().scoreFloor).toEqual({ project: 0.78, instance: INSTANCE_FLOOR, effective: 0.78 });
     expect((await summary(newStub(0))).json().scoreFloor).toEqual({ project: 0, instance: INSTANCE_FLOOR, effective: 0 });
+  });
+
+  it('is off, the project’s own included, when the server’s floor is 0', async () => {
+    const res = await call(newStub(0.9), 'GET', `/api/projects/${PROJECT_ID}/queries/summary`, undefined, 0);
+    expect(res.json().scoreFloor).toEqual({ project: 0.9, instance: 0, effective: 0 });
+  });
+});
+
+describe('naming the floor a configuration was decided against', () => {
+  const summary = (qs: string) => call(newStub(), 'GET', `/api/projects/${PROJECT_ID}/queries/summary?${qs}`);
+
+  it.each([
+    ['a number', 'model=local%3Astub%3Afp32&generation=3&floor=0.77'],
+    ['none, for the rows logged before it was recorded', 'model=local%3Astub%3Afp32&generation=3&floor=none'],
+    ['nothing, which takes the biggest floor of that model and generation', 'model=local%3Astub%3Afp32&generation=3'],
+  ])('takes %s', async (_label, qs) => {
+    expect((await summary(qs)).statusCode).toBe(200);
+  });
+
+  it('answers an unmatched floor with an empty configuration that names it', async () => {
+    const res = await summary('model=local%3Astub%3Afp32&generation=3&floor=0.77');
+    expect(res.json().configuration).toMatchObject({ embeddingModel: 'local:stub:fp32', liveGeneration: 3, scoreFloor: 0.77, queries: 0 });
+    expect((await summary('model=local%3Astub%3Afp32&generation=3&floor=none')).json().configuration.scoreFloor).toBeNull();
+  });
+
+  it.each([
+    ['without the model and generation it narrows', 'floor=0.77'],
+    ['above 1', 'model=m&generation=3&floor=1.5'],
+    ['that is not a number', 'model=m&generation=3&floor=high'],
+    ['that is negative', 'model=m&generation=3&floor=-0.1'],
+  ])('refuses a floor %s', async (_label, qs) => {
+    expect((await summary(qs)).statusCode).toBe(400);
+  });
+});
+
+describe('the price of a floor, before it is set', () => {
+  const preview = (qs: string, stub = newStub(), instanceFloor = INSTANCE_FLOOR) =>
+    call(stub, 'GET', `/api/projects/${PROJECT_ID}/score-floor/preview?${qs}`, undefined, instanceFloor);
+
+  it('names the floor now and the one proposed, over the encoder and generation the next search uses', async () => {
+    const res = await preview('floor=0.77');
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      configuration: { embeddingModel: 'local:stub:fp32', liveGeneration: 3 },
+      current: { project: null, effective: INSTANCE_FLOOR },
+      proposed: { project: 0.77, effective: 0.77 },
+      instanceOff: false,
+      atMost: true,
+      searches: 0,
+      gained: 0,
+      lost: 0,
+      gainedSamples: [],
+      lostSamples: [],
+    });
+  });
+
+  it('previews handing the project back to the server’s floor', async () => {
+    const res = await preview('floor=instance', newStub(0.77));
+    expect(res.json()).toMatchObject({ current: { project: 0.77, effective: 0.77 }, proposed: { project: null, effective: INSTANCE_FLOOR } });
+  });
+
+  it('says a project floor changes nothing while the server’s floor is off', async () => {
+    const res = await preview('floor=0.9', newStub(0.77), 0);
+    expect(res.json()).toMatchObject({ instanceOff: true, current: { effective: 0 }, proposed: { project: 0.9, effective: 0 } });
+  });
+
+  it.each([
+    ['missing', ''],
+    ['above 1', 'floor=1.5'],
+    ['a word', 'floor=off'],
+    ['beyond the window', 'floor=0.8&days=365'],
+  ])('refuses a floor %s', async (_label, qs) => {
+    expect((await preview(qs)).statusCode).toBe(400);
+  });
+
+  it('answers 404 for a project that is not there', async () => {
+    const stub = newStub();
+    const db = stubDb(stub);
+    (db as unknown as { select: () => unknown }).select = () => ({ from: () => ({ where: () => rows([]) }) });
+    const app = await buildApi(db, INSTANCE_FLOOR);
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/projects/${PROJECT_ID}/score-floor/preview?floor=0.8`,
+      headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+    });
+    await app.close();
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('is a viewer’s read, like the summary it prices, while setting the floor stays a manager’s', () => {
+    expect(requiredProjectAccess('GET', '/api/projects/:id/score-floor/preview')).toBe('viewer');
+    expect(requiredProjectAccess('GET', '/api/projects/:id/score-floor/preview')).toBe(
+      requiredProjectAccess('GET', '/api/projects/:id/queries/summary'),
+    );
+    expect(requiredProjectAccess('PATCH', '/api/projects/:id/score-floor')).toBe('manager');
   });
 });

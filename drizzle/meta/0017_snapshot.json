@@ -1,5 +1,5 @@
 {
-  "id": "6ceafcf3-f993-4b91-87e1-d64b5187e4d1",
+  "id": "3557dcbc-dc88-4fa7-9abc-54d618eed747",
   "prevId": "252017e0-e0a8-462b-86df-0ebd6f136d3d",
   "version": "7",
   "dialect": "postgresql",
@@ -1718,6 +1718,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "score_floor": {
+          "name": "score_floor",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
         },
         "duration_ms": {
           "name": "duration_ms",

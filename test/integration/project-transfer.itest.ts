@@ -145,6 +145,7 @@ async function seedOrigin(db: Db): Promise<void> {
       embeddingModel: MODEL_ID,
       mcpAuth: 'token',
       queryLogEnabled: false,
+      scoreFloor: 0.78,
       lastIndexedAt: new Date('2026-09-10T08:00:00Z'),
       status: 'idle',
     })
@@ -448,9 +449,10 @@ describe('importing it into a second instance', () => {
     expect(landed.embeddingModel).toBe(MODEL_ID);
     expect(landed.documentCount).toBe(3);
     expect(landed.chunkCount).toBe(5);
-    // Two project-level decisions that are the project's and not the instance's, so they travel.
+    // Project-level decisions that are the project's and not the instance's, so they travel.
     expect(landed.mcpAuth).toBe('token');
     expect(landed.queryLogEnabled).toBe(false);
+    expect(landed.scoreFloor).toBe(0.78);
 
     const rows = await destination.db.select().from(documents).where(eq(documents.projectId, report.projectId));
     expect(rows.every((r) => r.indexGeneration === 0)).toBe(true);

@@ -12,9 +12,11 @@
 // and the score, ordered so that "asked forty-one times and never above 0.84" rises to the top, and
 // the operator makes the judgement the product cannot.
 //
-// Every figure describes **one embedding model and one index generation**, named above the table. A
-// week that spans a model change averaged into one number is the confusion the whole feature was
-// written about.
+// Every figure describes **one embedding model, one index generation and one relevance floor**, named
+// above the table. A week that spans a model change averaged into one number is the confusion the
+// whole feature was written about, and a floor change is the same confusion one column over: the week
+// before it refused different searches than the week after, and one "refused" figure across both
+// describes neither.
 //
 // As with search.js, everything transient lives in state.queries: app.js rebuilds #detail on every
 // poll, and a tab or a window length held in the DOM would vanish while somebody was reading it.
@@ -42,7 +44,13 @@ const TABS = [
   { key: 'volume', label: 'Volume' },
 ];
 
-const configKey = (c) => (c ? `${c.embeddingModel}@${c.liveGeneration}` : '');
+/**
+ * `<model>@<generation>@<floor>`, with `none` for a floor the log did not record (searches logged before
+ * the column existed). The model is split off last-`@`-first, so a model id that contains one survives.
+ */
+const configKey = (c) => (c ? `${c.embeddingModel}@${c.liveGeneration}@${c.scoreFloor ?? 'none'}` : '');
+const modelKey = (c) => `${c.embeddingModel}@${c.liveGeneration}`;
+const floorText = (floor) => (floor === null ? 'floor not recorded' : floor === 0 ? 'floor off' : `floor ${floor}`);
 const score = (value) => (value === null || value === undefined ? '—' : value.toFixed(3));
 
 /** Everything that decides which request to send; a change of any part of it refetches. */
@@ -55,9 +63,12 @@ function params(limit) {
   const q = state.queries;
   const search = new URLSearchParams({ days: String(q.days), actor: q.actor, limit: String(limit) });
   if (q.configKey) {
-    const at = q.configKey.lastIndexOf('@');
-    search.set('model', q.configKey.slice(0, at));
-    search.set('generation', q.configKey.slice(at + 1));
+    const floorAt = q.configKey.lastIndexOf('@');
+    const rest = q.configKey.slice(0, floorAt);
+    const generationAt = rest.lastIndexOf('@');
+    search.set('model', rest.slice(0, generationAt));
+    search.set('generation', rest.slice(generationAt + 1));
+    search.set('floor', q.configKey.slice(floorAt + 1));
   }
   return search;
 }
@@ -108,6 +119,8 @@ function reset(projectId) {
     error: '',
     data: null,
     confirmPurge: false,
+    floorPending: undefined,
+    floorPreview: null,
   });
 }
 
@@ -154,6 +167,8 @@ function controls(project) {
         'aria-label': label,
         onchange: (event) => {
           q[key] = key === 'days' ? Number(event.target.value) : event.target.value;
+          // A price read off another window is not the price of this one.
+          if (q.floorPending !== undefined) void previewFloor(project, q.floorPending);
           void loadQuerySummary();
           emit('render');
         },
@@ -206,7 +221,12 @@ function configurationLine(data) {
   if (!chosen) {
     return el('p', { class: 'hint', text: 'Nothing was asked of this project in this window.' });
   }
-  const stale = data.current.embeddingModel && configKey(chosen) !== `${data.current.embeddingModel}@${data.current.liveGeneration}`;
+  const stale = data.current.embeddingModel && modelKey(chosen) !== `${data.current.embeddingModel}@${data.current.liveGeneration}`;
+  // The same model and generation decided against another floor: the other side of a floor change.
+  const otherFloors = data.configurations
+    .filter((c) => modelKey(c) === modelKey(chosen) && configKey(c) !== configKey(chosen))
+    .reduce((sum, c) => sum + c.queries, 0);
+  const otherConfigurations = data.queriesOutsideConfiguration - otherFloors;
   return el('div', { class: 'queries-config' }, [
     el('span', { class: 'field-hint', text: 'These figures describe' }),
     el(
@@ -224,14 +244,20 @@ function configurationLine(data) {
         el('option', {
           value: configKey(c),
           selected: configKey(c) === configKey(chosen) || undefined,
-          text: `${c.embeddingModel} · generation ${c.liveGeneration} · ${fmt(c.queries)} searches`,
+          text: `${c.embeddingModel} · generation ${c.liveGeneration} · ${floorText(c.scoreFloor)} · ${fmt(c.queries)} searches`,
         }),
       ),
     ),
-    data.queriesOutsideConfiguration > 0
+    otherFloors > 0
       ? el('span', {
           class: 'field-hint warn',
-          text: `${fmt(data.queriesOutsideConfiguration)} more searches in this window were answered by another configuration and are not in these figures.`,
+          text: `${fmt(otherFloors)} more searches of this model and generation were decided against another relevance floor. They are kept apart because a floor changes which searches were refused; pick them above to compare.`,
+        })
+      : null,
+    otherConfigurations > 0
+      ? el('span', {
+          class: 'field-hint warn',
+          text: `${fmt(otherConfigurations)} more searches in this window were answered by another model or generation and are not in these figures.`,
         })
       : null,
     stale
@@ -474,40 +500,140 @@ function foot(project, data, mayManage) {
 }
 
 /**
- * The relevance floor these searches were decided against, and — for a manager — a choice of this
- * project's own. A select and not a number box: app.js rebuilds the panel on every poll, and a select
- * survives that where a half-typed number would not. The presets span what eval/BASELINE.md measured
- * the right floor to be across corpus shapes (0.773 on English prose to 0.811 on a product guide);
- * a value set through the API outside them is kept as an option of its own so it is never misread.
+ * The relevance floor the project's next search will be decided against — which is not necessarily the
+ * floor of the figures above; the configuration line names that one — and, for a manager, a choice of
+ * this project's own. A select and not a number box: app.js rebuilds the panel on every poll, and a
+ * select survives that where a half-typed number would not.
+ *
+ * Choosing a value does not apply it. It asks the server what the value would have done to the searches
+ * this window already holds — how many refused ones it would have answered and how many answered ones it
+ * would have refused, with the questions behind them — and only the Apply button beside that price sends
+ * the change. A floor is the one setting here that silently decides what agents are told.
+ *
+ * The presets span what eval/BASELINE.md measured across corpus shapes: the floor that falsely refuses
+ * at most 1% of answerable questions runs from 0.773 on English prose to 0.811 on a product guide (the
+ * floor that refuses none of them goes down to 0.738). A value set through the API outside them is kept
+ * as an option of its own so it is never misread.
  */
 const FLOOR_PRESETS = [0.84, 0.83, 0.82, 0.81, 0.8, 0.79, 0.78, 0.77, 0.76, 0.75];
 
+/** The select's value for a project column: '' is "the server's default". */
+const floorValue = (own) => (own === null ? '' : String(own));
+
 function floorLine(project, data, mayManage) {
   if (!data || !data.scoreFloor) return null;
+  const q = state.queries;
   const { project: own, instance, effective } = data.scoreFloor;
-  const source = own === null ? `this server’s default` : `set for this project; the server’s default is ${instance}`;
+  const source =
+    instance <= 0
+      ? 'SEARCH_SCORE_FLOOR is 0 on this server, which turns every project’s floor off, this one’s included'
+      : own === null
+        ? 'this server’s default'
+        : `set for this project; the server’s default is ${instance}`;
   const hint = el('span', {
     class: 'field-hint',
-    text: `Relevance floor ${effective === 0 ? 'off' : effective} (${source}). Below it an agent is told “no good match” instead of the hits.`,
+    text: `Current relevance floor: ${effective === 0 ? 'off' : effective} (${source}). Below it an agent is told “no good match” instead of the hits.`,
   });
   if (!mayManage) return el('div', { class: 'token-foot' }, [hint]);
   const values = new Set(FLOOR_PRESETS);
   if (own !== null && own > 0) values.add(own);
+  const shown = q.floorPending === undefined ? floorValue(own) : floorValue(q.floorPending);
   const options = [
-    el('option', { value: '', selected: own === null || undefined, text: `Server default (${instance})` }),
-    ...[...values].sort((a, b) => b - a).map((v) => el('option', { value: String(v), selected: own === v || undefined, text: String(v) })),
-    el('option', { value: '0', selected: own === 0 || undefined, text: 'Off (0)' }),
+    el('option', { value: '', selected: shown === '' || undefined, text: `Server default (${instance})` }),
+    ...[...values].sort((a, b) => b - a).map((v) => el('option', { value: String(v), selected: shown === String(v) || undefined, text: String(v) })),
+    el('option', { value: '0', selected: shown === '0' || undefined, text: 'Off (0)' }),
   ];
-  return el('div', { class: 'token-foot' }, [
+  return el('div', { class: 'floor-change' }, [
+    el('div', { class: 'token-foot' }, [
+      el(
+        'select',
+        {
+          'aria-label': `Relevance floor for ${project.name}`,
+          onchange: (event) => {
+            const floor = event.target.value === '' ? null : Number(event.target.value);
+            if (floor === own) cancelFloor();
+            else void previewFloor(project, floor);
+          },
+        },
+        options,
+      ),
+      hint,
+    ]),
+    q.floorPending === undefined ? null : floorPrice(project, q.floorPending),
+  ]);
+}
+
+/** What the chosen floor would have done to this window, and the only way to apply it. */
+function floorPrice(project, floor) {
+  const q = state.queries;
+  const preview = q.floorPreview;
+  const target = floor === null ? 'the server’s default' : floor === 0 ? 'off' : String(floor);
+  const loading = !preview || preview.status === 'loading';
+  const failed = preview?.status === 'error';
+  const p = preview?.data;
+
+  const parts = [];
+  if (loading) parts.push(el('p', { class: 'field-hint', text: 'Reading what this floor would have done to the searches in this window…' }));
+  else if (failed) parts.push(el('p', { class: 'field-hint warn', text: `The price could not be read: ${preview.error}` }));
+  else {
+    const change = (n) => `${fmt(n)} search${n === 1 ? '' : 'es'}`;
+    parts.push(
+      el('p', {
+        class: 'field-hint',
+        text:
+          `Of the ${change(p.searches)} this project answered in the last ${p.window.days} day${p.window.days === 1 ? '' : 's'} ` +
+          `(${p.configuration.embeddingModel}, generation ${p.configuration.liveGeneration}), a floor of ${p.proposed.effective === 0 ? 'off' : p.proposed.effective} ` +
+          `instead of ${p.current.effective === 0 ? 'off' : p.current.effective} would have answered at most ${change(p.gained)} ` +
+          `that were refused, and refused at most ${change(p.lost)} that were answered.`,
+      }),
+    );
+    if (p.instanceOff) {
+      parts.push(
+        el('p', {
+          class: 'field-hint warn',
+          text: 'SEARCH_SCORE_FLOOR is 0 on this server, so every project’s floor is off: saving this changes nothing until the server’s floor is switched on.',
+        }),
+      );
+    }
+    parts.push(samples('Answered instead of refused', p.gainedSamples), samples('Refused instead of answered', p.lostSamples));
+    parts.push(
+      el('p', {
+        class: 'field-hint',
+        text:
+          'Each count is an upper bound. The log keeps a search’s best score but not whether an identifier in it matched word for word, ' +
+          'and such a search is answered whatever its score — so some searches counted here as refused were in fact answered.',
+      }),
+    );
+  }
+  return el('div', { class: 'floor-preview' }, [
+    ...parts,
+    el('div', { class: 'token-foot' }, [
+      el('button', {
+        type: 'button',
+        class: 'primary small',
+        text: failed ? `Set the floor to ${target} without a price` : `Set the floor to ${target}`,
+        disabled: loading || undefined,
+        onclick: () => void setFloor(project, floor),
+      }),
+      el('button', { type: 'button', class: 'ghost small', text: 'Cancel', onclick: cancelFloor }),
+    ]),
+  ]);
+}
+
+function samples(title, rows) {
+  if (!rows || rows.length === 0) return null;
+  return el('div', { class: 'floor-samples' }, [
+    el('span', { class: 'field-hint', text: title }),
     el(
-      'select',
-      {
-        'aria-label': `Relevance floor for ${project.name}`,
-        onchange: (event) => void setFloor(project, event.target.value === '' ? null : Number(event.target.value)),
-      },
-      options,
+      'ul',
+      {},
+      rows.map((row) =>
+        el('li', {}, [
+          el('span', { text: row.query }),
+          el('span', { class: 'mono field-hint', text: ` ×${fmt(row.asked)} · best ${score(row.topScore)}` }),
+        ]),
+      ),
     ),
-    hint,
   ]);
 }
 
@@ -533,9 +659,37 @@ async function setRecording(project, enabled) {
   }
 }
 
+/** Prices a floor against the window on screen; the newest choice wins a race between two. */
+async function previewFloor(project, floor) {
+  const q = state.queries;
+  const search = new URLSearchParams({ floor: floor === null ? 'instance' : String(floor), days: String(q.days), actor: q.actor });
+  const key = `${project.id}|${search}`;
+  q.floorPending = floor;
+  q.floorPreview = { key, status: 'loading', data: null, error: '' };
+  emit('render');
+  try {
+    const data = await api(`/api/projects/${project.id}/score-floor/preview?${search}`);
+    if (q.floorPreview?.key !== key) return; // chose again, or moved on, meanwhile
+    q.floorPreview = { key, status: 'done', data, error: '' };
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) return;
+    if (q.floorPreview?.key !== key) return;
+    q.floorPreview = { key, status: 'error', data: null, error: err.message };
+  }
+  emit('render');
+}
+
+function cancelFloor() {
+  state.queries.floorPending = undefined;
+  state.queries.floorPreview = null;
+  emit('render');
+}
+
 async function setFloor(project, floor) {
   try {
     await api(`/api/projects/${project.id}/score-floor`, { method: 'PATCH', body: { floor } });
+    state.queries.floorPending = undefined;
+    state.queries.floorPreview = null;
     toast(floor === null ? `${project.name} uses the server’s relevance floor again` : `${project.name}’s relevance floor is now ${floor}`);
     await loadQuerySummary(true);
   } catch (err) {

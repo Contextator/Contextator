@@ -2684,3 +2684,21 @@ body.auth .gate-card a {
     display: none;
   }
 }
+
+/* The price of a relevance floor, shown before it is applied (queries.js). */
+.floor-preview {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--neutral-tint);
+  border-radius: 7px;
+}
+
+.floor-preview .field-hint.warn {
+  color: var(--warn-text);
+}
+
+.floor-samples ul {
+  margin: 4px 0 8px;
+  padding-left: 18px;
+  font-size: 13px;
+}

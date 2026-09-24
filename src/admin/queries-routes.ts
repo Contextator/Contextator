@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import { NotFoundError, getProjectById, setProjectScoreFloor } from '../services/projects.js';
+import { effectiveScoreFloor } from '../services/relevance.js';
 import { buildExport, toJsonl } from '../services/query-export.js';
 import {
   DEFAULT_EXPORT_ROWS,
@@ -10,6 +11,7 @@ import {
   MAX_EXPORT_ROWS,
   MAX_SUMMARY_DAYS,
   MAX_SUMMARY_ROWS,
+  type ModelScope,
   type QueryConfiguration,
   type SummaryActor,
   type SummaryScope,
@@ -17,6 +19,7 @@ import {
   mostReturnedChunks,
   neverReturnedDocuments,
   oldestLoggedQuery,
+  previewScoreFloor,
   purgeProjectQueryLog,
   repeatedQuestions,
   setQueryLogEnabled,
@@ -37,17 +40,30 @@ import {
 
 const ProjectParams = z.object({ id: z.uuid() });
 
+/** A cosine similarity in a query string: digits, an optional fraction, between 0 and 1. */
+const floorNumber = (special: string) =>
+  z
+    .string()
+    .regex(new RegExp(`^(${special}|\\d+(\\.\\d+)?)$`), `a floor between 0 and 1, or ${special}`)
+    .transform((v) => (v === special ? null : Number(v)))
+    .refine((v) => v === null || v <= 1, 'a floor is between 0 and 1');
+
 /**
  * A window, whose searches, one retrieval configuration, and a page size.
  *
  * `model` and `generation` travel together or not at all. A generation without the model it belongs to
  * names half a configuration, and half a configuration is the averaging this panel exists to prevent.
+ * `floor` — the relevance floor the searches were decided against, `none` for the rows logged before it
+ * was recorded — narrows a named configuration and so needs the other two; without it the biggest
+ * floor the named model and generation hold is taken, which is what a caller from before the floor was
+ * part of the configuration meant.
  */
 const SummaryFields = {
   days: z.coerce.number().int().min(1).max(MAX_SUMMARY_DAYS).default(DEFAULT_SUMMARY_DAYS),
   actor: z.enum(['mcp', 'dashboard', 'all']).default('mcp'),
   model: z.string().min(1).max(200).optional(),
   generation: z.coerce.number().int().min(0).optional(),
+  floor: floorNumber('none').optional(),
 };
 
 /** The pairing rule, spelled once and applied to both read routes. */
@@ -55,14 +71,28 @@ const bothOrNeither = <T extends { model?: string; generation?: number }>(q: T):
 const PAIRING = {
   message: 'model and generation are given together or not at all: a generation without its model names half a retrieval configuration',
 };
+const floorNeedsModel = <T extends { model?: string; floor?: number | null }>(q: T): boolean => q.floor === undefined || q.model !== undefined;
+const FLOOR_PAIRING = { message: 'floor narrows a named configuration and is given with model and generation' };
 
 const SummaryQuery = z
   .object({ ...SummaryFields, limit: z.coerce.number().int().min(1).max(MAX_SUMMARY_ROWS).default(DEFAULT_SUMMARY_ROWS) })
-  .refine(bothOrNeither, PAIRING);
+  .refine(bothOrNeither, PAIRING)
+  .refine(floorNeedsModel, FLOOR_PAIRING);
 
 const ExportQuery = z
   .object({ ...SummaryFields, limit: z.coerce.number().int().min(1).max(MAX_EXPORT_ROWS).default(DEFAULT_EXPORT_ROWS) })
-  .refine(bothOrNeither, PAIRING);
+  .refine(bothOrNeither, PAIRING)
+  .refine(floorNeedsModel, FLOOR_PAIRING);
+
+/**
+ * The floor a manager is about to set — a number, or `instance` for "hand it back to the server's" —
+ * over a window of the project's own searches. What a `PATCH` would store, asked as a `GET` first.
+ */
+const PreviewQuery = z.object({
+  floor: floorNumber('instance'),
+  days: SummaryFields.days,
+  actor: SummaryFields.actor,
+});
 
 const SwitchBody = z.object({ enabled: z.boolean() });
 
@@ -90,7 +120,7 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
   /** The shared first half of both read routes: the project, the window, and the configuration. */
   async function resolve(
     id: string,
-    query: { days: number; actor: SummaryActor; model?: string; generation?: number },
+    query: { days: number; actor: SummaryActor; model?: string; generation?: number; floor?: number | null },
   ): Promise<{
     project: Awaited<ReturnType<typeof getProjectById>>;
     from: Date;
@@ -110,9 +140,16 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
         : // A configuration the caller named that the window does not contain is an empty panel rather
           // than an error: it is a legitimate question ("what did generation 2 look like?") whose
           // honest answer is "nothing in this window", and the list beside it says what there is.
-          (configurations.find((c) => c.embeddingModel === query.model && c.liveGeneration === query.generation) ?? {
+          // `configurations` is biggest first, so without a floor the first match is the biggest one.
+          (configurations.find(
+            (c) =>
+              c.embeddingModel === query.model &&
+              c.liveGeneration === query.generation &&
+              (query.floor === undefined || c.scoreFloor === query.floor),
+          ) ?? {
             embeddingModel: query.model,
             liveGeneration: query.generation ?? 0,
+            scoreFloor: query.floor ?? null,
             queries: 0,
             firstAt: from.toISOString(),
             lastAt: from.toISOString(),
@@ -145,14 +182,15 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
       logEnabled: project?.queryLogEnabled === true,
       instanceLogEnabled: config.SEARCH_QUERY_LOG,
       /**
-       * The relevance floor this project's searches are decided against, and where it comes from. The
-       * panel is where the operator reads `below_floor` rows, so it is where the number that set them
-       * is shown — and where a manager changes it.
+       * The relevance floor this project's **next** search is decided against, and where it comes from.
+       * The floor the figures below were decided against is `configuration.scoreFloor`, which is not
+       * always this one. `effective` is `0` whenever the instance's is — the server's `0` turns every
+       * project's own floor off with it.
        */
       scoreFloor: {
         project: project?.scoreFloor ?? null,
         instance: config.SEARCH_SCORE_FLOOR,
-        effective: project?.scoreFloor ?? config.SEARCH_SCORE_FLOOR,
+        effective: effectiveScoreFloor(config.SEARCH_SCORE_FLOOR, project?.scoreFloor ?? null),
       },
       configurations,
       configuration,
@@ -172,6 +210,7 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
       actor: query.actor,
       embeddingModel: configuration.embeddingModel,
       liveGeneration: configuration.liveGeneration,
+      scoreFloor: configuration.scoreFloor,
     };
     const [questions, neverReturned, chunks, volume] = await Promise.all([
       repeatedQuestions(db, scope, query.limit),
@@ -204,6 +243,7 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
             actor: query.actor,
             embeddingModel: configuration.embeddingModel,
             liveGeneration: configuration.liveGeneration,
+            scoreFloor: configuration.scoreFloor,
           },
           query.limit,
         )
@@ -228,6 +268,49 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
   });
 
   /**
+   * What a floor would cost before it is set: of the searches this project's current encoder and live
+   * generation answered in the window, how many the proposed floor would answer that the current one
+   * refused, and how many it would refuse that the current one answered — with a few of each.
+   *
+   * A `viewer`'s, by the `GET` default: it reads the same log the summary does and changes nothing.
+   * The dashboard sends the `PATCH` only after a manager has read this and confirmed it.
+   */
+  app.get('/api/projects/:id/score-floor/preview', async (req) => {
+    const { id } = ProjectParams.parse(req.params);
+    const query = PreviewQuery.parse(req.query);
+    const project = await getProjectById(db, id);
+    if (!project) throw new NotFoundError('Project not found');
+
+    const to = new Date();
+    const from = new Date(to.getTime() - query.days * 24 * 60 * 60 * 1000);
+    const scope: ModelScope = {
+      projectId: id,
+      from,
+      to,
+      actor: query.actor,
+      // The encoder the next search will use, spelled the way the log spells it.
+      embeddingModel: ctx.embeddings.id,
+      liveGeneration: project.liveGeneration,
+    };
+    const current = effectiveScoreFloor(config.SEARCH_SCORE_FLOOR, project.scoreFloor);
+    const proposed = effectiveScoreFloor(config.SEARCH_SCORE_FLOOR, query.floor);
+    const preview = await previewScoreFloor(db, scope, current, proposed);
+    return {
+      window: { days: query.days, from: from.toISOString(), to: to.toISOString() },
+      actor: query.actor,
+      configuration: { embeddingModel: scope.embeddingModel, liveGeneration: scope.liveGeneration },
+      current: { project: project.scoreFloor, effective: current },
+      proposed: { project: query.floor, effective: proposed },
+      instance: config.SEARCH_SCORE_FLOOR,
+      /** The server's `0` turns every project's floor off: a column set now changes nothing until it is on. */
+      instanceOff: config.SEARCH_SCORE_FLOOR <= 0,
+      /** Every count is an upper bound; see `FloorPreview`. */
+      atMost: true,
+      ...preview,
+    };
+  });
+
+  /**
    * `manager`, by its row in `PROJECT_ROUTE_OVERRIDES`: what this project refuses to answer is the same
    * class of decision as whether it records what it was asked. `null` returns the project to the
    * instance's `SEARCH_SCORE_FLOOR`; the next search reads the new value.
@@ -237,7 +320,11 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
     const { floor } = FloorBody.parse(req.body);
     const row = await setProjectScoreFloor(db, id, floor);
     if (!row) throw new NotFoundError('Project not found');
-    return { scoreFloor: row.scoreFloor, instanceScoreFloor: config.SEARCH_SCORE_FLOOR };
+    return {
+      scoreFloor: row.scoreFloor,
+      instanceScoreFloor: config.SEARCH_SCORE_FLOOR,
+      effectiveScoreFloor: effectiveScoreFloor(config.SEARCH_SCORE_FLOOR, row.scoreFloor),
+    };
   });
 
   /** Also `manager`: deleting evidence is not an editorial act. */

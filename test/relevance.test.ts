@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { EnvSchema } from '../src/config.js';
-import { belowRelevanceFloor, FLOOR_MEASURED_MODEL, floorModelWarning, isIdentifierShaped } from '../src/services/relevance.js';
+import { belowRelevanceFloor, effectiveScoreFloor, FLOOR_MEASURED_MODEL, floorModelWarning, isIdentifierShaped } from '../src/services/relevance.js';
 import { DEFAULT_RESULT_SELECTION, escapeLikePattern, selectionFrom, type SearchHit } from '../src/services/vector-store.js';
 
 /**
@@ -105,6 +105,47 @@ describe('the floor is a number about one model', () => {
 
   it('says nothing at all when the floor is off, however exotic the model', () => {
     expect(floorModelWarning(0, 'something-nobody-has-measured')).toBeNull();
+  });
+
+  it("names the projects that set their own floor, and says the server's 0 turns theirs off too", () => {
+    const warning = floorModelWarning(0.82, 'text-embedding-3-small', [
+      { name: 'prose', scoreFloor: 0.77 },
+      { name: 'unfloored', scoreFloor: 0 },
+    ]);
+    expect(warning).toContain('One project sets its own floor (prose=0.77)');
+    expect(warning).not.toContain('unfloored');
+    expect(warning).toContain("SEARCH_SCORE_FLOOR=0, which turns every project's own floor off too");
+  });
+
+  it('counts the projects past the first five rather than listing them all', () => {
+    const many = Array.from({ length: 7 }, (_, i) => ({ name: `p${i}`, scoreFloor: 0.8 }));
+    const warning = floorModelWarning(0.82, 'text-embedding-3-small', many);
+    expect(warning).toContain('7 projects set their own floor (p0=0.8, p1=0.8, p2=0.8, p3=0.8, p4=0.8, and 2 more)');
+  });
+
+  it("says nothing about the projects' floors when the server's is 0, because 0 turns them off", () => {
+    expect(floorModelWarning(0, 'text-embedding-3-small', [{ name: 'prose', scoreFloor: 0.77 }])).toBeNull();
+  });
+});
+
+describe('the floor a search is decided against', () => {
+  it("is the instance's when the project has none of its own", () => {
+    expect(effectiveScoreFloor(0.82, null)).toBe(0.82);
+  });
+
+  it("is the project's when it has one, higher or lower, and 0 there turns it off for that project", () => {
+    expect(effectiveScoreFloor(0.82, 0.77)).toBe(0.77);
+    expect(effectiveScoreFloor(0.82, 0.9)).toBe(0.9);
+    expect(effectiveScoreFloor(0.82, 0)).toBe(0);
+  });
+
+  it("is 0 whatever the project says when the instance's is 0 — the master switch", () => {
+    expect(effectiveScoreFloor(0, 0.77)).toBe(0);
+    expect(effectiveScoreFloor(0, null)).toBe(0);
+  });
+
+  it('is 0 whatever the project says when the caller passes no floor at all', () => {
+    expect(effectiveScoreFloor(undefined, 0.77)).toBe(0);
   });
 });
 

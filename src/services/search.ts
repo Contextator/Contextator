@@ -4,7 +4,7 @@ import type { EmbeddingProvider } from './embeddings/provider.js';
 import { normalizeRelativePath } from './fs-scan.js';
 import { getProjectById } from './projects.js';
 import type { QueryLogSink } from './query-log.js';
-import { belowRelevanceFloor } from './relevance.js';
+import { belowRelevanceFloor, effectiveScoreFloor } from './relevance.js';
 import { getSourceByName, listSources } from './sources.js';
 import type { Reranker } from './reranker.js';
 import { documentVersionExists, type HnswScan, listDocumentVersions, type ResultSelection, searchChunks, type SearchHit } from './vector-store.js';
@@ -47,7 +47,8 @@ export interface SearchDeps {
    *
    * Set, it is the **instance's** floor: a project whose `score_floor` column holds a value uses that
    * instead, and one whose column is `null` — every project, until an operator sets one — uses this.
-   * Unset stays off regardless of the column, so the harness measures retrieval and not a refusal.
+   * Unset **or `0`** stays off regardless of the column ({@link effectiveScoreFloor}): `0` is the
+   * operator's master switch, and the harnesses pass `0`, so they measure retrieval and not a refusal.
    */
   scoreFloor?: number;
   /**
@@ -221,11 +222,11 @@ export async function searchProject(
     // it takes a vector rather than a provider, and binding it here is what keeps the model out of it.
     rerank: rerank ? (query, passages) => rerank.score(query, passages) : undefined,
   });
-  // The project's own floor wins over the instance's, and only when the caller passed a floor at all:
-  // `scoreFloor` unset is "off", and a column cannot turn on a refusal the caller did not ask for.
-  // `project` is the row re-read at the top, so the override costs no query.
-  const scoreFloorOverridden = scoreFloor !== undefined && project.scoreFloor !== null;
-  const effectiveFloor = scoreFloor === undefined ? 0 : (project.scoreFloor ?? scoreFloor);
+  // The project's own floor wins over the instance's, and only while the instance's floor is on:
+  // `scoreFloor` unset or `0` is "off" for every project, so a column cannot turn on a refusal the
+  // operator switched off. `project` is the row re-read at the top, so the override costs no query.
+  const effectiveFloor = effectiveScoreFloor(scoreFloor, project.scoreFloor);
+  const scoreFloorOverridden = scoreFloor !== undefined && scoreFloor > 0 && project.scoreFloor !== null;
   const belowFloor = belowRelevanceFloor(input.query, hits, effectiveFloor);
 
   // **One seam, three callers** ([ADR-0047](../../.ssot/ADR.md#adr-0047)). The MCP tool and the
@@ -259,6 +260,7 @@ export async function searchProject(
         score: hit.score,
       })),
       belowFloor,
+      scoreFloor: effectiveFloor,
       durationMs: Date.now() - startedAt,
       // The encoder that answered *this* question and the generation it answered from, taken from the
       // provider and the row in hand rather than from configuration: a log recorded across a model

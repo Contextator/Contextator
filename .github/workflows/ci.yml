@@ -383,13 +383,20 @@ jobs:
       # corpus of a different shape; the two gates are two numbers each and never pooled. The floors are
       # looser than ADR-0044's "less one question" rule would give (99.0 % / 96.0 % from the measured
       # 99.3 % / 96.2 % Turkish figures): this container is new, and a first gate that fails on the
-      # rounding of a different CPU is a gate somebody deletes. `eval/BASELINE.md` carries the run.
+      # rounding of a different CPU is a gate somebody deletes. English sits higher (99.9 % / 98.5 %), so
+      # it gets its own, equally loose bar (98.5 % / 97.0 %) rather than inheriting the Turkish one,
+      # which would leave it 3.5 points of heading@5 to lose unseen. `eval/BASELINE.md` carries the run.
       - name: Score the external set, and fail below its floor
         if: always() && steps.relevant.outputs.run == 'true'
-        run: npx tsx scripts/eval-external.ts --markdown=eval-external.md --json=eval-external.json --min-recall5="$MIN_EXTERNAL_RECALL5" --min-heading5="$MIN_EXTERNAL_HEADING5"
+        run: >-
+          npx tsx scripts/eval-external.ts --markdown=eval-external.md --json=eval-external.json
+          --min-recall5="$MIN_EXTERNAL_RECALL5" --min-heading5="$MIN_EXTERNAL_HEADING5"
+          --min-recall5-en="$MIN_EXTERNAL_RECALL5_EN" --min-heading5-en="$MIN_EXTERNAL_HEADING5_EN"
         env:
           MIN_EXTERNAL_RECALL5: "0.98"
           MIN_EXTERNAL_HEADING5: "0.95"
+          MIN_EXTERNAL_RECALL5_EN: "0.985"
+          MIN_EXTERNAL_HEADING5_EN: "0.97"
 
       - name: Add the external set to the run summary
         if: always() && steps.relevant.outputs.run == 'true'
