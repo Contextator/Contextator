@@ -355,7 +355,7 @@ describe('an ADR-0076 token over a real request', () => {
    * filter finds it under the owner's name. Two same-named tokens of one owner are told apart by the
    * id alone, and a token whose *name* imitates another account stays its own owner's.
    */
-  it("records the acting token's id, and files token actions under the owner in the actor filter", async () => {
+  it("records the acting token's id beside its label, and the actor filter stays the label exactly", async () => {
     const { db } = httpDb;
     const owner = await createUser(db, { username: 'pia', role: 'admin', password: PASSWORD });
     const mimic = await createUser(db, { username: 'quinn', role: 'admin', password: PASSWORD });
@@ -391,16 +391,26 @@ describe('an ADR-0076 token over a real request', () => {
     expect(byMode.get('account')).toEqual({ label: 'ops · pia', userId: owner.id, detail: { mode: 'account', tokenId: second.view.id } });
     expect(byMode.get('open')).toEqual({ label: 'ops · pia · quinn', userId: mimic.id, detail: { mode: 'open', tokenId: imitation.view.id } });
 
-    const page = await live.app.inject({ method: 'GET', url: '/api/audit?limit=200&actor=pia', headers: { cookie: await signIn('pia') } });
-    expect(page.statusCode, page.body).toBe(200);
-    const events = (page.json() as { events: Array<{ summary: string; actor: { kind: string; label: string; tokenId: string | null } }> }).events;
-    const tokenEvents = events.filter((e) => e.actor.kind === 'api_token');
-    expect(tokenEvents.map((e) => e.actor.tokenId).sort()).toEqual([first.view.id, second.view.id].sort());
-    expect(tokenEvents.every((e) => e.actor.label === 'ops · pia')).toBe(true);
-    expect(tokenEvents.map((e) => e.summary).join('\n')).toContain(`via token ${first.view.id.slice(0, 8)}…`);
+    // `actor` is `actor_label` exactly (API.md, FR-451): a token's events are found under the token's
+    // label, and told apart by `detail.tokenId`, the one thing the label cannot do.
+    const audit = async (actor: string) => {
+      const res = await live.app.inject({
+        method: 'GET',
+        url: `/api/audit?limit=200&actor=${encodeURIComponent(actor)}`,
+        headers: { cookie: await signIn('pia') },
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      return (res.json() as { events: Array<{ summary: string; actor: { kind: string; label: string }; detail: Record<string, unknown> }> }).events;
+    };
+    const tokens = await audit('ops · pia');
+    expect(tokens.every((e) => e.actor.kind === 'api_token' && e.actor.label === 'ops · pia')).toBe(true);
+    expect(tokens.map((e) => e.detail.tokenId).sort()).toEqual([first.view.id, second.view.id].sort());
+    expect(tokens.map((e) => e.summary).join('\n')).toContain(`via token ${first.view.id.slice(0, 8)}…`);
+    expect(tokens.map((e) => e.summary).join('\n')).toContain(`via token ${second.view.id.slice(0, 8)}…`);
 
-    const theirs = await live.app.inject({ method: 'GET', url: '/api/audit?limit=200&actor=quinn', headers: { cookie: await signIn('pia') } });
-    const theirEvents = (theirs.json() as { events: Array<{ actor: { label: string; tokenId: string | null } }> }).events;
-    expect(theirEvents.map((e) => e.actor.tokenId)).toContain(imitation.view.id);
+    // Not a suffix, not an owner lookup: the account's own name finds none of its tokens' events, and
+    // the imitation stays under its own, longer label.
+    expect((await audit('pia')).filter((e) => e.actor.kind === 'api_token')).toEqual([]);
+    expect((await audit('ops · pia · quinn')).map((e) => e.detail.tokenId)).toEqual([imitation.view.id]);
   });
 });

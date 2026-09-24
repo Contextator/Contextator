@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
@@ -62,11 +62,7 @@ const optionalText = (max: number) =>
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 const AuditQuery = z.object({
-  /**
-   * `actor_label` exactly — the name as it was at the time, which outlives the account — **and** the
-   * [ADR-0076](../../.ssot/ADR.md#adr-0076) API tokens that account held, whose label is
-   * `"<token name> · <owner>"`. See `actorFilter`.
-   */
+  /** `actor_label` exactly — the name as it was at the time, which outlives the account. */
   actor: optionalText(200),
   /** A project id, or `none` for the events that belong to no project (accounts, sessions, imports). */
   project: optionalText(64),
@@ -296,8 +292,6 @@ export interface AuditEventView {
     /** A `user` event whose account has been deleted; `actor_user_id` is `ON DELETE SET NULL`. */
     accountGone: boolean;
     ip: string | null;
-    /** The API token that acted, for an `api_token` event; `null` for every other kind. */
-    tokenId: string | null;
   };
   /** `null` for an event that belongs to no project; `name: null` when the project is gone. */
   project: { id: string; name: string | null } | null;
@@ -316,7 +310,7 @@ export const auditRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     if (cursor !== null) await assertCursorExists(cursor);
 
     const where = [
-      query.actor === undefined ? null : actorFilter(query.actor),
+      query.actor === undefined ? null : eq(auditEvents.actorLabel, query.actor),
       query.action === undefined ? null : eq(auditEvents.action, query.action),
       query.project === undefined
         ? null
@@ -451,23 +445,6 @@ function cursorPredicate(id: string) {
   return sql`(${auditEvents.createdAt}, ${auditEvents.id}) < (select anchor.created_at, anchor.id from audit_events as anchor where anchor.id = ${id}::uuid)`;
 }
 
-/**
- * The events `actor` did: those under their own label, and those a token of theirs did.
- *
- * A token's label ends in `" · <owner's username>"`, and a username cannot contain `·` or a space
- * (`USERNAME_RE`), so that suffix names the owner and nothing else — a token *named* `"deploy · alice"`
- * held by bob is labelled `"deploy · alice · bob"` and is bob's. Matching the suffix rather than
- * `actor_user_id` keeps the filter what it always was, the name as it was at the time, so it still
- * finds a deleted account's token events.
- */
-function actorFilter(actor: string) {
-  const suffix = ` · ${actor}`;
-  return or(
-    eq(auditEvents.actorLabel, actor),
-    and(eq(auditEvents.actorKind, 'api_token'), sql`right(${auditEvents.actorLabel}, char_length(${suffix})) = ${suffix}`),
-  );
-}
-
 /** A project filter is a row id too, and is refused here rather than reaching a `uuid` column. */
 function projectId(value: string): string {
   if (!UUID.test(value))
@@ -512,7 +489,6 @@ function toView(row: AuditRow): AuditEventView {
       userId: row.actorUserId,
       accountGone: row.actorKind === 'user' && row.actorUserId === null,
       ip: row.actorIp,
-      tokenId: row.actorKind === 'api_token' && typeof detail.tokenId === 'string' ? detail.tokenId : null,
     },
     project: row.projectId === null ? null : { id: row.projectId, name: row.projectName },
     target: row.targetType !== null && row.targetId !== null ? { type: row.targetType, id: row.targetId } : null,

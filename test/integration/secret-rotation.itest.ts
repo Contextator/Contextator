@@ -1,11 +1,11 @@
 import { execFile } from 'node:child_process';
 import { createCipheriv, createHash, createHmac, randomBytes } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 import { eq } from 'drizzle-orm';
@@ -591,12 +591,25 @@ describe('what the command says out loud', () => {
       })
       .returning({ id: documentSources.id });
 
+    const scratch = await mkdtemp(path.join(tmpdir(), 'rotate-exit-'));
     try {
       const root = fileURLToPath(new URL('../../', import.meta.url));
-      const failure = await promisify(execFile)(path.join(root, 'node_modules', '.bin', 'tsx'), ['scripts/rotate-secret.ts'], {
+      // The exit code alone cannot tell `exitCode = 1` from `exit(1)` — both reach the parent as 1. The
+      // preload writes a marker only if the command ran out of work on its own (`beforeExit`), which is
+      // what closing the pool in `finally` and letting a piped stdout drain looks like from outside.
+      // Loaded into the command itself (`node --import tsx`), not into a `tsx` wrapper process around it.
+      const marker = path.join(scratch, 'natural-exit');
+      const preload = pathToFileURL(path.join(root, 'test', 'support', 'natural-exit.mjs')).href;
+      const failure = await promisify(execFile)(process.execPath, ['--import', 'tsx', '--import', preload, 'scripts/rotate-secret.ts'], {
         cwd: root,
         timeout: 90_000,
-        env: { ...process.env, DATABASE_URL: database.url, SECRET_KEY: NEW_KEY, SECRET_KEY_PREVIOUS: OLD_KEY },
+        env: {
+          ...process.env,
+          DATABASE_URL: database.url,
+          SECRET_KEY: NEW_KEY,
+          SECRET_KEY_PREVIOUS: OLD_KEY,
+          NATURAL_EXIT_MARKER: marker,
+        },
       }).then(
         () => null,
         (err: unknown) => err as { code?: number; killed?: boolean; stdout: string; stderr: string },
@@ -612,7 +625,10 @@ describe('what the command says out loud', () => {
       expect(failure?.stdout).toContain('Run this again; if the number does not move');
       // Exiting through `exitCode` rather than past `finally` is also what keeps an error out of stderr.
       expect(failure?.stderr).toBe('');
+      // …and it ended by draining, with the code set rather than forced: the pool closed, stdout flushed.
+      expect(await readFile(marker, 'utf8').catch(() => 'no natural exit')).toBe('1');
     } finally {
+      await rm(scratch, { recursive: true, force: true });
       await db.delete(documentSources).where(eq(documentSources.id, orphan.id));
     }
   }, 120_000);

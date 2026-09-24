@@ -178,9 +178,9 @@ describe('keyringOf', () => {
  * literal handed to one of them would drop the retired key in the rotation window, and every source
  * still under it would read as `unreadable` ([ADR-0075](../../.ssot/ADR.md#adr-0075)).
  *
- * Two layers, because either alone would pass a broken tree: the type-level assertions fail
- * `npm run typecheck` when a caller's `Pick` is narrower than `DriverContext`'s, and the runtime ones
- * show that a config typed as each caller's own carries the key a rotation still needs.
+ * The guard is the type-level assertion: it fails `npm run typecheck` when a caller's `Pick` is narrower
+ * than `DriverContext`'s. The `it` below only keeps it in the test report; that a config carrying both
+ * keys becomes a ring that opens what the retired one wrote is covered above (`keyringOf`, `rotating`).
  */
 describe('the config a driver is built from', () => {
   type Missing<Caller> = Exclude<keyof DriverContext['config'], keyof Caller>;
@@ -191,15 +191,5 @@ describe('the config a driver is built from', () => {
   it('is never narrower in the indexer or the scheduler than a driver needs', () => {
     expect(indexerCarriesTheDriverConfig).toBe(true);
     expect(schedulerCarriesTheDriverConfig).toBe(true);
-  });
-
-  it('opens a value the retired key wrote, from a config typed as the indexer holds it', () => {
-    const config: Pick<IndexerDeps['config'], 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS'> = { SECRET_KEY: KEY, SECRET_KEY_PREVIOUS: OLD_KEY };
-    expect(decryptSecret(encryptSecret('git-token', { current: OLD_KEY }), keyringOf(config))).toBe('git-token');
-  });
-
-  it('opens a value the retired key wrote, from a config typed as the scheduler holds it', () => {
-    const config: Pick<SchedulerDeps['config'], 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS'> = { SECRET_KEY: KEY, SECRET_KEY_PREVIOUS: OLD_KEY };
-    expect(decryptSecret(encryptSecret('confluence-token', { current: OLD_KEY }), keyringOf(config))).toBe('confluence-token');
   });
 });

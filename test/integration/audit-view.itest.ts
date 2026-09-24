@@ -23,9 +23,11 @@ import { type TestDatabase, applySchema, createTestDatabase, dropTestDatabase } 
  * that has since been deleted — survive the deletion and say what they are.
  *
  * Every row asserted here was written by the policy layer in response to a request made through
- * `app.inject`. Nothing in this file inserts into `audit_events`; the one test that needs two events
- * inside the same millisecond moves the instants of three rows that were genuinely written, because
- * real traffic produces that collision rarely and a test may not wait for it.
+ * `app.inject`. Nothing in this file inserts into `audit_events` for good; the one test that needs two
+ * events inside the same millisecond moves the instants of three rows that were genuinely written,
+ * because real traffic produces that collision rarely and a test may not wait for it. The one test that
+ * asks the planner a question fills the table with a year of other people's traffic inside a
+ * transaction it rolls back, so no row of it is ever visible to another test.
  */
 
 const baseUrl = inject('postgresBaseUrl');
@@ -56,7 +58,7 @@ interface AuditPage {
     createdAt: string;
     action: string;
     summary: string;
-    actor: { kind: string; label: string; userId: string | null; accountGone: boolean; tokenId: string | null };
+    actor: { kind: string; label: string; userId: string | null; accountGone: boolean };
     project: { id: string; name: string | null } | null;
     target: { type: string; id: string } | null;
     statusCode: number;
@@ -124,6 +126,19 @@ beforeAll(async () => {
   await live.ctx.audit.settled();
 });
 
+/** A node of `EXPLAIN (FORMAT JSON)`, as much of it as the index test reads. */
+interface PlanNode {
+  'Node Type': string;
+  'Relation Name'?: string;
+  'Index Name'?: string;
+  Plans?: PlanNode[];
+}
+
+/** Every node of a plan, depth first. */
+function planNodes(node: PlanNode): PlanNode[] {
+  return [node, ...(node.Plans ?? []).flatMap(planNodes)];
+}
+
 afterAll(async () => {
   await live?.close();
   await dropTestDatabase(baseUrl, database);
@@ -177,8 +192,6 @@ describe('what a page says about rows that outlived what they name', () => {
     for (const event of living.events) {
       expect(event.actor.userId).toBe(admin.id);
       expect(event.actor.accountGone).toBe(false);
-      // A session acted, not an ADR-0076 token: there is no token to name.
-      expect(event.actor.tokenId).toBeNull();
     }
   });
 
@@ -195,6 +208,55 @@ describe('the filters, which are SQL and not the browser', () => {
     const mine = await read('limit=200&actor=dana');
     expect(mine.events.length).toBeLessThan(all.events.length);
     expect(new Set(mine.events.map((e) => e.actor.label))).toEqual(new Set(['dana']));
+  });
+
+  it('answers the actor filter from `audit_events_actor_label_created_idx`, not by walking the log', async () => {
+    // FR-451: the filters are SQL **and** the actor one is indexed. That a filter narrows is proved above
+    // on twenty rows, where any plan is fast; this asks the planner about the statement the route
+    // actually sends, over a table the size the index was added for — a filter that only a scan of
+    // the whole log can answer would pass every other test in this file.
+    const pool = database.pool as unknown as { query: (...args: unknown[]) => unknown };
+    const query = pool.query;
+    const sent: Array<{ text: string; values: unknown[] }> = [];
+    pool.query = function (this: unknown, ...args: unknown[]) {
+      const [first, second] = args;
+      const text = typeof first === 'string' ? first : (first as { text: string }).text;
+      const values = (typeof first === 'string' ? undefined : (first as { values?: unknown[] }).values) ?? second ?? [];
+      if (/from "audit_events"/.test(text) && /"actor_label" = \$/.test(text)) sent.push({ text, values: values as unknown[] });
+      return query.apply(this, args);
+    };
+    try {
+      await read('limit=50&actor=dana');
+    } finally {
+      pool.query = query;
+    }
+    expect(sent, 'the page query the route sends with an actor filter').toHaveLength(1);
+    const [page] = sent;
+
+    const client = await database.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // A year of a busy instance, a thousand actors, none of them dana: her twenty-odd rows are the
+      // rare actor a newest-first walk would have to cross the whole table to fill a page for.
+      await client.query(
+        `INSERT INTO audit_events (created_at, action, actor_kind, actor_label, status_code)
+         SELECT now() - g * interval '5 minutes', 'PATCH /api/projects/:id/mcp-auth', 'user', 'bulk-' || (g % 1000), 200
+         FROM generate_series(1, 100000) AS g`,
+      );
+      await client.query('ANALYZE audit_events');
+      const explained = await client.query<{ 'QUERY PLAN': Array<{ Plan: PlanNode }> }>(`EXPLAIN (FORMAT JSON) ${page.text}`, page.values);
+      const scans = planNodes(explained.rows[0]['QUERY PLAN'][0].Plan).filter(
+        (node) => node['Relation Name'] === 'audit_events' || node['Index Name']?.startsWith('audit_events_'),
+      );
+      expect(scans.length, 'a plan that never reads audit_events').toBeGreaterThan(0);
+      for (const node of scans) {
+        expect(`${node['Node Type']} ${node['Index Name'] ?? ''}`.trim()).toMatch(/^(Index Scan|Index Only Scan|Bitmap Index Scan|Bitmap Heap Scan)/);
+        if (node['Index Name'] !== undefined) expect(node['Index Name']).toBe('audit_events_actor_label_created_idx');
+      }
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
   });
 
   it('narrows by action', async () => {

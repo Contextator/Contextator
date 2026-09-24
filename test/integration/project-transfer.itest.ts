@@ -533,6 +533,13 @@ describe('importing it into a second instance', () => {
     expect(gitConfig.url).toBe('https://git.example.invalid/wiki.git');
     expect(gitConfig).not.toHaveProperty('lastCommit');
     expect(gitConfig).not.toHaveProperty('syncProbeToken');
+
+    // What the import tells the operator to do about the webhook secret that did not travel depends on
+    // the provider: a git host takes a pasted secret, Notion re-verifies a subscription.
+    const told = (name: string) => report.sources.find((s) => s.name === name)?.needs ?? '';
+    expect(told('notes')).toContain('re-verify from Notion');
+    expect(told('notes')).not.toContain('paste it into the provider');
+    expect(told('wiki')).toContain('generate a new webhook secret here and paste it into the provider');
   });
 
   it("carries the upload source's files, and only the ones importTree accepts", async () => {
