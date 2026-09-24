@@ -2,6 +2,7 @@ import { asc, eq } from 'drizzle-orm';
 import { PROJECT_NAME_RE } from '../config.js';
 import type { Db } from '../db/client.js';
 import { projects, type ProjectRow } from '../db/schema.js';
+import { createProjectVectorIndex, dropProjectVectorIndex } from '../db/vector-indexes.js';
 import { createMcpToken, type McpTokenView } from './auth/mcp-tokens.js';
 import { resolveProjectRoot } from './fs-scan.js';
 
@@ -58,13 +59,24 @@ export async function createProject(db: Db, input: { name: string; rootPath?: st
   const rootPath = input.rootPath?.trim() || null;
   if (rootPath) await resolveProjectRoot(rootPath, allowedRoots); // throws PathNotAllowedError
 
+  let row: ProjectRow;
   try {
-    const [row] = await db.insert(projects).values({ name, rootPath }).returning();
-    return row;
+    [row] = await db.insert(projects).values({ name, rootPath }).returning();
   } catch (err) {
     if (isUniqueViolation(err)) throw new ConflictError(`A project named "${name}" already exists`);
     throw err;
   }
+
+  // The project's own vector index, before its first chunk (src/db/vector-indexes.ts). A project the
+  // index could not be built for is taken back rather than left to be searched without one: an exact
+  // scan would answer correctly, but the next start would build the index under the bootstrap lock.
+  try {
+    await createProjectVectorIndex(db, row.id);
+  } catch (err) {
+    await db.delete(projects).where(eq(projects.id, row.id));
+    throw err;
+  }
+  return row;
 }
 
 /** The name the first token is given, so the list says where it came from without anybody typing it. */
@@ -105,13 +117,20 @@ export async function createProjectWithFirstToken(
   return { project, mcpToken: { secret: token, view } };
 }
 
-/** Deletes a project and (via ON DELETE CASCADE) all of its documents and chunks. */
+/**
+ * Deletes a project and (via ON DELETE CASCADE) all of its documents and chunks.
+ *
+ * Its vector index goes first: dropped concurrently it blocks nobody, and a delete that then fails
+ * leaves a project searched by exact scan until the next start rebuilds its index — correct, if slow.
+ * The other order would leave an index over rows that no longer exist until that same start.
+ */
 export async function deleteProject(db: Db, id: string, isBusy: (projectId: string) => boolean): Promise<ProjectRow> {
   const project = await getProjectById(db, id);
   if (!project) throw new NotFoundError('Project not found');
   if (project.status === 'indexing' || isBusy(id)) {
     throw new ConflictError('Project is currently being indexed; try again when it finishes');
   }
+  await dropProjectVectorIndex(db, id);
   await db.delete(projects).where(eq(projects.id, id));
   return project;
 }

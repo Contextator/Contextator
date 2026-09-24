@@ -7,6 +7,7 @@ import { count, eq } from 'drizzle-orm';
 import { loadConfig, type Config } from '../src/config.js';
 import type { Logger } from '../src/context.js';
 import type { Db } from '../src/db/client.js';
+import { createProjectVectorIndex } from '../src/db/vector-indexes.js';
 import { projects, searchQueries } from '../src/db/schema.js';
 import { chunkReserveTokens } from '../src/services/chunk-budget.js';
 import { chunkMarkdown, embeddingText } from '../src/services/chunker.js';
@@ -470,6 +471,9 @@ async function run(options: Options): Promise<GateVerdict> {
       .insert(projects)
       .values({ name: PROJECT_NAME })
       .returning({ id: projects.id, liveGeneration: projects.liveGeneration });
+    // The index `createProject` would have built: the harness inserts the row itself, and a project
+    // searched without its own index is searched by exact scan — a better answer than the product gives.
+    await createProjectVectorIndex(db, project.id);
 
     step('eval: indexing the corpus');
     const indexStart = Date.now();

@@ -7,6 +7,7 @@ import type { Config } from '../../config.js';
 import type { Logger } from '../../context.js';
 import type { Db } from '../../db/client.js';
 import { documentSources, projects } from '../../db/schema.js';
+import { dropProjectVectorIndex } from '../../db/vector-indexes.js';
 import { type ImportLimits, importTree, unpackTar, withScratch } from '../archives.js';
 import { removeProjectDir, sourceCurrentDir } from '../data-dir.js';
 import { allowedExtensionsFor, FLAVORS, type Flavor } from '../flavors.js';
@@ -301,6 +302,10 @@ async function discardPartialImport(deps: ImportDeps, projectId: string, cause: 
     deps.log?.error({ err, cause, projectId }, 'a project import failed and could not be unwound; delete this project by hand — it is incomplete');
     return;
   }
+  await dropProjectVectorIndex(deps.db, projectId).catch((err: unknown) => {
+    // An index whose project is gone is one the next start drops. Worth a line, not worth failing over.
+    deps.log?.warn({ err, projectId }, 'could not drop the vector index of an import that was unwound');
+  });
   await removeProjectDir(deps.config.DATA_DIR, projectId).catch((err: unknown) => {
     // The rows are gone, so the tree is an orphan by `sweepOrphanDirs`'s own definition and the next
     // start collects it. Worth a line, not worth failing over.

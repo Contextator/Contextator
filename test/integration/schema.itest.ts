@@ -8,6 +8,8 @@ import { afterAll, describe, expect, inject, it } from 'vitest';
 
 import { MIGRATIONS_FOLDER, SchemaMismatchError } from '../../src/db/bootstrap.js';
 import { DEFAULT_MCP_AUTH } from '../../src/db/schema.js';
+import { LEGACY_VECTOR_INDEX, projectVectorIndexName } from '../../src/db/vector-indexes.js';
+import { createProject } from '../../src/services/projects.js';
 import { ensureSchema } from './fixtures/ensure-schema-v5.js';
 import {
   applySchema,
@@ -107,17 +109,26 @@ describe('the bootstrap on an empty database', () => {
       FROM pg_attribute a WHERE a.attrelid = 'chunks'::regclass AND a.attname = 'embedding'`);
     expect((embedding.rows[0] as { type: string }).type).toBe(`vector(${TEST_EMBEDDING_DIMENSIONS})`);
 
+    // No shared vector index: an empty database has no project to build one for, and a project gets
+    // its own when it is created.
+    const shared = await db.execute(sql`SELECT 1 FROM pg_class WHERE relname = ${LEGACY_VECTOR_INDEX}`);
+    expect(shared.rows).toHaveLength(0);
+
     // Not "an index by that name exists": an HNSW index built with other parameters is a different
-    // index with the same name, and `m` and `ef_construction` are the numbers NFR-02 rests on.
+    // index with the same name, and `m` and `ef_construction` are the numbers NFR-02 rests on. The
+    // predicate is the other half — it is what makes the index this project's and nobody else's.
+    const project = await createProject(db, { name: 'nfr-02' }, []);
     const index = await db.execute(sql`
-      SELECT am.amname, c.reloptions
+      SELECT am.amname, c.reloptions, pg_get_expr(i.indpred, i.indrelid) AS predicate
       FROM pg_class c
       JOIN pg_am am ON am.oid = c.relam
-      WHERE c.relname = 'chunks_embedding_hnsw_idx'`);
+      JOIN pg_index i ON i.indexrelid = c.oid
+      WHERE c.relname = ${projectVectorIndexName(project.id)}`);
     expect(index.rows).toHaveLength(1);
-    const row = index.rows[0] as { amname: string; reloptions: string[] | null };
+    const row = index.rows[0] as { amname: string; reloptions: string[] | null; predicate: string };
     expect(row.amname).toBe('hnsw');
     expect([...(row.reloptions ?? [])].sort()).toEqual(['ef_construction=64', 'm=16']);
+    expect(row.predicate).toBe(`(project_id = '${project.id}'::uuid)`);
 
     // Every migration applied, in drizzle's own journal — the thing that now decides what a start does.
     const journal = await db.execute(sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`);
@@ -241,11 +252,18 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     expect(
       changed.filter(
         (line) =>
-          !/index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config|^user_federated_identities|user_sessions \| \d+ \| auth_method \||user_sessions_auth_method_check/.test(
+          !/chunks_embedding_hnsw|index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config|^user_federated_identities|user_sessions \| \d+ \| auth_method \||user_sessions_auth_method_check/.test(
             line,
           ),
       ),
     ).toEqual([]);
+
+    // The shared vector index the ladder built is gone, and the project that was carried forward has
+    // its own — the one line of the diff above that is about the bootstrap rather than a migration.
+    const vectorIndexes = await db.execute(sql`
+      SELECT c.relname AS name, i.indisvalid AS valid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+      WHERE i.indrelid = 'chunks'::regclass AND c.relname LIKE 'chunks_embedding_hnsw%'`);
+    expect(vectorIndexes.rows).toEqual([{ name: projectVectorIndexName(projectId), valid: true }]);
 
     // The chunks are still there and still one per (document, index): the constraint was satisfied by
     // data that predates it, which is the only way to find out that it is an invariant and not a wish.

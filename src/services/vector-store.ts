@@ -28,7 +28,7 @@ import { DEFAULT_TEXT_SEARCH_CONFIG, type TextSearchConfig } from './text-search
  * harness, a test — can say what it wants without assembling an environment.
  */
 export interface HnswScan {
-  /** Candidates the index yields *before* the project and generation predicates post-filter them. */
+  /** Candidates the project's own index yields *before* the generation predicate post-filters them. */
   efSearch: number;
   /** `off` is pgvector's default: answer short rather than keep scanning. */
   iterativeScan: 'off' | 'relaxed_order' | 'strict_order';
@@ -445,6 +445,8 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
         -- projection, not of the ORDER BY, which is the distinction the comment below is about.
         select c.id, (c.embedding <=> ${vector}) as distance, c.chunk_index
         from chunks c
+        -- The project predicate also picks the project's own partial HNSW index (src/db/vector-indexes.ts):
+        -- it must stay a plain equality on the bound id, or the planner cannot prove that index applies.
         where c.project_id = ${projectId} and c.index_generation = ${generation} ${withinScope}
         -- One sort key, and no tie-break. A second ORDER BY column here is not free: the HNSW index
         -- can only satisfy an ordering it produces itself, so adding c.id makes the whole clause

@@ -5,7 +5,7 @@ import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { createWriteStream } from 'node:fs';
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import * as tar from 'tar';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
@@ -23,6 +23,7 @@ import {
   searchQueryHits,
   users,
 } from '../../src/db/schema.js';
+import { PROJECT_VECTOR_INDEX_PREFIX } from '../../src/db/vector-indexes.js';
 import { sourceCurrentDir } from '../../src/services/data-dir.js';
 import { ConflictError } from '../../src/services/projects.js';
 import { ImportRefusedError } from '../../src/services/transfer/manifest.js';
@@ -618,11 +619,14 @@ describe('importing it into a second instance', () => {
  * a leak shows up as a delta rather than as the difference between zero and zero.
  */
 async function census(db: Db, dataDir: string): Promise<Record<string, unknown>> {
-  const [projectRows, sourceRows, documentRows, chunkRows] = await Promise.all([
+  const [projectRows, sourceRows, documentRows, chunkRows, vectorIndexRows] = await Promise.all([
     db.select({ id: projects.id, name: projects.name }).from(projects),
     db.select({ id: documentSources.id }).from(documentSources),
     db.select({ id: documents.id }).from(documents),
     db.select({ id: chunks.id }).from(chunks),
+    // A landing that is unwound took a project row with it, and that row came with a vector index of its
+    // own (`createProject`); leaving the index behind is writing to the destination too.
+    db.execute(sql`SELECT relname FROM pg_class WHERE relkind = 'i' AND starts_with(relname, ${PROJECT_VECTOR_INDEX_PREFIX}) ORDER BY relname`),
   ]);
   const dirs = await fs.readdir(path.join(dataDir, 'projects')).catch(() => [] as string[]);
   return {
@@ -630,6 +634,7 @@ async function census(db: Db, dataDir: string): Promise<Record<string, unknown>>
     sources: sourceRows.length,
     documents: documentRows.length,
     chunks: chunkRows.length,
+    vectorIndexes: vectorIndexRows.rows.map((r) => (r as { relname: string }).relname),
     dataDirs: [...dirs].sort(),
   };
 }

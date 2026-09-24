@@ -463,10 +463,11 @@ export const chunks = pgTable(
      */
     indexGeneration: integer('index_generation').notNull().default(0),
   },
-  // `chunks_embedding_hnsw_idx` is deliberately absent, and its absence is load-bearing. An HNSW index
-  // needs a fixed dimension and blocks the `ALTER COLUMN … TYPE` that sets the real one, so the
-  // bootstrap creates it afterwards. Declaring it here would put it in the snapshot, and the first
-  // `db:generate` after that would emit a `DROP INDEX` for an index this file cannot describe.
+  // The vector indexes — one partial HNSW index per project, `src/db/vector-indexes.ts` — are
+  // deliberately absent, and their absence is load-bearing. An HNSW index needs a fixed dimension and
+  // blocks the `ALTER COLUMN … TYPE` that sets the real one, so the bootstrap creates them afterwards.
+  // Declaring one here would put it in the snapshot, and the first `db:generate` after that would emit
+  // a `DROP INDEX` for an index this file cannot describe.
   (t) => [
     foreignKey({ name: 'chunks_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
     foreignKey({ name: 'chunks_document_id_fkey', columns: [t.documentId], foreignColumns: [documents.id] }).onDelete('cascade'),
@@ -487,7 +488,7 @@ export const chunks = pgTable(
     // Nothing that used the two-column prefix changes: a leading-column lookup does not care what
     // follows it.
     index('chunks_project_generation_idx').on(t.projectId, t.indexGeneration, t.textSearchConfig),
-    // Unlike `chunks_embedding_hnsw_idx` above, this one *is* declared here and *is* generated. A GIN
+    // Unlike the vector indexes above, this one *is* declared here and *is* generated. A GIN
     // index over a `tsvector` needs no fixed dimension and blocks no `ALTER COLUMN … TYPE`, so none of
     // the reasons that keep the HNSW index in the bootstrap apply to it.
     index('chunks_content_tsv_idx').using('gin', t.contentTsv),
