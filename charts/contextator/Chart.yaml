@@ -20,7 +20,7 @@ version: 1.0.0
 
 # The application release this chart was last tested with (ADR-0092). It is not an image default:
 # values.yaml `image.tag` has none and must be set to a `-slim` tag.
-appVersion: "0.1.0"
+appVersion: "0.2.0"
 
 kubeVersion: ">=1.24.0-0"
 

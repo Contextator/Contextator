@@ -28,11 +28,10 @@ image:
   # This chart only ever deploys the slim image — the full/embedded-Postgres image is a
   # single-host (docker-compose) topology and is out of scope here.
   repository: contextator/contextator
-  # No default — set this explicitly to an image built from the `slim` target. No `-slim` tag has
-  # been published yet: Docker Hub carries only `latest`, `0.1` and `0.1.0`, all the full image
-  # with embedded PostgreSQL, the wrong topology for this chart. The release workflow publishes
-  # `<version>-slim`, `<major>.<minor>-slim` and `latest-slim` starting with the first release after
-  # v0.1.0; until then, build the `slim` target, push it to your own registry and point
+  # No default — set this explicitly to an image built from the `slim` target. The release workflow
+  # publishes `<version>-slim`, `<major>.<minor>-slim` and `latest-slim` from v0.2.0 on; the tags
+  # without the suffix are the full image with embedded PostgreSQL, the wrong topology for this
+  # chart. For a build of your own, build the `slim` target, push it to your own registry and point
   # `repository`/`tag` at it. A default would either fail as ImagePullBackOff (a tag that does not
   # exist) or, falling back to the chart's appVersion, silently deploy the embedded-Postgres image.
   tag: ""

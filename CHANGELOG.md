@@ -10,6 +10,8 @@ ships, that stops.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-25
+
 ### Added
 
 - **`npm run backup` and `npm run restore`: one archive that is the installation, not just the
@@ -38,8 +40,8 @@ ships, that stops.
   backups are yours** — `docker exec contextator pg_dump …` dumps the embedded database and reaches
   nothing else.
 - **A `-slim` image, for the same thing without a PostgreSQL inside it at all.** Every published tag
-  now has a `-slim` twin — `latest-slim`, `0.1-slim`, `0.1.0-slim` — carrying the application alone,
-  on both architectures. It requires `DATABASE_URL` rather than accepting it, and started without one
+  from this release on has a `-slim` twin — `latest-slim`, `0.2-slim`, `0.2.0-slim` — carrying the
+  application alone, on both architectures. It requires `DATABASE_URL` rather than accepting it, and started without one
   it exits immediately naming the variable and what the server behind it has to be.
   `docker-compose.slim.yml` runs it. The default image and the default installation are unchanged: a
   single container with its own PostgreSQL is still what `docker compose up -d` gives you.
@@ -143,5 +145,6 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Contextator/Contextator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Contextator/Contextator/releases/tag/v0.1.0

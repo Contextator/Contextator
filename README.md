@@ -117,11 +117,11 @@ docker run -d --name contextator -p 127.0.0.1:3444:3444 \
 Building the image from source instead of pulling it:
 [wiki/Installation#build-the-image-yourself](https://github.com/Contextator/Contextator/wiki/Installation#build-the-image-yourself).
 
-**Tags.** `latest` is the newest stable release; `0.1` tracks the latest patch inside the `0.1.x`
-line; `0.1.0` is one exact, immutable release. Pin a versioned tag for anything you upgrade
-deliberately by setting `CONTEXTATOR_TAG` in `.env` (e.g. `CONTEXTATOR_TAG=0.1.0`) and running
-`docker compose up -d` — this reads at every start, not only the first. Every one of those tags has
-a `-slim` twin — `latest-slim`, `0.1-slim`, `0.1.0-slim` — which is the section below.
+**Tags.** `latest` is the newest stable release; `0.2` tracks the latest patch inside the `0.2.x`
+line; `0.2.0` is one exact, immutable release. Pin a versioned tag for anything you upgrade
+deliberately by setting `CONTEXTATOR_TAG` in `.env` (e.g. `CONTEXTATOR_TAG=0.2.0`) and running
+`docker compose up -d` — this reads at every start, not only the first. Every one of those tags from
+`0.2.0` on has a `-slim` twin — `latest-slim`, `0.2-slim`, `0.2.0-slim` — which is the section below.
 
 ### Bringing your own PostgreSQL
 
@@ -174,10 +174,9 @@ helm install ctx contextator/contextator \
   --set-string image.tag="<version>-slim"
 ```
 
-The repository is filled by the release workflow, from the first release that carries the chart
-onwards; until that release is out (and GitHub Pages is turned on for the `gh-pages` branch), the URL
-answers 404 — install from a checkout instead, `helm install ctx ./charts/contextator` with the same
-flags. The chart's own `version` moves independently of the application's: patch for a fix, minor
+The repository is filled by the release workflow on every release, starting with `v0.2.0`; a
+checkout works too, `helm install ctx ./charts/contextator` with the same flags. The chart's own
+`version` moves independently of the application's: patch for a fix, minor
 for a new value, major for a removed or renamed value or one the chart newly rejects.
 
 It deploys exactly one Pod — this chart does not expose a `replicaCount` value, and setting one fails
@@ -186,9 +185,9 @@ the install as an unknown key, because MCP sessions and the indexer both live in
 chart's strict `values.schema.json`: a misspelt key or a wrong type fails `helm install` and names the
 key, rather than being ignored. Like the `-slim` image itself, it refuses to install without
 `DATABASE_URL` or an equivalent Secret. `image.tag` has no default either: it must name a `slim` image
-(a string, hence `--set-string` for a numeric-looking tag). No `-slim` tag has been published yet —
-`<version>-slim`, `<major>.<minor>-slim` and `latest-slim` start with the first release after
-`v0.1.0` — so until then, build the `slim` target yourself and push it to your own registry. See
+(a string, hence `--set-string` for a numeric-looking tag). The release workflow publishes
+`<version>-slim`, `<major>.<minor>-slim` and `latest-slim` from `v0.2.0` on (`v0.1.0` has no `-slim`
+twin); to run a build of your own, build the `slim` target and push it to your own registry. See
 `charts/contextator/README.md` for the full install guide, including the `SECRET_KEY`/persistence/probe
 design, running behind an Ingress, and measured resource sizing; the reasoning is decision records
 ADR-0078 and ADR-0092.

@@ -52,13 +52,12 @@ Verified: `helm install ctx ./charts/contextator` with no `database.*` set exits
 naming the missing value, before any Kubernetes object is created.
 
 `image.tag` is **also required** and has no default. It must point at an image built from the `slim`
-target. **No `-slim` tag has been published yet:** `contextator/contextator` on Docker Hub carries only
-`latest`, `0.1` and `0.1.0`, all three the full image with an embedded PostgreSQL — the wrong topology
-for this chart, which is why the chart does not fall back to its `appVersion` either. The release
-workflow publishes the `slim` target as `<version>-slim`, `<major>.<minor>-slim` and `latest-slim`
-starting with the first release after `v0.1.0`; `<version>-slim` in the commands above only resolves
-from then on. Until that release exists, build the `slim` target yourself (`docker build --target slim`),
-push it to your own registry, and point `image.repository`/`image.tag` at it.
+target. The release workflow publishes the `slim` target as `<version>-slim`, `<major>.<minor>-slim` and
+`latest-slim` from `v0.2.0` on. The tags without the suffix (`latest`, `0.2`, `0.2.0`, and `v0.1.0`'s
+tags, which have no `-slim` twin) are the full image with an embedded PostgreSQL — the wrong topology
+for this chart, which is why the chart does not fall back to its `appVersion` either. To run a build
+of your own, build the `slim` target (`docker build --target slim`), push it to your own registry,
+and point `image.repository`/`image.tag` at it.
 
 After install, `helm test ctx` runs a hook Pod that calls `GET /api/health` on the Service and prints
 the response — the same check described under "No `wget`/`curl` in the image" below.
