@@ -1,0 +1,13 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "\"../outside\" is not a usable path prefix. Use a relative path as shown by list_topics, e.g. \"handbook/operations\"."
+      }
+    ],
+    "isError": true
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

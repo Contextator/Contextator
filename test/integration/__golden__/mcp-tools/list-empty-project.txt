@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Project \"empty-project\" has no indexed documents yet."
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

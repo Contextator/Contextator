@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "File: handbook/manual.md\nTitle: Operations manual\nTokens: 237\n\n---\n\n<<<BEGIN DOCUMENT TEXT>>>\n# Operations manual\n\nParagraph 0 explains one more part of the operations procedure in a sentence of ordinary length.\n\nParagraph 1 explains one more part of the operations procedure in a sentence of ordinary length.\n\nParagraph 2 explains one more part of the operations procedure in a sentence of ordinary length.\n\n<<<END DOCUMENT TEXT>>>\n\n[…truncated at 300 tokens. This document is 60 chunks; ask for one section with heading:, or a range with from:/to:, or raise max_tokens.]"
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

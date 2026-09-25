@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "File: handbook/manual.md\nTitle: Operations manual\nChunks: 2-6 of 60\n\n---\n\n<<<BEGIN DOCUMENT TEXT>>>\nParagraph 2 explains one more part of the operations procedure in a sentence of ordinary length.\n\nParagraph 3 explains one more part of the operations procedure in a sentence of ordinary length.\n\nParagraph 4 explains one more part of the operations procedure in a sentence of ordinary length.\n\nParagraph 5 explains one more part of the operations procedure in a sentence of ordinary length.\n\nParagraph 6 explains one more part of the operations procedure in a sentence of ordinary length.\n<<<END DOCUMENT TEXT>>>\n\n[…truncated at 400 tokens: chunks 2-6 of the 29 that matched. Call read_document again with from: 7 for the rest.]"
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "No good match for \"Page 3 short page number 3\" in project \"strict-project\". The closest passage scored 0.990, below this project's floor of 0.99, which usually means the documentation does not cover it. Call list_topics to see what it does cover, or ask again in the words the documentation would use — an exact identifier, a header name or an error code searches best."
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

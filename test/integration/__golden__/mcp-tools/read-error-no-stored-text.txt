@@ -1,0 +1,13 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "\"handbook/legacy.md\" was indexed before this version stored document text, so there is no text on it to return. Re-index the project from the Contextator dashboard and it will be readable — after that, a document stays readable whatever happens to its file. Until then, ask for one of its 1 chunk with heading: or from:/to:, which are served from the index and work now."
+      }
+    ],
+    "isError": true
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

@@ -1,0 +1,13 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Project \"handbook-project\" has no documents at version \"v9\". None of its documents carry a version, so searching without the filter reaches all of them."
+      }
+    ],
+    "isError": true
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

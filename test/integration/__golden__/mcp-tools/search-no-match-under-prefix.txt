@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "No matching documentation for \"install the package\" under \"handbook/nowhere\". Try different wording or call list_topics to browse."
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

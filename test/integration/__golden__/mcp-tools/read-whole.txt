@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "File: handbook/guide.md\nTitle: Delivery guide\nTokens: 327\n\n---\n\n<<<BEGIN DOCUMENT TEXT>>>\n# Delivery guide\n\nIntroduction to the delivery pipeline and what it is for.\n\n## Install\n\nInstall the package from the registry before anything else.\n\n### Docker\n\nRun the published image with the compose file in the repository, mounting the documentation read-only.\nThe container listens on one port and needs a writable data directory beside it.\n\n## Tuning\n\nSet DISPATCH_WORKERS to the number of cores the host can spare for delivery.\n\n<<<END DOCUMENT TEXT>>>"
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

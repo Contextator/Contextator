@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "File: handbook/manual.md\nTitle: Operations manual\nChunks: 0-1 of 60\n\n---\n\n<<<BEGIN DOCUMENT TEXT>>>\n# Operations manual\n\nParagraph 0 explains one more part of the operations procedure in a sentence of ordinary length.\n\nParagraph 1 explains one more part of the operations procedure in a sentence of ordinary length.\n<<<END DOCUMENT TEXT>>>"
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

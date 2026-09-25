@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "No further documents in project \"handbook-project\"; that cursor was already at the end of the listing."
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

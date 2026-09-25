@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Project \"handbook-project\": 15 documents, 99 chunks\nSources (the first path segment): handbook (local)\n\nhandbook/ — 3 documents, 67 chunks\n  • handbook/guide.md — Delivery guide (6 chunks)\n  • handbook/legacy.md — Legacy notes (1 chunk)\n  • handbook/manual.md — Operations manual (60 chunks)\n\nhandbook/pages/ — 12 documents, 12 chunks\n  • handbook/pages/page-00.md — Page 0 (1 chunk)\n  • handbook/pages/page-01.md — Page 1 (1 chunk)\n  • handbook/pages/page-02.md — Page 2 (1 chunk)\n  • handbook/pages/page-03.md — Page 3 (1 chunk)\n  • handbook/pages/page-04.md — Page 4 (1 chunk)\n  • handbook/pages/page-05.md — Page 5 (1 chunk)\n  • handbook/pages/page-06.md — Page 6 (1 chunk)\n  • handbook/pages/page-07.md — Page 7 (1 chunk)\n  • handbook/pages/page-08.md — Page 8 (1 chunk)\n  • handbook/pages/page-09.md — Page 9 (1 chunk)\n  • handbook/pages/page-10.md — Page 10 (1 chunk)\n  • handbook/pages/page-11.md — Page 11 (1 chunk)"
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "File: handbook/guide.md\nTitle: Delivery guide\nSection: Delivery guide > Install\nChunks: 1-4 of 6\n\n---\n\n<<<BEGIN DOCUMENT TEXT>>>\n## Install\n\nInstall the package from the registry before anything else.\n\n### Docker\n\nRun the published image with the compose file in the repository, mounting the\n\ndocumentation read-only.\n\nThe container listens on one port and needs a writable data directory beside it.\n<<<END DOCUMENT TEXT>>>"
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

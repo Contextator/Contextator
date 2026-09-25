@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "File: handbook/legacy.md\nTitle: Legacy notes\nSection: Legacy notes\nChunks: 0-0 of 1\n\n---\n\n<<<BEGIN DOCUMENT TEXT>>>\n# Legacy notes\n\nThe archive rotation job ran nightly before the scheduler replaced it.\n<<<END DOCUMENT TEXT>>>"
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

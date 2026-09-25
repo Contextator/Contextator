@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Project \"empty-project\" has no indexed content yet. Trigger indexing from the Contextator dashboard and try again."
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}
