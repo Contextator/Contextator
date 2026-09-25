@@ -243,13 +243,21 @@ jobs:
   # pushed, and only after `publish` — the chart needs the `-slim` image that job pushes, and a chart
   # published for a release whose image failed its checks would point at nothing.
   #
-  # chart-releaser packages every chart under charts/ that changed since the previous tag, uploads the
-  # package as a GitHub release named `contextator-<chart version>`, and commits the updated index.yaml
-  # to the `gh-pages` branch. A chart that did not change is not packaged, and `skip_existing` leaves a
-  # version that already has a release alone, so a published version is never overwritten.
-  # `mark_as_latest: false` keeps that chart release from displacing the application's `v*` release as
-  # the repository's "Latest". The `gh-pages` branch and GitHub Pages serving it are the repository
-  # owner's one-time setup; until both exist this job fails and the image above is unaffected.
+  # chart-releaser packages a chart only when it changed since the previous tag (`git describe --tags
+  # HEAD~`); a release that leaves charts/ alone publishes nothing and this job passes. A changed chart
+  # is uploaded as a GitHub release (and tag) named `contextator-<chart version>`, then the updated
+  # index.yaml is committed to the `gh-pages` branch. `skip_existing` leaves a version that already
+  # has a release alone, so a published version is never overwritten. `mark_as_latest: false` keeps
+  # that chart release from displacing the application's `v*` release as the repository's "Latest".
+  #
+  # One-time setup, in this order: create the `gh-pages` branch, turn GitHub Pages on for it, then cut
+  # the tag. chart-releaser creates the chart's release before it writes the index, so without the
+  # branch it would leave a released-but-unindexed version behind, and the next release — chart
+  # unchanged — would find nothing to do and never index it; the first step below refuses to start
+  # instead. chart-releaser never looks at Pages: with the branch present and Pages off, this job
+  # passes and the repository URL answers 404. If this job fails for any reason, fix the cause and
+  # use "Re-run failed jobs" on the same run — `skip_existing` skips the upload that already happened
+  # and the index is written; a later release will not do it for you. The image above is unaffected.
   chart:
     name: Publish the Helm chart to gh-pages
     needs: publish
@@ -268,6 +276,19 @@ jobs:
           # chart-releaser finds the changed charts by diffing against the previous tag.
           fetch-depth: 0
 
+      - name: Require the gh-pages branch
+        run: |
+          set -euo pipefail
+          rc=0
+          git ls-remote --exit-code --heads origin gh-pages >/dev/null || rc=$?
+          if [ "$rc" -eq 2 ]; then
+            echo "::error title=No gh-pages branch::The gh-pages branch does not exist, so the chart cannot be indexed. Create it (an empty orphan branch is enough), turn GitHub Pages on for it, then use \"Re-run failed jobs\" on this run. Nothing has been published."
+            exit 1
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=gh-pages lookup failed::git ls-remote exited $rc while looking for the gh-pages branch; re-run this job."
+            exit 1
+          fi
+
       - name: Configure the git identity for the gh-pages commit
         run: |
           git config user.name "github-actions[bot]"
@@ -277,8 +298,52 @@ jobs:
         with:
           version: v3.14.4
 
+      # ADR-0092: `appVersion` is the application release the chart was tested with, and a published
+      # version is never overwritten — a stale `appVersion` would be permanent. Whoever cuts the release
+      # sets it to the tag's version before tagging. Checked only when chart-releaser will publish,
+      # i.e. when charts/contextator changed since the previous tag (the same `git describe HEAD~` and
+      # diff cr.sh uses); a release that does not touch the chart does not have to touch it.
+      - name: Require appVersion to match the tag when the chart is published
+        run: |
+          set -euo pipefail
+          git fetch --tags >/dev/null 2>&1 || true
+          previous=$(git describe --tags --abbrev=0 HEAD~ 2>/dev/null || git rev-list --max-parents=0 --first-parent HEAD)
+          if git diff --quiet "$previous" -- charts/contextator; then
+            echo "charts/contextator unchanged since $previous: nothing will be published, appVersion not checked."
+            exit 0
+          fi
+          app_version=$(helm show chart charts/contextator | sed -n 's/^appVersion:[[:space:]]*//p' | tr -d "\"'")
+          if [ "$app_version" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "::error file=charts/contextator/Chart.yaml,title=appVersion does not match the tag::charts/contextator/Chart.yaml has appVersion \"$app_version\", but this release is ${GITHUB_REF_NAME} and the chart changed since $previous, so it would be published now. Set appVersion to \"${GITHUB_REF_NAME#v}\" before tagging; a published chart version is never overwritten."
+            exit 1
+          fi
+          echo "appVersion $app_version matches ${GITHUB_REF_NAME}."
+
+      # chart-releaser-action downloads the `cr` binary with curl and runs it unverified, in a job whose
+      # token can write to the repository; a release asset can be replaced by its owner just as a tag
+      # can be moved. So `cr` is installed here instead, and only after its archive matches the sha256
+      # published in chart-releaser v1.7.0's own checksums.txt (read 2026-09-25). The action is pointed
+      # at this directory via `install_dir`; cr.sh skips its own download when the directory exists,
+      # and this step fails before creating it when the checksum does not match. Moving `CR_VERSION`
+      # means reading that release's checksums.txt and updating `CR_SHA256` in the same change.
+      - name: Install chart-releaser (checksum-verified)
+        env:
+          CR_VERSION: v1.7.0
+          CR_SHA256: 121a16d4e38b348decb977b8257d4bddab3323681c1819bab4870603138087cf
+        run: |
+          set -euo pipefail
+          archive="chart-releaser_${CR_VERSION#v}_linux_amd64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$archive" "https://github.com/helm/chart-releaser/releases/download/${CR_VERSION}/${archive}"
+          echo "${CR_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          mkdir "$RUNNER_TEMP/cr"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/cr"
+          rm -f "$RUNNER_TEMP/$archive"
+          test -x "$RUNNER_TEMP/cr/cr"
+
       - uses: helm/chart-releaser-action@cae68fefc6b5f367a0275617c9f83181ba54714f # v1.7.0
         with:
+          version: v1.7.0
+          install_dir: ${{ runner.temp }}/cr
           charts_dir: charts
           skip_existing: true
           mark_as_latest: false
