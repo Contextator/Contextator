@@ -9,6 +9,7 @@ import type pg from 'pg';
 import type { Logger } from '../context.js';
 import { TEXT_SEARCH_CONFIGS } from '../services/text-search.js';
 import type { Db } from './client.js';
+import { dropAllProjectVectorIndexes, LEGACY_VECTOR_INDEX, reconcileProjectVectorIndexes } from './vector-indexes.js';
 
 export class SchemaMismatchError extends Error {
   constructor(message: string) {
@@ -63,9 +64,9 @@ export const MIGRATIONS_FOLDER = fileURLToPath(new URL('../../drizzle', import.m
  * 2. `adoptBaselineIfNeeded` — a `0.1.0` database already has every table and no journal; applying the
  *    baseline to it would fail on the first `CREATE TABLE`.
  * 3. `migrate()` — drizzle applies whatever the journal says is outstanding.
- * 4. The dimension, the HNSW index and the legacy backfill — the three things that cannot be
- *    generated SQL, because the first is a deploy-time setting, the second depends on the first, and
- *    the third is a loop over rows.
+ * 4. The dimension, the per-project HNSW indexes and the legacy backfill — the three things that
+ *    cannot be generated SQL, because the first is a deploy-time setting, the second depends on the
+ *    first and on which projects exist, and the third is a loop over rows.
  * 5. `content_tsv` for the chunks that predate it — a loop over rows for the same reason, and one
  *    that must not be inside phase 4's single transaction, because it rewrites every chunk of an
  *    existing installation ([ADR-0041](../../.ssot/ADR.md#adr-0041)).
@@ -126,7 +127,12 @@ async function settleDimensionAndIndex(db: Db, dims: number, opts: BootstrapOpti
       // never existed. Either way the column type is whatever the migration said, and this is the one
       // moment it can be changed — before the HNSW index exists and before a single row is written.
       const actual = await embeddingColumnDimensions(tx);
-      if (actual !== dims) await run(`ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(${dims})`);
+      if (actual !== dims) {
+        // Any vector index fixes the dimension and blocks the re-type; the reconcile below rebuilds them.
+        await run(`DROP INDEX IF EXISTS ${LEGACY_VECTOR_INDEX}`);
+        await dropAllProjectVectorIndexes(tx);
+        await run(`ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(${dims})`);
+      }
     } else if (storedDims !== dims) {
       if (!opts.resetVectors) {
         throw new SchemaMismatchError(
@@ -136,7 +142,8 @@ async function settleDimensionAndIndex(db: Db, dims: number, opts: BootstrapOpti
         );
       }
       opts.log.warn({ from: storedDims, to: dims }, 'RESET_VECTORS=1: dropping all chunks and re-typing the embedding column');
-      await run(`DROP INDEX IF EXISTS chunks_embedding_hnsw_idx`);
+      await run(`DROP INDEX IF EXISTS ${LEGACY_VECTOR_INDEX}`);
+      await dropAllProjectVectorIndexes(tx);
       await run(`TRUNCATE chunks`);
       await run(`DELETE FROM documents`);
       await run(`ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(${dims})`);
@@ -147,9 +154,9 @@ async function settleDimensionAndIndex(db: Db, dims: number, opts: BootstrapOpti
     }
 
     // After the column type and never in a migration: an HNSW index needs a fixed dimension, and it
-    // blocks the `ALTER COLUMN … TYPE` above while it exists. `m` and `ef_construction` are NFR-02.
-    await run(`CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx
-      ON chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)`);
+    // blocks the `ALTER COLUMN … TYPE` above while it exists. One partial index per project rather than
+    // one the instance shares — `vector-indexes.ts` says why; `m` and `ef_construction` are NFR-02.
+    await reconcileProjectVectorIndexes(tx, opts.log);
 
     await migrateLegacyRootPaths(tx, opts.log);
 

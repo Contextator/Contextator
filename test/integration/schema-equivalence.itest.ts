@@ -7,6 +7,8 @@ import { afterAll, describe, expect, inject, it } from 'vitest';
 
 import { bootstrapDatabase, MIGRATIONS_FOLDER } from '../../src/db/bootstrap.js';
 import { createDb } from '../../src/db/client.js';
+import { projectVectorIndexName } from '../../src/db/vector-indexes.js';
+import { createProject } from '../../src/services/projects.js';
 import { ensureSchema } from './fixtures/ensure-schema-v5.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 import { captureSchema, renderSchemaSnapshot, snapshotDifference } from './support/schema-snapshot.js';
@@ -107,7 +109,7 @@ const opened: TestDatabase[] = [];
  * the CHECK constraint the column ships with.
  */
 const POST_BASELINE_MARKERS =
-  /index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config|^user_federated_identities|user_sessions \| \d+ \| auth_method \||user_sessions_auth_method_check/;
+  /chunks_embedding_hnsw|index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config|^user_federated_identities|user_sessions \| \d+ \| auth_method \||user_sessions_auth_method_check/;
 
 afterAll(async () => {
   for (const database of opened) await dropTestDatabase(baseUrl, database);
@@ -187,9 +189,11 @@ describe('a fresh database at a non-default dimension', () => {
       FROM pg_attribute a WHERE a.attrelid = 'chunks'::regclass AND a.attname = 'embedding'`);
     expect((embedding.rows[0] as { type: string }).type).toBe('vector(1536)');
 
-    // And the index that could not have been built before the column was re-typed exists on it.
+    // And the index that could not have been built before the column was re-typed can be built on it:
+    // a project's own, at the dimension the column now has.
+    const project = await createProject(database.db, { name: 'wide' }, []);
     const index = await database.db.execute(sql`
-      SELECT am.amname FROM pg_class c JOIN pg_am am ON am.oid = c.relam WHERE c.relname = 'chunks_embedding_hnsw_idx'`);
+      SELECT am.amname FROM pg_class c JOIN pg_am am ON am.oid = c.relam WHERE c.relname = ${projectVectorIndexName(project.id)}`);
     expect((index.rows[0] as { amname: string }).amname).toBe('hnsw');
 
     const settings = await database.db.execute(sql`SELECT value FROM settings WHERE key = 'embedding_dimensions'`);

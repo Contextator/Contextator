@@ -17,6 +17,7 @@ import { runRestore, type RestoreDeps } from '../../scripts/restore.js';
 import { loadConfig, MAX_SEARCH_LIMIT } from '../../src/config.js';
 import { MIGRATIONS_FOLDER } from '../../src/db/bootstrap.js';
 import { documentSources, projects, type ProjectRow } from '../../src/db/schema.js';
+import { createProjectVectorIndex, PROJECT_VECTOR_INDEX_PREFIX, projectVectorIndexName } from '../../src/db/vector-indexes.js';
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
 import { chunkMarkdown, embeddingText, estimateTokens } from '../../src/services/chunker.js';
 import { decryptSecret, encryptSecret, encryptWebhookSecret } from '../../src/services/crypto.js';
@@ -43,7 +44,7 @@ import { captureSchema, renderSchemaSnapshot, type SchemaSnapshot } from './supp
  * need it, which is the day it is least recoverable — so this file is the procedure, executed, with
  * three assertions on the other side of it.
  *
- * **Why a row count is not one of them.** A restore that dropped `chunks_embedding_hnsw_idx` on the
+ * **Why a row count is not one of them.** A restore that dropped a project's vector index on the
  * floor would still hold every chunk, and so would one that came back with `content_tsv` empty — the
  * first answers searches slowly and exactly, the second answers them with the dense half alone. Both
  * look like a healthy database until somebody compares an answer. So the three things asserted are the
@@ -76,8 +77,8 @@ const TOC_ALL = '/tmp/contextator-backup-restore.toc';
 const TOC_HNSW = '/tmp/contextator-backup-restore.hnsw.toc';
 const TOC_REST = '/tmp/contextator-backup-restore.rest.toc';
 
-/** The index whose rebuild the measurement below is about. */
-const HNSW_INDEX = 'chunks_embedding_hnsw_idx';
+/** The indexes whose rebuild the measurement below is about: every project's own (`src/db/vector-indexes.ts`). */
+const HNSW_INDEX = PROJECT_VECTOR_INDEX_PREFIX;
 
 /**
  * The corpus, and the reason it is this size rather than a comfortable one.
@@ -289,6 +290,8 @@ async function seedProject(
 ): Promise<string> {
   const answers = opts.answers ?? [];
   const [project] = await subject.db.insert(projects).values({ name }).returning({ id: projects.id });
+  // What `createProject` does after the insert, so the dump carries the indexes an instance has.
+  await createProjectVectorIndex(subject.db, project.id);
   const [source] = await subject.db
     .insert(documentSources)
     .values({ projectId: project.id, type: 'local', name })
@@ -435,7 +438,7 @@ beforeAll(async () => {
       `            →  the compressed dump is ${(dumpBytes / measured.vectorBytes).toFixed(2)}× the binary vector footprint`,
       `  heap ${mb(tableBytes)} MB + indexes ${mb(indexBytes)} MB on disk; chunk text ${mb(chunkTextBytes)} MB, document text ${mb(documentTextBytes)} MB`,
       `  restore   ${s(restoreMs)}s total`,
-      `    of which ${s(restoreHnswMs)}s is CREATE INDEX ${HNSW_INDEX} (${((restoreHnswMs / (restoreHnswMs + restoreEverythingElseMs)) * 100).toFixed(0)} %)`,
+      `    of which ${s(restoreHnswMs)}s is CREATE INDEX ${HNSW_INDEX}* ×2 (${((restoreHnswMs / (restoreHnswMs + restoreEverythingElseMs)) * 100).toFixed(0)} %)`,
       `    and      ${s(restoreEverythingElseMs)}s is the schema, the data and every other index`,
     ].join('\n'),
   );
@@ -469,8 +472,9 @@ describe('a custom-format dump restored into an empty database', () => {
     // The index came back with its build parameters — the projection above asserts that — but a
     // restored index that the planner will not use is a restored index nobody benefits from.
     const plan = await subject.db.execute(sql`
-      EXPLAIN (FORMAT JSON) SELECT id FROM chunks ORDER BY embedding <=> ${JSON.stringify(stubVector(QUESTIONS[0]))}::vector LIMIT 10`);
-    expect(JSON.stringify(plan.rows)).toContain(HNSW_INDEX);
+      EXPLAIN (FORMAT JSON) SELECT id FROM chunks WHERE project_id = ${handbookId}
+      ORDER BY embedding <=> ${JSON.stringify(stubVector(QUESTIONS[0]))}::vector LIMIT 10`);
+    expect(JSON.stringify(plan.rows)).toContain(projectVectorIndexName(handbookId));
   });
 
   it('returns the identical rows in the identical order, with identical scores', async () => {
@@ -808,6 +812,9 @@ describe('the backup command, and the instance it is asked to bring back', () =>
     archive = nodePath.join(exchangeDir, 'instance-backup.tar.gz');
 
     [project] = await cli.db.insert(projects).values({ name: 'handbook', embeddingModel: 'local:stub-bag-of-words:fp32' }).returning();
+    // And its vector index, as `createProject` builds it — without it the dump would carry an instance that
+    // is not one the product makes, and the restored start below would build the index it is missing.
+    await createProjectVectorIndex(cli.db, project.id);
 
     // An upload source: its `current/` tree is the only copy of its content anywhere, and no `pg_dump`
     // has ever contained it.

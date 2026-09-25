@@ -236,8 +236,8 @@ function compareVersions(left: string, right: string): number {
 
 /**
  * The product's own startup path, against a test database: extension, journal adoption, migrations,
- * the vector dimension and the HNSW index. Every suite that needs tables goes through this rather than
- * through re-stated DDL, which is what makes the schema these tests run on the schema an operator gets.
+ * the vector dimension and the HNSW index of every project that exists by then. Every suite that needs
+ * tables goes through this rather than through re-stated DDL, which is what makes the schema these tests run on the schema an operator gets.
  */
 export function applySchema(database: TestDatabase, dimensions: number = TEST_EMBEDDING_DIMENSIONS): Promise<void> {
   return bootstrapDatabase(database.db, { pool: database.pool, dimensions, resetVectors: false, log: silentLogger });
