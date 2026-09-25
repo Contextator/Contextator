@@ -354,15 +354,19 @@ release's SHA-256 before it runs.
 
 One-time setup, in this order, before the first tag that carries the chart: create the `gh-pages`
 branch (an empty orphan branch is enough), turn GitHub Pages on for it, then push the tag. The job
-checks for the branch first and fails before publishing anything if it is missing. If the job fails
-for that or any other reason, fix the cause and use "Re-run failed jobs" on the same workflow run: a
-later tag does not make up for it, because the next run only looks at chart changes since that
-previous tag. With Pages off, the job succeeds but the repository URL answers 404 until Pages is
-turned on.
+checks for the branch first and fails before publishing the chart if it is missing. If the `chart`
+job fails for that or another infrastructure reason (the network, the release upload, the index
+push), fix the cause and use "Re-run failed jobs" on the same workflow run: a later tag does not make
+up for it, because the next run only looks at chart changes since that previous tag. With Pages off,
+the job succeeds but the repository URL answers 404 until Pages is turned on.
 
 Versioning (ADR-0092): `version` in `Chart.yaml` is bumped on every chart change — patch for a fix,
 minor for a new value, major for a removed or renamed value or a value the schema newly rejects. CI
 fails a change to `charts/contextator/` that does not raise `version`. `appVersion` is the application
 release the chart was last tested with; it is not an image default (`image.tag` stays required).
 Whoever cuts a release that publishes the chart sets `appVersion` to that tag without its `v`
-(`v1.4.0` → `"1.4.0"`) before tagging; the `chart` job fails otherwise.
+(`v1.4.0` → `"1.4.0"`) before tagging. Otherwise the `chart-preflight` job fails before the image
+job starts, so nothing is published — no image, no chart. Re-running that run does not help, since it
+checks the same commit: fix `appVersion` (and raise `version`, as for any chart change), commit it and
+push a tag on the new commit (the failed tag published nothing, so it can be deleted and pushed again
+there).

@@ -24,6 +24,42 @@ permissions:
   contents: read
 
 jobs:
+  # Runs before anything is built or pushed, and needs nothing but the checkout: no registry, no
+  # Helm, no remote lookup. ADR-0092: `appVersion` is the application release the chart was tested
+  # with, and a published chart version is never overwritten, so a stale `appVersion` would be
+  # permanent. Checking it here instead of in `chart` means a mismatch stops the release while
+  # nothing — no image, no chart — has been published, rather than after the image is already out.
+  chart-preflight:
+    name: Check the chart's appVersion before anything is published
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The previous tag and the history to diff against it; a full fetch brings the tags along.
+          fetch-depth: 0
+
+      # Checked only when chart-releaser will publish, i.e. when charts/contextator changed since the
+      # previous tag (the same `git describe HEAD~` and diff cr.sh uses in `chart`); a release that
+      # does not touch the chart does not have to touch it. `appVersion` is read from Chart.yaml
+      # directly, so no Helm has to be installed. Re-running cannot fix a mismatch: the run checks the
+      # tagged commit, so the fix is a new commit and a tag on it.
+      - name: Require appVersion to match the tag when the chart is published
+        run: |
+          set -euo pipefail
+          previous=$(git describe --tags --abbrev=0 HEAD~ 2>/dev/null || git rev-list --max-parents=0 --first-parent HEAD)
+          if git diff --quiet "$previous" -- charts/contextator; then
+            echo "charts/contextator unchanged since $previous: nothing will be published, appVersion not checked."
+            exit 0
+          fi
+          app_version=$(sed -n 's/^appVersion:[[:space:]]*//p' charts/contextator/Chart.yaml | tr -d "\"'")
+          if [ "$app_version" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "::error file=charts/contextator/Chart.yaml,title=appVersion does not match the tag::charts/contextator/Chart.yaml has appVersion \"$app_version\", but this release is ${GITHUB_REF_NAME} and the chart changed since $previous, so it would be published now, permanently. Nothing has been published: no image, no chart. Set appVersion to the version of the tag you release under (\"${GITHUB_REF_NAME#v}\" for this one), raise version as for any chart change, commit it, and push a tag on that new commit; ${GITHUB_REF_NAME} published nothing, so it may be deleted and pushed again there. Re-running this run does not help: it checks the same commit."
+            exit 1
+          fi
+          echo "appVersion $app_version matches ${GITHUB_REF_NAME}."
+
   # One job, not two. It used to be `verify` building amd64 and asserting against it, then a
   # separate `publish` job building both architectures over again and pushing that — connected only
   # by `cache-from: type=gha`, and a remote cache is allowed to evict between two jobs, and
@@ -40,6 +76,8 @@ jobs:
   # it is no longer what carries the verified layers into the pushed image — the shared builder is.
   publish:
     name: Verify, then build and push contextator/contextator
+    # Nothing is built or pushed until the chart preflight has passed.
+    needs: chart-preflight
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -255,9 +293,15 @@ jobs:
   # branch it would leave a released-but-unindexed version behind, and the next release — chart
   # unchanged — would find nothing to do and never index it; the first step below refuses to start
   # instead. chart-releaser never looks at Pages: with the branch present and Pages off, this job
-  # passes and the repository URL answers 404. If this job fails for any reason, fix the cause and
-  # use "Re-run failed jobs" on the same run — `skip_existing` skips the upload that already happened
-  # and the index is written; a later release will not do it for you. The image above is unaffected.
+  # passes and the repository URL answers 404.
+  #
+  # `appVersion` is not checked here: `chart-preflight` checks it before `publish` starts, so a
+  # mismatch fails the run with nothing published and is fixed by a new commit and tag, never by a
+  # re-run. What can still fail here is infrastructure — the missing branch, the network, the upload
+  # or the index push. For those, fix the cause and use "Re-run failed jobs" on the same run:
+  # `skip_existing` skips the upload that already happened and the index is written; a later release
+  # will not do it for you, since it only looks at chart changes since this tag. The image is
+  # unaffected either way.
   chart:
     name: Publish the Helm chart to gh-pages
     needs: publish
@@ -282,7 +326,7 @@ jobs:
           rc=0
           git ls-remote --exit-code --heads origin gh-pages >/dev/null || rc=$?
           if [ "$rc" -eq 2 ]; then
-            echo "::error title=No gh-pages branch::The gh-pages branch does not exist, so the chart cannot be indexed. Create it (an empty orphan branch is enough), turn GitHub Pages on for it, then use \"Re-run failed jobs\" on this run. Nothing has been published."
+            echo "::error title=No gh-pages branch::The gh-pages branch does not exist, so the chart cannot be indexed. Create it (an empty orphan branch is enough), turn GitHub Pages on for it, then use \"Re-run failed jobs\" on this run. The chart has not been published; the image has, and is not affected."
             exit 1
           elif [ "$rc" -ne 0 ]; then
             echo "::error title=gh-pages lookup failed::git ls-remote exited $rc while looking for the gh-pages branch; re-run this job."
@@ -297,27 +341,6 @@ jobs:
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with:
           version: v3.14.4
-
-      # ADR-0092: `appVersion` is the application release the chart was tested with, and a published
-      # version is never overwritten — a stale `appVersion` would be permanent. Whoever cuts the release
-      # sets it to the tag's version before tagging. Checked only when chart-releaser will publish,
-      # i.e. when charts/contextator changed since the previous tag (the same `git describe HEAD~` and
-      # diff cr.sh uses); a release that does not touch the chart does not have to touch it.
-      - name: Require appVersion to match the tag when the chart is published
-        run: |
-          set -euo pipefail
-          git fetch --tags >/dev/null 2>&1 || true
-          previous=$(git describe --tags --abbrev=0 HEAD~ 2>/dev/null || git rev-list --max-parents=0 --first-parent HEAD)
-          if git diff --quiet "$previous" -- charts/contextator; then
-            echo "charts/contextator unchanged since $previous: nothing will be published, appVersion not checked."
-            exit 0
-          fi
-          app_version=$(helm show chart charts/contextator | sed -n 's/^appVersion:[[:space:]]*//p' | tr -d "\"'")
-          if [ "$app_version" != "${GITHUB_REF_NAME#v}" ]; then
-            echo "::error file=charts/contextator/Chart.yaml,title=appVersion does not match the tag::charts/contextator/Chart.yaml has appVersion \"$app_version\", but this release is ${GITHUB_REF_NAME} and the chart changed since $previous, so it would be published now. Set appVersion to \"${GITHUB_REF_NAME#v}\" before tagging; a published chart version is never overwritten."
-            exit 1
-          fi
-          echo "appVersion $app_version matches ${GITHUB_REF_NAME}."
 
       # chart-releaser-action downloads the `cr` binary with curl and runs it unverified, in a job whose
       # token can write to the repository; a release asset can be replaced by its owner just as a tag
