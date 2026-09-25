@@ -1046,6 +1046,16 @@ header already in place. See [MCP access](#mcp-access).
 
 The server also sends MCP `instructions` describing the project so agents know when to use which tool.
 
+**Structured output is opt-in.** `MCP_STRUCTURED_OUTPUT=1` has each tool declare an `outputSchema` and return its
+answer a second time as `structuredContent` — the same results, status and fenced text as fields, for a client that
+wants to read them rather than parse prose. The text answer is identical either way. It is off by default because
+Claude Code, when a result carries `structuredContent`, hands its model that and drops the text
+([anthropics/claude-code#55677](https://github.com/anthropics/claude-code/issues/55677),
+[#79944](https://github.com/anthropics/claude-code/issues/79944)), so the guidance written into each answer would reach
+it only as a JSON field. Off, every tool definition and every answer is byte for byte what it was before the setting
+existed. Independently of it, every project's indexed documents are also MCP resources
+(`contextator://<project>/<source>/<path>`), listed and read behind the same auth and never beyond what `read_document` can reach.
+
 **What an answer looks like, and what it costs.** Each excerpt is rendered with the chunk before and
 after it, marked with a leading and trailing `…`, so an agent usually does not have to spend a
 `read_document` call to see the sentence a chunk boundary cut in half. At most two excerpts come from
@@ -1357,6 +1367,7 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `PUBLIC_BASE_URL` | – | e.g. `https://docs.example.com` for the URLs shown in the dashboard |
 | `TRUST_PROXY` | `0` | **Which peers may tell this server where a request came from.** It decides `req.ip` — the key of the per-IP sign-in limit, of `/oauth/register`'s per-host budget and of the address beside an audit event — and `req.protocol`, which three places build published URLs from when `PUBLIC_BASE_URL` is unset. `0` reads the socket's own peer address and ignores `X-Forwarded-*`, which is right for the shipped `docker compose` shape: nothing is in front of it, so a caller writing those headers would otherwise choose its own rate-limit key. **Put a reverse proxy in front and you must set this** — see *Running behind a reverse proxy* below for what breaks if you do not, including MCP connectors being answered `invalid_target`. Name the **proxy**: an IP, a CIDR block, or the subnet names `loopback` / `linklocal` / `uniquelocal`, comma-separated (`TRUST_PROXY=loopback`, `TRUST_PROXY=172.18.0.0/16`). The range is matched against **every hop**, not just the peer, so a range your clients are also inside (`uniquelocal` on a LAN) protects nothing. `1` trusts whoever wrote the header and is only safe when nothing but the proxy can open a socket to this port. A hop count is **not** accepted — it is a claim the server cannot check and goes silently wrong the day a CDN appears in front of the proxy |
 | `SESSION_IDLE_TTL_MS` | `1800000` | Idle Streamable HTTP sessions are closed after 30 min |
+| `MCP_STRUCTURED_OUTPUT` | `0` | `1` makes the MCP tools publish an `outputSchema` and return `structuredContent` beside the unchanged text. Off by default because Claude Code reads the structured content instead of the text when both are there — see [Tools exposed to the agent](#tools-exposed-to-the-agent). The `contextator://` resources do not depend on it |
 | `AUDIT_LOG_RETENTION_DAYS` | `365` | How long an audit event is kept. There is no switch for the log itself: every state-changing admin request that succeeds is recorded with the account that made it, written by the policy layer rather than by each route. The rows carry no question, no document and no excerpt — that is the query log, which is a separate table under a separate window |
 | `METRICS_TOKEN` | – | A bearer credential that reaches `GET /metrics` and **nothing else**, so scraping does not mean handing Prometheus an `ADMIN_TOKEN`. At least 16 characters, and generate it as you would any other secret — the length is a floor, not entropy, and this endpoint is not rate-limited. Unset, `/metrics` still answers a signed-in account or `ADMIN_TOKEN` — but only while the database is up, so an instance that wants to be readable during an outage sets this |
 | `METRICS_PUBLIC` | `0` | `1` answers `/metrics` with no credential at all. For a private network or a proxy that already guards the path; anywhere the port is reachable, leave it off — the exposition describes the instance |

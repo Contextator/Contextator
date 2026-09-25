@@ -127,8 +127,10 @@ function archiveExtensions(): string[] {
  * instead of serving.
  *
  * Parsing `src/mcp/tools.ts` as text would report what the file looks like; this reports what the
- * registration actually produces, which is what a client is answered with. The context is empty
- * because registration touches none of it — only the handlers do, and no handler is called here.
+ * registration actually produces, which is what a client is answered with. The context is empty but
+ * for the one setting registration reads, `MCP_STRUCTURED_OUTPUT` (whether a tool declares an output
+ * schema) — only the handlers touch the rest, and no handler is called here. Its default, so the facts
+ * describe what an instance answers out of the box; name, title and parameters do not depend on it.
  */
 function tools(): ToolFact[] {
   const collected: ToolFact[] = [];
@@ -148,7 +150,8 @@ function tools(): ToolFact[] {
     },
   } as unknown as McpServer;
   // `registerTools` reads `project.name` into each description and nothing else off the row.
-  registerTools(recorder, {} as ToolContext, { name: 'example' } as ProjectRow);
+  const config = { MCP_STRUCTURED_OUTPUT: defaultOf<boolean>('MCP_STRUCTURED_OUTPUT') } as ToolContext['config'];
+  registerTools(recorder, { config } as ToolContext, { name: 'example' } as ProjectRow);
   return collected;
 }
 

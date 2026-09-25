@@ -436,6 +436,18 @@ export const EnvSchema = z
      */
     MCP_OAUTH: z.string().default('1').transform(flag),
     /**
+     * `1` has each MCP tool declare an `outputSchema` and return its answer as `structuredContent` as
+     * well as text (MCP 2025-06-18). The text is the same either way.
+     *
+     * **Off by default, because a client that reads structured content can stop reading the text**:
+     * Claude Code hands its model the `structuredContent` alone when a result carries it
+     * (anthropics/claude-code#55677, #79944), so the prose this server writes for the model — the
+     * guidance on how to read excerpts and what to do next — would reach it only as a JSON field. Off,
+     * every tool definition and every answer is byte for byte what it was before structured output
+     * existed. The `docs://` resources do not depend on this flag.
+     */
+    MCP_STRUCTURED_OUTPUT: z.string().default('0').transform(flag),
+    /**
      * How long an issued access token lives, in minutes.
      *
      * An hour is the usual OAuth answer and it is short for a reason that is specific to this product:
