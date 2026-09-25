@@ -83,7 +83,9 @@ function trimPartialMarker(text: string, fence: DocumentFence): string {
  * roughly three times what a hit used to be, and twenty of those is a real fraction of an agent's
  * context spent on a tool result it did not size. Whole excerpts are dropped from the end rather than
  * the text being cut mid-sentence — except when the first one alone is over budget, which has to be
- * cut somewhere — and either way it says so.
+ * cut somewhere — and either way it says so. (The text cuts that first excerpt only when it is the only
+ * hit; when others were dropped behind it, the text shows it whole and over budget, as it always has.
+ * The structured answer cuts it in both cases — see below.)
  *
  * **And since [ADR-0066](../../.ssot/ADR.md#adr-0066) each excerpt is fenced.** The heading line above
  * is this server's sentence about a document; everything between the markers is the document's own
@@ -103,9 +105,15 @@ function trimPartialMarker(text: string, fence: DocumentFence): string {
  * Beside the text it returns the pieces the structured answer is made of, cut from the same string so
  * the two cannot drift: which hits it showed, each one's fenced excerpt exactly as the text carries it
  * (cut where the text is cut), how many it dropped, and the server's own sentences — the header that
- * names the markers and says the excerpts are data, and the truncation note. A client that hands the
+ * names the markers and says the excerpts are data, and the truncation notes. A client that hands the
  * model the structured answer instead of the text (Claude Code does) still gets the fence, the
  * framing and the budget.
+ *
+ * **One place the two differ: the structured answer always keeps to `maxChars`, the text does not.**
+ * When the first excerpt alone is over budget and later hits were dropped behind it, the text says what
+ * it dropped and shows that first excerpt whole — its shape before structured output existed, kept
+ * byte for byte. The structured excerpt is cut there anyway, exactly where the text would cut it were
+ * it the only hit, `cut` is set, and `guidance` carries both notes.
  */
 function formatHits(
   query: string,
@@ -151,27 +159,40 @@ function formatHits(
   let out = [header, ...candidates.map((i) => blockFor(i, fence))].join('\n\n');
   let excerpts = candidates.map((i) => wrapDocumentText(fence, bodies[i]));
   const omitted = hits.length - candidates.length;
+  // The one cut *inside* an excerpt, and so the one that can leave a marker half written or an opening
+  // one with no closing one — the second being the shape the fence exists to deny a document. Drop the
+  // half marker, then balance the pair. Only a single excerpt is ever cut (a second would have been
+  // dropped whole instead), so what follows its heading is that excerpt as cut — or nothing, when the
+  // cut landed before its opening marker.
+  const cutFirst = (whole: string): { text: string; excerpt: string } => {
+    let text = trimPartialMarker(whole.slice(0, maxChars), fence);
+    if (count(text, fence.begin) > count(text, fence.end)) text += `\n${fence.end}`;
+    const excerptAt = header.length + 2 + headingFor(candidates[0]).length + 2;
+    return { text, excerpt: text.length > excerptAt ? text.slice(excerptAt) : '' };
+  };
+  const cutNote = `[…truncated at ${maxChars} characters]`;
   let cut = false;
-  let note: string | null = null;
+  const notes: string[] = [];
   if (omitted > 0) {
-    note = `[…truncated: ${omitted} further excerpt${omitted === 1 ? '' : 's'} omitted at ${maxChars} characters. Ask for fewer results, or read_document one of the paths above.]`;
+    const note = `[…truncated: ${omitted} further excerpt${omitted === 1 ? '' : 's'} omitted at ${maxChars} characters. Ask for fewer results, or read_document one of the paths above.]`;
     out += `\n\n${note}`;
+    notes.push(note);
+    // The text leaves an over-budget first excerpt whole here, as it did before structured output; the
+    // structured answer does not. Only the first can be over budget: a second is selected only if it fits.
+    const first = [header, blockFor(candidates[0], fence)].join('\n\n');
+    if (first.length > maxChars) {
+      cut = true;
+      excerpts = [cutFirst(first).excerpt];
+      notes.push(cutNote);
+    }
   } else if (out.length > maxChars) {
     cut = true;
-    // The one path that cuts *inside* an excerpt, and so the one that can leave a marker half written or
-    // an opening one with no closing one — the second being the shape the fence exists to deny a
-    // document. Drop the half marker, then balance the pair, then say it was cut.
-    out = trimPartialMarker(out.slice(0, maxChars), fence);
-    if (count(out, fence.begin) > count(out, fence.end)) out += `\n${fence.end}`;
-    // Only one excerpt reaches this branch (a second would have been dropped whole instead), so what
-    // follows its heading is that excerpt as the text now carries it — or nothing, when the cut landed
-    // before its opening marker.
-    const excerptAt = header.length + 2 + headingFor(candidates[0]).length + 2;
-    excerpts = [out.length > excerptAt ? out.slice(excerptAt) : ''];
-    note = `[…truncated at ${maxChars} characters]`;
-    out += `\n${note}`;
+    const cutText = cutFirst(out);
+    out = `${cutText.text}\n${cutNote}`;
+    excerpts = [cutText.excerpt];
+    notes.push(cutNote);
   }
-  const guidance = note === null ? header : `${header}\n\n${note}`;
+  const guidance = [header, ...notes].join('\n\n');
   return { text: out, shown: candidates, excerpts, omitted, cut, guidance };
 }
 
@@ -358,9 +379,9 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
           );
         }
         const formatted = formatHits(query, project.name, outcome.hits, config.SEARCH_MAX_RESULT_CHARS);
-        // The excerpts the text shows and no others, each fenced and cut exactly as the text carries it:
-        // a client that gives its model this object instead of the text must not get past the fence
-        // or the size budget by doing so.
+        // The excerpts the text shows and no others, each fenced and cut as the text carries it — or
+        // tighter, when the text leaves a lone over-budget excerpt whole: a client that gives its model
+        // this object instead of the text must not get past the fence or the size budget by doing so.
         const results = formatted.shown.map((i, n) => {
           const hit = outcome.hits[i];
           return { rank: i + 1, file: hit.file, title: hit.title, headingPath: hit.headingPath, score: hit.score, text: formatted.excerpts[n] };

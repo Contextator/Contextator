@@ -869,6 +869,31 @@ describe('the plain text a client without structured output reads', () => {
     }
   });
 
+  it('says what the size budget dropped and what it cut, word for word', async () => {
+    // The two notes are the only sentences the budget adds, and an installed prompt may lean on them.
+    // At the default budget nothing in the fixture is dropped or cut, so the cases above never reach
+    // them: these do, at the smallest budget the config allows.
+    const narrow = { ...fx.ctx, config: { ...fx.ctx.config, SEARCH_MAX_RESULT_CHARS: 500, SEARCH_SCORE_FLOOR: 0 } };
+    // The tail of an answer from its last closing marker on: the marker, the separator and the note.
+    const tail = (text: string): string => text.slice(text.lastIndexOf(END));
+    const dropped = await call('search_docs', { query: 'Page 7 short page number 7', limit: 5 }, undefined, narrow);
+    expect(tail(dropped.text)).toBe(
+      `${END}\n\n[…truncated: 4 further excerpts omitted at 500 characters. Ask for fewer results, or read_document one of the paths above.]`,
+    );
+    const droppedOne = await call('search_docs', { query: 'Paragraph 30 explains the operations procedure', limit: 10 }, undefined, narrow);
+    expect(tail(droppedOne.text)).toBe(
+      `${END}\n\n[…truncated: 1 further excerpt omitted at 500 characters. Ask for fewer results, or read_document one of the paths above.]`,
+    );
+    // The one excerpt left is over budget on its own, and the text shows it whole anyway: dropping
+    // stops the cut (`formatHits`). That is how the text has always read, so it stays; the structured
+    // answer is the one that keeps to the budget here.
+    expect(droppedOne.text.length).toBeGreaterThan(500);
+    const cut = await call('search_docs', { query: 'Paragraph 30 explains the operations procedure', limit: 1 }, undefined, narrow);
+    expect(tail(cut.text)).toBe(`${END}\n[…truncated at 500 characters]`);
+    // And the whole of each, byte for byte.
+    for (const answer of [dropped, droppedOne, cut]) expect({ isError: answer.isError, text: answer.text }).toMatchSnapshot();
+  });
+
   it('answers a client on a protocol version from before structured output with the same text', async () => {
     // Raw JSON-RPC rather than the SDK client, which would negotiate the newest version it knows and
     // validate what came back: this is a client that asked for 2025-03-26, which has no outputSchema,
@@ -1019,23 +1044,59 @@ describe('the structured output', () => {
     expect(cut.guidance).toContain('[…truncated at 500 characters]');
   });
 
-  it('spends no more of the budget on structured document text than the text answer does', async () => {
+  it('keeps the structured answer to the budget in every case', async () => {
     // SEARCH_MAX_RESULT_CHARS bounds what the model is handed. A client that hands it the structured
-    // answer instead must not be handed more document text than the budget allows: dropped hits are
-    // absent, a cut hit is cut, and no context outside the budget rides along beside them.
+    // answer instead must not be handed more than the budget allows: dropped hits are absent, a cut hit
+    // is cut, and no context outside the budget rides along beside them. Measured the way the text is:
+    // the header, each heading and each excerpt, laid out as the text lays them out, less the closing
+    // marker a cut adds so the fence stays shut.
     const budget = 500;
     const narrow = { ...fx.ctx, config: { ...fx.ctx.config, SEARCH_MAX_RESULT_CHARS: budget, SEARCH_SCORE_FLOOR: 0 } };
+    const closing = `\n${END}`;
     for (const [query, limit] of [
       ['Page 7 short page number 7', 5],
       ['Paragraph 30 explains the operations procedure', 1],
+      // The first excerpt alone is over budget and the others are dropped behind it: the text shows it
+      // whole (as it always has), the structured answer cuts it.
       ['Paragraph 30 explains the operations procedure', 10],
     ] as const) {
       const answer = await structured('search_docs', { query, limit }, undefined, narrow);
       const data = searchDocsOutput.parse(answer.data);
-      const documentText = data.results.reduce((sum, r) => sum + r.text.length, 0);
-      expect(documentText, query).toBeLessThanOrEqual(budget);
-      for (const r of data.results) expect(answer.text).toContain(r.text);
+      const header = data.guidance.split('\n\n')[0];
+      const blocks = data.results.map((r) => {
+        const heading = `### ${r.rank}. ${r.file}${r.headingPath ? ` — ${r.headingPath}` : ''} (score ${r.score.toFixed(3)})`;
+        const excerpt = data.truncated ? r.text.slice(0, -closing.length) : r.text;
+        // Cut or not, what the structured answer carries is what the text shows, or the start of it.
+        expect(answer.text, query).toContain(`${heading}\n\n${excerpt}`);
+        return `${heading}\n\n${excerpt}`;
+      });
+      expect([header, ...blocks].join('\n\n').length, `${query} / ${limit}`).toBeLessThanOrEqual(budget);
+      for (const r of data.results) {
+        expect(r.text.startsWith(`${BEGIN}\n`)).toBe(true);
+        expect(r.text.endsWith(closing)).toBe(true);
+      }
     }
+  });
+
+  it('cuts the one excerpt the text leaves whole over budget, and says both what it dropped and that it cut', async () => {
+    const narrow = { ...fx.ctx, config: { ...fx.ctx.config, SEARCH_MAX_RESULT_CHARS: 500, SEARCH_SCORE_FLOOR: 0 } };
+    const answer = await structured('search_docs', { query: 'Paragraph 30 explains the operations procedure', limit: 10 }, undefined, narrow);
+    const data = searchDocsOutput.parse(answer.data);
+    expect(data).toMatchObject({ status: 'results', omitted: 1, truncated: true });
+    expect(data.results).toHaveLength(1);
+    const [only] = data.results;
+    expect(only.file).toBe('handbook/manual.md');
+    expect(occurrences(only.text, BEGIN)).toBe(1);
+    expect(occurrences(only.text, END)).toBe(1);
+    // The text runs over and says only what it dropped; the structured excerpt is shorter than the one
+    // the text shows, and guidance carries both notes.
+    expect(answer.text.length).toBeGreaterThan(500);
+    expect(answer.text).not.toContain(only.text);
+    const header = data.guidance.split('\n\n')[0];
+    expect(data.guidance).toBe(
+      `${header}\n\n[…truncated: 1 further excerpt omitted at 500 characters. Ask for fewer results, or read_document one of the paths above.]` +
+        '\n\n[…truncated at 500 characters]',
+    );
   });
 
   it('names the floor and the closest score below it, and no excerpts', async () => {
