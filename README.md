@@ -760,7 +760,15 @@ Two things a **dump** does not contain, which is the whole reason the command ab
 Take the backup when no project is `indexing`: a re-index writes a second generation beside the live one
 and `pg_dump` cannot filter rows, so a dump taken mid-run is twice the size. Expect a dump of roughly
 2 KB per indexed chunk — vectors dump as text and compress back down — and expect most of a restore's
-time to be the HNSW index being rebuilt over every chunk in the instance.
+time to be the HNSW indexes being rebuilt: one per project, and each scans every chunk in the instance
+to find its own project's rows, so a restore is sized by the instance and the project count together.
+
+**A backup holds project creation and deletion until it ends.** `pg_dump` reads the database in one
+snapshot, and creating a project builds its HNSW index with `CREATE INDEX CONCURRENTLY` while deleting
+one drops it with `DROP INDEX CONCURRENTLY` — both wait for every transaction open when they start.
+Creating a project (`POST /api/projects` or the dashboard), deleting one or importing one during a
+backup returns when the backup finishes; nothing fails, and searches and indexing into existing
+projects are not held. Schedule the backup away from the hours projects are created.
 
 `POSTGRES_PASSWORD` is applied when the cluster is created. To change it later run
 `ALTER USER contextator PASSWORD '...'` via `psql` and update `.env` before the next start.
@@ -985,6 +993,11 @@ your documentation at all. What it does **not** catch is a question shaped like 
 answer is not written down — those score exactly where real questions score, and no threshold
 separates them.
 
+`SEARCH_SCORE_FLOOR` (default 0.82) is the server's floor. A project can set its own from the query
+panel, or turn the floor off for itself, when its corpus scores differently — prose-heavy corpora
+usually want a lower one. The panel shows what a floor would have done to the searches already logged
+before it is applied, and the server's `SEARCH_SCORE_FLOOR=0` still turns every project's floor off.
+
 ## File types
 
 A source indexes `.md` and `.mdx` by default and can be told to take `.txt`, `.html`/`.htm`, `.csv`, `.docx` and
@@ -1079,7 +1092,7 @@ What is capped on the way *in* is the file itself: `UPLOAD_MAX_FILE_BYTES`, 50 M
 1. Every source of the project is synced in turn (git fetch, Notion pull; local and upload sources have nothing to fetch), then its directory is walked for the file types the source selected — `.md`/`.mdx` by default, optionally `.txt`, `.html`/`.htm`, `.csv`, `.docx` and `.pdf`, plus `.yaml`/`.yml`/`.json` on a source whose content type is OpenAPI (dotfiles, `node_modules`, `dist`, `build`, symlinks and `IGNORE_GLOBS` are skipped). Every path collected is prefixed with the source name, so two sources can both hold an `install.md` without colliding.
 2. Every file is hashed (sha256) over its **raw bytes**, then converted to Markdown by its type ([File types](#file-types)) and the source's content type is applied (Obsidian wikilinks, Notion export ids). Unchanged files are skipped, changed/new files are re-chunked and re-embedded, files that disappeared are deleted. A file the [OpenAPI](#openapi-and-swagger) content type expands is several documents rather than one: every one of them carries the specification's hash, so an unchanged specification re-embeds nothing, and an operation that left the file leaves the index with it. A **force** re-index (and one triggered by a changed embedding model) rebuilds everything, and does it *beside* the live index rather than by wiping it first: the project keeps answering `search_docs`, `list_topics` and `read_document` for the whole run, and a run that fails halfway leaves the previous index serving instead of an empty project. Every finished run (mode, counts, duration, error) is stored in `index_runs`; the last 20 per project are kept and shown in the dashboard.
 3. Chunking is Markdown-aware: frontmatter is parsed (`title` wins), MDX `import`/`export` lines and component tags are stripped, the document is split at headings (`#`–`####`) with a breadcrumb kept per chunk, and oversized sections are packed from paragraphs and fenced code blocks (code is never split mid-block when avoidable) with a small overlap.
-4. Each chunk is embedded as `heading breadcrumb + content` and stored in `chunks` with an HNSW cosine index. The same string is also stored as a `tsvector` with a GIN index — that is the keyword half of search, and it is written in the same statement as the row, so the two halves can never describe different text.
+4. Each chunk is embedded as `heading breadcrumb + content` and stored in `chunks`, under its project's own partial HNSW cosine index. The same string is also stored as a `tsvector` with a GIN index — that is the keyword half of search, and it is written in the same statement as the row, so the two halves can never describe different text.
 
 **How the chunk budget is spent, and why it is 96.** Tokens are counted with the embedding model's own
 tokenizer — the one the provider has already loaded — rather than approximated from the character count.
@@ -1236,15 +1249,15 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `EMBEDDING_MAX_INPUT_TOKENS` | – | What the model reads **usefully** — the window it was trained at, not where its tokenizer truncates. Left empty the server discovers it from the loaded model and warns after startup if `CHUNK_MAX_TOKENS` does not fit; set, it overrules that and a contradicting `CHUNK_MAX_TOKENS` refuses to start |
 | `EMBEDDING_QUERY_PREFIX`, `EMBEDDING_PASSAGE_PREFIX` | – | The instruction prefixes the model was trained with, put on by the server and never by you. Empty means the model decides: `query: ` / `passage: ` for `multilingual-e5-*`, nothing for anything else. The trailing space matters and `.env` strips an unquoted one, so write `EMBEDDING_QUERY_PREFIX="query: "`. An empty value reads as *unset*, so `none` is how you say *no prefix* on a model that has them. Either value is part of the model id, so changing one re-indexes every project |
 | `CHUNK_MAX_TOKENS` / `CHUNK_OVERLAP_TOKENS` | `96` / `24` | Counted with the model's own tokenizer. `96` is what measured best on the golden set, not what fits the model's 512-token window — filling the window measures *worse*. Raise both on OpenAI (8191). Changing either re-chunks every project on its next index run |
-| `HNSW_EF_SEARCH` | `100` | How many candidates the vector index produces **before** the project filter is applied — pgvector's own default is 40. One index serves every project and pgvector post-filters, so too low a value answers a project that does not dominate the index with too few hits, or none. Costs latency on every search |
+| `HNSW_EF_SEARCH` | `100` | How many candidates the vector index produces **before** the generation filter is applied — pgvector's own default is 40. Every project has its own partial index, so the candidates are the project's rows; while a project re-indexes, its next generation sits in the same index and is filtered out after it. Costs latency on every search |
 | `HNSW_ITERATIVE_SCAN` | `relaxed_order` | `relaxed_order`, `strict_order` or `off`. Keeps scanning when the filter leaves fewer hits than asked for, instead of answering short (pgvector 0.8+; on an older one all three settings are ignored and search behaves as it did). `relaxed_order` returns the rows unordered and the server sorts them itself |
-| `HNSW_MAX_SCAN_TUPLES` | `20000` | The ceiling that actually **ends** an iterative scan, counted in index tuples across the **whole instance** rather than the project. Raise it with the instance — a project holding one per cent of the rows has to be scanned past to be found |
+| `HNSW_MAX_SCAN_TUPLES` | `20000` | The ceiling that actually **ends** an iterative scan, counted in tuples of the **project's own** index. Raise it as a project grows, not as the instance does |
 | `SEARCH_MAX_PER_DOCUMENT` | `2` | Excerpts one document may contribute to one answer, applied after ranking and refilled from the excerpts below it, so an agent that asked for five still gets five. Measured on the golden set it *gains* a question — what it drops is a near-duplicate of something already on the page. `20` turns it off |
 | `SEARCH_NEIGHBOR_CONTEXT` | `1` | Chunks either side of each hit, shown as context around it rather than as further results. `0` turns it off. A chunk is `CHUNK_MAX_TOKENS`, so one either side is about three times the context a hit used to be |
 | `SEARCH_MAX_RESULT_CHARS` | `12000` | Ceiling on one rendered `search_docs` answer; past it whole excerpts are dropped and the result says how many. A default answer is around 3 300 characters |
 | `SYNC_DEFAULT_INTERVAL_MINUTES` | `60` | The sync interval a **newly created** source is given, in minutes; `0` creates them unscheduled. It never reaches a source that already exists — not on upgrade, and not when this value changes — so an upgrade starts no outbound traffic nobody asked for. Per source the dashboard and the API accept 5 to 43200 (30 days), or *never* |
 | `SYNC_PROBES_PER_TICK` | `10` | How many due sources one tick — one minute — may check. The rest keep their turn, oldest first, and the next tick takes them |
-| `SEARCH_SCORE_FLOOR` | `0.82` | Similarity below which `search_docs` answers *no good match* rather than its best hit. `0` turns it off. **Measured against the default embedding model and meaningless on another one** — the server warns at startup if they disagree. A question naming an identifier that the keyword half actually matched skips the gate, because an exact string match is correct at any similarity |
+| `SEARCH_SCORE_FLOOR` | `0.82` | Similarity below which `search_docs` answers *no good match* rather than its best hit. `0` turns it off. **Measured against the default embedding model and meaningless on another one** — the server warns at startup if they disagree. A question naming an identifier that the keyword half actually matched skips the gate, because an exact string match is correct at any similarity. A project can override it from the query-log panel; `0` here turns every project's floor off too |
 | `ADMIN_TOKEN` | – | **Machine access** to `/api/*` via `Authorization: Bearer …`, acting with root permissions. Browsers sign in with an account instead; treat this token like a root password |
 | `AUTH_SESSION_IDLE_MS` | `43200000` (12 h) | A dashboard session unused for this long has to sign in again. Refreshed while the dashboard is in use |
 | `AUTH_SESSION_TTL_DAYS` | `30` | Hard ceiling on a session's life, however actively it is used |
@@ -1491,7 +1504,8 @@ git config blame.ignoreRevsFile .git-blame-ignore-revs
 src/server.ts                 Fastify entrypoint / composition root
 src/config.ts                 zod-validated environment
 src/db/schema.ts              Drizzle schema — the source `drizzle/*.sql` is generated from, and the only description of the tables
-src/db/bootstrap.ts           startup: the extension, the migration journal, `migrate()`, the vector dimension, the HNSW index
+src/db/bootstrap.ts           startup: the extension, the migration journal, `migrate()`, the vector dimension, and reconciling the per-project HNSW indexes
+src/db/vector-indexes.ts      one partial HNSW index per project: its name, its concurrent build and drop, the queue that serialises them, and the bootstrap's reconcile
 src/services/chunker.ts       Markdown/MDX-aware chunking with heading breadcrumbs; pure and synchronous, the token counter injected
 src/services/fs-scan.ts       safe directory walking + path-escape checks
 src/services/sources.ts       source CRUD and the zod schema of each type's config
@@ -1560,7 +1574,7 @@ public/auth.js                the signed-in account, the top-bar menu, permissio
 public/users.js               the account list at #/~users
 public/tokens.js              your own API tokens at #/~tokens — create, list, revoke
 public/audit.js               the audit log at #/~audit — who changed this instance, filtered and paged by the server
-public/queries.js             a project's query-log panel: what agents asked, and the export beside it
+public/queries.js             a project's query-log panel: what agents asked, the export beside it, and the project's own relevance floor with its preview
 public/members.js             a project's Members panel
 public/mcp.js                 a project's MCP access panel and its tokens
 public/search.js              a project's search box and the hits it renders, scores and all
@@ -1663,8 +1677,9 @@ is a deployment setting (`vector(384)` vs `vector(1536)`), so `schema.ts` carrie
 the migration to bake in and the bootstrap re-types the column to the configured dimension
 afterwards, once, before any row exists — drizzle-kit diffs `schema.ts` against its own snapshot and
 never against the live database, so a deployment at 1536 cannot be seen by it, let alone broken by it.
-The HNSW index is the second: it needs a fixed dimension and blocks the re-typing while it exists, so
-the bootstrap creates it after. The dimension is still recorded in `settings` and a mismatch still
+The HNSW indexes are the second: one partial index per project, named after the project, which a
+generated migration could never describe; each needs a fixed dimension and blocks the re-typing while
+it exists, so the bootstrap creates them after. The dimension is still recorded in `settings` and a mismatch still
 fails fast with the remedy in the message.
 
 What used to rest on review has a test: `test/integration/schema-equivalence.itest.ts` applies the
@@ -1730,8 +1745,8 @@ text, on every pull request, against a real server.
 | `Subdirectory "…" does not exist in the repository` | The path is relative to the repository root and is checked against the branch that was checked out. |
 | A push webhook returns `401 invalid_signature` | The secret in the repository settings is not the one shown while editing the source — copy it again, or **Regenerate** and paste the new one. |
 | `search_docs` says the project was indexed with another model | Re-index the project (it happens automatically on the next index run). |
-| Every search answers *no good match* | `SEARCH_SCORE_FLOOR` is a cosine similarity measured against the default embedding model. If you changed `EMBEDDING_MODEL`, the startup log says so — re-measure the floor with `npm run eval` against your corpus, or set `SEARCH_SCORE_FLOOR=0`. |
-| An agent is told *no good match* for something that **is** documented | The floor refused a question it should not have. The server logs every gated query at `info` with the score it saw; compare that against `SEARCH_SCORE_FLOOR` and lower it, or set it to `0`. |
+| Every search answers *no good match* | `SEARCH_SCORE_FLOOR` is a cosine similarity measured against the default embedding model. If you changed `EMBEDDING_MODEL`, the startup log says so — re-measure the floor with `npm run eval` against your corpus, or set `SEARCH_SCORE_FLOOR=0`, which turns the projects' own floors off as well. The warning names the projects that carry one. |
+| An agent is told *no good match* for something that **is** documented | The floor refused a question it should not have. The server logs every gated query at `info` with the score it saw; compare that against the floor in effect — the project's own if it set one, else `SEARCH_SCORE_FLOOR`. A corpus that scores lower than the rest (prose more than reference pages) is better served by lowering that project's floor in the query-log panel, which previews the change first, than by lowering the server's. |
 | Answers got longer after upgrading | Each excerpt now carries the chunk either side of it. `SEARCH_NEIGHBOR_CONTEXT=0` restores the old shape, and `SEARCH_MAX_RESULT_CHARS` caps the whole answer. |
 | `Could not load the sharp module` in the container | Only when building from source: regenerate `package-lock.json` on Linux or run `npm install --os=linux --cpu=x64 sharp` before building. |
 | I missed the first-run setup code | Set `SETUP_CODE` in `.env` to something you choose and restart — it is read on every start until the first account exists. Or just restart and read the fresh code the server prints: `docker compose restart contextator && docker compose logs -f`. |

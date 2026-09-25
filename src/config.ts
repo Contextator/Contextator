@@ -784,32 +784,31 @@ export const EnvSchema = z
     /** A quarter of the budget, because what has to survive a chunk boundary is a sentence, and a sentence does not get shorter when the budget does. */
     CHUNK_OVERLAP_TOKENS: z.coerce.number().int().min(0).default(24),
 
-    // Search: how far into the HNSW index one query is allowed to look (ADR-0040). All three are set
-    // per search transaction with `set_config(..., is_local => true)`, never on the connection — the
-    // pool hands the same connection to unrelated work a moment later.
+    // Search: how far into a project's HNSW index one query is allowed to look (ADR-0040, ADR-0082).
+    // All three are set per search transaction with `set_config(..., is_local => true)`, never on the
+    // connection — the pool hands the same connection to unrelated work a moment later.
     /**
-     * Candidates the index yields before the project and generation predicates are applied. pgvector's
-     * own default is 40, which is the *whole* answer to a top-k on a busy instance: the predicates are
-     * a post-filter, so 40 candidates drawn from every project's chunks can leave a small project with
-     * a handful of hits or none. 100 is the usual small-corpus recall setting and the number this
-     * product runs at; it is a knob because the trade is latency against recall and the right point
-     * depends on how many projects share the index.
+     * Candidates the index yields before the generation predicate is applied. Every project has its own
+     * partial index ([ADR-0082](../../.ssot/ADR.md#adr-0082)), so the candidates are that project's rows;
+     * the generation is still a post-filter, and during a re-index the next generation sits in the same
+     * index. pgvector's own default is 40; 100 is the usual small-corpus recall setting and the number
+     * this product runs at. It is a knob because the trade is latency against recall.
      */
     HNSW_EF_SEARCH: z.coerce.number().int().min(1).max(1000).default(100),
     /**
      * pgvector 0.8's iterative scan: when the post-filter leaves fewer than `limit` rows, keep scanning
-     * instead of answering short. `relaxed_order` re-searches with a growing `ef_search` and is what
-     * makes a 50-chunk project answerable inside a 20 000-chunk instance; `strict_order` keeps rows in
-     * distance order at a higher cost; `off` is pgvector's default and this product's old behaviour.
+     * instead of answering short. `relaxed_order` re-searches with a growing `ef_search`; `strict_order`
+     * keeps rows in distance order at a higher cost; `off` is pgvector's default and this product's old
+     * behaviour.
      *
      * Under `relaxed_order` the rows do not arrive in distance order — `searchChunks` re-sorts them.
      */
     HNSW_ITERATIVE_SCAN: z.enum(['off', 'relaxed_order', 'strict_order']).default('relaxed_order'),
     /**
      * The stop condition that actually fires once iterative scan is on: how many index tuples one query
-     * may visit before it gives up and answers with what it has. pgvector's default is 20 000, and it is
-     * nameable here because the number that matters is *the instance's* row count, not a project's — a
-     * project holding 1 % of the chunks has to be scanned past to be found.
+     * may visit before it gives up and answers with what it has. pgvector's default is 20 000. It counts
+     * the tuples of the project's own index (ADR-0082), so it is the number to raise as a project grows,
+     * not as the instance does.
      */
     HNSW_MAX_SCAN_TUPLES: z.coerce.number().int().min(1).default(20_000),
 
