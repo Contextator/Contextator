@@ -1,7 +1,8 @@
-# Lints and renders the Helm chart at charts/contextator/ — it does not publish anything. Whether to
-# push this chart to an OCI registry or a gh-pages index is a separate, not-yet-made product decision
-# (ADR-0078's Decision section, last bullet); this workflow only guards against the chart failing to
-# lint or render, the same way `ci`'s `image` job guards the Dockerfile without publishing an image.
+# Lints and renders the Helm chart at charts/contextator/ and checks its version policy — it does not
+# publish anything. Publishing is the release workflow's `chart` job (chart-releaser to the gh-pages
+# Helm repository, ADR-0092), which runs only for a `v*` tag; this workflow guards every chart change
+# before that: the chart lints, renders, rejects values its strict schema does not allow, and carries a
+# bumped `version`.
 name: Helm chart
 
 on:
@@ -95,7 +96,8 @@ jobs:
           fi
 
       # replicaCount is deliberately not an exposed value (ADR-0078, "Replicas" in the chart README) —
-      # asserting `replicas: 1` here is a regression guard against ever adding a way to raise it.
+      # asserting `replicas: 1` here is a regression guard against ever adding a way to raise it; the
+      # schema step below checks that setting replicaCount is rejected.
       - name: Exactly one replica in the rendered Deployment
         run: |
           set -euo pipefail
@@ -105,24 +107,36 @@ jobs:
             --show-only templates/deployment.yaml)
           grep -E '^\s*replicas:\s*1\s*$' <<< "$rendered"
 
-      # ADR-0078: there is nothing to set, so there is nothing to validate at install time. A
-      # replicaCount passed anyway is an unknown value the chart ignores — it must still render, and
-      # the Deployment must still say `replicas: 1`. This fails if a template ever starts reading
-      # replicaCount (the rendered count would move) or if install-time validation is added without
-      # the ADR changing first (the render would fail).
-      - name: replicaCount is ignored, not a way to scale (ADR-0078)
+      # values.schema.json is strict (ADR-0092): an unknown key at the root or nested, or a value of the
+      # wrong type, must fail the render and name the offending key — nothing is ignored silently.
+      # replicaCount is one of the unknown keys: the chart does not offer it at all (ADR-0078), so it
+      # is rejected rather than ignored. Each case sets image.tag and database.url, so the render can
+      # only fail for the schema reason under test; the grep checks that the error names that key.
+      # The patterns match both Helm 3's error wording (`service.port: Invalid type`) and Helm 4's
+      # (`at '/service/port': got string`), so a local run with either reads the same.
+      - name: The values schema rejects unknown keys and wrong types (ADR-0092)
         run: |
           set -euo pipefail
-          rendered=$(helm template ctx charts/contextator \
-            --set image.tag="ci-test" \
-            --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
-            --set replicaCount=3 \
-            --show-only templates/deployment.yaml)
-          if ! grep -Eq '^\s*replicas:\s*1\s*$' <<< "$rendered"; then
-            echo "replicaCount=3 changed the rendered replica count — ADR-0078 keeps it at exactly 1:"
-            grep -E '^\s*replicas:' <<< "$rendered" || echo "(no replicas line rendered)"
-            exit 1
-          fi
+          check() {
+            local expect=$1; shift
+            if output=$(helm template ctx charts/contextator \
+                --set image.tag="ci-test" \
+                --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
+                "$@" 2>&1); then
+              echo "helm template accepted $* — expected the values schema to reject it (ADR-0092)."
+              exit 1
+            fi
+            if ! grep -qE -- "$expect" <<< "$output"; then
+              echo "helm template failed for $*, but the error does not name '$expect':"
+              echo "$output"
+              exit 1
+            fi
+          }
+          check 'foo' --set foo=bar                                   # unknown key at the root
+          check 'tagg' --set image.tagg=x                             # unknown key, nested
+          check 'replicaCount' --set-string replicaCount=1            # not offered (ADR-0078)
+          check 'service[./]port' --set-string service.port=80        # wrong type: string for integer
+          check 'pullPolicy' --set image.pullPolicy=Sometimes         # outside the enum
 
       # TRUST_PROXY must never be inferred from ingress.enabled (ADR-0060, ADR-0078) — it is only ever
       # rendered when config.trustProxy is set explicitly. This regression-tests the tur 2 fix against
@@ -241,3 +255,53 @@ jobs:
             grep -E '(^| )name: data( |$)' <<< "$volumes" | grep -qE "(^| )claimName: $claim( |\$)" || {
               echo "volume data does not claim $claim (existingClaim='$existing'):"; echo "${volumes:-<missing>}"; exit 1; }
           done
+
+  # ADR-0092: `version` is bumped in the same change that touches the chart, and a published version
+  # is never overwritten — chart-releaser skips a version that already has a release, so a chart change
+  # without a bump would never reach the Helm repository. The base is the pull request's base commit,
+  # or the commit the push moved main from. The version must be higher than the base's, by SemVer
+  # order; which part to bump (patch, minor, major) is the author's call and Chart.yaml says how.
+  version-bump:
+    name: Chart version bumped with the chart
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Chart.yaml version moves with any chart change
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            echo "No base commit to compare against ('$BASE_SHA'); nothing to check."
+            exit 0
+          fi
+          if git diff --quiet "$BASE_SHA" HEAD -- charts/contextator; then
+            echo "charts/contextator/ unchanged since $BASE_SHA."
+            exit 0
+          fi
+          version() { sed -nE 's/^version:[[:space:]]*"?([^"[:space:]]+)"?[[:space:]]*$/\1/p' | head -n 1; }
+          if ! git cat-file -e "$BASE_SHA:charts/contextator/Chart.yaml" 2>/dev/null; then
+            echo "charts/contextator/Chart.yaml is new since $BASE_SHA; nothing to compare."
+            exit 0
+          fi
+          old=$(git show "$BASE_SHA:charts/contextator/Chart.yaml" | version)
+          new=$(version < charts/contextator/Chart.yaml)
+          if [[ -z "$new" ]]; then
+            echo "Could not read version from charts/contextator/Chart.yaml."
+            exit 1
+          fi
+          highest=$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -n 1)
+          if [[ "$new" == "$old" || "$highest" != "$new" ]]; then
+            echo "charts/contextator/ changed since $BASE_SHA, but Chart.yaml version went from '$old' to '$new'."
+            echo "Bump it in the same change (ADR-0092): patch for a fix, minor for a new value, major for a"
+            echo "removed or renamed value or a value the schema newly rejects."
+            exit 1
+          fi
+          echo "Chart version $old -> $new."

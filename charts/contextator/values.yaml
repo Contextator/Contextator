@@ -11,9 +11,14 @@
 # sessions and indexing state across pods rather than scale anything. Horizontal scaling is
 # out of scope (ROADMAP.md, "Deliberately not"). See ADR-0078.
 #
-# There is no `replicaCount` key in this file and no template reads one, so there is nothing to
-# validate: `--set replicaCount=2` is an unknown value the chart ignores, and the Deployment still
-# renders `replicas: 1`. If you need more headroom, raise `resources` below rather than replicas.
+# There is no `replicaCount` key in this file, in values.schema.json or in any template. The schema
+# rejects keys it does not list (ADR-0092), so `--set replicaCount=2` fails `helm install` /
+# `helm template` as an unknown key instead of being ignored. If you need more headroom, raise
+# `resources` below rather than replicas.
+#
+# Every value below is checked against values.schema.json: a misspelt key or a wrong type (e.g. a
+# number where a string is expected — use `--set-string` for a numeric-looking image tag) fails the
+# install and names the key.
 
 # -----------------------------------------------------------------------------------------------
 # Image
@@ -112,6 +117,17 @@ config:
   # X-Forwarded-For (not just one), or supply a comma-separated list of trusted proxy IPs/CIDRs/
   # subnet names (loopback, linklocal, uniquelocal) to trust only those.
   trustProxy: ""
+  # CONFLUENCE_ALLOWED_HOSTS (ADR-0088): host names — not URLs — a Confluence source may reach on a
+  # private address (10/8, 172.16/12, 192.168/16, fc00::/7). Set it when Confluence Data Center is
+  # on the internal network. Loopback, link-local (169.254.169.254), unspecified and multicast
+  # addresses stay refused whatever is listed. Empty leaves the variable unset.
+  confluenceAllowedHosts: []
+  #   - wiki.corp.example
+  # MCP_STRUCTURED_OUTPUT: true makes every MCP tool also return its answer as structured JSON
+  # (`structuredContent`) beside the unchanged text answer. Off by default: Claude Code hands its
+  # model the structured part alone when both are present, so the guidance each answer carries
+  # would reach it only as a JSON field. `false` leaves the variable unset (the app's default, 0).
+  mcpStructuredOutput: false
 
 # -----------------------------------------------------------------------------------------------
 # Persistence
@@ -235,11 +251,12 @@ affinity: {}
 # -----------------------------------------------------------------------------------------------
 # Contextator has ~80 optional environment variables (.env.example) — OAuth/SSO, rate limits,
 # upload caps, embedding provider/model/dtype, webhook settings, and so on. Anything not already
-# modelled above (image, database, secretKey, service, ingress, persistence, resources, probes)
+# modelled above (image, database, secretKey, service, ingress, config, persistence, resources, probes)
 # is deliberately left to these two passthrough maps rather than mirrored one-by-one into this
 # chart, so the chart does not drift out of sync with the application's own env surface.
 #
-# Plain, non-secret values:
+# Plain, non-secret values. Names are open; values must be strings (quote numbers, or use
+# `--set-string`), so a value typed as a number or boolean fails the schema:
 env: {}
 #   EMBEDDING_DTYPE: fp16
 #   RATE_LIMIT_MAX: "600"

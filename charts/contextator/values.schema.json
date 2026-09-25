@@ -1,53 +1,497 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "contextator chart values",
-  "description": "Checks the shape of the top-level maps only. There is no replicaCount entry: the chart does not offer the key at all (ADR-0078). Draft-07 because Helm v3 validates with gojsonschema, which supports drafts 4, 6 and 7 only.",
+  "description": "Strict (ADR-0092): every object level rejects keys it does not list, every scalar has a type and closed value sets are enums, so a misspelt or mistyped value fails helm install/upgrade/template instead of being ignored. Structures Kubernetes leaves open are bounded by their type only. There is no replicaCount entry: the chart does not offer the key at all (ADR-0078), so setting it fails as an unknown key. Draft-07 because Helm v3 validates with gojsonschema, which supports drafts 4, 6 and 7 only.",
   "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "image",
+    "database",
+    "secretKey",
+    "service",
+    "ingress",
+    "config",
+    "persistence",
+    "resources",
+    "probes",
+    "serviceAccount",
+    "env",
+    "envSecret",
+    "tests"
+  ],
+  "definitions": {
+    "stringMap": {
+      "description": "A string-to-string map (annotations, labels, nodeSelector). Open: any key is accepted.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "openObject": {
+      "description": "A Kubernetes structure the chart passes through as written (resources, affinity, security contexts). Bounded by its type only.",
+      "type": "object"
+    },
+    "openArray": {
+      "description": "A Kubernetes list the chart passes through as written (tolerations, extra volumes and mounts). Bounded by its type only.",
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "persistentVolume": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "storageClassName",
+        "accessModes",
+        "size",
+        "existingClaim",
+        "annotations"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "storageClassName": {
+          "description": "Empty uses the cluster's default StorageClass.",
+          "type": "string"
+        },
+        "accessModes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": [
+              "ReadWriteOnce",
+              "ReadOnlyMany",
+              "ReadWriteMany",
+              "ReadWriteOncePod"
+            ]
+          }
+        },
+        "size": {
+          "description": "A Kubernetes quantity, e.g. 5Gi.",
+          "type": "string",
+          "minLength": 1
+        },
+        "existingClaim": {
+          "description": "Name of a PersistentVolumeClaim to mount instead of creating one. Empty creates the chart's own.",
+          "type": "string"
+        },
+        "annotations": {
+          "$ref": "#/definitions/stringMap"
+        }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "initialDelaySeconds",
+        "periodSeconds",
+        "timeoutSeconds",
+        "failureThreshold"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "initialDelaySeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "periodSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "failureThreshold": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  },
   "properties": {
+    "global": {
+      "description": "Not used by this chart. Listed because Helm hands every chart a `global` map when it is installed as a subchart, and a strict root would otherwise reject it.",
+      "type": "object"
+    },
     "image": {
-      "type": "object"
-    },
-    "database": {
-      "type": "object"
-    },
-    "secretKey": {
-      "type": "object"
-    },
-    "service": {
-      "type": "object"
-    },
-    "ingress": {
-      "type": "object"
-    },
-    "config": {
-      "type": "object"
-    },
-    "persistence": {
-      "type": "object"
-    },
-    "resources": {
-      "type": "object"
-    },
-    "probes": {
-      "type": "object"
-    },
-    "env": {
-      "type": "object"
-    },
-    "envSecret": {
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "tag",
+        "pullPolicy"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "description": "Required, a `-slim` tag. A string, so a numeric-looking tag needs --set-string. Emptiness is checked by the template, whose error explains what to set (ADR-0078).",
+          "type": "string"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
     },
     "imagePullSecrets": {
-      "type": "array"
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "database": {
+      "description": "Required: `url` or `existingSecret` must be non-empty. The template checks that and says which to set (ADR-0078).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "existingSecret",
+        "existingSecretKey"
+      ],
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "existingSecret": {
+          "type": "string"
+        },
+        "existingSecretKey": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "secretKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "existingSecret",
+        "existingSecretKey",
+        "value"
+      ],
+      "properties": {
+        "existingSecret": {
+          "type": "string"
+        },
+        "existingSecretKey": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "port",
+        "targetPort",
+        "annotations"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "ClusterIP",
+            "NodePort",
+            "LoadBalancer"
+          ]
+        },
+        "port": {
+          "$ref": "#/definitions/port"
+        },
+        "targetPort": {
+          "$ref": "#/definitions/port"
+        },
+        "annotations": {
+          "$ref": "#/definitions/stringMap"
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "className",
+        "annotations",
+        "hosts",
+        "tls"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "className": {
+          "type": "string"
+        },
+        "annotations": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "host",
+              "paths"
+            ],
+            "properties": {
+              "host": {
+                "type": "string",
+                "minLength": 1
+              },
+              "paths": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "path",
+                    "pathType"
+                  ],
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "pathType": {
+                      "type": "string",
+                      "enum": [
+                        "Exact",
+                        "Prefix",
+                        "ImplementationSpecific"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "tls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "secretName": {
+                "type": "string"
+              },
+              "hosts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "publicBaseUrl",
+        "trustProxy",
+        "confluenceAllowedHosts",
+        "mcpStructuredOutput"
+      ],
+      "properties": {
+        "publicBaseUrl": {
+          "description": "PUBLIC_BASE_URL. Empty leaves it unset.",
+          "type": "string"
+        },
+        "trustProxy": {
+          "description": "TRUST_PROXY. Empty leaves it unset (the app's default, off); never inferred from ingress.enabled (ADR-0060).",
+          "type": "string"
+        },
+        "confluenceAllowedHosts": {
+          "description": "CONFLUENCE_ALLOWED_HOSTS: host names (not URLs) a Confluence source may reach on a private address (ADR-0088). Empty leaves it unset.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^,\\s/]+$"
+          }
+        },
+        "mcpStructuredOutput": {
+          "description": "MCP_STRUCTURED_OUTPUT: true adds structuredContent beside every MCP tool's text answer. Off by default; false leaves the variable unset.",
+          "type": "boolean"
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "retainOnUninstall",
+        "data",
+        "models"
+      ],
+      "properties": {
+        "retainOnUninstall": {
+          "type": "boolean"
+        },
+        "data": {
+          "$ref": "#/definitions/persistentVolume"
+        },
+        "models": {
+          "$ref": "#/definitions/persistentVolume"
+        }
+      }
+    },
+    "resources": {
+      "$ref": "#/definitions/openObject"
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "liveness",
+        "readiness",
+        "startup"
+      ],
+      "properties": {
+        "liveness": {
+          "$ref": "#/definitions/probe"
+        },
+        "readiness": {
+          "$ref": "#/definitions/probe"
+        },
+        "startup": {
+          "$ref": "#/definitions/probe"
+        }
+      }
+    },
+    "podAnnotations": {
+      "$ref": "#/definitions/stringMap"
+    },
+    "podLabels": {
+      "$ref": "#/definitions/stringMap"
+    },
+    "podSecurityContext": {
+      "$ref": "#/definitions/openObject"
+    },
+    "securityContext": {
+      "$ref": "#/definitions/openObject"
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "create",
+        "annotations",
+        "name"
+      ],
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "annotations": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "nodeSelector": {
+      "$ref": "#/definitions/stringMap"
+    },
+    "tolerations": {
+      "$ref": "#/definitions/openArray"
+    },
+    "affinity": {
+      "$ref": "#/definitions/openObject"
+    },
+    "env": {
+      "description": "Plain environment variables, NAME: value. Open: any variable name is accepted; values are strings, so a number needs quoting or --set-string.",
+      "$ref": "#/definitions/stringMap"
+    },
+    "envSecret": {
+      "description": "Environment variables read from an existing Secret, NAME: {secretName, secretKey}. Open over names; each entry is strict.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "secretName",
+          "secretKey"
+        ],
+        "properties": {
+          "secretName": {
+            "type": "string",
+            "minLength": 1
+          },
+          "secretKey": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
     },
     "extraVolumes": {
-      "type": "array"
+      "$ref": "#/definitions/openArray"
     },
     "extraVolumeMounts": {
-      "type": "array"
+      "$ref": "#/definitions/openArray"
     },
     "tests": {
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
     }
   }
 }

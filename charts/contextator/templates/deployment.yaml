@@ -70,6 +70,14 @@ spec:
             - name: TRUST_PROXY
               value: {{ .Values.config.trustProxy | quote }}
             {{- end }}
+            {{- with .Values.config.confluenceAllowedHosts }}
+            - name: CONFLUENCE_ALLOWED_HOSTS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if .Values.config.mcpStructuredOutput }}
+            - name: MCP_STRUCTURED_OUTPUT
+              value: "1"
+            {{- end }}
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
