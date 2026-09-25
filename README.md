@@ -813,17 +813,23 @@ the one case that is unambiguously safe. Only `git`, `notion` and `confluence` s
 credential, so only their secrets count. An archive taken before the manifest recorded which types it
 counted is judged on the rows of its own dump, still before the target is touched: a secret stored on a
 `local`, `upload` or `web` source by an older release does not refuse the restore, and after the restore
-such secrets — which nothing ever read — are set to empty and their number is printed. Keep the key where the archive is not.
+such secrets — which nothing ever read — are set to empty and their number is printed. Keep the key
+where the archive is not.
 
 That key is rotatable — a four-step runbook (`npm run rotate-secret` is step 3, ADR-0075 is the record
 of why) — which gives the paragraph above a second edge: **rotating the key, and then retiring the old
 one, invalidates every archive taken before the rotation that carries a source's sync credential — a
 private git, Notion or Confluence token — encrypted under it.** The old archive's fingerprint names a
 key the environment no longer holds, and for that archive `restore` refuses, because the credential's
-ciphertext was written under the key that was retired and cannot be re-derived; an archive with no such credential restores
-anyway. Exactly when in the four steps that refusal starts, and what to do about backups from before a
-rotation, is the runbook's business, not this paragraph's —
-see [wiki/Security#rotating-secret_key](https://github.com/Contextator/Contextator/wiki/Security#rotating-secret_key).
+ciphertext was written under the key that was retired and cannot be re-derived; an archive with no
+such credential restores anyway, and the refusal starts at step 2 of the four, not step 4. A
+rotation is bracketed by backups, in three steps and in this order: a normal backup **before** the
+rotation, under the current key; a fresh archive **after** `npm run rotate-secret` reports every row
+converted and before `SECRET_KEY_PREVIOUS` is removed, under the new key — the oldest one the
+rotated instance can restore; and the retired key kept in the secret store, labelled and not beside
+the archives, until the retention of the oldest pre-rotation archive expires — only then discarded.
+The full runbook, with each step's command, is
+[wiki/Security#rotating-secret_key](https://github.com/Contextator/Contextator/wiki/Security#rotating-secret_key).
 
 The restore also refuses a dump taken from a newer PostgreSQL major version than the server it is going
 into; going the other way, 16 to 17, is the documented upgrade and is what the command exists for.
