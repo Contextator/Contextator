@@ -42,7 +42,10 @@ Once it is up: create the first account at `/setup`, then a project pointing at 
 npm run smoke -- http://localhost:3444/mcp/demo "how do I re-index"
 ```
 
-which talks to the endpoint as a real MCP client would.
+which talks to the endpoint as a real MCP client would. Add `--sse` to the same command to exercise the
+legacy SSE transport instead of Streamable HTTP.
+
+`npm run db:studio` opens Drizzle Studio against `DATABASE_URL`, for looking at the tables directly.
 
 ## The checks a change has to pass
 
@@ -101,6 +104,195 @@ reformatted the tree:
 ```bash
 git config blame.ignoreRevsFile .git-blame-ignore-revs
 ```
+
+## Project layout
+
+```
+src/server.ts                 Fastify entrypoint / composition root
+src/config.ts                 zod-validated environment
+src/db/schema.ts              Drizzle schema — the source `drizzle/*.sql` is generated from, and the only description of the tables
+src/db/bootstrap.ts           startup: the extension, the migration journal, `migrate()`, the vector dimension, and reconciling the per-project HNSW indexes
+src/db/vector-indexes.ts      one partial HNSW index per project: its name, its concurrent build and drop, the queue that serialises them, and the bootstrap's reconcile
+src/services/chunker.ts       Markdown/MDX-aware chunking with heading breadcrumbs; pure and synchronous, the token counter injected
+src/services/fs-scan.ts       safe directory walking + path-escape checks
+src/services/sources.ts       source CRUD and the zod schema of each type's config
+src/services/sources/         one driver per type: local, git (isomorphic-git), upload, notion, confluence
+src/services/sources/confluence.ts        the Confluence driver, Cloud and Data Center: the page tree, the incremental skip, and the probe
+src/services/sources/confluence-client.ts the REST surface it talks to, as an interface plus an HTTPS implementation, and the one place CQL is built
+src/services/sources/confluence-egress.ts where a Confluence request may connect: the address check after DNS and on every redirect, CONFLUENCE_ALLOWED_HOSTS
+src/services/sources/confluence-render.ts storage format → the plain XHTML `doc-types/html.ts` converts; it does not convert HTML itself
+src/services/sources/web.ts               the documentation-site driver: the three entry formats, the five ceilings, and the sitemap probe
+src/services/sources/web-client.ts        its one HTTP surface — serial, paced, inside a deadline — as an interface plus an implementation
+src/services/sources/web-entry.ts         sitemap, llms.txt, robots.txt, links and URL→path, as pure functions over strings
+src/services/flavors.ts       content-type transforms (Obsidian wikilinks, Notion export ids) and which of them expand one file into many
+src/services/openapi.ts       OpenAPI/Swagger → one Markdown document per operation: $ref resolution, cycle and depth guards, derived paths
+src/services/doc-types/       one transform per file extension, all of them producing Markdown: html, docx, csv, pdf
+src/services/doc-types/pdf.ts a PDF read as a layout — lines, columns, running heads, headings by size, tables by alignment
+src/services/conversion/      the thread all of that runs on: `worker.ts` (the same transforms, over there), `client.ts` (a thread that dies, one that stops answering, a refusal that has to arrive as a refusal), `protocol.ts` (the wire)
+scripts/build-doc-fixtures.ts the dependency-free PDF and zip writers the binary test fixtures come from
+src/types/                    ambient declarations for the two dependencies that ship none (mammoth, the turndown GFM plugin)
+src/services/archives.ts      zip / tar / tar.gz / rar extraction with path and size guards
+src/services/uploads.ts       staged upload sessions and their commit into a source
+src/services/data-dir.ts      layout of DATA_DIR, atomic directory swaps, orphan sweep
+src/services/crypto.ts        AES-256-GCM encryption of source tokens and webhook secrets, and the key id that makes SECRET_KEY rotatable
+src/services/encrypted-fields.ts  the one list of columns encrypted under SECRET_KEY, derived from the schema so a new one cannot be forgotten
+src/services/embeddings/      provider interface, local (transformers.js) and OpenAI implementations
+src/services/chunk-budget.ts  the after-warmup half of the chunk budget check: what the model reads, against what the chunker produces
+src/services/indexer.ts       incremental background indexing queue
+src/services/vector-store.ts  the fused search statement (vector + keyword) and chunk persistence
+src/services/rrf.ts           reciprocal rank fusion: the arithmetic that turns two rankings into one
+src/services/text-search.ts   which PostgreSQL text search configuration the keyword half speaks
+src/services/search.ts        the one search path: the guards, the query embedding and the top-k query, shared by the MCP tool and the search API
+src/mcp/router.ts             /mcp/:project — Streamable HTTP + legacy SSE on one URL
+src/mcp/tools.ts              search_docs, list_topics, read_document
+src/services/document-read.ts  joining chunks back into a section, and cutting text to a token budget
+src/mcp/sessions.ts           per-connection McpServer/transport registry + idle reaper
+src/auth/policy.ts            every authorization rule as data — no DB, no Fastify, fully unit-tested; also which requests are audit events and what they may record
+src/auth/authorize.ts         the request checks that need no database, in the order they must happen
+src/auth/plugin.ts            resolves the principal (cookie, ADMIN_TOKEN or an account's own API token) and applies the policy
+src/services/auth/api-tokens.ts  mint/list/verify/revoke for an account's own scoped API tokens (ctxk_…)
+src/auth/cookies.ts           the session cookie's name, flags and Secure decision
+src/auth/csrf.ts              same-site check for cookie-authenticated writes
+src/services/passwords.ts     scrypt hashing (node:crypto), policy and temporary passwords
+src/services/auth/            accounts, sessions, memberships and the first-run setup gate
+src/services/rate-limit.ts    in-memory sliding window for sign-in attempts
+src/services/audit.ts         the audit log: the row an action becomes, the writer the policy layer holds, and the retention sweep
+src/services/metrics.ts       the process counters and the Prometheus text /metrics answers with
+src/admin/routes.ts           REST API for the dashboard
+src/services/scheduler.ts     the sync schedule: which sources are due, the cheap per-driver check, and the run it queues
+src/admin/sources-routes.ts   source CRUD, sync, test, webhook secret
+src/admin/upload-routes.ts    multipart upload sessions (the only multipart-parsing plugin)
+src/admin/webhooks.ts         push webhooks, verified with the per-source secret — git's and Confluence's generated here, Notion's captured from them
+src/services/notion-webhook.ts which Notion deliveries mean a run, the window a captured token may be stored in, and the debounce before the queue
+src/admin/auth-routes.ts      /api/auth/* and /api/setup/*
+src/admin/users-routes.ts     /api/users/*
+src/admin/tokens-routes.ts    /api/tokens/* — an account's own API tokens, self-service
+src/admin/audit-routes.ts     /api/audit — the read side of the audit log: the filters, the keyset page, and the sentence a row is rendered as
+src/admin/members-routes.ts   /api/projects/:id/members/*
+src/admin/mcp-routes.ts       /api/projects/:id/mcp-tokens/* and the open/token/account switch
+src/mcp/access.ts             the MCP endpoint's access rule, as a pure function
+src/mcp/identity.ts           turns the Authorization header into an account and its membership, for that rule to judge
+src/mcp/oauth-routes.ts       the OAuth 2.1 flow for /mcp/*: discovery, registration, the approval page, the token endpoint
+src/services/auth/oauth.ts    registered OAuth clients, the authorization codes, and the PKCE check
+src/admin/pages.ts            /about, /privacy, /cookies, /terms, /license rendered into one shell
+src/admin/auth-pages.ts       /login, /setup, /change-password and the guard on `/`
+public/                       vanilla HTML/JS dashboard (no build step)
+public/core.js                shared helpers: el(), api(), state, the event bus
+public/auth.js                the signed-in account, the top-bar menu, permission helpers
+public/users.js               the account list at #/~users
+public/tokens.js              your own API tokens at #/~tokens — create, list, revoke
+public/audit.js               the audit log at #/~audit — who changed this instance, filtered and paged by the server
+public/queries.js             a project's query-log panel: what agents asked, the export beside it, and the project's own relevance floor with its preview
+public/members.js             a project's Members panel
+public/mcp.js                 a project's MCP access panel and its tokens
+public/search.js              a project's search box and the hits it renders, scores and all
+public/auth-page.js           /login, /setup and /change-password — imports nothing from the dashboard
+public/product-facts.json     generated: the numbers and identifiers this product can be quoted on, for the site in the other repository to check its prose against
+public/pages/                 body of each product/legal page + the shell they share, and the OAuth approval page
+scripts/smoke-mcp.ts          end-to-end MCP client check
+scripts/reset-password.ts     last-resort password reset straight against the database; ships in the image and runs there
+scripts/rotate-secret.ts      `npm run rotate-secret` — moves every encrypted value onto the current SECRET_KEY; re-runnable, interruptible, and silent about plaintext
+scripts/backup.ts             `npm run backup` — the database, the upload trees and a manifest in one archive; never SECRET_KEY, only its fingerprint
+scripts/restore.ts            `npm run restore` — the same archive back, with every refusal decided before a byte is unpacked (`--check` decides them and writes nothing)
+scripts/backup-archive.ts     the archive's format and every refusal in it: the manifest, the key check value, the topology, and where pg_dump/pg_restore run
+scripts/embedded-database.ts  how an operator command run through `docker exec` finds the container's own PostgreSQL — the entrypoint's PG* variables are not in that environment
+scripts/build-product-facts.ts `npm run build:facts` — writes public/product-facts.json by reading the declarations, never by restating them
+scripts/eval.ts               `npm run eval` — indexes eval/corpus, asks eval/golden.jsonl, prints recall@1, recall@5, MRR
+scripts/eval-scoring.ts       the scoring arithmetic and the report, with no database or model in it, so it can be unit-tested
+scripts/cla/rules.ts          the licence gate's judgements — who authored a pull request, who may sign, what the record says — with no I/O in them
+scripts/cla/github.ts         the two GitHub surfaces it is handed: this repository, and the signatures repository behind its own narrow token
+scripts/cla/run.ts            the gate wired up: read the event, record a signature, judge, ask once, re-run the pull request's check
+scripts/cla/main.ts           what the workflow runs — the environment, the two tokens and the exit code, and no decision at all
+test/*.test.ts                unit suite — pure functions, no database, no Docker (`npm test`)
+test/cla-*.test.ts            the licence gate: its judgements, the whole flow against fakes, and the GitHub clients against an injected fetch
+test/dockerhub-description.test.ts  DOCKERHUB.md fits Docker Hub's limit, its links are absolute, and it names the image
+test/container-topology.test.ts     the packaging contract: `full` is still the default target, `slim` still carries no database, and neither compose file has gone back to forcing DATABASE_URL empty
+test/backup-manifest.test.ts        the backup's refusals, each in both directions: the key check value, the server's major version, the topology, the manifest reader
+test/product-facts.test.ts    public/product-facts.json is still what the generator produces from today's code
+test/integration/*.itest.ts   the bootstrap, the schema equivalence review, vector-store, the password reset and /api/health against a real PostgreSQL + pgvector
+test/integration/support/     the testcontainers harness, and the schema projection two schemas are compared with
+test/integration/fixtures/    a pre-v3 `0.1` schema derived from history, and the frozen DDL ladder the migrations replaced
+test/fixtures/doc-types/      one real file per supported type, plus the malformed ones a refusal has to survive
+test/support/confluence-stub.ts a `ConfluenceClient` answering out of an array, shared by the unit and the integration suite so one page tree drives both
+test/support/web-stub.ts      a `WebClient` answering out of a map of URL → response, recording every request so a ceiling can be asserted by what was *not* fetched
+test/fixtures/web/            a sitemap, a sitemap index, an `llms.txt` and a `robots.txt`, each carrying the awkward case the parser has to survive
+eval/corpus/                  the fixture corpus the golden set asks about: 15 English and 11 Turkish pages, written for this
+eval/golden.jsonl             48 questions, one JSON object per line, each naming the file that answers it
+eval/README.md                what a good question is, how to add one, and why the failures are kept
+eval/BASELINE.md              the last recorded run of the default configuration
+drizzle/                      generated migrations (`npm run db:generate`), applied at startup and shipped in the image
+CHANGELOG.md                  what shipped in each release, Keep a Changelog style, for the operator pulling the image — not the commit log
+CONTRIBUTING.md               how to run it, the four checks, the pairs kept in sync, and the licence grant
+CLA.md                        the contributor licence grant, in force; signed on a pull request
+SECURITY.md                   how to report a vulnerability, and what is documented behaviour rather than one
+CODE_OF_CONDUCT.md            Contributor Covenant 2.1
+LICENSE                       AGPL-3.0-or-later, verbatim; copied into the image and served at /license.txt
+docs/demo/                    sample documentation (English, Turkish, MDX)
+Dockerfile                    two images over one build: `full` (postgres:16 + pgvector + Node 22 + the app, the default target) and `slim` (the app alone)
+docker/entrypoint.sh          starts PostgreSQL unless DATABASE_URL names one, then the app; stops both in order on SIGTERM
+docker-compose.yml            the `contextator` container and its volumes; embedded PostgreSQL, or an external one when .env names it
+docker-compose.build.yml      overlay for docker-compose.yml that builds the image from source instead of pulling it
+docker-compose.slim.yml       the `-slim` image against a PostgreSQL you operate — a whole file rather than an overlay, because the pgdata mount has to be absent
+docker-compose.dev.yml        PostgreSQL only, for `npm run dev`
+charts/contextator/           Helm chart for Kubernetes: one Pod, the `-slim` image, an external PostgreSQL; `replicas: 1` is hardcoded, not a value; values checked by a strict values.schema.json
+DOCKERHUB.md                  what Docker Hub shows on the repository page; not this README, which is well past its 25,000-character limit
+biome.jsonc                   the one formatter and linter, and why each rule is set as it is
+tsconfig.test.json            typechecks test/ and scripts/, which the build's tsconfig cannot see
+.github/workflows/ci.yml      the gate on every pull request: lint, typecheck, tests, image build
+.github/workflows/cla.yml     the licence grant: the `Licence grant` required check, and the lock on a merged thread
+.github/workflows/release.yml on a `v*` tag: verify the image, then build and push it to Docker Hub for both architectures; then publish a changed Helm chart to the gh-pages repository
+.github/workflows/helm-chart.yml lints and renders charts/contextator on every change to it, and asserts the decisions it encodes: one replica, the required values, the strict schema, probes, the data mount, a bumped chart version
+.github/workflows/dockerhub-description.yml pushes DOCKERHUB.md to Docker Hub's description whenever it changes
+.github/PULL_REQUEST_TEMPLATE.md   the FR/ADR reference, the checks, and the documented claims a change touches
+.github/ISSUE_TEMPLATE/       bug report, feature request, and the links the issue chooser offers first
+.git-blame-ignore-revs        commits that only reformatted; `git blame` should look through them
+```
+
+### How the single container works
+
+`docker/entrypoint.sh` (under `tini`) launches the unchanged upstream `postgres` image entrypoint in the
+background, so first-run `initdb`, `POSTGRES_*` handling and `/docker-entrypoint-initdb.d` work exactly
+as in the official image. Once `pg_isready` succeeds on `127.0.0.1:5432` it starts `node dist/server.js`
+as the unprivileged `node` user with the libpq `PG*` variables pointing at that server. `SIGTERM` stops
+the app first and then PostgreSQL (fast shutdown); if either process dies the other is stopped and the
+container exits so `restart: unless-stopped` can bring the pair back.
+
+`DATABASE_URL` is what makes that paragraph conditional. Set, the entrypoint skips all of it: no
+postmaster is started, the `PG*` variables are deliberately left unset so the URL is the only answer
+to *where is the database*, and the container supervises one process instead of two. The startup log
+names which of the two it chose — with the credentials cut out of the connection string — and
+`/api/health` says the same thing as `database.mode` to a signed-in caller, with the host, port and
+database name beside it for an administrator. The `-slim` image is this path with the PostgreSQL
+removed from the image as well: it sets `CONTEXTATOR_EMBEDDED_POSTGRES=0`, and started without a
+`DATABASE_URL` it exits immediately naming the variable rather than searching for a database that
+was never built into it.
+
+### How the schema evolves
+
+There is one way to change the schema and it has four steps: edit `src/db/schema.ts`, run
+`npm run db:generate`, read the SQL drizzle-kit wrote into `drizzle/`, and commit both. Nothing else
+creates or alters a table, and `npm run db:check` — a step in CI — fails if the schema and the
+migrations stop agreeing.
+
+Nothing is asked of the operator. `src/db/bootstrap.ts` runs `migrate()` at startup, under a
+session-scoped advisory lock, with `drizzle/*.sql` baked into the image: upgrading is
+`docker compose pull && docker compose up -d` and there is still no migration command to forget. An installation that
+predates the migrations is adopted on its first start — its schema is already the baseline, so a row
+is written to drizzle's journal saying so and nothing is applied.
+
+Two things stay out of the generated SQL because they cannot be in it. The vector column's dimension
+is a deployment setting (`vector(384)` vs `vector(1536)`), so `schema.ts` carries a constant 384 for
+the migration to bake in and the bootstrap re-types the column to the configured dimension
+afterwards, once, before any row exists — drizzle-kit diffs `schema.ts` against its own snapshot and
+never against the live database, so a deployment at 1536 cannot be seen by it, let alone broken by it.
+The HNSW indexes are the second: one partial index per project, named after the project, which a
+generated migration could never describe; each needs a fixed dimension and blocks the re-typing while
+it exists, so the bootstrap creates them after. The dimension is still recorded in `settings` and a mismatch still
+fails fast with the remedy in the message.
+
+What used to rest on review has a test: `test/integration/schema-equivalence.itest.ts` applies the
+frozen DDL ladder to one database and the new bootstrap to another and compares the two schemas as
+text, on every pull request, against a real server.
 
 ## Specification first
 
