@@ -173,14 +173,23 @@ export const NotionConfig = z.object({
 });
 
 /**
- * Confluence **Cloud** ([ADR-0059](../../.ssot/ADR.md#adr-0059)). Data Center publishes a different
- * API under a different base path and authenticates differently; it is not supported, and `README.md`
- * says which one this is rather than leaving an operator to find out from a 404.
+ * Confluence ([ADR-0059](../../.ssot/ADR.md#adr-0059)), **Cloud or Data Center — and the operator says
+ * which.** The two serve the same REST v1 resources behind a different base path and a different auth
+ * scheme; detecting one from the other would mean sending a credential to find out, and a wrong guess
+ * reads as a bad token. An absent `deployment` is Cloud, which is what every source stored before Data
+ * Center existed is, so those rows mean exactly what they meant.
  */
 export const ConfluenceConfig = z.object({
-  /** `https://acme.atlassian.net/wiki` — the site, including the `/wiki` context path Cloud serves on. */
+  /**
+   * Cloud: `https://acme.atlassian.net/wiki` — the site, including the `/wiki` context path Cloud serves
+   * on. Data Center: the address the instance is served on, with its context path if it has one.
+   */
   baseUrl: z.url().max(2048),
-  /** The Atlassian account the API token belongs to; the user half of HTTP Basic. Not a secret. */
+  deployment: z.enum(['cloud', 'datacenter']).default('cloud'),
+  /**
+   * Cloud: the Atlassian account the API token belongs to; the user half of HTTP Basic. Not a secret.
+   * Data Center authenticates with a personal access token alone and ignores this field.
+   */
   email: z.string().max(320).default(''),
   /**
    * Space keys to index; empty = every space the account can read.

@@ -5,7 +5,7 @@ import { decryptSecret, keyringOf } from '../crypto.js';
 import { sourceCurrentDir } from '../data-dir.js';
 import { ValidationError } from '../projects.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig, type ConfluenceConfig } from '../sources.js';
-import { cqlFor, HttpConfluenceClient, type ConfluenceClient, type ConfluencePageSummary } from './confluence-client.js';
+import { checkDataCenterVersion, cqlFor, HttpConfluenceClient, type ConfluenceClient, type ConfluencePageSummary } from './confluence-client.js';
 import { ConfluenceRenderError, storageToMarkdown } from './confluence-render.js';
 import { registerDriver, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
 // Reused rather than reimplemented: the file-stem rule (a slug plus an id prefix, so two pages with
@@ -47,8 +47,9 @@ export const MAX_PAGES = 5000;
 const HEAD_BYTES = 64;
 
 /**
- * Confluence Cloud as a source ([ADR-0059](../../../.ssot/ADR.md#adr-0059)): every page in the
- * configured spaces — or in every space the credential can read — rendered to Markdown under
+ * Confluence — Cloud or Data Center, as the source says — as a source
+ * ([ADR-0059](../../../.ssot/ADR.md#adr-0059)): every page in the configured spaces — or in every
+ * space the credential can read — rendered to Markdown under
  * `<source>/<space>/<parent page>/<page>.md`, nested by the page's own ancestry.
  *
  * Incremental in the same way the Notion driver is: a listing gives every page's version number, and
@@ -82,17 +83,38 @@ export class ConfluenceDriver implements SourceDriver {
   private client(): ConfluenceClient {
     if (this.injectedClient) return this.injectedClient;
     if (this.built) return this.built;
-    if (!this.source.secretEnc) throw new ValidationError('This Confluence source has no API token stored');
-    if (!this.cfg.email) {
+    const dataCenter = this.cfg.deployment === 'datacenter';
+    if (!this.source.secretEnc) {
+      throw new ValidationError(
+        dataCenter ? 'This Confluence source has no personal access token stored' : 'This Confluence source has no API token stored',
+      );
+    }
+    if (!dataCenter && !this.cfg.email) {
       throw new ValidationError('This Confluence source has no account e-mail; Confluence Cloud authenticates with an e-mail plus an API token');
     }
     const token = decryptSecret(this.source.secretEnc, keyringOf(this.ctx.config));
     this.built = new HttpConfluenceClient(
-      { baseUrl: this.cfg.baseUrl, email: this.cfg.email, token },
+      { baseUrl: this.cfg.baseUrl, deployment: this.cfg.deployment, email: this.cfg.email, token },
       undefined,
       this.ctx.log.child({ source: this.source.name, type: 'confluence' }),
     );
     return this.built;
+  }
+
+  /**
+   * A Data Center instance this client does not support is refused **by its version**, before any
+   * credential is sent — on "Test" and at the start of every sync, never inside `probe()`, whose cost
+   * is one request by design. Cloud has no version to check and takes no request here.
+   */
+  private async checkServer(client: ConfluenceClient): Promise<string | null> {
+    if (this.cfg.deployment !== 'datacenter' || !client.serverInfo) return null;
+    const info = await client.serverInfo();
+    try {
+      checkDataCenterVersion(info);
+    } catch (err) {
+      throw new ValidationError(err instanceof Error ? err.message : String(err));
+    }
+    return info.version;
   }
 
   async docRoot(): Promise<string> {
@@ -103,12 +125,13 @@ export class ConfluenceDriver implements SourceDriver {
 
   async test(): Promise<string> {
     const client = this.client();
+    const version = await this.checkServer(client);
     const who = await client.whoAmI();
     const scope = this.cfg.spaceKeys.length ? `spaces ${this.cfg.spaceKeys.join(', ')}` : 'every space this account can read';
     // The same query the sync and the probe use, so "Test" answers about the pages this source would
     // actually index rather than about the site in general.
     const { total } = await client.revision(this.cql);
-    return `Connected as ${who} — ${total} page(s) in ${scope}`;
+    return `Connected${version ? ` to Confluence Data Center ${version}` : ''} as ${who} — ${total} page(s) in ${scope}`;
   }
 
   /**
@@ -154,6 +177,7 @@ export class ConfluenceDriver implements SourceDriver {
 
   async sync(): Promise<SyncResult> {
     const client = this.client();
+    await this.checkServer(client);
     const root = await this.docRoot();
     const { pages, truncated } = await this.listAll(client);
 
