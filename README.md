@@ -489,7 +489,7 @@ says a token exists. The username sent with it depends on the provider and is de
 |----------|------------------------------|
 | GitHub | `x-access-token` (classic PAT, fine-grained PAT, App installation token) |
 | GitLab | `oauth2` (OAuth and personal/project access tokens); **a deploy token needs its own generated username** (`gitlab+deploy-token-N`) in the Username field |
-| Bitbucket Cloud | `x-token-auth` for repository/workspace access tokens; **app passwords need your real username** in the Username field |
+| Bitbucket Cloud | `x-token-auth` for repository/workspace access tokens; an **API token** needs your Bitbucket username, or `x-bitbucket-api-token-auth`, in the Username field |
 | Gitea / Forgejo / Codeberg / other | `token`, or whatever you type in Username |
 
 A username you type in the Username field always replaces the default in the table.
