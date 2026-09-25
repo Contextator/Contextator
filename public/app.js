@@ -80,7 +80,7 @@ const SOURCE_KINDS = {
   confluence: {
     type: 'confluence',
     title: 'Confluence',
-    subtitle: 'Confluence Cloud. Pages in the chosen spaces are rendered to Markdown, nested the way they are in the wiki.',
+    subtitle: 'Confluence Cloud or Data Center. Pages in the chosen spaces are rendered to Markdown, nested the way they are in the wiki.',
   },
   web: {
     type: 'web',
@@ -1205,6 +1205,7 @@ function openSourceDialog(project, source) {
   setSyncIntervalField(source ? null : (state.health?.sync?.defaultIntervalMinutes ?? null));
   $('#src-next-sync').textContent = '—';
   if (source) fillSourceForm(source);
+  syncConfluenceDeployment(); // a reset form is Cloud again; the credential fields follow it
   setKind(source ? kindOfSource(source) : 'local');
   if (srcUi.readOnly) {
     for (const field of srcForm.querySelectorAll('input, select, textarea')) field.disabled = true;
@@ -1259,6 +1260,7 @@ function fillSourceForm(s) {
     srcForm.elements.entryKind.value = c.entryKind || 'auto';
   }
   if (s.type === 'confluence') {
+    srcForm.elements.confluenceDeployment.value = c.deployment === 'datacenter' ? 'datacenter' : 'cloud';
     srcForm.elements.confluenceUrl.value = c.baseUrl || '';
     srcForm.elements.confluenceEmail.value = c.email || '';
     srcForm.elements.spaceKeys.value = (c.spaceKeys || []).join('\n');
@@ -1266,6 +1268,27 @@ function fillSourceForm(s) {
   }
   updateProviderHint();
 }
+
+/**
+ * Cloud and Data Center ask for different credentials, so the form says which one it wants. Static
+ * strings only: nothing an operator typed is written back into markup here.
+ */
+function syncConfluenceDeployment() {
+  const dataCenter = srcForm.elements.confluenceDeployment.value === 'datacenter';
+  $('#confluence-email-field').hidden = dataCenter;
+  srcForm.elements.confluenceUrl.placeholder = dataCenter ? 'https://wiki.example.com' : 'https://your-site.atlassian.net/wiki';
+  $('#confluence-url-hint').textContent = dataCenter
+    ? 'The address Confluence is served on, with its context path if it has one (e.g. /confluence).'
+    : 'Include the /wiki path.';
+  $('#confluence-secret-label').textContent = dataCenter ? 'Personal access token' : 'API token';
+  $('#confluence-secret-hint').textContent = dataCenter
+    ? 'Create one under your Confluence profile → Personal Access Tokens. Stored encrypted with SECRET_KEY.'
+    : 'Create one at id.atlassian.com/manage-profile/security/api-tokens. Stored encrypted with SECRET_KEY.';
+  if (!srcUi.editing || srcUi.editing.type !== 'confluence' || !srcUi.editing.hasSecret) {
+    srcForm.elements.confluenceSecret.placeholder = dataCenter ? '' : 'ATATT…';
+  }
+}
+srcForm.elements.confluenceDeployment.addEventListener('change', syncConfluenceDeployment);
 
 function updateProviderHint() {
   const node = $('#git-provider');
@@ -1447,7 +1470,14 @@ function configForKind(kind) {
   if (type === 'confluence') {
     const baseUrl = srcForm.elements.confluenceUrl.value.trim().replace(/\/+$/, '');
     if (!baseUrl) throw new Error('A Confluence site URL is required');
-    return { baseUrl, email: srcForm.elements.confluenceEmail.value.trim(), spaceKeys: parseSpaceKeys(srcForm.elements.spaceKeys.value), ...common };
+    const deployment = srcForm.elements.confluenceDeployment.value === 'datacenter' ? 'datacenter' : 'cloud';
+    return {
+      baseUrl,
+      deployment,
+      email: deployment === 'cloud' ? srcForm.elements.confluenceEmail.value.trim() : '',
+      spaceKeys: parseSpaceKeys(srcForm.elements.spaceKeys.value),
+      ...common,
+    };
   }
   return { ...common };
 }

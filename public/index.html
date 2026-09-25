@@ -223,20 +223,28 @@
 
           <div class="kind-only" data-kind="confluence">
             <label class="field">
+              <span class="field-label">Deployment</span>
+              <select name="confluenceDeployment">
+                <option value="cloud">Confluence Cloud (*.atlassian.net)</option>
+                <option value="datacenter">Confluence Data Center 7.9 or later (self-hosted)</option>
+              </select>
+              <span class="field-hint">Which Confluence this is. It is not detected: the two authenticate differently.</span>
+            </label>
+            <label class="field">
               <span class="field-label">Site URL</span>
               <input name="confluenceUrl" type="url" placeholder="https://your-site.atlassian.net/wiki" autocomplete="off" spellcheck="false" />
-              <span class="field-hint"><strong>Confluence Cloud only.</strong> Include the <code>/wiki</code> path. Data Center and Server are not supported.</span>
+              <span class="field-hint" id="confluence-url-hint">Include the <code>/wiki</code> path.</span>
             </label>
             <div class="field-row">
-              <label class="field">
+              <label class="field" id="confluence-email-field">
                 <span class="field-label">Account e-mail</span>
                 <input name="confluenceEmail" type="email" placeholder="you@example.com" autocomplete="off" spellcheck="false" />
                 <span class="field-hint">The Atlassian account the API token belongs to.</span>
               </label>
               <label class="field">
-                <span class="field-label">API token</span>
+                <span class="field-label" id="confluence-secret-label">API token</span>
                 <input name="confluenceSecret" type="password" placeholder="ATATT…" autocomplete="off" />
-                <span class="field-hint">Create one at id.atlassian.com/manage-profile/security/api-tokens. Stored encrypted with <code>SECRET_KEY</code>.</span>
+                <span class="field-hint" id="confluence-secret-hint">Create one at id.atlassian.com/manage-profile/security/api-tokens. Stored encrypted with <code>SECRET_KEY</code>.</span>
               </label>
             </div>
             <label class="check-inline" id="confluence-clear-secret-row" hidden>
