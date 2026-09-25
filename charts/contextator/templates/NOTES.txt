@@ -18,12 +18,12 @@ Contextator {{ .Chart.AppVersion }} has been installed ({{ include "contextator.
    kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "contextator.fullname" . }} 3444:{{ .Values.service.port }}
    http://localhost:3444
 {{- end }}
-{{- if and .Values.ingress.enabled (not .Values.config.trustProxy) }}
+{{- if and .Values.ingress.enabled (or (not .Values.config.trustProxy) (eq (toString .Values.config.trustProxy) "0")) }}
 
    The Ingress is enabled but config.trustProxy is not set (or is 0), so TRUST_PROXY stays off:
-   the app will not honour X-Forwarded-* headers. If 0 is deliberate, ignore this note. Set config.trustProxy (and config.publicBaseUrl) to
-   match what actually sits in front of the Pod — see the chart README, "Ingress and reverse
-   proxies".
+   the app will not honour X-Forwarded-* headers. Set config.trustProxy (and config.publicBaseUrl)
+   to match what actually sits in front of the Pod — see the chart README, "Ingress and reverse
+   proxies". If 0 is deliberate, ignore this note.
 {{- end }}
 
 3) Complete the first-run setup (needsSetup) in the dashboard.
