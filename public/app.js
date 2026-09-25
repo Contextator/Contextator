@@ -1269,21 +1269,34 @@ function fillSourceForm(s) {
   updateProviderHint();
 }
 
+/** A hint with one fragment in monospace, built as nodes so no string ever reaches `innerHTML`. */
+function setHint(el, before, code, after) {
+  const c = document.createElement('code');
+  c.textContent = code;
+  el.replaceChildren(document.createTextNode(before), c, document.createTextNode(after));
+}
+
 /**
  * Cloud and Data Center ask for different credentials, so the form says which one it wants. Static
  * strings only: nothing an operator typed is written back into markup here.
  */
+
 function syncConfluenceDeployment() {
   const dataCenter = srcForm.elements.confluenceDeployment.value === 'datacenter';
   $('#confluence-email-field').hidden = dataCenter;
   srcForm.elements.confluenceUrl.placeholder = dataCenter ? 'https://wiki.example.com' : 'https://your-site.atlassian.net/wiki';
-  $('#confluence-url-hint').textContent = dataCenter
-    ? 'The address Confluence is served on, with its context path if it has one (e.g. /confluence).'
-    : 'Include the /wiki path.';
+  if (dataCenter)
+    setHint($('#confluence-url-hint'), 'The address Confluence is served on, with its context path if it has one (e.g. ', '/confluence', ').');
+  else setHint($('#confluence-url-hint'), 'Include the ', '/wiki', ' path.');
   $('#confluence-secret-label').textContent = dataCenter ? 'Personal access token' : 'API token';
-  $('#confluence-secret-hint').textContent = dataCenter
-    ? 'Create one under your Confluence profile → Personal Access Tokens. Stored encrypted with SECRET_KEY.'
-    : 'Create one at id.atlassian.com/manage-profile/security/api-tokens. Stored encrypted with SECRET_KEY.';
+  setHint(
+    $('#confluence-secret-hint'),
+    dataCenter
+      ? 'Create one under your Confluence profile → Personal Access Tokens. Stored encrypted with '
+      : 'Create one at id.atlassian.com/manage-profile/security/api-tokens. Stored encrypted with ',
+    'SECRET_KEY',
+    '.',
+  );
   if (!srcUi.editing || srcUi.editing.type !== 'confluence' || !srcUi.editing.hasSecret) {
     srcForm.elements.confluenceSecret.placeholder = dataCenter ? '' : 'ATATT…';
   }

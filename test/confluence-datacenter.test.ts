@@ -256,6 +256,16 @@ describe('the data center version check', () => {
     );
     expect(await client.serverInfo()).toEqual({ version: '7.13.20', product: 'confluence' });
   });
+
+  it('blames what sits in front of Confluence, not the token, when the anonymous manifest is refused', async () => {
+    const client = new HttpConfluenceClient(
+      { baseUrl: 'https://wiki.acme.internal/confluence', deployment: 'datacenter', email: '', token: TOKEN },
+      async () => new Response('Unauthorized', { status: 401 }),
+    );
+    const failure = client.serverInfo();
+    await expect(failure).rejects.toThrow(/401 for \/rest\/applinks\/1\.0\/manifest.*carries no credential.*proxy, SSO/);
+    await expect(client.serverInfo()).rejects.not.toThrow(/personal access token/);
+  });
 });
 
 /**

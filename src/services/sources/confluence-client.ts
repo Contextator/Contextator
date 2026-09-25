@@ -162,6 +162,9 @@ export interface ConfluenceCredentials {
   token: string;
 }
 
+/** The anonymous application-links manifest the Data Center version check reads. */
+const MANIFEST_PATH = '/rest/applinks/1.0/manifest';
+
 /** Just enough of `fetch` to be replaceable in a test without any of it reaching a network. */
 export type FetchLike = (url: string, init: { method: string; headers: Record<string, string> }) => Promise<Response>;
 
@@ -174,15 +177,21 @@ export type FetchLike = (url: string, init: { method: string; headers: Record<st
  * ([ADR-0017](../../../.ssot/ADR.md#adr-0017)). What this says instead is the status, the path, and
  * the first 200 characters of the body — enough to tell a wrong site from a wrong token from a space
  * that was renamed.
+ *
+ * **The version manifest is asked without the credential**, so a 401/403 there is never the token's
+ * fault: it is a proxy, SSO front or anonymous-access policy refusing an unauthenticated request, and
+ * pointing the operator at the token would send them after the wrong thing.
  */
 function requestFailure(status: number, pathname: string, body: string, deployment: ConfluenceDeployment = 'cloud'): Error {
   const hint =
     deployment === 'datacenter'
-      ? status === 401 || status === 403
-        ? ' — check the personal access token, and that its user can read the spaces this source names'
-        : status === 404
-          ? ' — check the base URL; for Data Center it is the address Confluence is served on, including a context path such as /confluence if it has one'
-          : ''
+      ? (status === 401 || status === 403) && pathname === MANIFEST_PATH
+        ? ' — this request carries no credential, so something in front of Confluence (a proxy, SSO or an anonymous-access policy) refused it; the version check needs the manifest reachable without signing in'
+        : status === 401 || status === 403
+          ? ' — check the personal access token, and that its user can read the spaces this source names'
+          : status === 404
+            ? ' — check the base URL; for Data Center it is the address Confluence is served on, including a context path such as /confluence if it has one'
+            : ''
       : status === 401 || status === 403
         ? ' — check the account e-mail and the API token, and that the account can read the spaces this source names'
         : status === 404
@@ -295,7 +304,7 @@ export class HttpConfluenceClient implements ConfluenceClient {
    * log it. JSON is asked for and XML is accepted, because which one comes back has varied by version.
    */
   async serverInfo(): Promise<ConfluenceServerInfo> {
-    const response = await this.request('/rest/applinks/1.0/manifest', {}, { accept: 'application/json, application/xml;q=0.9' });
+    const response = await this.request(MANIFEST_PATH, {}, { accept: 'application/json, application/xml;q=0.9' });
     const text = await response.text();
     if (text.trimStart().startsWith('{')) {
       const body = JSON.parse(text) as { version?: unknown; typeId?: unknown };
