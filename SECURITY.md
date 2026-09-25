@@ -2,13 +2,18 @@
 
 ## Supported versions
 
+Security fixes land on the **latest release only**. There is no long-term support line, and an older
+release is not patched — upgrading is the fix.
+
 | Version | Supported |
 |---------|-----------|
-| `0.1.0` (unreleased, `main`) | Yes — it is the only thing there is |
+| `0.1.0` (tagged `v0.1.0`) | Yes — it is the latest release, and the only one so far |
 
-Contextator has not been released yet. `0.1.0` is the version in `package.json` and on `main`, no tag has
-been published, and there is no older version to maintain. Fixes land on `main`; upgrading is pulling and
-rebuilding.
+## Response
+
+A report is acknowledged within **5 business days**. There is no fixed patch window: severity and the
+fix's own blast radius decide it, you are told the plan once it is set, and the patch ships as fast as
+possible rather than on a promised date.
 
 ## Reporting a vulnerability
 
