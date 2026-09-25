@@ -199,10 +199,11 @@ is not finished until it has fixed it. The template asks for exactly that.
 Contextator is [AGPL-3.0-or-later](LICENSE), and a commercial licence is offered alongside it by the
 copyright holder. `ADR-0025` is why the licence looks like that: Contextator is a server, and the
 obligations a copyleft licence carries are triggered by *distribution* — a hosted service distributes
-nothing, so a permissively or weakly-copyleft licensed fork could be modified, run behind a URL for other
-people, and sold, and its users would never see what changed. AGPL closes that gap. Its section 13 is the
-operative clause: a **modified** version reachable over a network owes its users the corresponding source;
-running the software unmodified, the common case, triggers nothing. The commercial licence sits next to
+nothing, so a fork under any licence whose copyleft stops at distribution, the GPL included, could be
+modified, run behind a URL for other people, and sold, and its users would never see what changed. AGPL
+closes that gap. Its section 13 is the operative clause: a **modified** version reachable over a network
+owes its users the corresponding source; running the unmodified software internally, the common case,
+triggers nothing. The commercial licence sits next to
 that because the copyright is held by one person in full, which is what makes it possible to offer terms
 the AGPL does not carry — never as a condition of the AGPL, only as an alternative to it.
 
