@@ -426,11 +426,14 @@ describe('confluenceEgress', () => {
       expect(connections).toBe(1);
     });
 
-    it('does not cut a request whose answer takes longer than idleMs', async () => {
-      answerAfterMs = 400;
+    it('does not cut a request whose answer takes longer than idleMs, on a fresh socket or a pooled one', async () => {
       const fetch = guarded({ ...publicFixture('public.test'), idleMs: 100 });
-      const res = await fetch(url(), GET);
-      expect(await res.json()).toEqual({ ok: true });
+      expect(await (await fetch(url(), GET)).json()).toEqual({ ok: true });
+      // The pool has just put idleMs on that socket; the next request takes it back and has to run on
+      // its own timeout again, or a sync that pages through one connection is cut after the first page.
+      answerAfterMs = 400;
+      expect(await (await fetch(url(), GET)).json()).toEqual({ ok: true });
+      expect(connections).toBe(1);
     });
   });
 });
