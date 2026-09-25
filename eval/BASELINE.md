@@ -1761,7 +1761,8 @@ xquad-en the spread separates off-domain slightly better (0.977 against 0.968), 
 z-score separates absent-feature questions better (0.828 against 0.778, on 12 of them). Neither helps
 a single threshold: fitted globally to refuse no answerable question, no relative feature catches more
 than 11.1 % of any corpus's off-domain questions (the z-score on halyard, 12 of 108), where the absolute
-score catches 14.8 % and 25.0 % on the documentation corpora. A hit-level drop ratio cannot refuse anything — the top hit always
+score catches 14.8 % and 25.0 % on the documentation corpora (and 0 % on the prose sets, where the
+spread catches 9.7 % of xquad-en). A hit-level drop ratio cannot refuse anything — the top hit always
 passes it — and trims answers out of the top five as it tightens (xquad-tr loses 6 at 0.97, 13 at
 0.99). Candidate (b) is not worth building.
 
