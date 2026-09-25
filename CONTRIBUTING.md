@@ -126,6 +126,10 @@ part you can do.
 - **A change with no observable behaviour** — a refactor, a test, a typo, a dependency bump — needs none
   of this. Say so in the pull request and that is the end of it.
 
+**Looking for the roadmap, not the process?** The one above is internal to that private repository. What
+is planned and being considered is tracked separately, in public, on
+[GitHub Projects](https://github.com/Contextator/Contextator/projects).
+
 ## The pairs that are kept in sync
 
 Four places in this repository hold one statement in two files. Each has a check that fails when the two
