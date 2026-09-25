@@ -801,3 +801,111 @@ describe('the budget and the fence', () => {
     expect(countTokens(answer.text)).toBeGreaterThan(300);
   });
 });
+
+/**
+ * **The plain text is frozen across the structured output that sits beside it.** Every text below was
+ * recorded into `__snapshots__/mcp-tools.itest.ts.snap` by the code *before* `outputSchema` and
+ * `structuredContent` existed, and is compared byte for byte against what the code answers now. A
+ * client that never learned about structured output — most of the ones already configured against
+ * this server — reads `content[0].text` and nothing else, and that is the string the snapshot holds.
+ *
+ * Every outcome a tool can answer `ok` with is here, because each of them is a separate branch that
+ * had to grow structured content without its sentence moving: results, no match, below the floor,
+ * nothing indexed, a first page, a continuation, the end of a listing, a whole read, a cut read, a
+ * section and a range. The refusals are here too, although they carry no structured content: that is
+ * what a refusal still is.
+ */
+const TEXT_CASES: Array<[string, string, Record<string, unknown>]> = [
+  // One page and one hit: the guide exists three times over (`legacy.md`, `vanished.md`), and three
+  // excerpts on the same score have no order a snapshot could hold.
+  ['search: results', 'search_docs', { query: 'Page 7 short page number 7', limit: 1 }],
+  ['search: no match under a prefix', 'search_docs', { query: 'install the package', path_prefix: 'handbook/nowhere' }],
+  ['search: below the floor', 'search_docs', { query: 'zebra quantum marmalade' }],
+  ['search: unknown source', 'search_docs', { query: 'install the package', source: 'elsewhere' }],
+  ['list: whole project', 'list_topics', {}],
+  ['list: first page', 'list_topics', { limit: 5 }],
+  ['list: continuation', 'list_topics', { limit: 5, cursor: Buffer.from('handbook/pages/page-02.md', 'utf8').toString('base64url') }],
+  ['list: past the end', 'list_topics', { limit: 5, cursor: Buffer.from('zzz', 'utf8').toString('base64url') }],
+  ['read: whole document', 'read_document', { path: 'handbook/guide.md' }],
+  ['read: by suffix', 'read_document', { path: 'guide.md' }],
+  ['read: cut at a budget', 'read_document', { path: 'handbook/manual.md', max_tokens: 300 }],
+  ['read: section', 'read_document', { path: 'handbook/guide.md', heading: 'Delivery guide > Install' }],
+  ['read: range cut on a chunk boundary', 'read_document', { path: 'handbook/manual.md', from: 2, to: 30, max_tokens: 400 }],
+  ['read: no stored text', 'read_document', { path: 'handbook/legacy.md' }],
+  ['read: unknown document', 'read_document', { path: 'handbook/nope.md' }],
+];
+
+describe('the plain text a client without structured output reads', () => {
+  it.each(TEXT_CASES)('%s is the text it was before structured output existed', async (_name, tool, args) => {
+    const client = await connect();
+    try {
+      const result = await client.callTool({ name: tool, arguments: args });
+      const content = result.content as Array<{ type: string; text?: string }>;
+      // One block, and a text one: no JSON rendering of the structured result was added beside it.
+      expect(content).toHaveLength(1);
+      expect(content[0].type).toBe('text');
+      expect({ isError: result.isError === true, text: content[0].text }).toMatchSnapshot();
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('answers a project with nothing indexed the way it did before', async () => {
+    const [empty] = await fx.database.db.insert(projects).values({ name: 'empty-project', embeddingModel: MODEL_ID }).returning();
+    for (const [tool, args] of [
+      ['search_docs', { query: 'install the package' }],
+      ['list_topics', {}],
+    ] as const) {
+      const client = await connect(empty);
+      try {
+        const result = await client.callTool({ name: tool, arguments: args });
+        const content = result.content as Array<{ type: string; text?: string }>;
+        expect(content).toHaveLength(1);
+        expect({ tool, isError: result.isError === true, text: content[0].text }).toMatchSnapshot();
+      } finally {
+        await client.close();
+      }
+    }
+  });
+
+  it('answers a client on a protocol version from before structured output with the same text', async () => {
+    // Raw JSON-RPC rather than the SDK client, which would negotiate the newest version it knows and
+    // validate what came back: this is a client that asked for 2025-03-26, which has no outputSchema,
+    // and reads `content` because it has never heard of anything else.
+    const server = new McpServer({ name: 'contextator-test', version: '0.0.0' });
+    registerTools(server, fx.ctx, fx.project);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const replies = new Map<number, Record<string, unknown>>();
+    clientTransport.onmessage = (msg) => {
+      const m = msg as { id?: number };
+      if (typeof m.id === 'number') replies.set(m.id, msg as Record<string, unknown>);
+    };
+    await server.connect(serverTransport);
+    await clientTransport.start();
+    const request = async (id: number, method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
+      await clientTransport.send({ jsonrpc: '2.0', id, method, params });
+      for (let i = 0; i < 200 && !replies.has(id); i++) await new Promise((r) => setTimeout(r, 5));
+      const reply = replies.get(id);
+      expect(reply).toBeDefined();
+      return reply as Record<string, unknown>;
+    };
+    try {
+      const init = await request(1, 'initialize', {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: { name: 'legacy-client', version: '0.0.0' },
+      });
+      expect((init.result as { protocolVersion: string }).protocolVersion).toBe('2025-03-26');
+      await clientTransport.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+
+      const args = { path: 'handbook/guide.md', heading: 'Delivery guide > Install' };
+      const raw = await request(2, 'tools/call', { name: 'read_document', arguments: args });
+      const rawContent = (raw.result as { content: Array<{ type: string; text: string }> }).content;
+      expect(rawContent).toHaveLength(1);
+      expect(rawContent[0].text).toBe((await call('read_document', args)).text);
+    } finally {
+      await clientTransport.close();
+      await server.close();
+    }
+  });
+});
