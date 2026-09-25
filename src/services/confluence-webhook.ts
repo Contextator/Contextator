@@ -38,8 +38,10 @@ export function confluenceEventOf(payload: unknown): string | null {
  * - `attachment_*`: attachments are not indexed; a page that *embeds* one changes its own version when
  *   it is edited, and that arrives as a `page_updated` of its own.
  * - `relation_*`: likes and favourites.
+ * - `blog_*`: blog posts are not in the scope — `cqlFor` lists `type = page` only — so an edit to one
+ *   cannot change the index, and a run for it would be a listing that finds nothing new.
  */
-const NEVER_QUEUES_PREFIXES = ['comment_', 'user_', 'group_', 'label_', 'attachment_', 'relation_'] as const;
+const NEVER_QUEUES_PREFIXES = ['comment_', 'user_', 'group_', 'label_', 'attachment_', 'relation_', 'blog_'] as const;
 const NEVER_QUEUES = new Set(['theme_enabled', 'space_logo_updated']);
 
 /**

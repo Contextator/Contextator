@@ -55,7 +55,7 @@ describe('confluenceEventOf', () => {
 });
 
 describe('decideConfluenceEvent', () => {
-  it.each(['page_created', 'page_updated', 'page_moved', 'page_removed', 'page_trashed', 'page_restored', 'blog_created', 'blog_removed'])(
+  it.each(['page_created', 'page_updated', 'page_moved', 'page_removed', 'page_trashed', 'page_restored'])(
     'queues %s, which is content the driver indexes',
     (event) => {
       expect(decideConfluenceEvent(event)).toEqual({ queue: true, reason: event });
@@ -78,6 +78,9 @@ describe('decideConfluenceEvent', () => {
     'label_added',
     'attachment_created',
     'relation_created',
+    'blog_created',
+    'blog_updated',
+    'blog_removed',
     'theme_enabled',
     'space_logo_updated',
   ])('queues nothing for %s, and says why', (event) => {

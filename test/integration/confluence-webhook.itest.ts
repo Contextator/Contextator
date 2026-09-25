@@ -290,7 +290,7 @@ describe('a burst of deliveries', () => {
     const secret = await currentSecret();
     const answers = [];
     for (let i = 0; i < 20; i++) {
-      const { payload, headers } = delivery(i % 2 === 0 ? 'page_updated' : 'blog_updated', secret);
+      const { payload, headers } = delivery(i % 2 === 0 ? 'page_updated' : 'page_moved', secret);
       answers.push(await post(confluenceId, payload, headers));
     }
     expect(answers.every((a) => a.statusCode === 200 && a.body.queued === false)).toBe(true);

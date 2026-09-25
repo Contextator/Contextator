@@ -1361,7 +1361,7 @@ function renderConfluenceWebhook(project, source) {
   $('#confluence-webhook-enable').textContent = enabled ? 'New secret' : 'Turn on';
   $('#confluence-webhook-disable').hidden = !enabled;
   $('#confluence-webhook-status').textContent = enabled
-    ? 'On. Add the URL above as a webhook in Confluence with this secret, and pick the page and blog post events. Deliveries signed with anything else are refused.'
+    ? 'On. Add the URL above as a webhook in Confluence with this secret, and pick the page events (and the permission events, if restrictions matter). Blog posts are not indexed. Deliveries signed with anything else are refused.'
     : 'Off. This source syncs on its interval, which is not an error \u2014 turn the webhook on when you are ready to add it in Confluence.';
   const update = async (method, message) => {
     try {
