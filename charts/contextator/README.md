@@ -32,7 +32,7 @@ Or from a checkout of this repository:
 ```sh
 helm install ctx ./charts/contextator \
   --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
-  --set image.tag="<version>-slim"
+  --set-string image.tag="<version>-slim"
 ```
 
 Or, pointing at a Secret you already manage instead of passing the URL on the command line:
@@ -41,7 +41,7 @@ Or, pointing at a Secret you already manage instead of passing the URL on the co
 helm install ctx ./charts/contextator \
   --set database.existingSecret=my-db-secret \
   --set database.existingSecretKey=DATABASE_URL \
-  --set image.tag="<version>-slim"
+  --set-string image.tag="<version>-slim"
 ```
 
 Either `database.url` or `database.existingSecret` is **required**. If neither is set, the chart fails
