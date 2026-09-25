@@ -817,13 +817,15 @@ such secrets — which nothing ever read — are set to empty and their number i
 where the archive is not.
 
 That key is rotatable — a four-step runbook (`npm run rotate-secret` is step 3, ADR-0075 is the record
-of why) — which gives the paragraph above a second edge: **rotating the key, and then retiring the old
-one, invalidates every archive taken before the rotation that carries a source's sync credential — a
-private git, Notion or Confluence token — encrypted under it.** The old archive's fingerprint names a
-key the environment no longer holds, and for that archive `restore` refuses, because the credential's
-ciphertext was written under the key that was retired and cannot be re-derived; an archive with no
-such credential restores anyway, and the refusal starts at step 2 of the four, not step 4. A
-rotation is bracketed by backups, in three steps and in this order: a normal backup **before** the
+of why) — which gives the paragraph above a second edge: **retiring the old key — removing
+`SECRET_KEY_PREVIOUS` — and then discarding it invalidates every archive taken before the rotation
+that carries a source's sync credential — a private git, Notion or Confluence token — encrypted under
+it.** The old archive's fingerprint names a key the environment no longer holds, and for that archive
+`restore` refuses, because the credential's ciphertext was written under the key that was retired and
+discarded and cannot be re-derived; an archive with no such credential restores anyway, and the
+refusal starts at step 2 of the four, not step 4. Keeping the retired key instead of discarding it
+keeps that archive restorable until its retention expires. A rotation is bracketed by backups, in
+three steps and in this order: a normal backup **before** the
 rotation, under the current key; a fresh archive **after** `npm run rotate-secret` reports every row
 converted and before `SECRET_KEY_PREVIOUS` is removed, under the new key — the oldest one the
 rotated instance can restore; and the retired key kept in the secret store, labelled and not beside
