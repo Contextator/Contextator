@@ -180,6 +180,55 @@ jobs:
             exit 1
           fi
 
+      # The two typed `config` keys that map onto application env vars: config.confluenceAllowedHosts is
+      # joined with "," into CONFLUENCE_ALLOWED_HOSTS (the app splits it on ","), and
+      # config.mcpStructuredOutput=true renders MCP_STRUCTURED_OUTPUT as the string "1". With the
+      # defaults, and with mcpStructuredOutput=false, neither variable is rendered at all. `env_value`
+      # prints the `value:` line that follows `- name: <var>`, so a lost `join` (a rendered list) or a
+      # changed flag value fails here. The set-values render doubles as the control that the
+      # "not rendered" greps can match.
+      - name: Typed config keys render CONFLUENCE_ALLOWED_HOSTS and MCP_STRUCTURED_OUTPUT
+        run: |
+          set -euo pipefail
+          render() {
+            helm template ctx charts/contextator \
+              --set image.tag="ci-test" \
+              --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
+              "$@" \
+              --show-only templates/deployment.yaml
+          }
+          env_value() {
+            awk -v var="$1" '
+              found { sub(/^[ \t]*value:[ \t]*/, ""); print; exit }
+              { line = $0; sub(/^[ \t]*-[ \t]*name:[ \t]*/, "", line); if (line != $0 && line == var) found = 1 }
+            ' <<< "$rendered"
+          }
+          assert_unset() {
+            local label=$1 var; shift
+            rendered=$(render "$@")
+            for var in CONFLUENCE_ALLOWED_HOSTS MCP_STRUCTURED_OUTPUT; do
+              if grep -qE "name: ${var}\$" <<< "$rendered"; then
+                echo "$var was rendered with $label — expected it to stay unset."
+                exit 1
+              fi
+            done
+          }
+          assert_unset 'the defaults'
+          assert_unset 'mcpStructuredOutput=false' --set config.mcpStructuredOutput=false
+          rendered=$(render \
+            --set 'config.confluenceAllowedHosts={wiki.corp.example,10.0.4.12,fd00::12}' \
+            --set config.mcpStructuredOutput=true)
+          got=$(env_value CONFLUENCE_ALLOWED_HOSTS)
+          if [[ "$got" != '"wiki.corp.example,10.0.4.12,fd00::12"' ]]; then
+            echo "CONFLUENCE_ALLOWED_HOSTS rendered as ${got:-<missing>}; expected \"wiki.corp.example,10.0.4.12,fd00::12\"."
+            exit 1
+          fi
+          got=$(env_value MCP_STRUCTURED_OUTPUT)
+          if [[ "$got" != '"1"' ]]; then
+            echo "MCP_STRUCTURED_OUTPUT rendered as ${got:-<missing>}; expected \"1\"."
+            exit 1
+          fi
+
       # Both PVCs default to helm.sh/resource-policy: keep (ADR-0078, persistence.retainOnUninstall
       # defaults to true) — `helm uninstall` must not silently delete stored data or models.
       - name: Both PVCs default to helm.sh/resource-policy keep
