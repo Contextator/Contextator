@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { loadConfig } from '../../src/config.js';
 import type { Db } from '../../src/db/client.js';
 import { documents, documentSources, projects, type ProjectRow } from '../../src/db/schema.js';
+import { listTopicsOutput, readDocumentOutput, searchDocsOutput } from '../../src/mcp/output-schemas.js';
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
 import { chunkMarkdown, embeddingText, estimateTokens } from '../../src/services/chunker.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
@@ -907,5 +908,175 @@ describe('the plain text a client without structured output reads', () => {
       await clientTransport.close();
       await server.close();
     }
+  });
+});
+
+/**
+ * **The structured answer beside it, validated against the schema the tool publishes.** Twice over:
+ * the SDK client checks `structuredContent` against the JSON Schema it was handed by `tools/list`
+ * (it caches that list and refuses a result that does not fit), and the test parses the same object
+ * with the zod schema the server declared. The first is what a real client does; the second is the
+ * one that fails with a readable diff.
+ *
+ * And the two answers are one answer: the structured text is exactly what the fence encloses, the
+ * paths are the ones the text lists, the cursor is the one it prints.
+ */
+const SCHEMAS = { search_docs: searchDocsOutput, list_topics: listTopicsOutput, read_document: readDocumentOutput } as const;
+
+async function structured(
+  tool: keyof typeof SCHEMAS,
+  args: Record<string, unknown>,
+  project?: ProjectRow,
+  ctx?: ToolContext,
+): Promise<{ text: string; isError: boolean; data: Record<string, unknown> | undefined }> {
+  const client = await connect(project, ctx);
+  try {
+    // Without this the client has no schema to validate against; with it, a result that does not fit
+    // the published schema throws here rather than reaching the assertions.
+    await client.listTools();
+    const result = await client.callTool({ name: tool, arguments: args });
+    const content = result.content as Array<{ type: string; text: string }>;
+    const data = result.structuredContent as Record<string, unknown> | undefined;
+    if (data !== undefined) {
+      const parsed = SCHEMAS[tool].safeParse(data);
+      expect(parsed.success, parsed.success ? '' : JSON.stringify(parsed.error.issues)).toBe(true);
+    }
+    return { text: content[0].text, isError: result.isError === true, data };
+  } finally {
+    await client.close();
+  }
+}
+
+describe('the structured output', () => {
+  it('publishes an output schema for each of the three tools', async () => {
+    const client = await connect();
+    try {
+      const { tools } = await client.listTools();
+      for (const name of Object.keys(SCHEMAS)) {
+        const tool = tools.find((t) => t.name === name);
+        expect(tool?.outputSchema?.type).toBe('object');
+        expect(Object.keys(tool?.outputSchema?.properties ?? {}).length).toBeGreaterThan(0);
+      }
+    } finally {
+      await client.close();
+    }
+  });
+
+  it.each(TEXT_CASES)('%s: structured content fits the schema, and only on success', async (_name, tool, args) => {
+    const answer = await structured(tool as keyof typeof SCHEMAS, args);
+    if (answer.isError) expect(answer.data).toBeUndefined();
+    else expect(answer.data).toBeDefined();
+  });
+
+  it('carries the search excerpts the text shows, in its order and whole', async () => {
+    const answer = await structured('search_docs', { query: 'Page 7 short page number 7', limit: 3 });
+    const data = searchDocsOutput.parse(answer.data);
+    expect(data.status).toBe('results');
+    expect(data.results).toHaveLength(3);
+    expect(data.results.map((r) => r.rank)).toEqual([1, 2, 3]);
+    for (const r of data.results) {
+      expect(answer.text).toContain(`### ${r.rank}. ${r.file}`);
+      expect(answer.text).toContain(`(score ${r.score.toFixed(3)})`);
+      expect(answer.text).toContain(r.text.trim());
+      // Unfenced: the markers belong to the text answer, not to the document.
+      expect(r.text).not.toContain(BEGIN);
+    }
+    expect(data.results[0].file).toBe('handbook/pages/page-07.md');
+    expect(data).toMatchObject({ project: 'handbook-project', query: 'Page 7 short page number 7', omitted: 0, truncated: false });
+  });
+
+  it('says what the text dropped and what it cut, and keeps the excerpt whole', async () => {
+    // The floor off, so the bag-of-words stub's modest scores still reach the budget this is about.
+    const narrow = { ...fx.ctx, config: { ...fx.ctx.config, SEARCH_MAX_RESULT_CHARS: 500, SEARCH_SCORE_FLOOR: 0 } };
+    const dropped = searchDocsOutput.parse(
+      (await structured('search_docs', { query: 'Page 7 short page number 7', limit: 5 }, undefined, narrow)).data,
+    );
+    expect(dropped.status).toBe('results');
+    expect(dropped.omitted).toBeGreaterThan(0);
+    expect(dropped.results.length + dropped.omitted).toBe(5);
+
+    const cutAnswer = await structured('search_docs', { query: 'Paragraph 30 explains the operations procedure', limit: 1 }, undefined, narrow);
+    const cut = searchDocsOutput.parse(cutAnswer.data);
+    expect(cutAnswer.text).toContain('[…truncated at 500 characters]');
+    expect(cut).toMatchObject({ status: 'results', omitted: 0, truncated: true });
+    expect(cut.results[0].file).toBe('handbook/manual.md');
+    expect(cutAnswer.text).not.toContain(cut.results[0].text.trim());
+  });
+
+  it('names the floor and the closest score below it, and no excerpts', async () => {
+    const data = searchDocsOutput.parse((await structured('search_docs', { query: 'zebra quantum marmalade' })).data);
+    expect(data).toMatchObject({ status: 'below_floor', results: [], floor: fx.ctx.config.SEARCH_SCORE_FLOOR });
+    expect(data.closestScore).toBeLessThan(fx.ctx.config.SEARCH_SCORE_FLOOR);
+  });
+
+  it('says no_match and not_indexed as statuses rather than sentences', async () => {
+    const none = searchDocsOutput.parse((await structured('search_docs', { query: 'install the package', path_prefix: 'handbook/nowhere' })).data);
+    expect(none).toMatchObject({ status: 'no_match', results: [] });
+    const [empty] = await fx.database.db.insert(projects).values({ name: 'empty-structured', embeddingModel: MODEL_ID }).returning();
+    const unindexed = searchDocsOutput.parse((await structured('search_docs', { query: 'install the package' }, empty)).data);
+    expect(unindexed).toMatchObject({ project: 'empty-structured', status: 'not_indexed', results: [] });
+    const list = listTopicsOutput.parse((await structured('list_topics', {}, empty)).data);
+    expect(list).toMatchObject({ documents: [], nextCursor: null, after: null });
+  });
+
+  it('lists the page the text lists, with the cursor it prints', async () => {
+    const first = await structured('list_topics', { limit: 5 });
+    const page = listTopicsOutput.parse(first.data);
+    expect(page.after).toBeNull();
+    expect(page.documents).toHaveLength(5);
+    expect(page).toMatchObject({ project: 'handbook-project', documentCount: 16, chunkCount: 99 });
+    for (const doc of page.documents) expect(first.text).toContain(`• ${doc.path} — ${doc.title}`);
+    expect(page.nextCursor).not.toBeNull();
+    expect(first.text).toContain(`next_cursor: ${page.nextCursor}`);
+    expect(page.sources).toEqual([{ name: 'handbook', type: 'local', label: null, language: null }]);
+    expect(page.versions).toEqual([]);
+
+    const second = listTopicsOutput.parse((await structured('list_topics', { limit: 5, cursor: page.nextCursor })).data);
+    expect(second.after).toBe(page.documents[4].path);
+    // The project, not the page, is described on the first page only — as in the text.
+    expect(second.sources).toBeUndefined();
+    expect(second.versions).toBeUndefined();
+    expect(second.documents[0].path > page.documents[4].path).toBe(true);
+
+    const last = listTopicsOutput.parse((await structured('list_topics', {})).data);
+    expect(last.documents).toHaveLength(16);
+    expect(last.nextCursor).toBeNull();
+  });
+
+  it('returns exactly the text the fence encloses, on a whole read and on a cut one', async () => {
+    const whole = await structured('read_document', { path: 'handbook/guide.md' });
+    const w = readDocumentOutput.parse(whole.data);
+    expect(w.text).toBe(fenced(whole.text));
+    expect(w).toMatchObject({ path: 'handbook/guide.md', title: 'Delivery guide', truncated: false, storedTextTruncated: false });
+    expect(whole.text).toContain(`Tokens: ${w.tokens}`);
+    expect(w.chunks).toBeUndefined();
+
+    const cut = await structured('read_document', { path: 'handbook/manual.md', max_tokens: 300 });
+    const c = readDocumentOutput.parse(cut.data);
+    expect(c.text).toBe(fenced(cut.text));
+    expect(c.truncated).toBe(true);
+    expect(countTokens(c.text)).toBeLessThanOrEqual(300);
+  });
+
+  it('names the section, the chunks and where to continue on a sectional read', async () => {
+    const section = await structured('read_document', { path: 'handbook/guide.md', heading: 'Delivery guide > Install' });
+    const s = readDocumentOutput.parse(section.data);
+    expect(s.section).toBe('Delivery guide > Install');
+    expect(section.text).toContain(`Chunks: ${s.chunks?.first}-${s.chunks?.last} of ${s.chunks?.total}`);
+    expect(s.text).toBe(fenced(section.text));
+    expect(s.continueFrom).toBeUndefined();
+
+    const range = await structured('read_document', { path: 'handbook/manual.md', from: 2, to: 30, max_tokens: 400 });
+    const r = readDocumentOutput.parse(range.data);
+    expect(r.truncated).toBe(true);
+    expect(r.chunks?.first).toBe(2);
+    expect(r.continueFrom).toBe((r.chunks?.last ?? 0) + 1);
+    expect(range.text).toContain(`from: ${r.continueFrom} for the rest`);
+    expect(r.section).toBeUndefined();
+  });
+
+  it('resolves a suffix to the indexed path, and the structured path says which', async () => {
+    const data = readDocumentOutput.parse((await structured('read_document', { path: 'guide.md' })).data);
+    expect(data.path).toBe('handbook/guide.md');
   });
 });

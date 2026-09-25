@@ -29,10 +29,28 @@ import {
   type SearchHit,
 } from '../services/vector-store.js';
 import { type DocumentFence, documentFence, wrapDocumentText } from './document-fence.js';
+import {
+  type ListTopicsOutput,
+  type ReadDocumentOutput,
+  type SearchDocsOutput,
+  listTopicsOutput,
+  readDocumentOutput,
+  searchDocsOutput,
+} from './output-schemas.js';
 
-type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
+type ToolResult = { content: Array<{ type: 'text'; text: string }>; structuredContent?: Record<string, unknown>; isError?: boolean };
 
-const ok = (text: string): ToolResult => ({ content: [{ type: 'text', text }] });
+/**
+ * A successful answer is the text it has always been, as its only content block, plus the same answer
+ * as `structuredContent` for a client that reads the tool's `outputSchema` (see `output-schemas.ts`).
+ * Required rather than optional: the SDK refuses a non-error result from a tool that declares an output
+ * schema and returns no structured content, so a success path that forgot it would fail at runtime.
+ * A failure stays text only — the spec validates structured content on success alone.
+ */
+const ok = <T extends Record<string, unknown>>(text: string, structured: T): ToolResult => ({
+  content: [{ type: 'text', text }],
+  structuredContent: structured,
+});
 const fail = (text: string): ToolResult => ({ content: [{ type: 'text', text }], isError: true });
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
@@ -81,8 +99,16 @@ function trimPartialMarker(text: string, fence: DocumentFence): string {
  * budget on markers in the header. Dropping a hit can only narrow the fence, and narrowing it can only
  * free space, so the candidate set shrinks monotonically and the loop below settles — in one pass
  * unless something was dropped, and in at most one pass per hit in any case.
+ *
+ * Beside the text it says which hits it showed, how many it dropped and whether it had to cut inside
+ * the first one, so the structured answer carries exactly the excerpts the text does.
  */
-function formatHits(query: string, projectName: string, hits: SearchHit[], maxChars: number): string {
+function formatHits(
+  query: string,
+  projectName: string,
+  hits: SearchHit[],
+  maxChars: number,
+): { text: string; shown: number[]; omitted: number; cut: boolean } {
   const bodies = hits.map((hit) =>
     [hit.contextBefore ? `…${hit.contextBefore.trim()}` : null, hit.content.trim(), hit.contextAfter ? `${hit.contextAfter.trim()}…` : null]
       .filter((part): part is string => part !== null)
@@ -119,9 +145,11 @@ function formatHits(query: string, projectName: string, hits: SearchHit[], maxCh
   const header = headerFor(fence);
   let out = [header, ...candidates.map((i) => blockFor(i, fence))].join('\n\n');
   const omitted = hits.length - candidates.length;
+  let cut = false;
   if (omitted > 0) {
     out += `\n\n[…truncated: ${omitted} further excerpt${omitted === 1 ? '' : 's'} omitted at ${maxChars} characters. Ask for fewer results, or read_document one of the paths above.]`;
   } else if (out.length > maxChars) {
+    cut = true;
     // The one path that cuts *inside* an excerpt, and so the one that can leave a marker half written or
     // an opening one with no closing one — the second being the shape the fence exists to deny a
     // document. Drop the half marker, then balance the pair, then say it was cut.
@@ -129,7 +157,7 @@ function formatHits(query: string, projectName: string, hits: SearchHit[], maxCh
     if (count(out, fence.begin) > count(out, fence.end)) out += `\n${fence.end}`;
     out += `\n[…truncated at ${maxChars} characters]`;
   }
-  return out;
+  return { text: out, shown: candidates, omitted, cut };
 }
 
 /**
@@ -138,10 +166,13 @@ function formatHits(query: string, projectName: string, hits: SearchHit[], maxCh
  * edit. Opaque is the contract — it is not promised to stay a path — and `decodeCursor` re-encodes what
  * it decoded so that a cursor somebody assembled by hand is refused rather than silently read as some
  * other position.
+ *
+ * The resource list (`resources.ts`) pages with the same two functions, so one listing's cursor and the
+ * other's are the same kind of token over the same order.
  */
-const encodeCursor = (relativePath: string): string => Buffer.from(relativePath, 'utf8').toString('base64url');
+export const encodeCursor = (relativePath: string): string => Buffer.from(relativePath, 'utf8').toString('base64url');
 
-function decodeCursor(cursor: string): string | null {
+export function decodeCursor(cursor: string): string | null {
   const trimmed = cursor.trim();
   if (trimmed === '' || trimmed.length > 2048) return null;
   const decoded = Buffer.from(trimmed, 'base64url').toString('utf8');
@@ -226,9 +257,20 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
               'what most projects have exactly one of.',
           ),
       },
+      outputSchema: searchDocsOutput,
       annotations: readOnly,
     },
     async ({ query, limit, source, path_prefix, version }) => {
+      // Every structured answer starts from this: no excerpts, nothing dropped, nothing cut.
+      const answer = (status: SearchDocsOutput['status'], extra: Partial<SearchDocsOutput> = {}): SearchDocsOutput => ({
+        project: project.name,
+        query,
+        status,
+        results: [],
+        omitted: 0,
+        truncated: false,
+        ...extra,
+      });
       try {
         // Counted before the search rather than after it, so a search that threw is still a search
         // somebody asked for ([ADR-0055](../../.ssot/ADR.md#adr-0055)).
@@ -260,7 +302,10 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
           return fail(`Project "${project.name}" has no documents at version "${outcome.requested}". ${known}`);
         }
         if (outcome.status === 'not_indexed') {
-          return ok(`Project "${project.name}" has no indexed content yet. Trigger indexing from the Contextator dashboard and try again.`);
+          return ok(
+            `Project "${project.name}" has no indexed content yet. Trigger indexing from the Contextator dashboard and try again.`,
+            answer('not_indexed'),
+          );
         }
         if (outcome.status === 'model_mismatch') {
           return fail(
@@ -271,7 +316,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
         const narrowed = [source && `source "${source}"`, path_prefix && `"${path_prefix}"`, version && `version "${version}"`].filter(Boolean);
         const scoped = narrowed.length > 0 ? ` under ${narrowed.join(' and ')}` : '';
         if (outcome.hits.length === 0) {
-          return ok(`No matching documentation for "${query}"${scoped}. Try different wording or call list_topics to browse.`);
+          return ok(`No matching documentation for "${query}"${scoped}. Try different wording or call list_topics to browse.`, answer('no_match'));
         }
         if (outcome.belowFloor) {
           // The log line predates the table and stays beside it ([ADR-0047](../../.ssot/ADR.md#adr-0047)):
@@ -287,9 +332,26 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
               `${outcome.hits[0].score.toFixed(3)}, below this server's floor of ${config.SEARCH_SCORE_FLOOR}, which usually means the ` +
               'documentation does not cover it. Call list_topics to see what it does cover, or ask again in the words the documentation ' +
               'would use — an exact identifier, a header name or an error code searches best.',
+            answer('below_floor', { closestScore: outcome.hits[0].score, floor: config.SEARCH_SCORE_FLOOR }),
           );
         }
-        return ok(formatHits(query, project.name, outcome.hits, config.SEARCH_MAX_RESULT_CHARS));
+        const formatted = formatHits(query, project.name, outcome.hits, config.SEARCH_MAX_RESULT_CHARS);
+        // The excerpts the text shows and no others, whole: a structured field has no size budget to
+        // cut to, and `truncated` says the text one was cut where the field is not.
+        const results = formatted.shown.map((i) => {
+          const hit = outcome.hits[i];
+          return {
+            rank: i + 1,
+            file: hit.file,
+            title: hit.title,
+            headingPath: hit.headingPath,
+            score: hit.score,
+            text: hit.content,
+            contextBefore: hit.contextBefore,
+            contextAfter: hit.contextAfter,
+          };
+        });
+        return ok(formatted.text, answer('results', { results, omitted: formatted.omitted, truncated: formatted.cut }));
       } catch (err) {
         log.error({ err, tool: 'search_docs', project: project.name }, 'tool failed');
         return fail(`search_docs failed: ${message(err)}`);
@@ -322,6 +384,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
           .default(LIST_TOPICS_DEFAULT_LIMIT)
           .describe(`Documents per page (1-${LIST_TOPICS_MAX_LIMIT}, default ${LIST_TOPICS_DEFAULT_LIMIT})`),
       },
+      outputSchema: listTopicsOutput,
       annotations: readOnly,
     },
     async ({ cursor, limit }) => {
@@ -342,11 +405,20 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
         const rows = await listDocumentsForProject(db, project.id, live.liveGeneration, { limit: limit + 1, after });
         const hasMore = rows.length > limit;
         const docs = rows.slice(0, limit);
+        const structured: ListTopicsOutput = {
+          project: project.name,
+          documentCount: live.documentCount,
+          chunkCount: live.chunkCount,
+          after: after ?? null,
+          documents: docs.map((doc) => ({ path: doc.relativePath, title: doc.title, chunkCount: doc.chunkCount })),
+          nextCursor: hasMore ? encodeCursor(docs[docs.length - 1].relativePath) : null,
+        };
         if (docs.length === 0) {
           return ok(
             after === undefined
               ? `Project "${project.name}" has no indexed documents yet.`
               : `No further documents in project "${project.name}"; that cursor was already at the end of the listing.`,
+            structured,
           );
         }
 
@@ -363,6 +435,12 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
           // Only on the first page. The source list describes the project and not the page, and
           // repeating it on every continuation is context spent to say the same thing again.
           const sources = await listSources(db, project.id);
+          structured.sources = sources.map((s) => ({
+            name: s.name,
+            type: s.type,
+            label: s.label || null,
+            language: namedLanguageOf(s.config) ?? null,
+          }));
           if (sources.length > 0) {
             // The language, when the source names one, is this tool's half of
             // [ADR-0068](../../.ssot/ADR.md#adr-0068): it does not say the server can search across
@@ -383,6 +461,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
           // product is willing to give: the list, alphabetical and in no chronological order at all,
           // for the agent to choose from.
           const versions = await listDocumentVersions(db, project.id, live.liveGeneration);
+          structured.versions = versions;
           if (versions.length > 0) {
             lines.push(`Versions (pass one to search_docs as version): ${versions.join(', ')}. Omit it to search all of them.`);
           }
@@ -396,12 +475,12 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
           for (const doc of list) lines.push(`  • ${doc.relativePath} — ${doc.title} (${doc.chunkCount} chunk${doc.chunkCount === 1 ? '' : 's'})`);
         }
 
-        if (hasMore) {
-          const next = encodeCursor(docs[docs.length - 1].relativePath);
+        if (structured.nextCursor !== null) {
+          const next = structured.nextCursor;
           lines.push('', `next_cursor: ${next}`);
           lines.push(`More documents follow. Call list_topics again with cursor: "${next}" to continue from here.`);
         }
-        return ok(lines.join('\n'));
+        return ok(lines.join('\n'), structured);
       } catch (err) {
         log.error({ err, tool: 'list_topics', project: project.name }, 'tool failed');
         return fail(`list_topics failed: ${message(err)}`);
@@ -440,6 +519,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
             `Token budget for the text returned (${READ_DOCUMENT_MIN_MAX_TOKENS}-${READ_DOCUMENT_MAX_MAX_TOKENS}, default ${READ_DOCUMENT_DEFAULT_MAX_TOKENS})`,
           ),
       },
+      outputSchema: readDocumentOutput,
       annotations: readOnly,
     },
     async ({ path: requested, heading, from, to, max_tokens }) => {
@@ -465,7 +545,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
         const body = sectional
           ? await readSection(doc, { heading, from, to, maxTokens: max_tokens, count })
           : await readWholeDocument(doc, max_tokens, count);
-        return typeof body === 'string' ? fail(body) : ok(body.text);
+        return typeof body === 'string' ? fail(body) : ok(body.text, body.structured);
       } catch (err) {
         log.error({ err, tool: 'read_document', project: project.name }, 'tool failed');
         return fail(`read_document failed: ${message(err)}`);
@@ -482,7 +562,17 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
    * [ADR-0043](../../.ssot/ADR.md#adr-0043) promises this is the text `search_docs` quoted, down to the
    * character, and a substitution here would break that to buy nothing a wider marker does not buy.
    */
-  const render = (doc: DocumentRow, extra: string[], text: string, notes: string[]): { text: string } => ({
+  type Rendered = { text: string; structured: ReadDocumentOutput };
+  const render = (
+    doc: DocumentRow,
+    extra: string[],
+    text: string,
+    notes: string[],
+    fields: Omit<ReadDocumentOutput, 'path' | 'title' | 'text'>,
+  ): Rendered => ({
+    // The same values the header and the notes print, and the same text between the markers — the
+    // markers themselves are not part of it (see output-schemas.ts on the fence).
+    structured: { path: doc.relativePath, title: doc.title, ...fields, text },
     text: [
       `File: ${doc.relativePath}`,
       `Title: ${doc.title}`,
@@ -509,7 +599,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
   async function readSection(
     doc: DocumentRow,
     opts: { heading?: string; from?: number; to?: number; maxTokens: number; count: (text: string) => number },
-  ): Promise<{ text: string } | string> {
+  ): Promise<Rendered | string> {
     const rows = await getDocumentChunks(db, doc.id, { heading: opts.heading, from: opts.from, to: opts.to });
     if (rows.length === 0) {
       if (opts.heading !== undefined) {
@@ -526,6 +616,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
     const first = rows[0].chunkIndex;
     const notes: string[] = [];
     let text = joined.text;
+    let continueFrom: number | undefined;
 
     if (fitting === 0) {
       // Not even one chunk fits — only possible at a small `max_tokens` against a chunk budget an
@@ -536,6 +627,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
     } else if (fitting < rows.length) {
       text = joined.text.slice(0, joined.offsets[fitting]).trimEnd();
       const last = rows[fitting - 1].chunkIndex;
+      continueFrom = rows[fitting].chunkIndex;
       notes.push(
         `[…truncated at ${opts.maxTokens} tokens: chunks ${first}-${last} of the ${rows.length} that matched. ` +
           `Call read_document again with from: ${rows[fitting].chunkIndex} for the rest.]`,
@@ -547,7 +639,13 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
       ...(opts.heading !== undefined ? [`Section: ${rows[0].headingPath || '(the document itself)'}`] : []),
       `Chunks: ${first}-${shown} of ${doc.chunkCount}`,
     ];
-    return render(doc, extra, text, notes);
+    return render(doc, extra, text, notes, {
+      ...(opts.heading !== undefined ? { section: rows[0].headingPath } : {}),
+      chunks: { first, last: shown, total: doc.chunkCount },
+      truncated: fitting < rows.length,
+      ...(continueFrom !== undefined ? { continueFrom } : {}),
+      storedTextTruncated: false,
+    });
   }
 
   /**
@@ -565,7 +663,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
    * re-index, or a sectional read, which has never needed this column because it is served from the
    * chunks.
    */
-  async function readWholeDocument(doc: DocumentRow, maxTokens: number, count: (text: string) => number): Promise<{ text: string } | string> {
+  async function readWholeDocument(doc: DocumentRow, maxTokens: number, count: (text: string) => number): Promise<Rendered | string> {
     const notes: string[] = [];
     const content = doc.content;
 
@@ -595,6 +693,10 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
           'with heading:, or a range with from:/to:, or raise max_tokens.]',
       );
     }
-    return render(doc, [`Tokens: ${cut.tokens}`], cut.text, notes);
+    return render(doc, [`Tokens: ${cut.tokens}`], cut.text, notes, {
+      tokens: cut.tokens,
+      truncated: cut.truncated,
+      storedTextTruncated: doc.contentTruncated,
+    });
   }
 }
