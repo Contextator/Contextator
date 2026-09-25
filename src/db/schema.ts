@@ -142,7 +142,7 @@ export const projects = pgTable(
     queryLogEnabled: boolean('query_log_enabled').notNull().default(true),
     /**
      * This project's relevance floor, overriding `SEARCH_SCORE_FLOOR` for this project only
-     * ([ADR-0042](../../.ssot/ADR.md#adr-0042)).
+     * ([ADR-0083](../../.ssot/ADR.md#adr-0083); the refusal rule is [ADR-0042](../../.ssot/ADR.md#adr-0042)'s).
      *
      * **`null` is the default and means "the instance's floor"**, so a project nobody has touched
      * behaves exactly as it did before the column existed. The floor is a cosine similarity measured on

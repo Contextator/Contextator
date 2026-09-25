@@ -72,8 +72,8 @@ export function belowRelevanceFloor(query: string, hits: readonly SearchHit[], f
 
 /**
  * The floor a search is decided against, from the instance's `SEARCH_SCORE_FLOOR` and the project's own
- * `score_floor` column ([ADR-0042](../../.ssot/ADR.md#adr-0042), and the per-project override proposed
- * beside it).
+ * `score_floor` column ([ADR-0083](../../.ssot/ADR.md#adr-0083), which leaves
+ * [ADR-0042](../../.ssot/ADR.md#adr-0042)'s refusal rule as it was).
  *
  * **The instance's `0` is the master switch.** An instance floor of `0` — or none at all, which is how
  * the evaluation harness calls — turns every floor off, the projects' own included: it is what the

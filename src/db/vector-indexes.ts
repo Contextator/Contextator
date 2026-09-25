@@ -6,7 +6,7 @@ import type { Db } from './client.js';
 
 /**
  * One partial HNSW index per project, `WHERE project_id = '<uuid>'`, instead of one index every project
- * shares (ROADMAP.md Item 16, `eval/BASELINE.md` "One index per project").
+ * shares ([ADR-0082](../../.ssot/ADR.md#adr-0082), `eval/BASELINE.md` "One index per project").
  *
  * **Why.** A shared index answers a project's question by walking the *instance's* nearest neighbours
  * and throwing away every row that belongs to somebody else. `hnsw.max_scan_tuples` bounds that walk by
@@ -17,10 +17,11 @@ import type { Db } from './client.js';
  * its database scored 88–89 %. Its own index scores 87–88 %.
  *
  * **What it costs, and where it is paid.** Creating a project builds an index over nothing, but a partial
- * index is built by scanning the whole table, so the cost grows with the *instance*: 100 ms at 210 500
- * chunks `CONCURRENTLY` (median of five), 17 ms at 21 050. A plain build is 38 ms at 210 500 but blocks
- * every writer for all of it; creation is done concurrently, because blocking every other project's
- * indexing to create an empty one is the wrong way round.
+ * index is built by scanning the whole table, so the cost grows with the *instance*. Measured on
+ * `scripts/hnsw-tenancy.ts`'s corpus: 100 ms at 210 500 chunks `CONCURRENTLY` (median of five), 17 ms at
+ * 21 050 — a recorded cost, not a target (ADR-0082). A plain build is 38 ms at 210 500 but blocks every
+ * writer for all of it; creation is done concurrently, because blocking every other project's indexing
+ * to create an empty one is the wrong way round.
  *
  * **Not declared in `schema.ts`**, for the global index's old reason: an HNSW index needs the dimension
  * the bootstrap settles, and a per-project index has a name drizzle's snapshot could never describe.
