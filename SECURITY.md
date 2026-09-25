@@ -9,6 +9,9 @@ release is not patched — upgrading is the fix.
 |---------|-----------|
 | `0.1.0` (tagged `v0.1.0`) | Yes — it is the latest release, and the only one so far |
 
+Fixes land on `main` first and stay there until the next release is tagged — check `main` if you are
+reproducing a report against a fix that is not in `v0.1.0` yet.
+
 ## Response
 
 A report is acknowledged within **5 business days**. There is no fixed patch window: severity and the
