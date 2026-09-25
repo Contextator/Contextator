@@ -1675,7 +1675,7 @@ src/admin/routes.ts           REST API for the dashboard
 src/services/scheduler.ts     the sync schedule: which sources are due, the cheap per-driver check, and the run it queues
 src/admin/sources-routes.ts   source CRUD, sync, test, webhook secret
 src/admin/upload-routes.ts    multipart upload sessions (the only multipart-parsing plugin)
-src/admin/webhooks.ts         push webhooks, verified with the per-source secret — git's generated here, Notion's captured from them
+src/admin/webhooks.ts         push webhooks, verified with the per-source secret — git's and Confluence's generated here, Notion's captured from them
 src/services/notion-webhook.ts which Notion deliveries mean a run, the window a captured token may be stored in, and the debounce before the queue
 src/admin/auth-routes.ts      /api/auth/* and /api/setup/*
 src/admin/users-routes.ts     /api/users/*
@@ -1830,7 +1830,7 @@ text, on every pull request, against a real server.
 - Browser `Origin` headers on `/mcp/*` are validated (DNS-rebinding protection) in both modes; CLI clients send none.
 - Local source directories are confined to `ALLOWED_DOC_ROOTS`; `..`, symlinks that escape, and non-directories are rejected.
 - A Confluence source's base URL is operator-typed, so its requests may not connect to loopback, link-local (the cloud metadata address included), unspecified or multicast addresses, nor to a private one unless its host is in `CONFLUENCE_ALLOWED_HOSTS`. The check is on the address actually dialled, after DNS and on every redirect, and a refusal sends no request and no token.
-- Git and Notion tokens are encrypted at rest with `SECRET_KEY` (AES-256-GCM) and never returned by the API; credentials pasted into a repository URL are stripped before storage. `SECRET_KEY` can be rotated without re-entering them — `SECRET_KEY_PREVIOUS`, then `npm run rotate-secret` — and the command never prints a secret.
+- Git, Notion and Confluence tokens are encrypted at rest with `SECRET_KEY` (AES-256-GCM) and never returned by the API; credentials pasted into a repository URL are stripped before storage. `SECRET_KEY` can be rotated without re-entering them — `SECRET_KEY_PREVIOUS`, then `npm run rotate-secret` — and the command never prints a secret.
 - Push webhooks verify the provider's signature against the per-source secret before anything is queued; the endpoint is otherwise unauthenticated by necessity.
 - Uploads and archives are extracted into a scratch directory first and only then copied in: entries that escape, dot-directories, non-portable names and unselected file types are dropped, and `ARCHIVE_MAX_ENTRIES` / `ARCHIVE_MAX_TOTAL_BYTES` bound a zip bomb. Nested archives are unpacked one level deep.
 - A git subdirectory is resolved inside the checkout; `..` segments are rejected.
@@ -1861,7 +1861,7 @@ text, on every pull request, against a real server.
 | Dashboard shows `model loading` for a long time | First run downloads ~470 MB (fp32); check `docker compose logs -f`. Air-gapped hosts: pre-populate the `contextator-models` volume and set `EMBEDDING_OFFLINE=1`. |
 | Container keeps restarting, logs say `PostgreSQL exited during startup` | The PostgreSQL output above that line tells why: usually a data directory from another PostgreSQL major version, or a bind-mounted `CONTEXTATOR_PGDATA_PATH` with wrong permissions. |
 | `Directory is outside the allowed document roots` | Use a path under `ALLOWED_DOC_ROOTS` (`/docs/...` inside Docker). |
-| Adding a private git or Notion source fails on `SECRET_KEY` | Set `SECRET_KEY` (32+ characters) and restart; it is only required once a source stores a token. |
+| Adding a private git, Notion or Confluence source fails on `SECRET_KEY` | Set `SECRET_KEY` (32+ characters) and restart; it is only required once a source stores a token. |
 | Every private source stopped syncing after `SECRET_KEY` was changed | The old key is what those tokens were encrypted with. Put it back in `SECRET_KEY_PREVIOUS`, restart, run `npm run rotate-secret`, then remove `SECRET_KEY_PREVIOUS` and restart. If the old key is gone, re-enter each source's token. |
 | A git source's row shows an authentication error | Check the token's scope and the Username field. Leave it empty for a Bitbucket repository or workspace access token (the default `x-token-auth` is for those only); a Bitbucket Cloud API token needs your Bitbucket username or `x-bitbucket-api-token-auth`, and a GitLab deploy token its generated `gitlab+deploy-token-N` username. **Test connection** reports the remote's answer verbatim. |
 | `Subdirectory "…" does not exist in the repository` | The path is relative to the repository root and is checked against the branch that was checked out. |
