@@ -24,6 +24,7 @@
  */
 
 import type { Logger } from '../../context.js';
+import { confluenceEgress } from './confluence-egress.js';
 
 /**
  * One page as a listing answers for it — **everything the layout of the tree needs, and no body**.
@@ -259,7 +260,12 @@ export class HttpConfluenceClient implements ConfluenceClient {
 
   constructor(
     credentials: ConfluenceCredentials,
-    private readonly fetchImpl: FetchLike = fetch as unknown as FetchLike,
+    /**
+     * Every request this client makes goes through it. The default is the ADR-0088 egress with an empty
+     * allowlist — the strictest it can be — so a client built without one cannot reach an internal
+     * address; the driver passes one that carries `CONFLUENCE_ALLOWED_HOSTS`.
+     */
+    private readonly fetchImpl: FetchLike = confluenceEgress({ allowedHosts: [] }),
     private readonly log?: Logger,
   ) {
     this.base = credentials.baseUrl.replace(/\/+$/, '');

@@ -33,6 +33,7 @@ import { openVerificationWindow } from '../../src/services/notion-webhook.js';
 import { ConfluenceDriver } from '../../src/services/sources/confluence.js';
 import type { DriverContext } from '../../src/services/sources/driver.js';
 import { createSource } from '../../src/services/sources.js';
+import { publicFixture, renamed } from '../support/egress-seams.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 
 /**
@@ -51,6 +52,7 @@ import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_E
  *   token. That is deliberate: `ConfluenceDriver` takes an injected client in every other test, and an
  *   injected client is precisely the seam that skips `decryptSecret`. A rotation test that used it
  *   would prove nothing about whether the credential survived. Here the product's own path runs —
+ *   including the egress guard, which sees the site as a public name (`support/egress-seams.ts`) —
  *   read the column, open it with the ring, build the Basic header — and the server is the thing that
  *   says whether the token that came out is the token that went in.
  * - The command itself is run as a child process at the end, because criterion 5 is about what the
@@ -58,6 +60,8 @@ import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_E
  */
 
 const baseUrl = inject('postgresBaseUrl');
+/** The name the Confluence fixture is reached by; the egress seams resolve it to a public-looking address. */
+const CONFLUENCE_HOST = 'wiki.rotation.test';
 const DIMS = TEST_EMBEDDING_DIMENSIONS;
 
 /** Long enough for `SECRET_KEY`'s 32-character floor, and recognisable in any string that leaks one. */
@@ -235,7 +239,7 @@ beforeAll(async () => {
 
   dataDir = await mkdtemp(path.join(tmpdir(), 'secret-rotation-'));
   server = await startConfluence();
-  confluenceBaseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}/wiki`;
+  confluenceBaseUrl = renamed(`http://127.0.0.1:${(server.address() as AddressInfo).port}/wiki`, CONFLUENCE_HOST);
 
   const [project] = await db.insert(projects).values({ name: 'rotation' }).returning({ id: projects.id });
   projectId = project.id;
@@ -463,7 +467,7 @@ describe('once SECRET_KEY_PREVIOUS is removed', () => {
 
   it('still syncs the source whose credential the retired key encrypted', async () => {
     const before = authorized;
-    const driver = new ConfluenceDriver(await sourceRow(wikiId), driverContext(ring(NEW_KEY)));
+    const driver = new ConfluenceDriver(await sourceRow(wikiId), driverContext(ring(NEW_KEY)), undefined, publicFixture(CONFLUENCE_HOST));
 
     const result = await driver.sync();
 

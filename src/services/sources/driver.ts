@@ -10,7 +10,13 @@ import { UploadDriver } from './upload.js';
 export interface DriverContext {
   db: Db;
   log: Logger;
-  config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS'> & WebLimits;
+  /**
+   * `CONFLUENCE_ALLOWED_HOSTS` is optional here only so that a context built for another driver need not
+   * carry it; absent reads as the empty list, which is the strictest the Confluence egress can be.
+   */
+  config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS'> &
+    Partial<Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS'>> &
+    WebLimits;
 }
 
 export interface SyncResult {

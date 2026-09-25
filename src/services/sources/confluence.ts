@@ -6,6 +6,7 @@ import { sourceCurrentDir } from '../data-dir.js';
 import { ValidationError } from '../projects.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig, type ConfluenceConfig } from '../sources.js';
 import { checkDataCenterVersion, cqlFor, HttpConfluenceClient, type ConfluenceClient, type ConfluencePageSummary } from './confluence-client.js';
+import { confluenceEgress, type EgressOptions } from './confluence-egress.js';
 import { ConfluenceRenderError, storageToMarkdown } from './confluence-render.js';
 import { registerDriver, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
 // Reused rather than reimplemented: the file-stem rule (a slug plus an id prefix, so two pages with
@@ -75,6 +76,11 @@ export class ConfluenceDriver implements SourceDriver {
     private readonly ctx: DriverContext,
     /** Stands in for the REST API in tests; in production one is built from the stored credential. */
     private readonly injectedClient?: ConfluenceClient,
+    /**
+     * Test seams for the egress guard: which address a name resolves to, and where an address that has
+     * passed the check is dialled. Production passes neither; the check itself cannot be replaced.
+     */
+    private readonly egress?: Pick<EgressOptions, 'resolve' | 'route'>,
   ) {
     this.cfg = parseSourceConfig('confluence', source.config);
     this.cql = cqlFor(this.cfg.spaceKeys);
@@ -95,7 +101,7 @@ export class ConfluenceDriver implements SourceDriver {
     const token = decryptSecret(this.source.secretEnc, keyringOf(this.ctx.config));
     this.built = new HttpConfluenceClient(
       { baseUrl: this.cfg.baseUrl, deployment: this.cfg.deployment, email: this.cfg.email, token },
-      undefined,
+      confluenceEgress({ allowedHosts: this.ctx.config.CONFLUENCE_ALLOWED_HOSTS ?? [], ...this.egress }),
       this.ctx.log.child({ source: this.source.name, type: 'confluence' }),
     );
     return this.built;

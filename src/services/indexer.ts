@@ -108,6 +108,7 @@ export interface IndexerDeps {
     | 'CONVERSION_TIMEOUT_MS'
     | 'CONVERSION_IDLE_MS'
   > &
+    Partial<Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS'>> &
     WebLimits;
   log: Logger;
   locks: KeyedMutex;

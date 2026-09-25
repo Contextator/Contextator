@@ -7,16 +7,20 @@ import type { DocumentSourceRow } from '../src/db/schema.js';
 import { encryptSecret } from '../src/services/crypto.js';
 import { sourceCurrentDir } from '../src/services/data-dir.js';
 import { checkDataCenterVersion, cqlFor, HttpConfluenceClient } from '../src/services/sources/confluence-client.js';
+import { confluenceEgress } from '../src/services/sources/confluence-egress.js';
 import { ConfluenceDriver } from '../src/services/sources/confluence.js';
 import { parseSourceConfig } from '../src/services/sources.js';
 import { DataCenterServer } from './support/confluence-dc-server.js';
 import { CAMPAIGN, HANDBOOK, ROTATION, SPACE } from './support/confluence-stub.js';
+import { publicFixture, renamed } from './support/egress-seams.js';
 
 /**
  * Confluence **Data Center** as the second transport of one contract ([ADR-0059](../.ssot/ADR.md#adr-0059)).
  *
  * The driver here is not handed a stub client: it decrypts a stored token and builds the HTTPS client
- * itself, and that client talks to `DataCenterServer` on 127.0.0.1. So what is asserted is the request
+ * itself, and that client talks to `DataCenterServer` on 127.0.0.1 — reached as `dc.test`, a name the
+ * egress guard sees resolve to a public address before the connection is routed to the loopback
+ * interface (`support/egress-seams.ts`), so the guard stays on for the whole suite. What is asserted is the request
  * a Data Center instance would receive — the context path, the bearer, the offset paging — and that the
  * cost thesis of ADR-0059 holds on it: the probe counts the scope the sync lists, and a page whose
  * version did not move is never fetched.
@@ -30,6 +34,8 @@ const PROJECT_ID = '00000000-0000-4000-8000-000000000021';
 const SOURCE_ID = '00000000-0000-4000-8000-000000000022';
 const TOKEN = 'NjY0-not-a-real-personal-access-token';
 const KEY = 'k'.repeat(64);
+const DC_HOST = 'dc.test';
+const SEAMS = publicFixture(DC_HOST);
 
 describe('confluence data center, against a fixture server', () => {
   let dataDir: string;
@@ -42,7 +48,7 @@ describe('confluence data center, against a fixture server', () => {
       type: 'confluence',
       name: 'dc-wiki',
       label: '',
-      config: { baseUrl: server.baseUrl, deployment: 'datacenter', email: '', spaceKeys: [SPACE], extensions: ['md'], ...config },
+      config: { baseUrl: renamed(server.baseUrl, DC_HOST), deployment: 'datacenter', email: '', spaceKeys: [SPACE], extensions: ['md'], ...config },
       secretEnc: encryptSecret(TOKEN, { current: KEY }),
       webhookSecret: null,
       flavor: 'plain',
@@ -59,11 +65,16 @@ describe('confluence data center, against a fixture server', () => {
     }) as DocumentSourceRow;
 
   const driver = (config: Record<string, unknown> = {}): ConfluenceDriver =>
-    new ConfluenceDriver(row(config), {
-      db: null as never,
-      log,
-      config: { ...WEB_LIMIT_DEFAULTS, DATA_DIR: dataDir, SECRET_KEY: KEY, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
-    });
+    new ConfluenceDriver(
+      row(config),
+      {
+        db: null as never,
+        log,
+        config: { ...WEB_LIMIT_DEFAULTS, DATA_DIR: dataDir, SECRET_KEY: KEY, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
+      },
+      undefined,
+      SEAMS,
+    );
 
   const currentDir = (): string => sourceCurrentDir(dataDir, PROJECT_ID, SOURCE_ID);
   /** The search requests that list pages — a sync also ends with one probe-shaped request for its token. */
@@ -208,7 +219,10 @@ describe('confluence data center, against a fixture server', () => {
     const wrong = new DataCenterServer([HANDBOOK], 'some-other-token');
     await wrong.start();
     try {
-      const client = new HttpConfluenceClient({ baseUrl: wrong.baseUrl, deployment: 'datacenter', email: '', token: TOKEN });
+      const client = new HttpConfluenceClient(
+        { baseUrl: renamed(wrong.baseUrl, DC_HOST), deployment: 'datacenter', email: '', token: TOKEN },
+        confluenceEgress({ allowedHosts: [], ...SEAMS }),
+      );
       const failure = client.revision(cqlFor([SPACE]));
       await expect(failure).rejects.toThrow(/Confluence answered 401.*personal access token/);
       await expect(client.revision(cqlFor([SPACE]))).rejects.toThrow(expect.not.stringContaining(TOKEN) as unknown as string);

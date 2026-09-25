@@ -35,7 +35,9 @@ export interface SchedulerDeps {
   db: Db;
   indexer: SchedulerIndexer;
   log: Logger;
-  config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS' | 'SYNC_PROBES_PER_TICK'> & WebLimits;
+  config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS' | 'SYNC_PROBES_PER_TICK'> &
+    Partial<Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS'>> &
+    WebLimits;
 }
 
 /** How often the timer fires. A minute is the resolution a per-source interval is stated in. */

@@ -470,6 +470,29 @@ export const EnvSchema = z
     // Documents
     ALLOWED_DOC_ROOTS: z.string().default('/docs').transform(csv),
     IGNORE_GLOBS: z.string().default('').transform(csv),
+    /**
+     * Host names a Confluence base URL may reach **on a private address** (RFC 1918, `fc00::/7`)
+     * ([ADR-0088](../../.ssot/ADR.md#adr-0088)). A Data Center inside the network is listed here; nothing
+     * else is. Loopback, link-local, unspecified and multicast stay refused whatever the list says, and
+     * there is no switch that turns the check off.
+     *
+     * Names, not URLs: a scheme, port or path here would never match the host a request is made to, so
+     * it is rejected at startup instead of silently allowing nothing.
+     */
+    CONFLUENCE_ALLOWED_HOSTS: z
+      .string()
+      .default('')
+      .transform((value) =>
+        csv(value).map((h) =>
+          h
+            .toLowerCase()
+            .replace(/^\[(.*)\]$/, '$1')
+            .replace(/\.$/, ''),
+        ),
+      )
+      .refine((hosts) => hosts.every((h) => net.isIP(h) !== 0 || /^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?)*$/.test(h)), {
+        message: 'must be a comma-separated list of host names, without scheme, port or path (for example "wiki.corp.example,10.0.4.12")',
+      }),
     /** Writable directory for materialised sources (git checkouts, uploads, Notion pulls). */
     DATA_DIR: z
       .string()
