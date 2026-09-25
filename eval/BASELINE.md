@@ -1814,7 +1814,7 @@ npx tsx scripts/eval-external.ts --min-recall5=0.98 --min-heading5=0.95 \
   --min-recall5-en=0.985 --min-heading5-en=0.97                          # a bar per language
 ```
 
-The run above used those two floors and passed. They are candidates, not a gate: nothing in CI runs
-this script on `main`. They were read off the Turkish numbers; English sits higher (99.9 % / 98.5 %),
-so one bar for both leaves English 1.9 and 3.5 points of room — the per-language flags are there so a
-gate can hold each language to its own height.
+The run above used those two floors and passed. CI's eval job runs it with per-language bars
+(TR 0.98 / 0.95, EN 0.985 / 0.97; ADR-0083). The Turkish bars were read off the Turkish numbers;
+English sits higher (99.9 % / 98.5 %), so one bar for both would leave English 1.9 and 3.5 points of
+room — the per-language flags hold each language to its own height.
