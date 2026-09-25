@@ -444,7 +444,7 @@ export const EnvSchema = z
      * (anthropics/claude-code#55677, #79944), so the prose this server writes for the model — the
      * guidance on how to read excerpts and what to do next — would reach it only as a JSON field. Off,
      * every tool definition and every answer is byte for byte what it was before structured output
-     * existed. The `docs://` resources do not depend on this flag.
+     * existed. The `contextator://` document resources do not depend on this flag.
      */
     MCP_STRUCTURED_OUTPUT: z.string().default('0').transform(flag),
     /**
