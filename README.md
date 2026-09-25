@@ -1,7 +1,7 @@
 # Contextator
 
 **Self-hosted, multi-tenant MCP documentation server.** Give a project its document sources — mounted
-folders, git repositories, uploaded archives, a Notion workspace, a Confluence Cloud site, a published
+folders, git repositories, uploaded archives, a Notion workspace, a Confluence Cloud site or Data Center instance, a published
 documentation site — and it
 becomes its own [Model Context Protocol](https://modelcontextprotocol.io) endpoint that AI agents
 (Cursor, Claude Code, Claude Desktop, …) can search semantically:
@@ -14,7 +14,7 @@ http://localhost:3444/mcp/<project-name>
   vector embeddings in PostgreSQL + [pgvector](https://github.com/pgvector/pgvector). A client
   connected to `/mcp/billing` never sees `/mcp/mobile`.
 - **Many sources per project.** A local directory, a git repository (or one subdirectory of it), an
-  upload of files/folders/`.zip`/`.tar.gz`/`.rar`, a Notion workspace, a Confluence Cloud site or a
+  upload of files/folders/`.zip`/`.tar.gz`/`.rar`, a Notion workspace, a Confluence Cloud site or Data Center instance, or a
   published documentation site read from its `sitemap.xml` —
   combined into one searchable endpoint. Every source is mounted under its own name, so documents read
   as `handbook/install.md`.
@@ -195,7 +195,7 @@ The name is the mount point, so it cannot change after creation; everything else
 | **Git repository** | A shallow, single-branch checkout under `DATA_DIR`. Any HTTPS git server: GitHub, GitLab, Bitbucket, Gitea/Forgejo/Codeberg. Optionally only a **subdirectory** of the repository (`docs/`). | `git fetch` of the branch tip at the start of every index run, a push webhook, or the sync interval below |
 | **Upload** | Files, whole folders (structure preserved) and archives — `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.rar` — unpacked on the server. Add to the existing files or replace them all. | Nothing to sync; the files live under `DATA_DIR` |
 | **Notion** | Every page shared with an internal integration (or the configured root pages/databases and their descendants), rendered to Markdown, nested by parent page. | The Notion API, re-rendering only pages whose `last_edited_time` changed |
-| **Confluence** | **Cloud only** (see below). Every page in the chosen spaces — or in every space the account can read — rendered from Confluence's storage format to Markdown, nested the way it is in the wiki: `<name>/<space>/<parent page>/<page>.md`. | The Confluence REST API, re-rendering only pages whose version number changed |
+| **Confluence** | **Cloud, or Data Center 7.9 and later** (see below). Every page in the chosen spaces — or in every space the account can read — rendered from Confluence's storage format to Markdown, nested the way it is in the wiki: `<name>/<space>/<parent page>/<page>.md`. | The Confluence REST API, re-rendering only pages whose version number changed; a signed webhook on Data Center, or the sync interval below |
 | **Documentation site** | **Public pages only** (see below). A published site, found through its `sitemap.xml`, its `llms.txt` or a crawl from one start URL, written under the site's own paths: `<name>/guide/install.html`, converted to Markdown by the same transform `.html` files use. | Conditional GETs against the site (`ETag`/`Last-Modified`), inside the five crawl ceilings below |
 
 Sources are synced at the start of every index run, one after another; a source that fails to sync is
@@ -226,18 +226,44 @@ one.
 another name: `api-v3` and `sdk-v3` are two mount points of one release, and `version: "v3"` searches
 both. Changing a source's version re-indexes it, the way changing its content type does.
 
-### Confluence: Cloud, and not Data Center
+### Confluence: Cloud or Data Center
 
-The Confluence source speaks **Confluence Cloud** — the REST API under `https://<site>.atlassian.net/wiki`,
-authenticated with an Atlassian account e-mail and an [API token](https://id.atlassian.com/manage-profile/security/api-tokens).
-Put the site URL in with its `/wiki` path, the e-mail of the account the token belongs to, and the token
-itself; it is stored encrypted with `SECRET_KEY` and is never shown again or returned by the API.
+Pick the **Deployment** when you add the source. It is not detected, because the two authenticate
+differently and a wrong guess would send the credential the wrong way.
 
-**Confluence Data Center and Server are not supported.** They publish a different API at a different
-base path and authenticate with a personal access token as a bearer, and a connector that half-works
-against them would be worse than one that says so: the failure would be a 404 or an empty space rather
-than a message. If that is what you run, the honest workaround today is to export the space and add it
-as an **Upload** source.
+- **Cloud** — the REST API under `https://<site>.atlassian.net/wiki`, authenticated with an Atlassian
+  account e-mail and an [API token](https://id.atlassian.com/manage-profile/security/api-tokens). Put the
+  site URL in with its `/wiki` path, the e-mail of the account the token belongs to, and the token.
+- **Data Center 7.9 and later** — the base URL your users open, **including any context path**
+  (`https://intranet.example.com/confluence`), and a **personal access token**, which is sent as a
+  bearer; there is no e-mail. The server's version is read anonymously before any credential is sent,
+  and an older release, a version that cannot be read or a server that is not Confluence is refused with
+  the version named, on **Test connection** and on sync. **Confluence Server**, the product line before
+  Data Center, is not supported.
+
+Either token is stored encrypted with `SECRET_KEY` and is never shown again or returned by the API.
+
+**A Data Center on the internal network needs one more step.** The base URL is typed by an editor and
+the server connects to it with the source's token, so where it may connect is bounded
+(ADR-0088):
+
+- loopback, link-local (the cloud metadata address `169.254.169.254` included), unspecified and
+  multicast addresses are **always refused**;
+- private addresses — `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` — are refused
+  **unless the host is listed in `CONFLUENCE_ALLOWED_HOSTS`**.
+
+So if your Data Center resolves to a private address, add its host name to that variable and restart:
+
+```
+CONFLUENCE_ALLOWED_HOSTS=wiki.corp.example
+```
+
+The check runs on the address the connection actually uses, after DNS, and again on every redirect, so
+neither a name that resolves inward nor a redirect to an internal address gets past it. A refusal names
+the rule on the source's row and in the Test message — for example ``refused: `wiki.corp.example`
+resolves to a private address; list `wiki.corp.example` in CONFLUENCE_ALLOWED_HOSTS to allow it`` — and
+no request, and so no token, is sent. The list lifts only the private rule, and only for the names on
+it; there is no switch that turns the check off.
 
 Leave *Spaces* empty and the source indexes every space the account can read; name space keys — one per
 line, `ENG`, `OPS` — and it indexes exactly those. The account's own permissions are the outer boundary
@@ -260,7 +286,8 @@ the run reported success. A configured space that held documents a moment ago an
 the sync instead, naming the space. With *Spaces* left empty there is no list of what should be there,
 so that check cannot be made; name your spaces if you want it.
 
-There is **no Confluence webhook yet**. The sync interval below is how a Confluence source stays fresh.
+On Data Center a **signed webhook** can start a sync as soon as a page changes — see
+[Push webhooks](#push-webhooks). It complements the sync interval below; it does not replace it.
 
 ### Documentation sites: public pages, and five ceilings
 
@@ -450,9 +477,31 @@ says a token exists. The username sent with it depends on the provider and is de
 | Provider | Username used with the token |
 |----------|------------------------------|
 | GitHub | `x-access-token` (classic PAT, fine-grained PAT, App installation token) |
-| GitLab | `oauth2` (OAuth and personal/project access tokens) |
+| GitLab | `oauth2` (OAuth and personal/project access tokens); **a deploy token needs its own generated username** (`gitlab+deploy-token-N`) in the Username field |
 | Bitbucket Cloud | `x-token-auth` for repository/workspace access tokens; **app passwords need your real username** in the Username field |
 | Gitea / Forgejo / Codeberg / other | `token`, or whatever you type in Username |
+
+A username you type in the Username field always replaces the default in the table.
+
+**Git is read over HTTPS only. SSH remotes (`ssh://…`, `git@host:path`) are not supported**, and no
+SSH key can be stored (ADR-0086). A private repository is reached one of two ways:
+
+1. **A read-only HTTPS token for that one repository** — the narrowest credential each provider offers:
+
+   | Provider | Token | Username |
+   |----------|-------|----------|
+   | GitHub | A fine-grained personal access token limited to the repository with *Contents: read*, or a GitHub App installation token | leave empty (`x-access-token`) |
+   | GitLab | A project **deploy token** with `read_repository` | the token's generated username, e.g. `gitlab+deploy-token-42` — the default `oauth2` is refused for a deploy token |
+   | Bitbucket Cloud | A repository access token with *Repositories: read* | leave empty (`x-token-auth`) |
+   | Gitea / Forgejo | An access token with read scope on the repository | your username, or leave empty (`token`) |
+
+   Use the repository's HTTPS clone URL (`https://gitlab.example.com/group/docs.git`).
+
+2. **A mirror you keep yourself**, when the repository is reachable only over SSH. Clone or mirror it
+   on the host, inside `ALLOWED_DOC_ROOTS`, keep it current with your own schedule (a cron job running
+   `git pull`, or your CI), and add that directory as a **Local directory** source. It is then a folder
+   like any other: there is no push webhook, no branch or subdirectory setting and no Test connection
+   for it, and it is exactly as fresh as your schedule keeps it.
 
 **Test connection** on a git source lists the remote refs without cloning; on a Notion source it reads
 the integration's own user. Credentials pasted into the URL itself are stripped before storage.
@@ -470,6 +519,36 @@ Add it as a **push** webhook in the repository settings with that secret. GitHub
 are recognised; the signature is verified before anything is queued, pushes to other branches are
 ignored, and a valid delivery queues a re-index of the project. **Regenerate** invalidates the old
 secret. The endpoint authenticates with this per-source secret, not with `ADMIN_TOKEN`.
+
+#### Confluence Data Center webhook
+
+A Confluence source has **no webhook until you turn it on** (ADR-0085): until then every delivery is
+refused with `not_enabled` and nothing is stored. Confluence Cloud cannot send these — its webhooks need
+a Forge or Connect app — so on Cloud the sync interval is the only trigger.
+
+1. Edit the source and choose **Turn on** under *Confluence webhook*. A secret is generated; **Copy URL** and
+   **Copy secret**:
+
+   ```
+   POST http://<your-host>/api/webhooks/confluence/<source-id>
+   ```
+
+2. In Confluence, **Administration → Webhooks → Create a webhook**: paste the URL and the secret and
+   choose the page events (created, updated, removed, restored, moved). Confluence signs each delivery
+   with `X-Hub-Signature: sha256=…` over the body; a delivery whose signature does not match is refused
+   with `invalid_signature`.
+
+Comments, labels, attachments, likes, user and group changes and **blog posts** cannot change what is
+indexed, so those events are acknowledged and ignored; anything else — including permission changes
+and an event this build does not know — queues a run. A burst of edits becomes one run, and runs are at
+least the minimum webhook interval apart (`WEBHOOK_MIN_INTERVAL_MINUTES`, 5 by default): a webhook makes
+the source **look soon**, not within seconds. Once on, the button reads **New secret** and replaces the
+secret; **Turn off** removes it, after which deliveries are refused again.
+
+It does not see everything: a delivery Confluence gave up on, a page that became unreadable to the
+account without an event, and deliveries Confluence skips for hours after repeated failures all go
+unnoticed until the next scheduled sync — so keep the sync interval on. The endpoint has to be
+reachable from Confluence.
 
 ## Accounts and permissions
 
@@ -1233,8 +1312,9 @@ Everything is an environment variable; see [`.env.example`](.env.example) for th
 | `DOCS_HOST_PATH` | `./docs` | Host folder mounted read-only at `/docs` (docker-compose only) |
 | `MODEL_CACHE_DIR` | `.cache/models` | Model download directory; `/app/.cache/models` inside the container |
 | `IGNORE_GLOBS` | – | e.g. `**/CHANGELOG.md,drafts/**`. Applies to every source |
+| `CONFLUENCE_ALLOWED_HOSTS` | – | Comma-separated host names (or IP literals) a Confluence source may reach **on a private address** (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`), e.g. `wiki.corp.example`. Needed for a Data Center on the internal network; loopback, link-local (`169.254.169.254`), unspecified and multicast stay refused whatever is listed. Checked on the connected address and on every redirect (ADR-0088) |
 | `DATA_DIR` | `.data` | Writable directory holding the materialised sources (git checkouts, uploads, Notion pulls). `/data` inside the container |
-| `SECRET_KEY` | – | At least 32 characters (`openssl rand -hex 32`). Encrypts git/Notion tokens and webhook secrets at rest (AES-256-GCM). Needed only once such a source exists. Changing it on its own leaves every stored token unreadable — replace it with a rotation instead: `SECRET_KEY_PREVIOUS` below |
+| `SECRET_KEY` | – | At least 32 characters (`openssl rand -hex 32`). Encrypts git/Notion/Confluence tokens and webhook secrets at rest (AES-256-GCM). Needed only once such a source exists. Changing it on its own leaves every stored token unreadable — replace it with a rotation instead: `SECRET_KEY_PREVIOUS` below |
 | `SECRET_KEY_PREVIOUS` | – | The key being retired, set only for the length of a rotation. It never encrypts: reads fall back to it, every write uses `SECRET_KEY`. Set it, set the new `SECRET_KEY`, restart, run `npm run rotate-secret`, then remove it and restart again — that removal is what retires the old key |
 | `MAX_STORED_DOCUMENT_BYTES` | `1048576` (1 MB) | How much of each document's text is kept in the database for `read_document`. Past it the prefix is stored and the tool says so. Compressed out of line by PostgreSQL, so the cost is a small fraction of the same document's vectors |
 | `UPLOAD_MAX_FILE_BYTES` | `52428800` (50 MB) | Per uploaded file |
@@ -1374,7 +1454,8 @@ no ambient credential.
 | `DELETE /api/projects/:id/sources/:sid` | Remove the source, its documents, chunks and materialised directory (`409` while indexing) |
 | `POST /api/projects/:id/sources/:sid/sync` | Queue a re-index (every source is synced at the start of it) → `202 { job }` |
 | `POST /api/projects/:id/sources/:sid/test` | Connectivity check without indexing → `{ ok, message }` |
-| `POST /api/projects/:id/sources/:sid/webhook-secret` | Generate a new push-webhook secret (git only) |
+| `POST /api/projects/:id/sources/:sid/webhook-secret` | Generate a new webhook secret: git, or Confluence (turns its webhook on, or regenerates it) |
+| `DELETE /api/projects/:id/sources/:sid/webhook-secret` | Confluence: turn the webhook off; deliveries are refused with `not_enabled` again |
 | `POST /api/projects/:id/sources/:sid/uploads` | Open an upload session → `{ session }` (upload sources only) |
 | `POST …/uploads/:session/files` | `multipart/form-data`; each part's `filename` carries the path inside the source. Archives are unpacked server-side → `{ files, skipped, bytes, errors }` |
 | `POST …/uploads/:session/commit?mode=add\|replace` | Move the staged tree into the source and queue an index run → `202 { files, job }` |
@@ -1382,6 +1463,7 @@ no ambient credential.
 | `GET /api/projects/:id/sources/:sid/files` | Files currently materialised for an upload source |
 | `DELETE /api/projects/:id/sources/:sid/files?path=…` | Delete one of them and re-index |
 | `POST /api/webhooks/git/:sourceId` | Push webhook. Authenticated by the per-source secret, **not** `ADMIN_TOKEN` |
+| `POST /api/webhooks/confluence/:sourceId` | Confluence Data Center webhook, signed with `X-Hub-Signature` over the per-source secret; `not_enabled` until the webhook is turned on |
 | `GET /api/projects/:id/mcp-tokens` | This project's live MCP tokens: name, prefix, when they were created and last used. Never the token itself |
 | `POST /api/projects/:id/mcp-tokens` `{ name? }` | Mint one → `201 { token, secret }`; `secret` is returned **once** |
 | `DELETE /api/projects/:id/mcp-tokens/:tokenId` | Revoke it and close the project's open MCP sessions |
@@ -1510,8 +1592,9 @@ src/services/chunker.ts       Markdown/MDX-aware chunking with heading breadcrum
 src/services/fs-scan.ts       safe directory walking + path-escape checks
 src/services/sources.ts       source CRUD and the zod schema of each type's config
 src/services/sources/         one driver per type: local, git (isomorphic-git), upload, notion, confluence
-src/services/sources/confluence.ts        the Confluence Cloud driver: the page tree, the incremental skip, and the probe
+src/services/sources/confluence.ts        the Confluence driver, Cloud and Data Center: the page tree, the incremental skip, and the probe
 src/services/sources/confluence-client.ts the REST surface it talks to, as an interface plus an HTTPS implementation, and the one place CQL is built
+src/services/sources/confluence-egress.ts where a Confluence request may connect: the address check after DNS and on every redirect, CONFLUENCE_ALLOWED_HOSTS
 src/services/sources/confluence-render.ts storage format → the plain XHTML `doc-types/html.ts` converts; it does not convert HTML itself
 src/services/sources/web.ts               the documentation-site driver: the three entry formats, the five ceilings, and the sitemap probe
 src/services/sources/web-client.ts        its one HTTP surface — serial, paced, inside a deadline — as an interface plus an implementation
@@ -1708,6 +1791,7 @@ text, on every pull request, against a real server.
   reverse proxy that handles auth — the endpoint itself is the only thing a project token closes.
 - Browser `Origin` headers on `/mcp/*` are validated (DNS-rebinding protection) in both modes; CLI clients send none.
 - Local source directories are confined to `ALLOWED_DOC_ROOTS`; `..`, symlinks that escape, and non-directories are rejected.
+- A Confluence source's base URL is operator-typed, so its requests may not connect to loopback, link-local (the cloud metadata address included), unspecified or multicast addresses, nor to a private one unless its host is in `CONFLUENCE_ALLOWED_HOSTS`. The check is on the address actually dialled, after DNS and on every redirect, and a refusal sends no request and no token.
 - Git and Notion tokens are encrypted at rest with `SECRET_KEY` (AES-256-GCM) and never returned by the API; credentials pasted into a repository URL are stripped before storage. `SECRET_KEY` can be rotated without re-entering them — `SECRET_KEY_PREVIOUS`, then `npm run rotate-secret` — and the command never prints a secret.
 - Push webhooks verify the provider's signature against the per-source secret before anything is queued; the endpoint is otherwise unauthenticated by necessity.
 - Uploads and archives are extracted into a scratch directory first and only then copied in: entries that escape, dot-directories, non-portable names and unselected file types are dropped, and `ARCHIVE_MAX_ENTRIES` / `ARCHIVE_MAX_TOTAL_BYTES` bound a zip bomb. Nested archives are unpacked one level deep.
@@ -1741,7 +1825,7 @@ text, on every pull request, against a real server.
 | `Directory is outside the allowed document roots` | Use a path under `ALLOWED_DOC_ROOTS` (`/docs/...` inside Docker). |
 | Adding a private git or Notion source fails on `SECRET_KEY` | Set `SECRET_KEY` (32+ characters) and restart; it is only required once a source stores a token. |
 | Every private source stopped syncing after `SECRET_KEY` was changed | The old key is what those tokens were encrypted with. Put it back in `SECRET_KEY_PREVIOUS`, restart, run `npm run rotate-secret`, then remove `SECRET_KEY_PREVIOUS` and restart. If the old key is gone, re-enter each source's token. |
-| A git source's row shows an authentication error | Check the token's scope, and on Bitbucket app passwords put your real username in the Username field. **Test connection** reports the remote's answer verbatim. |
+| A git source's row shows an authentication error | Check the token's scope, and on Bitbucket app passwords put your real username in the Username field; a GitLab deploy token needs its generated `gitlab+deploy-token-N` username there. **Test connection** reports the remote's answer verbatim. |
 | `Subdirectory "…" does not exist in the repository` | The path is relative to the repository root and is checked against the branch that was checked out. |
 | A push webhook returns `401 invalid_signature` | The secret in the repository settings is not the one shown while editing the source — copy it again, or **Regenerate** and paste the new one. |
 | `search_docs` says the project was indexed with another model | Re-index the project (it happens automatically on the next index run). |
