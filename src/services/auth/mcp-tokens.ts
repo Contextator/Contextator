@@ -112,6 +112,21 @@ export async function issueMcpCredential(
   return { token, id: row.id, expiresAt };
 }
 
+/**
+ * Whether an insert here failed because the project it names was deleted first — the foreign key
+ * `mcp_tokens_project_id_fkey`, under drizzle's "Failed query" wrapper or not. Nothing takes the
+ * project row's lock before minting, so a delete that commits between a caller's own look at the
+ * project and its insert surfaces as this, and the caller turns it into the refusal it would have
+ * given had it looked a moment later. Only this constraint: a vanished account or client is a
+ * different failure and stays the error it is.
+ */
+export function isMissingCredentialProject(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const e = err as { code?: string; constraint?: string; cause?: { code?: string; constraint?: string } };
+  const pg = e.code === '23503' ? e : e.cause?.code === '23503' ? e.cause : null;
+  return pg?.constraint === 'mcp_tokens_project_id_fkey';
+}
+
 /** Revoked rather than deleted, so "which token was this agent using" survives the revocation. */
 export async function revokeMcpToken(db: Db, projectId: string, tokenId: string): Promise<void> {
   const result = await db

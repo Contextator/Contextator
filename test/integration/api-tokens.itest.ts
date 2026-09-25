@@ -6,6 +6,7 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { apiTokens, auditEvents } from '../../src/db/schema.js';
+import { KeyedMutex } from '../../src/services/locks.js';
 import { createProject, deleteProject, NotFoundError } from '../../src/services/projects.js';
 import { createApiToken, listApiTokens, revokeApiToken, verifyApiToken } from '../../src/services/auth/api-tokens.js';
 import { setMemberRole } from '../../src/services/auth/memberships.js';
@@ -190,7 +191,7 @@ describe('API tokens', () => {
     const identity = await verifyApiToken(db, token);
     expect(identity?.projectId).toBe(project.id);
 
-    await deleteProject(db, project.id, () => false);
+    await deleteProject(db, project.id, () => false, new KeyedMutex());
 
     // `api_tokens_project_id_fkey` is `ON DELETE CASCADE`: the row is gone, not left behind with a
     // `project_id` of `NULL` — which would read as "every project the owner reaches", the widening
@@ -324,7 +325,7 @@ describe('an ADR-0076 token over a real request', () => {
     const owner = await createUser(db, { username: 'oona', role: 'admin', password: PASSWORD });
     const cookie = await signIn('oona');
     const gone = await createProject(db, { name: 'oona-gone' }, []);
-    await deleteProject(db, gone.id, () => false);
+    await deleteProject(db, gone.id, () => false, new KeyedMutex());
 
     for (const projectId of [gone.id, '11111111-1111-4111-8111-111111111111']) {
       const res = await live.app.inject({

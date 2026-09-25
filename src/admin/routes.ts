@@ -101,7 +101,7 @@ const SearchQuery = z.object({
  * plugin nested below it.
  */
 export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
-  const { config, db, indexer, sessions, embeddings } = ctx;
+  const { config, db, indexer, locks, sessions, embeddings } = ctx;
 
   installAuth(app, ctx);
 
@@ -494,7 +494,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
 
   app.delete('/api/projects/:id', async (req, reply) => {
     const { id } = IdParams.parse(req.params);
-    await deleteProject(db, id, (projectId) => indexer.isBusy(projectId));
+    await deleteProject(db, id, (projectId) => indexer.isBusy(projectId), locks);
     indexer.forget(id);
     await sessions.closeForProject(id);
     await removeProjectDir(config.DATA_DIR, id).catch((err: unknown) =>

@@ -8,15 +8,16 @@ import { isSameSiteRequest } from '../auth/csrf.js';
 import { OAUTH_REGISTER_MAX_PER_HOST, OAUTH_REGISTER_WINDOW_MS, PROJECT_NAME_RE } from '../config.js';
 import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
-import { getProjectById, getProjectByName } from '../services/projects.js';
+import { getProjectById, getProjectByName, keyShareProjectRow } from '../services/projects.js';
 import { findSessionUser, isSessionLive } from '../services/auth/sessions.js';
 import { resolveProjectAccess } from '../services/auth/memberships.js';
 import { shareUserRowForGrant, shareUserRowLock } from '../services/auth/users.js';
 import { MCP_READ_ACCESS, satisfies } from '../auth/policy.js';
-import type { Principal } from '../auth/types.js';
+import type { Principal, UserRole } from '../auth/types.js';
 import type { Db } from '../db/client.js';
 import {
   findSpentRefreshToken,
+  isMissingCredentialProject,
   issueMcpCredential,
   revokeMcpCredentialByToken,
   revokeMcpCredentialsOfGrant,
@@ -116,6 +117,28 @@ const escapeHtml = (value: string): string =>
 
 /** An OAuth error response, in the shape RFC 6749 §5.2 gives it. */
 const oauthError = (error: string, description: string) => ({ error, error_description: description });
+
+/**
+ * Whether an account may read a project over MCP — the rule the MCP endpoint applies on every request
+ * (`resolveMcpCredential`), and therefore the one thing both halves of this flow ask before they give
+ * anything out: the authorization endpoint before it hands over a code, the token endpoint before it
+ * mints a pair from one. One question, asked the same way in both places, so a code is never issued
+ * that its own exchange would refuse.
+ */
+async function accountMayReadProject(on: Db, account: { id: string; username: string; role: UserRole }, projectId: string): Promise<boolean> {
+  const principal: Principal = {
+    kind: 'session',
+    role: account.role,
+    userId: account.id,
+    username: account.username,
+    // Not a dashboard session and none of a session's rights; `Principal` is the shape
+    // `resolveProjectAccess` reads, and it does not read this field. A grant has no row id of its own
+    // yet, so the account's id stands in, as the token's does in `mcp/identity.ts`.
+    sessionId: account.id,
+    mustChangePassword: false,
+  };
+  return satisfies(await resolveProjectAccess(on, principal, projectId), MCP_READ_ACCESS);
+}
 
 export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
   const { config, db, log } = ctx;
@@ -337,6 +360,40 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
   };
 
   /**
+   * The signed-in account cannot read the project the request names. Never audited: nobody decided
+   * anything, which is the rule the POST's audit placement follows.
+   *
+   * Where the answer goes depends on who could have caused the question. The `GET` is reached with no
+   * action from the person — client registration is open, so anybody can own the redirect URI and
+   * send a browser here — and an automatic redirect back would tell that client, without the person
+   * doing anything, whether the account belongs to the project. So the `GET` shows the refusal on this
+   * page and the client hears nothing. The `POST` is reached only by the person pressing a button on a
+   * page naming the client, so it answers the client with `access_denied` (RFC 6749 §4.1.2.1) — the
+   * client and its redirect URI are known good by then, and it is the same answer *Deny* produces, so
+   * a connector needs no new case for it.
+   */
+  const refuseForNoAccess = (
+    reply: FastifyReply,
+    params: { redirect_uri: string; state?: string | undefined; client_id: string },
+    project: ProjectRow,
+    username: string,
+    answer: 'in-place' | 'to-client',
+  ) => {
+    log.warn(
+      { project: project.name, user: username, clientId: params.client_id },
+      'refused an oauth authorization; the signed-in account cannot read that project',
+    );
+    if (answer === 'in-place') {
+      return refuseInPlace(reply, 403, 'No access to this project', 'The signed-in account cannot read that project.');
+    }
+    return backToClient(reply, params.redirect_uri, {
+      error: 'access_denied',
+      error_description: 'The signed-in account cannot read that project',
+      state: params.state,
+    });
+  };
+
+  /**
    * Everything both the `GET` and the `POST` have to establish before anything happens: a registered
    * client, a registered redirect URI, a resource that names a project this instance has, and the
    * flow parameters OAuth 2.1 still allows.
@@ -416,6 +473,12 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     if (!session) return reply.header('cache-control', 'no-store').redirect(`/login?next=${encodeURIComponent(req.url)}`, 302);
     if (session.mustChangePassword) return reply.header('cache-control', 'no-store').redirect('/change-password', 302);
 
+    // Somebody who cannot read the project is not asked whether a client may read it on their behalf.
+    // The refusal is shown here, not sent to the client: nothing the person did led to this request.
+    if (!(await accountMayReadProject(db, { id: session.userId, username: session.username, role: session.role }, checked.project.id))) {
+      return refuseForNoAccess(reply, params, checked.project, session.username, 'in-place');
+    }
+
     reply.type('text/html; charset=utf-8').header('cache-control', 'no-store');
     const content = renderPage(consentBody, {
       client: escapeHtml(checked.clientName),
@@ -478,14 +541,21 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     // session a password change keeps is the one that just proved the new password) and has already
     // moved the epoch this reads, and one that waits for this commit moves it past the value the code
     // carries, which the exchange refuses.
-    const credentialsEpoch = await withRotationTransaction(db, async (tx) => {
+    //
+    // Read access to the project is asked under the same lock, off the account row just read rather
+    // than the session's copy of the role: the exchange asks it again anyway, but a code the exchange
+    // would refuse is not one to hand a client in the first place.
+    const grantable = await withRotationTransaction(db, async (tx) => {
       const account = await shareUserRowForGrant(tx, session.userId);
-      if (!account || !(await isSessionLive(tx, session.sessionId))) return null;
-      return account.mcpCredentialsEpoch;
+      if (!account || !(await isSessionLive(tx, session.sessionId))) return { signedOut: true as const };
+      if (!(await accountMayReadProject(tx, account, checked.project.id))) return { noAccess: true as const };
+      return { credentialsEpoch: account.mcpCredentialsEpoch };
     });
-    if (credentialsEpoch === null) {
+    if ('signedOut' in grantable) {
       return reply.header('cache-control', 'no-store').redirect(`/login?next=${encodeURIComponent('/oauth/authorize')}`, 302);
     }
+    if ('noAccess' in grantable) return refuseForNoAccess(reply, params, checked.project, session.username, 'to-client');
+    const { credentialsEpoch } = grantable;
 
     // The audit row's actor and project, set **here** rather than where the session was resolved:
     // everything above this point is a request that was refused or redirected, and an event for one of
@@ -584,24 +654,21 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         }
         // The rule the MCP endpoint applies on every request (`resolveMcpCredential`), applied once
         // before anything is minted: a pair the endpoint would refuse at its first use is not issued.
-        const principal: Principal = {
-          kind: 'session',
-          role: account.role,
-          userId: account.id,
-          username: account.username,
-          // Not a dashboard session and none of a session's rights; `Principal` is the shape
-          // `resolveProjectAccess` reads, and it does not read this field. The code has no row id of
-          // its own yet, so the account's id stands in, as the token's does in `mcp/identity.ts`.
-          sessionId: account.id,
-          mustChangePassword: false,
-        };
-        if (!satisfies(await resolveProjectAccess(tx, principal, redeemed.projectId), MCP_READ_ACCESS)) {
+        if (!(await accountMayReadProject(tx, account, redeemed.projectId))) {
           return { refused: 'The account this code was issued for can no longer read that project', reason: 'no_project_access' };
         }
 
         await ctx.testHooks?.onCodeVerifiedBeforeIssue?.();
         const grant = { projectId: redeemed.projectId, userId: redeemed.userId, clientId: redeemed.clientId };
         return { tokens: await issuePair(tx, grant, project.name), projectName: project.name };
+      }).catch((err: unknown): Exchange => {
+        // The project was read above without a lock, so a delete can commit between that read and the
+        // inserts, and the foreign key is what notices. It is the refusal the read would have given a
+        // moment later — the transaction has rolled back, nothing was minted — not a server error.
+        if (isMissingCredentialProject(err)) {
+          return { refused: 'The project this code was issued for no longer exists', reason: 'project_gone' };
+        }
+        throw err;
       });
       if ('refused' in outcome) {
         // A warning and not an audit event, the way the refresh branch's refusals are: this endpoint is
@@ -652,7 +719,12 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         if (body.client_id && body.client_id !== grant.clientId) {
           return { error: oauthError('invalid_grant', 'That refresh token was issued to another client') };
         }
-        const project = await getProjectById(tx, grant.projectId);
+        // The project row `FOR KEY SHARE`, before the claim below locks the refresh token: a project
+        // delete locks its row and then cascades onto that token, so taking the two in the other order
+        // is a deadlock Postgres breaks by aborting one side — a 500 when it picks this one. In this
+        // order a delete that got there first has committed and the row is gone (`invalid_grant`), and
+        // one that comes later waits for this commit and cascades over the pair minted here.
+        const project = await keyShareProjectRow(tx, grant.projectId);
         if (!project) return { error: oauthError('invalid_grant', 'The project this grant was for no longer exists') };
 
         // The account row, `FOR SHARE`, before the claim and until the commit ([F06-MINOR-1], faz 06

@@ -90,7 +90,7 @@ describe('a project and its vector index', () => {
         .sort((a, b) => a.name.localeCompare(b.name)),
     );
 
-    await deleteProject(database.db, first.id, () => false);
+    await deleteProject(database.db, first.id, () => false, new KeyedMutex());
     expect((await vectorIndexes(database.db)).map((index) => index.name)).toEqual([projectVectorIndexName(second.id)]);
   });
 
@@ -180,7 +180,7 @@ describe('two DDL statements on chunks at once', () => {
       const leaving = await createProject(database.db, { name: `leaving-${round}` }, []);
       const results = await Promise.allSettled([
         createProject(database.db, { name: `arriving-${round}` }, []),
-        deleteProject(database.db, leaving.id, () => false),
+        deleteProject(database.db, leaving.id, () => false, new KeyedMutex()),
       ]);
       expect(results.map(outcome)).toEqual(['done', 'done']);
     }

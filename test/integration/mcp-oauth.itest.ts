@@ -19,7 +19,7 @@ import {
   verifyRefreshToken,
   withRotationTransaction,
 } from '../../src/services/auth/mcp-tokens.js';
-import { setMemberRole } from '../../src/services/auth/memberships.js';
+import { removeMember, setMemberRole } from '../../src/services/auth/memberships.js';
 import { ClientLimitError, registerOauthClient, sweepStaleOauthClients } from '../../src/services/auth/oauth.js';
 import { createSession } from '../../src/services/auth/sessions.js';
 import { createUser } from '../../src/services/auth/users.js';
@@ -122,7 +122,10 @@ const cookieHeader = () => `${SESSION_COOKIE}=${sessionToken}`;
  * server rendered, and submit it. It reads the hidden fields back out of the page rather than
  * re-deriving them, because what the page carries is exactly what the server will re-validate.
  */
-async function approveInBrowser(url: URL, opts: { cookie?: string; decision?: 'approve' | 'deny'; sameSite?: string } = {}): Promise<Response> {
+async function approveInBrowser(
+  url: URL,
+  opts: { cookie?: string; decision?: 'approve' | 'deny'; sameSite?: string; beforeSubmit?: () => Promise<void> } = {},
+): Promise<Response> {
   const cookie = opts.cookie ?? cookieHeader();
   const page = await fetch(url, { headers: { cookie }, redirect: 'manual' });
   const html = await page.text();
@@ -133,6 +136,8 @@ async function approveInBrowser(url: URL, opts: { cookie?: string; decision?: 'a
     form.set(match[1], decodeHtml(match[2]));
   }
   form.set('decision', opts.decision ?? 'approve');
+  // Whatever happens between the person reading the page and pressing the button.
+  await opts.beforeSubmit?.();
 
   return fetch(`${live.origin}/oauth/authorize`, {
     method: 'POST',
@@ -639,10 +644,86 @@ describe('the authorization endpoint refuses what it must', () => {
     expect(res.status).toBe(403);
     expect(res.headers.get('location')).toBeNull();
   });
+
+  /**
+   * **A code is only ever handed to somebody who can read the project.** The exchange would refuse
+   * such a code anyway, but a consent page for a project the account cannot open says it can, and a
+   * code in a client's hands is a credential of that account for that project until it is refused.
+   * Both halves ask: the `GET` before it draws the page, the `POST` because the page is not proof of
+   * anything — it can be skipped, and access can be taken away while it is open.
+   */
+  describe('for an account that cannot read the project', () => {
+    let outsider: UserRow;
+    let outsiderCookie: string;
+
+    beforeAll(async () => {
+      outsider = await createUser(database.db, { username: 'outsider', role: 'member', password: OLD_PASSWORD });
+      outsiderCookie = `${SESSION_COOKIE}=${(await createSession(database.db, outsider.id, 1, { userAgent: 'browser' })).token}`;
+    });
+
+    /** The approval, posted straight at the endpoint — what a page that was never rendered would have carried. */
+    const postApproval = (url: URL, cookie: string) => {
+      const form = new URLSearchParams(url.searchParams);
+      form.set('decision', 'approve');
+      return fetch(`${live.origin}/oauth/authorize`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', 'sec-fetch-site': 'same-origin', cookie },
+        body: form,
+        redirect: 'manual',
+      });
+    };
+
+    /**
+     * The `GET` answers on the page, not to the client. Registration is open, so whoever registered
+     * the client can send a browser here; a redirect back would tell them, with no action from the
+     * person, whether the account belongs to the project.
+     */
+    it('shows a 403 page instead of a consent page, and tells the client nothing', async () => {
+      const res = await fetch(await authorizeUrl({ state: 'outsider-get' }), { headers: { cookie: outsiderCookie }, redirect: 'manual' });
+      expect(res.status).toBe(403);
+      expect(res.headers.get('location')).toBeNull();
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      const html = await res.text();
+      expect(html).toContain('No access to this project');
+      expect(html).not.toContain('name="decision"');
+      expect(html).not.toContain(REDIRECT_URI);
+      expect(html).not.toContain('outsider-get');
+    });
+
+    it('gives no code to an approval posted without the page', async () => {
+      const res = await postApproval(await authorizeUrl({ state: 'outsider-post' }), outsiderCookie);
+      expect(res.status).toBe(302);
+      const back = callbackParams(res);
+      expect(back.get('error')).toBe('access_denied');
+      expect(back.get('state')).toBe('outsider-post');
+      expect(back.get('code')).toBeNull();
+    });
+
+    it('gives no code when access was taken away while the consent page was open', async () => {
+      const leaver = await createUser(database.db, { username: 'leaver', role: 'member', password: OLD_PASSWORD });
+      await setMemberRole(database.db, project.id, leaver.id, 'viewer', null);
+      const cookie = `${SESSION_COOKIE}=${(await createSession(database.db, leaver.id, 1, { userAgent: 'browser' })).token}`;
+
+      // The page renders — the account could read the project when it was drawn — and the membership
+      // goes before the button is pressed.
+      const res = await approveInBrowser(await authorizeUrl(), {
+        cookie,
+        beforeSubmit: () => removeMember(database.db, project.id, leaver.id),
+      });
+      expect(callbackParams(res).get('error')).toBe('access_denied');
+      expect(callbackParams(res).get('code')).toBeNull();
+    });
+
+    it('still gives a code to the member who can read it, through the same two steps', async () => {
+      // The control: the refusals above are about the account, not about the request they sent.
+      const res = await approveInBrowser(await authorizeUrl());
+      expect(callbackParams(res).get('code')).toBeTruthy();
+    });
+  });
 });
 
 describe('the token endpoint refuses what it must', () => {
-  async function codeFor(): Promise<{ code: string; clientId: string }> {
+  async function codeFor(projectName = project.name): Promise<{ code: string; clientId: string }> {
     const registration = await registerClient({ client_name: 'probe', redirect_uris: [REDIRECT_URI] }).then((r) => r.json());
     const url = new URL(`${live.origin}/oauth/authorize`);
     for (const [key, value] of Object.entries({
@@ -652,7 +733,7 @@ describe('the token endpoint refuses what it must', () => {
       // sha256('a-verifier') in base64url, so the matching verifier below is a real one.
       code_challenge: 'NORfwpEYKakZsuYgaey8PFmACPx5Ikq_PyZGYQ7p8NI',
       code_challenge_method: 'S256',
-      resource: `${live.origin}/mcp/${project.name}`,
+      resource: `${live.origin}/mcp/${projectName}`,
     })) {
       url.searchParams.set(key, value);
     }
@@ -723,6 +804,126 @@ describe('the token endpoint refuses what it must', () => {
       redirect_uri: 'http://127.0.0.1:61999/elsewhere',
     });
     expect((await wrongUri.json()).error).toBe('invalid_grant');
+  });
+
+  /**
+   * **A project deleted under a grant is a refused grant, never a server error.** Before the exchange
+   * it is the project check that says so; in the window between that check and the insert — the
+   * project row is read, not locked — it is the foreign key, and the answer has to be the same one.
+   */
+  describe('for a project deleted before the pair is minted', () => {
+    let doomedCounter = 0;
+    async function doomedProject(): Promise<ProjectRow> {
+      const doomed = await seedProject(database.db, `doomed${doomedCounter++}`, { path: 'handbook/guide.md', body: HANDBOOK });
+      await setMemberRole(database.db, doomed.id, member.id, 'viewer', null);
+      return doomed;
+    }
+    const deleteRow = (id: string) => database.db.delete(projects).where(eq(projects.id, id));
+    const tokensOf = async (id: string) => (await database.db.select().from(mcpTokens).where(eq(mcpTokens.projectId, id))).length;
+    const refreshTokenFor = async (doomed: ProjectRow) => {
+      const client = await registerClient({ client_name: 'doomed', redirect_uris: [REDIRECT_URI] }).then((r) => r.json());
+      return issueMcpCredential(database.db, {
+        projectId: doomed.id,
+        userId: member.id,
+        clientId: client.client_id,
+        kind: 'refresh',
+        name: 'oauth doomed',
+        ttlMs: 60_000,
+      });
+    };
+    /** Until another backend of this database sits waiting on a lock in a `DELETE FROM projects`. */
+    const waitForBlockedDelete = async () => {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        const waiting = await database.db.execute(sql`
+          SELECT 1 FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE 'delete from "projects"%'`);
+        if (waiting.rows.length > 0) return;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      throw new Error('the project delete never started waiting on a lock');
+    };
+
+    it('refuses a code whose project was deleted before the exchange', async () => {
+      const doomed = await doomedProject();
+      const { code, clientId } = await codeFor(doomed.name);
+      await deleteRow(doomed.id);
+
+      const res = await exchange({
+        grant_type: 'authorization_code',
+        code,
+        code_verifier: 'a-verifier',
+        client_id: clientId,
+        redirect_uri: REDIRECT_URI,
+      });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe('invalid_grant');
+    });
+
+    it('refuses a code whose project is deleted after the exchange checked it and before it minted', async () => {
+      const doomed = await doomedProject();
+      const { code, clientId } = await codeFor(doomed.name);
+      // The delete lands exactly in the window: every check has passed, the inserts have not run.
+      live.ctx.testHooks = { onCodeVerifiedBeforeIssue: async () => void (await deleteRow(doomed.id)) };
+      try {
+        const res = await exchange({
+          grant_type: 'authorization_code',
+          code,
+          code_verifier: 'a-verifier',
+          client_id: clientId,
+          redirect_uri: REDIRECT_URI,
+        });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ error: 'invalid_grant', error_description: expect.stringMatching(/no longer exists/) });
+      } finally {
+        live.ctx.testHooks = undefined;
+      }
+      expect(await tokensOf(doomed.id)).toBe(0);
+    });
+
+    it('refuses a refresh whose project was deleted before it arrived', async () => {
+      const doomed = await doomedProject();
+      const refresh = await refreshTokenFor(doomed);
+      await deleteRow(doomed.id);
+
+      const res = await exchange({ grant_type: 'refresh_token', refresh_token: refresh.token });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe('invalid_grant');
+    });
+
+    /**
+     * The refresh branch holds the claimed token row when it mints, and a project delete cascades onto
+     * that row — so the two used to lock in opposite orders and deadlock, and Postgres answered by
+     * aborting one side: a `500` whenever it chose the rotation. With the project row taken first
+     * (`keyShareProjectRow`) the delete that arrives in the window waits for the rotation to commit
+     * and then takes the new pair down with the project. The delete is started inside the window and
+     * the rotation is let go only once Postgres reports the delete waiting on a lock, so both halves
+     * are in place every run.
+     */
+    it('lets a delete that arrives while a refresh is minting wait for it, then take the new pair down', async () => {
+      const doomed = await doomedProject();
+      const refresh = await refreshTokenFor(doomed);
+      let deleting: Promise<unknown> | undefined;
+      live.ctx.testHooks = {
+        onRefreshClaimedBeforeIssue: async () => {
+          // `.execute()`: a drizzle query only runs when awaited, and this one must run *now*.
+          deleting = deleteRow(doomed.id).execute();
+          await waitForBlockedDelete();
+        },
+      };
+      let res: Response;
+      try {
+        res = await exchange({ grant_type: 'refresh_token', refresh_token: refresh.token });
+      } finally {
+        live.ctx.testHooks = undefined;
+      }
+      expect(res.status).toBe(200);
+      const minted = await res.json();
+      await deleting;
+
+      expect(await database.db.select().from(projects).where(eq(projects.id, doomed.id))).toHaveLength(0);
+      expect(await tokensOf(doomed.id)).toBe(0);
+      expect((await initializeWith(minted.access_token)).status).toBe(401);
+    });
   });
 
   it('refuses a grant type it does not support', async () => {

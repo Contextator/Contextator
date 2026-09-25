@@ -415,7 +415,19 @@ export class Indexer {
     await locks.runExclusive(project.id, async () => {
       // Re-read under the lock. `live_generation` is the one field this run both reads and writes, and
       // the row above was fetched before the mutex was held.
-      const current = (await getProjectById(db, project.id)) ?? project;
+      //
+      // A project that is gone by now was deleted while this run waited for the mutex: `deleteProject`
+      // decides under the same mutex and deletes before releasing it, so a run that was not yet busy
+      // when it decided finds nothing here and must not start. Nothing is recorded — an `index_runs`
+      // row would have no project to belong to.
+      const current = await getProjectById(db, project.id);
+      if (!current) {
+        job.phase = 'error';
+        job.error = 'Project no longer exists';
+        job.finishedAt = new Date().toISOString();
+        log.info({ project: project.name }, 'project was deleted before indexing could start; nothing to do');
+        return;
+      }
       const live = current.liveGeneration;
 
       // Housekeeping before anything else, and under the same mutex: a previous run that was killed
