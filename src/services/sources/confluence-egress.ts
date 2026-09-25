@@ -45,6 +45,8 @@ export interface EgressOptions {
   route?: (address: string) => string;
   /** How long a connection may sit without a byte in either direction. */
   timeoutMs?: number;
+  /** How long a kept-alive connection waits in the pool for its next request before it is closed. */
+  idleMs?: number;
 }
 
 /** A refusal: the request was not sent, so no credential left. */
@@ -60,6 +62,12 @@ export class EgressRefusedError extends Error {
 
 /** undici's own header and body timeouts, which is what the `fetch` this replaces waited. */
 const DEFAULT_TIMEOUT_MS = 300_000;
+/**
+ * undici's keep-alive timeout, which is how long the `fetch` this replaces kept an idle connection.
+ * Without one a pooled socket stays open until the server closes it, and every egress instance —
+ * the scheduler builds one per probe — would hold its own until then.
+ */
+const DEFAULT_IDLE_MS = 4_000;
 /** What `fetch` follows is 20; Confluence behind a proxy needs one or two. */
 const MAX_REDIRECTS = 5;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -167,14 +175,18 @@ const systemResolver: Resolver = (hostname) => dns.promises.lookup(hostname, { a
  * GET only, which is all the Confluence client sends. Redirects are followed here rather than by the
  * platform, up to five, each hop checked again; the credential is dropped on a hop to another origin,
  * as `fetch` does. Connections are kept alive on an agent of this instance's own, so a pooled socket
- * is always one this module's `lookup` opened.
+ * is always one this module's `lookup` opened, and closed after `idleMs` without a request, so an
+ * instance nobody calls again lets go of its sockets and is collected.
  */
 export function confluenceEgress(options: EgressOptions): FetchLike {
   const allowed = new Set(options.allowedHosts.map(normalizeHost));
   const resolve = options.resolve ?? systemResolver;
   const route = options.route ?? ((address: string) => address);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const agents = { http: new http.Agent({ keepAlive: true }), https: new https.Agent({ keepAlive: true }) };
+  // The agent's `timeout` is what a socket gets while it waits in the pool; a request in flight
+  // runs on its own `timeout` below, which Node sets on the socket when it hands it to the request.
+  const pool = { keepAlive: true, timeout: options.idleMs ?? DEFAULT_IDLE_MS };
+  const agents = { http: new http.Agent(pool), https: new https.Agent(pool) };
 
   const judge = (host: string, address: string): RefusedRule | null => {
     const rule = refusedRule(address);

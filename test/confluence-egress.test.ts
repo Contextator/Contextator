@@ -372,6 +372,67 @@ describe('confluenceEgress', () => {
       await expect(slow(`http://public.test:${fixture.port}/`, GET)).rejects.toThrow('Confluence at `public.test` did not answer within 0.1 s');
     });
   });
+
+  /**
+   * The scheduler builds an egress per probe, so a pooled socket nobody asks for again must close on
+   * the client's side rather than wait for the server. **Mutation proof:** drop the agent's `timeout`
+   * and the first case goes red — the server below keeps an idle connection for ten seconds.
+   */
+  describe('kept-alive connections', () => {
+    let server: http.Server;
+    let connections = 0;
+    let closed: Promise<void>;
+    let answerAfterMs = 0;
+
+    beforeEach(async () => {
+      connections = 0;
+      answerAfterMs = 0;
+      let markClosed: () => void = () => undefined;
+      closed = new Promise((resolve) => {
+        markClosed = resolve;
+      });
+      server = http.createServer((_req, res) => {
+        setTimeout(() => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end('{"ok":true}');
+        }, answerAfterMs);
+      });
+      server.keepAliveTimeout = 10_000;
+      server.on('connection', (socket) => {
+        connections++;
+        socket.once('close', () => markClosed());
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    });
+    afterEach(async () => {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    });
+
+    const url = () => `http://public.test:${(server.address() as AddressInfo).port}/`;
+    const settlesWithin = (promise: Promise<void>, ms: number): Promise<boolean> =>
+      Promise.race([promise.then(() => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms))]);
+
+    it('closes a connection that has waited idle in the pool for idleMs', async () => {
+      const fetch = guarded({ ...publicFixture('public.test'), idleMs: 100 });
+      expect(await (await fetch(url(), GET)).json()).toEqual({ ok: true });
+      expect(await settlesWithin(closed, 2_000)).toBe(true);
+    });
+
+    it('reuses a connection for a request that comes before idleMs', async () => {
+      const fetch = guarded({ ...publicFixture('public.test'), idleMs: 2_000 });
+      await (await fetch(url(), GET)).text();
+      await (await fetch(url(), GET)).text();
+      expect(connections).toBe(1);
+    });
+
+    it('does not cut a request whose answer takes longer than idleMs', async () => {
+      answerAfterMs = 400;
+      const fetch = guarded({ ...publicFixture('public.test'), idleMs: 100 });
+      const res = await fetch(url(), GET);
+      expect(await res.json()).toEqual({ ok: true });
+    });
+  });
 });
 
 describe('CONFLUENCE_ALLOWED_HOSTS as configuration', () => {
