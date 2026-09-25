@@ -1825,7 +1825,7 @@ text, on every pull request, against a real server.
 | `Directory is outside the allowed document roots` | Use a path under `ALLOWED_DOC_ROOTS` (`/docs/...` inside Docker). |
 | Adding a private git or Notion source fails on `SECRET_KEY` | Set `SECRET_KEY` (32+ characters) and restart; it is only required once a source stores a token. |
 | Every private source stopped syncing after `SECRET_KEY` was changed | The old key is what those tokens were encrypted with. Put it back in `SECRET_KEY_PREVIOUS`, restart, run `npm run rotate-secret`, then remove `SECRET_KEY_PREVIOUS` and restart. If the old key is gone, re-enter each source's token. |
-| A git source's row shows an authentication error | Check the token's scope, and on Bitbucket app passwords put your real username in the Username field; a GitLab deploy token needs its generated `gitlab+deploy-token-N` username there. **Test connection** reports the remote's answer verbatim. |
+| A git source's row shows an authentication error | Check the token's scope, and leave Username empty unless the token is a GitLab deploy token, which needs its generated `gitlab+deploy-token-N` username there. **Test connection** reports the remote's answer verbatim. |
 | `Subdirectory "…" does not exist in the repository` | The path is relative to the repository root and is checked against the branch that was checked out. |
 | A push webhook returns `401 invalid_signature` | The secret in the repository settings is not the one shown while editing the source — copy it again, or **Regenerate** and paste the new one. |
 | `search_docs` says the project was indexed with another model | Re-index the project (it happens automatically on the next index run). |
