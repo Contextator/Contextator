@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
 import { DEFAULT_DOCUMENT_FENCE } from './document-fence.js';
+import { registerResources } from './resources.js';
 import { registerTools } from './tools.js';
 
 /**
@@ -42,9 +43,13 @@ export function buildInstructions(project: ProjectRow): string {
  * [ADR-0047](../../.ssot/ADR.md#adr-0047), to the MCP token the session presented when it opened, so
  * that what this client searches for can be attributed to a credential rather than to nobody.
  * `null` for an `open` project, which verifies nothing and so has nothing to attribute.
+ *
+ * The same session serves the project's documents as resources (`resources.ts`), behind the same auth
+ * and confined to what `read_document` can reach.
  */
 export function createProjectMcpServer(ctx: AppContext, project: ProjectRow, mcpTokenId: string | null = null): McpServer {
   const server = new McpServer({ name: `contextator-${project.name}`, version: ctx.version }, { instructions: buildInstructions(project) });
   registerTools(server, ctx, project, mcpTokenId);
+  registerResources(server, ctx, project);
   return server;
 }
