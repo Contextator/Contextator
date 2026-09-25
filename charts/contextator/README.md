@@ -16,6 +16,19 @@ image, i.e. the external-database topology.
 
 ## Install
 
+From the chart repository (published to GitHub Pages by the release workflow; see "Publishing" below —
+the repository answers only after the first release that carries the chart):
+
+```sh
+helm repo add contextator https://contextator.github.io/Contextator
+helm repo update
+helm install ctx contextator/contextator \
+  --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
+  --set-string image.tag="<version>-slim"
+```
+
+Or from a checkout of this repository:
+
 ```sh
 helm install ctx ./charts/contextator \
   --set database.url="postgres://user:pass@db.example.internal:5432/contextator" \
@@ -54,10 +67,10 @@ the response — the same check described under "No `wget`/`curl` in the image" 
 
 **Not a value you can set.** This chart always deploys exactly one Pod (`replicas: 1`, hardcoded in
 `templates/deployment.yaml`) and does not offer a `replicaCount` key in `values.yaml`. The missing key
-is deliberate, not an oversight: there is nothing to set, so there is nothing to validate at install
-time (ADR-0078). No template reads `replicaCount`, so `--set replicaCount=2` is an unknown value that
-Helm accepts and the chart ignores — the Deployment still renders `replicas: 1`. Do not read a
-successful `helm upgrade --set replicaCount=…` as a second Pod.
+is deliberate, not an oversight: there is nothing to set (ADR-0078). Because the values schema rejects
+unknown keys (see "Strict values schema" below), `--set replicaCount=2` fails `helm install`,
+`helm upgrade` and `helm template` with an `additional properties 'replicaCount' not allowed` error
+instead of being silently ignored.
 
 This is not an arbitrary limit: MCP sessions live in the application process's own memory
 (`src/mcp/sessions.ts`) and the indexer runs a single in-process queue (ADR-0009). A second replica
@@ -304,8 +317,39 @@ contract. The sections above explain the *why* behind the values that are not se
 (`database.*`, `secretKey.*`, `resources.*`, `probes.*`, `securityContext`); everything else
 (`service`, `ingress`, `env`, `envSecret`, `extraVolumes`, …) follows ordinary Helm chart conventions.
 
+## Strict values schema
+
+`values.schema.json` is strict (ADR-0092): every object level rejects keys it does not list, every
+scalar has a type, and closed value sets (`image.pullPolicy`, `service.type`, `ingress…pathType`,
+persistence `accessModes`) are enums. A misspelt or mistyped value therefore fails `helm install`,
+`helm upgrade` and `helm template` before anything is rendered — `--set image.tagg=x`,
+`--set foo=bar` and `--set-string service.port=80` all exit non-zero. Values are checked with their
+type, so a numeric-looking string (an image tag such as `1.2`, an `env` value such as `1`) needs
+`--set-string` or quoting in a values file.
+
+Structures Kubernetes itself leaves open are bounded by their type only and accept any inner shape:
+`resources`, `affinity`, `tolerations`, `podSecurityContext`, `securityContext`, `extraVolumes`,
+`extraVolumeMounts`, and the string-to-string maps `nodeSelector`, `podAnnotations`, `podLabels` and
+every `annotations`. `env` accepts any variable name with a string value; `envSecret` accepts any name,
+but each entry must be exactly `{secretName, secretKey}`.
+
+Two application settings have typed keys under `config` rather than going through `env`, so the schema
+checks them:
+
+- `config.confluenceAllowedHosts` — a list of host names (not URLs), joined into
+  `CONFLUENCE_ALLOWED_HOSTS`. Empty leaves the variable unset.
+- `config.mcpStructuredOutput` — `true` sets `MCP_STRUCTURED_OUTPUT=1`. `false` (the default) leaves it
+  unset.
+
 ## Publishing
 
-This chart is currently install-from-local-path only (`helm install ctx ./charts/contextator`). Whether
-to publish it to an OCI registry or a `gh-pages` chart index is a separate product decision, not yet
-made (decision record ADR-0078, Decision section, last bullet).
+The release workflow (`.github/workflows/release.yml`, job `chart`) publishes this chart with
+`helm/chart-releaser-action` on every `v*` release: it packages `charts/contextator`, attaches the
+`.tgz` to a GitHub release named `contextator-<chart version>`, and updates the `index.yaml` on the
+`gh-pages` branch, served at `https://contextator.github.io/Contextator`. A chart version that is
+already published is skipped, never overwritten (decision record ADR-0092).
+
+Versioning (ADR-0092): `version` in `Chart.yaml` is bumped on every chart change — patch for a fix,
+minor for a new value, major for a removed or renamed value or a value the schema newly rejects. CI
+fails a change to `charts/contextator/` that does not raise `version`. `appVersion` is the application
+release the chart was last tested with; it is not an image default (`image.tag` stays required).

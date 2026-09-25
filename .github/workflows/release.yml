@@ -237,3 +237,50 @@ jobs:
             echo "docker pull contextator/contextator:${GITHUB_REF_NAME#v}-slim   # no embedded PostgreSQL; needs DATABASE_URL"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # The Helm chart's gh-pages repository (ADR-0092): `helm repo add contextator
+  # https://contextator.github.io/Contextator`. Runs only here, so only for a `v*` tag a maintainer
+  # pushed, and only after `publish` — the chart needs the `-slim` image that job pushes, and a chart
+  # published for a release whose image failed its checks would point at nothing.
+  #
+  # chart-releaser packages every chart under charts/ that changed since the previous tag, uploads the
+  # package as a GitHub release named `contextator-<chart version>`, and commits the updated index.yaml
+  # to the `gh-pages` branch. A chart that did not change is not packaged, and `skip_existing` leaves a
+  # version that already has a release alone, so a published version is never overwritten.
+  # `mark_as_latest: false` keeps that chart release from displacing the application's `v*` release as
+  # the repository's "Latest". The `gh-pages` branch and GitHub Pages serving it are the repository
+  # owner's one-time setup; until both exist this job fails and the image above is unaffected.
+  chart:
+    name: Publish the Helm chart to gh-pages
+    needs: publish
+    runs-on: ubuntu-latest
+    # The only job in this workflow that writes to the repository: a GitHub release per chart version
+    # and a commit to `gh-pages`. Nothing else is granted.
+    permissions:
+      contents: write
+    steps:
+      # All three actions below are pinned to a commit, not a tag, for the same reason `cla.yml` and
+      # `docker/login-action` above are: this job's `GITHUB_TOKEN` can write to the repository, and a
+      # tag is a name its owner can move. `setup-helm` is included because it is handed the token by
+      # default. Resolve the tag again to move a pin, and read the diff first.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # chart-releaser finds the changed charts by diffing against the previous tag.
+          fetch-depth: 0
+
+      - name: Configure the git identity for the gh-pages commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.14.4
+
+      - uses: helm/chart-releaser-action@cae68fefc6b5f367a0275617c9f83181ba54714f # v1.7.0
+        with:
+          charts_dir: charts
+          skip_existing: true
+          mark_as_latest: false
+        env:
+          CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
