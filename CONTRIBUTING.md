@@ -211,7 +211,7 @@ triggers nothing. The commercial licence sits next to
 that because the copyright is held by one person in full, which is what makes it possible to offer terms
 the AGPL does not carry — never as a condition of the AGPL, only as an alternative to it.
 
-That second half only works while the copyright is held in full: a contribution merged without a licence
+That condition is also its weak point: a contribution merged without a licence
 grant permanently removes the ability to grant a commercial licence over that code, and reverting the
 commit afterwards does not undo it. This is the CLA's whole reason to exist — not distrust of
 contributors, and not a claim on work that stays theirs (see below), but the one condition that keeps the
