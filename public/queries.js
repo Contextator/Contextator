@@ -581,7 +581,7 @@ function floorPrice(project, floor) {
       el('p', {
         class: 'field-hint',
         text:
-          `Of the ${change(p.searches)} this project answered in the last ${p.window.days} day${p.window.days === 1 ? '' : 's'} ` +
+          `Of the ${change(p.searches)} on this project that returned anything in the last ${p.window.days} day${p.window.days === 1 ? '' : 's'} ` +
           `(${p.configuration.embeddingModel}, generation ${p.configuration.liveGeneration}), a floor of ${p.proposed.effective === 0 ? 'off' : p.proposed.effective} ` +
           `instead of ${p.current.effective === 0 ? 'off' : p.current.effective} would have answered at most ${change(p.gained)} ` +
           `that were refused, and refused at most ${change(p.lost)} that were answered.`,
