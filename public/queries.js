@@ -74,6 +74,14 @@ function params(limit) {
 }
 
 /**
+ * The number of the newest summary request. Two requests can share a `requestKey` — a forced re-read
+ * after a floor change asks the same question as the read already in flight — so the key alone cannot
+ * tell which answer is the newer one, and a slower answer from before the change would otherwise land
+ * last and put the old floor's figures back on screen.
+ */
+let latestRequest = 0;
+
+/**
  * Fetches the summary when the selection, the window, the actor or the configuration changes — and
  * never on a poll. A panel that refetched every two seconds would be four queries a poll against the
  * table the product's own searches are writing into.
@@ -93,15 +101,19 @@ export async function loadQuerySummary(force = false) {
   if (!force && q.loadedKey === key) return;
   q.loadedKey = key;
   q.status = 'loading';
+  const request = ++latestRequest;
+  // Moved on meanwhile: another project, another question, or the same question asked again since.
+  const superseded = () => request !== latestRequest || state.selectedId !== project.id || q.loadedKey !== key;
   try {
     const data = await api(`/api/projects/${project.id}/queries/summary?${params(20)}`);
-    if (state.selectedId !== project.id || q.loadedKey !== key) return; // moved on meanwhile
+    if (superseded()) return;
     q.data = data;
     q.loadedAt = new Date().toISOString();
     q.status = 'done';
     emit('render');
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) return; // core.js is already going to /login
+    if (superseded()) return;
     q.status = 'error';
     q.error = err.message;
     emit('render');
@@ -207,6 +219,60 @@ function controls(project) {
 }
 
 /**
+ * Whether the figures were decided against another relevance floor than the one the project's next
+ * search is decided against — `null` when they were not, otherwise both floors.
+ *
+ * Right after a floor is saved this is the normal case, not an edge: no search has been decided against
+ * the new floor yet, so the configuration with the most searches — the one the server picks by default —
+ * is the old floor's, and its "refused" figures describe a floor that no longer applies. A `decided` of
+ * `null` is a configuration logged before the floor was recorded, whose floor cannot be known.
+ */
+export function floorBehind(data) {
+  const chosen = data?.configuration;
+  if (!chosen || !data.scoreFloor) return null;
+  const now = data.scoreFloor.effective;
+  if (chosen.scoreFloor === now) return null;
+  return { decided: chosen.scoreFloor, now };
+}
+
+/**
+ * The searches of the chosen model and generation that the figures leave out, split by floor: `current`
+ * were decided under the floor in effect now — always 0 unless `floorBehind` flags the figures — and
+ * `other` under any further floor. Kept apart so that the panel says each once: the floor note speaks
+ * for the first, the other-floors line for the second, and the two warnings never repeat each other.
+ */
+export function otherFloorSearches(data) {
+  const chosen = data?.configuration;
+  const counts = { current: 0, other: 0 };
+  if (!chosen) return counts;
+  const behind = floorBehind(data);
+  for (const c of data.configurations) {
+    if (modelKey(c) !== modelKey(chosen) || configKey(c) === configKey(chosen)) continue;
+    if (behind && c.scoreFloor === behind.now) counts.current += c.queries;
+    else counts.other += c.queries;
+  }
+  return counts;
+}
+
+function floorBehindNote(data, underCurrent) {
+  const behind = floorBehind(data);
+  if (!behind) return null;
+  const now = behind.now === 0 ? 'with the floor off' : `against floor ${behind.now}`;
+  const decided =
+    behind.decided === null
+      ? 'These searches were logged before the floor was recorded, so which floor refused them is unknown'
+      : `These figures were decided ${behind.decided === 0 ? 'with the floor off' : `against floor ${behind.decided}`}`;
+  return el('span', {
+    class: 'field-hint warn',
+    text:
+      `${decided}; this project’s searches are now decided ${now}, so what it refuses from here on is not what these figures show.` +
+      (underCurrent > 0
+        ? ` ${fmt(underCurrent)} searches decided under the current floor are kept apart; pick them above.`
+        : ' No search in this window has been decided under the current floor yet.'),
+  });
+}
+
+/**
  * Which retrieval configuration the figures describe, and how much of the window is outside it.
  *
  * This line is the reason the panel can be believed at all: scores from two embedding models are not
@@ -223,10 +289,9 @@ function configurationLine(data) {
   }
   const stale = data.current.embeddingModel && modelKey(chosen) !== `${data.current.embeddingModel}@${data.current.liveGeneration}`;
   // The same model and generation decided against another floor: the other side of a floor change.
-  const otherFloors = data.configurations
-    .filter((c) => modelKey(c) === modelKey(chosen) && configKey(c) !== configKey(chosen))
-    .reduce((sum, c) => sum + c.queries, 0);
-  const otherConfigurations = data.queriesOutsideConfiguration - otherFloors;
+  const floors = otherFloorSearches(data);
+  const otherFloors = floors.other;
+  const otherConfigurations = data.queriesOutsideConfiguration - floors.current - floors.other;
   return el('div', { class: 'queries-config' }, [
     el('span', { class: 'field-hint', text: 'These figures describe' }),
     el(
@@ -263,6 +328,7 @@ function configurationLine(data) {
     stale
       ? el('span', { class: 'field-hint warn', text: 'This is not what the project runs now — it has been re-indexed or the model changed.' })
       : null,
+    floorBehindNote(data, floors.current),
     data.window.beyondRetention
       ? el('span', {
           class: 'field-hint warn',

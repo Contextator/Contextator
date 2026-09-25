@@ -213,6 +213,33 @@ const CORPUS: Spec[] = [
 
 const TOTAL_CHUNKS = CORPUS.reduce((n, s) => n + s.chunks, 0);
 
+/**
+ * Each project's id, fixed rather than left to `gen_random_uuid()` — because the ids, and nothing else,
+ * were what made the unforced plans in this file differ from one build to the next.
+ *
+ * The rows go in project by project, so `chunks` is physically laid out in `CORPUS` order. The ids
+ * decide how `chunks_project_idx` orders those same rows, and `ANALYZE` — which reads all 21 050 rows,
+ * so it samples nothing — records the agreement between the two as `project_id`'s correlation. Random
+ * ids made that a shuffle of six: over four builds it came out between −0.41 and −0.87, and the plan
+ * that reads a project through `chunks_project_idx` and sorts it moved with it — `small` at the fifty
+ * candidates the product asks for was costed at 1 170.58 on one build and 2 576.20 on the next, against
+ * 1 016.61 for its own HNSW index on every build. The HNSW side never moved; only its competitor did.
+ *
+ * The order is a fixed draw of that shuffle, not ascending. In an instance the ids are random, so they
+ * never agree with the order the rows were written in; ascending ids would give a correlation of exactly
+ * 1 that no real instance has. The draw here is the one three of the four builds above landed near, and
+ * its correlation, −0.41, is a property of this fixture and of nothing else: a project added to `CORPUS`,
+ * a reordering, or another draw moves it, and every unforced cost quoted in this file moves with it. At
+ * −0.41 the two unforced plans the file asserts are each decided by a wide margin — `tiny` sorts at fifty
+ * candidates (176.00 against 257.12 for its own index), `beta` is searched (1 197.53 against 5 757.47) —
+ * and those are the claims made. Which way `small` goes is not one of them: see `forceVectorIndex`.
+ */
+const PROJECT_ID_ORDER = [5, 4, 3, 0, 2, 1];
+
+function fixedProjectId(index: number): string {
+  return `00000000-0000-4000-8000-${(PROJECT_ID_ORDER[index] + 1).toString(16).padStart(12, '0')}`;
+}
+
 function chunkVector(centroid: number[], similarity: number, next: () => number): number[] {
   const noise = gaussianVector(next);
   const direction = orthogonalTo(
@@ -240,7 +267,10 @@ let seedMs = 0;
  * same HNSW index by the same incremental path a real index run uses.
  */
 async function seedProject(spec: Spec, index: number): Promise<void> {
-  const [project] = await database.db.insert(projects).values({ name: spec.name }).returning({ id: projects.id });
+  const [project] = await database.db
+    .insert(projects)
+    .values({ id: fixedProjectId(index), name: spec.name })
+    .returning({ id: projects.id });
   // The project's own vector index, created where `createProject` creates it — before any chunk — so
   // the rows below go into it by the same incremental path a real index run uses.
   await createProjectVectorIndex(database.db, project.id);
@@ -382,16 +412,19 @@ async function rowsAhead(projectId: string, query: number[], version: string): P
  * *question*: from "did the planner choose the HNSW scan this time" to "here is what the HNSW scan
  * does when it is the plan".
  *
- * **The crossover is a coin toss, and which way it lands has nothing to do with the HNSW graph.**
- * Measured over repeated builds of this same corpus: at the shipped `ef_search = 100` the HNSW scan of
- * `small` is costed at 1 184.52..1 598.51 every single time — pgvector's estimate is a function of the
- * settings and the row count, not of a graph it has not walked. Its competitor is what moves. `ANALYZE`
- * samples the physical correlation of `chunks_project_idx`, and across builds the same thousand rows
- * came back at 1 297.43, 2 126.39 and 2 542.86. When the sample lands low, reading the project's own
- * rows and sorting them exactly wins, the post-filter never runs at all, and a case asking whether this
- * project starves is answered **no** — correctly, and about a plan this file is not about. That is the
- * whole flake, roughly one build in five: the question had two right answers and the corpus picked
- * between them. Nothing was wrong with the code under test on the builds where it failed.
+ * **Which way the crossover lands has nothing to do with the HNSW graph.** At the shipped
+ * `ef_search = 100` the HNSW scan of `small` at fifty candidates is costed at 1 016.61 on every build —
+ * pgvector's estimate is a function of the settings and the row count, not of a graph it has not walked.
+ * Its competitor, reading the project through `chunks_project_idx` and sorting it, is what moves, and it
+ * moves with `project_id`'s correlation. That correlation is not sampled — `ANALYZE` reads all 21 050
+ * rows — it follows from the order of the project ids against the order the rows were written in
+ * (`fixedProjectId`). With random ids it came out between −0.41 and −0.87 over four builds, and the
+ * same thousand rows were costed between 1 170.58 and 2 576.20: under the index in one full-suite run in
+ * four. When it lands low, reading the project's own rows and sorting them exactly wins, the post-filter
+ * never runs at all, and a case asking whether this project starves is answered **no** — correctly, and
+ * about a plan this file is not about. A real instance's ids are random too, so either plan is a right
+ * answer for a thousand-row project there; the fixed ids make the build repeatable, they do not make
+ * one of the two answers the product's.
  *
  * So the probes take the planner's discretion away and then check, in the same transaction, that
  * taking it away left the plan the case is about. `bruteForce` above already does exactly this from
@@ -492,8 +525,8 @@ async function denseCandidates(
  * under the settings that search would carry, and optionally with the alternatives taken away.
  *
  * **The settings are not decoration.** pgvector's cost estimate depends on `hnsw.ef_search`: measured
- * on this corpus, the same scan of `small` starts at 591.64 at pgvector's default of 40 and at
- * 1 184.52 at the 100 this product ships. An `EXPLAIN` that leaves them unset describes a query nobody
+ * on this corpus, the same scan of `small` through its own index starts at 410.74 at pgvector's default
+ * of 40 and at 823.67 at the 100 this product ships. An `EXPLAIN` that leaves them unset describes a query nobody
  * issues, and describes it *more* favourably to the index — the direction that hides a disagreement
  * between what was asserted and what ran, rather than surfacing it. It hid this one: on the builds
  * where the starvation cases failed, this helper went on reporting the HNSW scan they had not got.
@@ -557,8 +590,10 @@ describe('a project the shared index crowded out, answered from its own', () => 
     for (const spec of CORPUS) expect(await vectorIndexOf(ids[spec.name], { force: true })).toBe(projectVectorIndexName(ids[spec.name]));
 
     // Left to itself, the 50-chunk project is still read by `chunks_project_idx` and sorted exactly at
-    // the fifty candidates the product asks for — ≈80..180 against ≈257 for its own index, measured
-    // over three builds. At ten the two are close enough to be a coin toss, so ten is not asserted.
+    // the fifty candidates the product asks for — 176.00 against 257.12 for its own index, on every
+    // build now that `fixedProjectId` holds the correlation still. Ten is not asserted: sorting wins there
+    // too (96.53 against 175.57), but which way a fifty-row project goes at a candidate count the
+    // product does not use is not a claim anybody relies on.
     expect(await usesVectorIndex(ids.tiny, { limit: DENSE_CANDIDATES })).toBe(false);
   });
 
@@ -566,14 +601,13 @@ describe('a project the shared index crowded out, answered from its own', () => 
     // The opposite of what ADR-0041 found for the shared index. There, fifty candidates made reading a
     // project's rows and sorting them cheaper than an HNSW descent through twenty thousand, so the
     // planner stepped around the post-filter. `beta`'s own index is a five-thousand-row graph, costed at
-    // 1 020.98..1 197.53 against 5 757.35 for reading and sorting its rows, on each of four builds.
+    // 1 197.53 against 5 757.47 for reading and sorting its rows.
     //
     // **Not asserted for `small`**, whose thousand rows sit on the crossover described above
-    // `forceVectorIndex`: its own graph is costed at 823.67..1 016.61, and the exact path at whatever
-    // `ANALYZE` sampled for `chunks_project_idx`'s correlation — 2 008.07..2 576.08 over four builds of
-    // this file alone, and under the index cost in one full-suite run in four. Either plan answers `small` correctly, and which one the planner picks is not
-    // this file's question; that its own index is the one a vector scan of it uses is asserted, forced,
-    // in the case above.
+    // `forceVectorIndex`. Which plan wins there follows `project_id`'s correlation, not anything in the
+    // code under test: at this fixture's −0.41 its own graph wins (1 016.61 against 2 576.20), at another
+    // draw of the ids the exact path does, and either answers `small` correctly. That its own index is
+    // the one a vector scan of it uses is asserted, forced, in the case above.
     expect(await usesVectorIndex(ids.beta, { limit: DENSE_CANDIDATES })).toBe(true);
   });
 

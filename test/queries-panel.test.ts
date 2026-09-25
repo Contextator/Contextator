@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error - public/ is untyped ES modules the browser loads directly (ADR-0022); see audit-panel.test.ts.
 import { state } from '../public/core.js';
 // @ts-expect-error - see above.
-import { loadQuerySummary } from '../public/queries.js';
+import { floorBehind, loadQuerySummary, otherFloorSearches } from '../public/queries.js';
 
 /**
  * **The panel names the relevance floor it wants figures for.** The log keeps the floor each search
@@ -65,5 +65,75 @@ describe('which configuration the query panel asks for', () => {
     await loadQuerySummary();
     expect(sent()).toHaveLength(2);
     expect(sent()[1].searchParams.get('floor')).toBe('0.78');
+  });
+});
+
+/**
+ * **After a floor change the panel does not pass the old floor's figures off as the current ones.** No
+ * search has been decided against a floor the moment it is saved, so the configuration the server picks
+ * by default — the one with the most searches — is still the old floor's, and the "refused" figures on
+ * screen describe a floor that no longer applies. The panel says so; and the re-read it sends after the
+ * save is the one that wins, even when an older read of the same question answers after it.
+ */
+describe('the query panel after a floor change', () => {
+  const configuration = (scoreFloor: number | null) => ({ embeddingModel: 'm', liveGeneration: 1, scoreFloor, queries: 40 });
+  const summary = (decided: number | null, effective: number) => ({
+    ...SUMMARY,
+    configuration: configuration(decided),
+    configurations: [configuration(decided)],
+    scoreFloor: { project: effective, instance: 0.82, effective },
+  });
+
+  it('flags figures decided against a floor other than the one in effect now', () => {
+    expect(floorBehind(summary(0.82, 0.78))).toEqual({ decided: 0.82, now: 0.78 });
+    expect(floorBehind(summary(0.78, 0.78))).toBeNull();
+  });
+
+  it('flags a floor turned off, and searches logged before the floor was recorded', () => {
+    expect(floorBehind(summary(0.82, 0))).toEqual({ decided: 0.82, now: 0 });
+    expect(floorBehind(summary(null, 0.82))).toEqual({ decided: null, now: 0.82 });
+  });
+
+  it('has nothing to flag when nothing was read or nothing was asked', () => {
+    expect(floorBehind(null)).toBeNull();
+    expect(floorBehind(SUMMARY)).toBeNull();
+  });
+
+  it('counts the searches under the current floor once, in the floor note, and leaves the rest to the other-floors line', () => {
+    const data = {
+      ...summary(0.82, 0.78),
+      configurations: [
+        configuration(0.82),
+        { ...configuration(0.78), queries: 5 },
+        { ...configuration(0.7), queries: 3 },
+        { ...configuration(0.78), liveGeneration: 2, queries: 9 },
+      ],
+    };
+    expect(otherFloorSearches(data)).toEqual({ current: 5, other: 3 });
+    // Nothing flagged: every other floor is just another floor, as before the note existed.
+    expect(otherFloorSearches({ ...data, scoreFloor: { project: 0.82, instance: 0.82, effective: 0.82 } })).toEqual({ current: 0, other: 8 });
+    expect(otherFloorSearches(SUMMARY)).toEqual({ current: 0, other: 0 });
+  });
+
+  it('keeps the re-read after the save, not an older read of the same question that answers later', async () => {
+    const before = summary(0.82, 0.82);
+    const after = summary(0.82, 0.78);
+    let answerBefore: (value: unknown) => void = () => {};
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answerBefore = resolve;
+        }),
+    );
+    fetchMock.mockImplementationOnce(async () => ({ status: 200, ok: true, text: async () => JSON.stringify(after) }));
+
+    const slow = loadQuerySummary();
+    await loadQuerySummary(true);
+    answerBefore({ status: 200, ok: true, text: async () => JSON.stringify(before) });
+    await slow;
+
+    expect(sent()).toHaveLength(2);
+    expect(state.queries.data.scoreFloor.effective).toBe(0.78);
+    expect(floorBehind(state.queries.data)).toEqual({ decided: 0.82, now: 0.78 });
   });
 });

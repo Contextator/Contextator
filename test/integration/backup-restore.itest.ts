@@ -280,6 +280,18 @@ async function countChunks(database: TestDatabase, predicate = sql`true`): Promi
   return (result.rows[0] as { n: number }).n;
 }
 
+/**
+ * The two projects' ids, fixed rather than drawn by `gen_random_uuid()`. The rows are written project by
+ * project, and the ids decide how `chunks_project_idx` orders them, so random ids made `project_id`'s
+ * correlation — and with it what the planner charges for reading a project through that index and
+ * sorting it — a coin toss per run. Fixed, the plan costs the index case below compares are the same
+ * on every run (correlation 0.97; the figures quoted there were measured with these ids).
+ */
+const PROJECT_IDS: Record<string, string> = {
+  handbook: '00000000-0000-4000-8000-000000000002',
+  ledger: '00000000-0000-4000-8000-000000000001',
+};
+
 /** One project, `documents` pages of `perDocument` chunks, written through the product's own upsert. */
 async function seedProject(
   name: string,
@@ -289,7 +301,7 @@ async function seedProject(
   opts: { answers?: string[]; dense?: boolean } = {},
 ): Promise<string> {
   const answers = opts.answers ?? [];
-  const [project] = await subject.db.insert(projects).values({ name }).returning({ id: projects.id });
+  const [project] = await subject.db.insert(projects).values({ id: PROJECT_IDS[name], name }).returning({ id: projects.id });
   // What `createProject` does after the insert, so the dump carries the indexes an instance has.
   await createProjectVectorIndex(subject.db, project.id);
   const [source] = await subject.db
@@ -382,6 +394,10 @@ beforeAll(async () => {
   handbookId = await seedProject('handbook', HANDBOOK_DOCUMENTS, HANDBOOK_CHUNKS_PER_DOCUMENT, 11, { answers: ANSWERS });
   ledgerId = await seedProject('ledger', LEDGER_DOCUMENTS, LEDGER_CHUNKS_PER_DOCUMENT, 22, { dense: true });
 
+  // Statistics before anything is asked of the planner, here and again after the restore below: left to
+  // autovacuum, whether a search ran with or without them was a matter of timing (see the HNSW case).
+  await subject.db.execute(sql`ANALYZE chunks`);
+
   schemaBefore = await captureSchema(subject.db);
   hitsBefore = await Promise.all(QUESTIONS.map(search));
   journalBefore = await journalRows(subject);
@@ -400,6 +416,8 @@ beforeAll(async () => {
   subject = await createTestDatabase(baseUrl, SUBJECT);
 
   const restoreMs = await elapsed(`pg_restore -U contextator -d ${SUBJECT} --clean --if-exists ${DUMP_PATH}`);
+  // A dump carries no planner statistics; see the HNSW case for why this is not left to autovacuum.
+  await subject.db.execute(sql`ANALYZE chunks`);
 
   // ── The same restore again, in two pieces, to say where the time went ────────────────────────────
   // `pg_restore -l` prints the archive's own table of contents, one line per object, and `-L` replays a
@@ -471,10 +489,48 @@ describe('a custom-format dump restored into an empty database', () => {
   it('still answers with the HNSW index rather than by sorting the table', async () => {
     // The index came back with its build parameters — the projection above asserts that — but a
     // restored index that the planner will not use is a restored index nobody benefits from.
-    const plan = await subject.db.execute(sql`
-      EXPLAIN (FORMAT JSON) SELECT id FROM chunks WHERE project_id = ${handbookId}
-      ORDER BY embedding <=> ${JSON.stringify(stubVector(QUESTIONS[0]))}::vector LIMIT 10`);
-    expect(JSON.stringify(plan.rows)).toContain(projectVectorIndexName(handbookId));
+    //
+    // **Statistics first, and on purpose.** `pg_dump` carries no planner statistics (PostgreSQL 16), so
+    // the restored `chunks` has none until autovacuum's next pass over a database that has just had ten
+    // thousand rows written into it — typically within a minute, on its own schedule, and not on this
+    // file's. That race was the flake: the case asked the planner once, in whichever of the two states
+    // the database happened to be in. With no statistics every project looks like fifty rows, and the
+    // `handbook` search went through its index at 91.69 against 172.21 for sorting; once autovacuum had
+    // analysed the table, the planner knew `handbook` is 48 rows and rightly sorted them, at 15.31 to
+    // 25.60 against the same 91.69. The assertion was reading the clock, not the index. The top-level
+    // `beforeAll` runs `ANALYZE` right after the restore, which puts the restored database in the state
+    // it will be in for the rest of its life — before this case and every case after it, so none of them
+    // depends on running in this order.
+
+    // **The project where sorting is the thing to avoid.** `ledger` is ten thousand rows; left to itself,
+    // under real statistics, the planner has to choose its restored index over reading and sorting them —
+    // 565.34 against 1 518.72 — and that is the claim this case exists for.
+    const vector = JSON.stringify(stubVector(QUESTIONS[0]));
+    const unforced = await subject.db.execute(sql`
+      EXPLAIN (FORMAT JSON) SELECT id FROM chunks WHERE project_id = ${ledgerId}
+      ORDER BY embedding <=> ${vector}::vector LIMIT 10`);
+    expect(JSON.stringify(unforced.rows)).toContain(projectVectorIndexName(ledgerId));
+
+    // **And the searched project's own index is usable too**, which at 48 rows can only be shown with
+    // the exact path taken away — `hnsw-scan.itest.ts`'s `forceVectorIndex`, for its reason: with only
+    // the scans disabled, reading `chunks_project_idx` into a `Sort` is still on the table. A restored
+    // partial index whose predicate no longer matched `project_id = $1`, or that came back invalid,
+    // would leave the planner nothing to answer this with but the disabled plans, and it would say so.
+    const client = await subject.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET LOCAL enable_seqscan = off');
+      await client.query('SET LOCAL enable_bitmapscan = off');
+      await client.query('SET LOCAL enable_sort = off');
+      const forced = await client.query(
+        'EXPLAIN (FORMAT JSON) SELECT id FROM chunks WHERE project_id = $1 ORDER BY embedding <=> $2::vector LIMIT 10',
+        [handbookId, vector],
+      );
+      expect(JSON.stringify(forced.rows)).toContain(projectVectorIndexName(handbookId));
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
   });
 
   it('returns the identical rows in the identical order, with identical scores', async () => {
