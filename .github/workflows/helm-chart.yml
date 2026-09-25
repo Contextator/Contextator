@@ -351,8 +351,53 @@ jobs:
             echo "Could not read version from charts/contextator/Chart.yaml."
             exit 1
           fi
-          highest=$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -n 1)
-          if [[ "$new" == "$old" || "$highest" != "$new" ]]; then
+          # SemVer 2.0.0 precedence (https://semver.org/#spec-item-11): prints 1, 0 or -1 for a >, =, < b.
+          # `sort -V` is not it: it puts 1.0.0-rc.1 after 1.0.0, where SemVer puts a pre-release before
+          # its release. Build metadata (+...) is ignored, as SemVer says.
+          semver_re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          semver_cmp() {
+            local LC_ALL=C a=${1%%+*} b=${2%%+*} ap='' bp='' i
+            [[ "$a" == *-* ]] && ap=${a#*-}
+            [[ "$b" == *-* ]] && bp=${b#*-}
+            local -a x y p q
+            IFS=. read -r -a x <<< "${a%%-*}"
+            IFS=. read -r -a y <<< "${b%%-*}"
+            for i in 0 1 2; do
+              if (( 10#${x[i]} != 10#${y[i]} )); then
+                (( 10#${x[i]} > 10#${y[i]} )) && echo 1 || echo -1
+                return
+              fi
+            done
+            if [[ -z "$ap" || -z "$bp" ]]; then
+              if [[ "$ap" == "$bp" ]]; then echo 0; elif [[ -z "$ap" ]]; then echo 1; else echo -1; fi
+              return
+            fi
+            IFS=. read -r -a p <<< "$ap"
+            IFS=. read -r -a q <<< "$bp"
+            for (( i = 0; i < ${#p[@]} || i < ${#q[@]}; i++ )); do
+              if (( i >= ${#p[@]} )); then echo -1; return; fi
+              if (( i >= ${#q[@]} )); then echo 1; return; fi
+              [[ "${p[i]}" == "${q[i]}" ]] && continue
+              if [[ "${p[i]}" =~ ^[0-9]+$ && "${q[i]}" =~ ^[0-9]+$ ]]; then
+                (( 10#${p[i]} > 10#${q[i]} )) && echo 1 || echo -1
+              elif [[ "${p[i]}" =~ ^[0-9]+$ ]]; then
+                echo -1
+              elif [[ "${q[i]}" =~ ^[0-9]+$ ]]; then
+                echo 1
+              else
+                [[ "${p[i]}" > "${q[i]}" ]] && echo 1 || echo -1
+              fi
+              return
+            done
+            echo 0
+          }
+          for v in "$old" "$new"; do
+            if [[ ! "$v" =~ $semver_re ]]; then
+              echo "Chart.yaml version '$v' is not a SemVer 2.0.0 version (ADR-0092)."
+              exit 1
+            fi
+          done
+          if [[ "$(semver_cmp "$new" "$old")" != 1 ]]; then
             echo "charts/contextator/ changed since $BASE_SHA, but Chart.yaml version went from '$old' to '$new'."
             echo "Bump it in the same change (ADR-0092): patch for a fix, minor for a new value, major for a"
             echo "removed or renamed value or a value the schema newly rejects."
