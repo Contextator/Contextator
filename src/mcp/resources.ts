@@ -52,8 +52,17 @@ export const RESOURCE_NOT_FOUND = -32002;
 /** One `resources/list` page; `list_topics`' default page, for the same reason it has that default. */
 export const RESOURCE_LIST_PAGE_SIZE = LIST_TOPICS_DEFAULT_LIMIT;
 
-/** `read_document`'s bound on a path, applied to the whole URI with room for the scheme and project. */
-const MAX_URI_LENGTH = 1024 + 128;
+/** `read_document`'s bound on a path (its `path` argument's `max`), applied to the decoded path. */
+const MAX_PATH_LENGTH = 1024;
+
+/**
+ * A coarse bound on the raw URI, checked before anything is decoded. Percent-encoding is what makes it
+ * coarse: one UTF-16 unit of a path encodes to at most nine characters (`%E3%81%82` for a BMP
+ * character; an astral one is twelve for two units), so a path at `MAX_PATH_LENGTH` needs up to nine
+ * times that. The scheme and the longest project name `PROJECT_NAME_RE` allows fit in the 128 on top.
+ * The exact bound is the decoded one; this only keeps a hostile URI from being decoded at all.
+ */
+const MAX_URI_LENGTH = MAX_PATH_LENGTH * 9 + 128;
 
 /** The resource URI of one indexed path. */
 export function documentUri(projectName: string, relativePath: string): string {
@@ -65,8 +74,9 @@ export function documentUri(projectName: string, relativePath: string): string {
  *
  * Refused: another scheme; a query or a fragment; an empty, `.` or `..` segment, whether written plainly
  * or percent-encoded; a segment that decodes to a `/` or a `\` (so `%2F` cannot join two segments into
- * one the list never showed); a malformed escape; a control character. What is left must be a path
- * `normalizeRelativePath` returns unchanged, which is the rule every indexed path was written under.
+ * one the list never showed); a malformed escape; a control character; a decoded path longer than
+ * `read_document` accepts. What is left must be a path `normalizeRelativePath` returns unchanged, which is
+ * the rule every indexed path was written under.
  */
 export function parseDocumentUri(uri: string): { project: string; relativePath: string } | null {
   if (uri.length > MAX_URI_LENGTH) return null;
@@ -89,6 +99,7 @@ export function parseDocumentUri(uri: string): { project: string; relativePath: 
     segments.push(segment);
   }
   const relativePath = segments.join('/');
+  if (relativePath.length > MAX_PATH_LENGTH) return null;
   return normalizeRelativePath(relativePath) === relativePath ? { project, relativePath } : null;
 }
 

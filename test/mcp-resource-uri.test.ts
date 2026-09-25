@@ -25,6 +25,23 @@ describe('documentUri', () => {
   });
 });
 
+describe('parseDocumentUri accepts every URI the list can issue', () => {
+  // Percent-encoding multiplies a non-ASCII path several times over: a URI built from a path
+  // read_document takes must parse back, however long its encoded form is.
+  it("takes a path at read_document's bound made of characters that encode to nine each", () => {
+    const relativePath = `docs/${'文'.repeat(1024 - 'docs/'.length - '.md'.length)}.md`;
+    expect(relativePath).toHaveLength(1024);
+    const uri = documentUri('p'.repeat(63), relativePath);
+    expect(uri.length).toBeGreaterThan(9000);
+    expect(parseDocumentUri(uri)).toEqual({ project: 'p'.repeat(63), relativePath });
+  });
+
+  it('refuses the same path one character past the bound', () => {
+    const relativePath = `docs/${'文'.repeat(1024 - 'docs/'.length - '.md'.length + 1)}.md`;
+    expect(parseDocumentUri(documentUri('p', relativePath))).toBeNull();
+  });
+});
+
 describe('parseDocumentUri refuses what the list would never have issued', () => {
   it.each([
     ['another scheme', 'file:///etc/passwd'],
@@ -45,7 +62,8 @@ describe('parseDocumentUri refuses what the list would never have issued', () =>
     ['a NUL byte', 'contextator://p/docs/a.md%00.txt'],
     ['a control character', 'contextator://p/docs/a%0A.md'],
     ['a malformed escape', 'contextator://p/docs/%E0%A4%A.md'],
-    ['a URI longer than any indexed path', `contextator://p/docs/${'a'.repeat(1200)}.md`],
+    ['a decoded path longer than read_document accepts', `contextator://p/docs/${'a'.repeat(1200)}.md`],
+    ['a URI too long to be worth decoding', `contextator://p/docs/${'%61'.repeat(3100)}.md`],
   ])('%s', (_label, uri) => {
     expect(parseDocumentUri(uri)).toBeNull();
   });

@@ -59,6 +59,13 @@ let alphaLive: string[];
 
 const ENCODED_PATH = 'handbook/Getting started/über #1 100%.md';
 
+/**
+ * A path well inside what `read_document` takes (under two hundred characters) whose URI is over a
+ * thousand: every CJK character percent-encodes to nine. A bound on the raw URI sized for ASCII paths
+ * refused the URI the list had just issued.
+ */
+const CJK_PATH = `handbook/${Array.from({ length: 5 }, (_, i) => `${'文档说明'.repeat(7)}${i}`).join('/')}.md`;
+
 /** A client and a server joined in memory, with the resource handlers exactly as the factory registers them. */
 async function connect(project: ProjectRow, pageSize?: number): Promise<Client> {
   const server = new McpServer({ name: 'contextator-test', version: '0.0.0' });
@@ -127,6 +134,7 @@ beforeAll(async () => {
     .returning();
   await seedDocument(db, alpha.id, disk.id, 'disk/indexed.md', '# Indexed\n\nThis one was indexed.\n');
   await seedDocument(db, alpha.id, handbook.id, ENCODED_PATH, '# Getting started\n\nA path with spaces, an umlaut, a hash and a percent sign.\n');
+  await seedDocument(db, alpha.id, handbook.id, CJK_PATH, '# 文档\n\nCJK-PATH-MARKER: a path whose URI is several times its length.\n');
   // More than one default page, so "a large project is not answered at once" is a claim about the
   // default and not only about the small page the other cases use.
   for (let i = 0; i < RESOURCE_LIST_PAGE_SIZE + 3; i++) {
@@ -306,6 +314,20 @@ describe('resources/read — what it serves', () => {
       const uri = uris.find((u) => parseDocumentUri(u)?.relativePath === ENCODED_PATH);
       expect(uri).toBe(documentUri('alpha', ENCODED_PATH));
       expect(await textOf(client, uri as string)).toContain('an umlaut, a hash and a percent sign');
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('serves a path whose URI percent-encoding made far longer than the path, by the URI the list issued', async () => {
+    const client = await connect(alpha, PAGE);
+    try {
+      expect(CJK_PATH.length).toBeLessThan(200);
+      const { uris } = await listAll(client);
+      const uri = uris.find((u) => parseDocumentUri(u)?.relativePath === CJK_PATH);
+      expect(uri).toBe(documentUri('alpha', CJK_PATH));
+      expect((uri as string).length).toBeGreaterThan(1024 + 128);
+      expect(await textOf(client, uri as string)).toContain('CJK-PATH-MARKER');
     } finally {
       await client.close();
     }
