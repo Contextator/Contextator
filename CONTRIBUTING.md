@@ -127,8 +127,8 @@ part you can do.
   of this. Say so in the pull request and that is the end of it.
 
 **Looking for the roadmap, not the process?** The roadmap mentioned above is internal to that private
-repository. What is planned and being considered will be tracked separately, in public, on
-[GitHub Projects](https://github.com/Contextator/Contextator/projects), once that board exists.
+repository. What has shipped, what is planned and what is being considered is tracked separately, in
+public, on the [Contextator Roadmap](https://github.com/orgs/Contextator/projects/1) board.
 
 ## The pairs that are kept in sync
 
