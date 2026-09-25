@@ -100,6 +100,15 @@ export const Manifest = z.object({
      */
     mcpAuth: z.enum(['open', 'token', 'account']),
     queryLogEnabled: z.boolean(),
+    /**
+     * The project's own relevance floor, or null for "the server's default". It travels for the reason
+     * `mcpAuth` and `queryLogEnabled` do — it is a decision about this project, not about the instance —
+     * and an importer applies it under **its own** `SEARCH_SCORE_FLOOR`, whose `0` still turns it off.
+     * Optional, and `manifestVersion` did not move, for the reason given on `mcpAuth`: an export taken
+     * before the column existed reads as "the server's default", which is what that project ran, and
+     * an older importer ignores the key rather than refusing the file.
+     */
+    scoreFloor: z.number().min(0).max(1).nullable().optional(),
     lastIndexedAt: z.string().nullable(),
   }),
   counts: z.object({

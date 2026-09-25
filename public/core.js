@@ -97,7 +97,7 @@ export const state = {
     tab: 'questions', // 'questions' | 'documents' | 'chunks' | 'volume'
     days: 7,
     actor: 'mcp',
-    /** `<model>@<generation>`, or null for whichever configuration the server picked. */
+    /** `<model>@<generation>@<floor|none>`, or null for whichever configuration the server picked. */
     configKey: null,
     /** The request the data in hand answers; a change of any part of it is what refetches. */
     loadedKey: null,
@@ -106,6 +106,10 @@ export const state = {
     error: '',
     data: null,
     confirmPurge: false,
+    /** A relevance floor chosen but not applied (null is the server's default); undefined when none is. */
+    floorPending: undefined,
+    /** What floorPending would have done to the window: { key, status, data, error }. */
+    floorPreview: null,
   },
   /**
    * The audit panel (audit.js), whole, and here for the reason state.search and state.queries are:

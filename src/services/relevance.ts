@@ -71,18 +71,53 @@ export function belowRelevanceFloor(query: string, hits: readonly SearchHit[], f
 }
 
 /**
- * The warning for an operator running the floor's default against a model it was not measured on, or
+ * The floor a search is decided against, from the instance's `SEARCH_SCORE_FLOOR` and the project's own
+ * `score_floor` column ([ADR-0042](../../.ssot/ADR.md#adr-0042), and the per-project override proposed
+ * beside it).
+ *
+ * **The instance's `0` is the master switch.** An instance floor of `0` — or none at all, which is how
+ * the evaluation harness calls — turns every floor off, the projects' own included: it is what the
+ * startup warning and the troubleshooting advice tell an operator to set when a model change makes every
+ * search answer "no good match", and that advice has to work without first finding which projects carry
+ * a floor of their own. Above `0`, a project's column wins when it holds a value (`0` there turns the
+ * floor off for that project alone) and the instance's floor applies when it is `null`.
+ */
+export function effectiveScoreFloor(instance: number | undefined, project: number | null): number {
+  if (instance === undefined || instance <= 0) return 0;
+  return project ?? instance;
+}
+
+/** A project that sets its own floor, as the startup warning names it. */
+export interface ProjectFloor {
+  name: string;
+  scoreFloor: number;
+}
+
+/**
+ * The warning for an operator running a relevance floor against a model it was not measured on, or
  * `null` when there is nothing to say.
+ *
+ * It covers every floor that is in effect: the instance's, and each project's own `score_floor` above
+ * `0`. With the instance's floor at `0` nothing is in effect — the projects' own floors included, see
+ * {@link effectiveScoreFloor} — and there is nothing to warn about.
  *
  * It is a warning and never a refusal: the number may well have been re-measured, and `config.ts`
  * cannot tell a deliberate 0.82 from the default one anyway. Startup is where it belongs, because by
  * the time somebody wonders why every search answers "no good match" they are not reading the schema.
  */
-export function floorModelWarning(floor: number, model: string): string | null {
+export function floorModelWarning(floor: number, model: string, projectFloors: readonly ProjectFloor[] = []): string | null {
   if (floor <= 0 || model === FLOOR_MEASURED_MODEL) return null;
+  const own = projectFloors.filter((p) => p.scoreFloor > 0);
+  const shown = own.slice(0, 5).map((p) => `${p.name}=${p.scoreFloor}`);
+  if (own.length > shown.length) shown.push(`and ${own.length - shown.length} more`);
+  const projectsLine =
+    own.length > 0
+      ? ` ${own.length === 1 ? 'One project sets its own floor' : `${own.length} projects set their own floor`} (${shown.join(', ')}), which is just as model-bound.`
+      : '';
   return (
-    `SEARCH_SCORE_FLOOR=${floor} was measured against ${FLOOR_MEASURED_MODEL} and this server embeds with ${model}. ` +
+    `SEARCH_SCORE_FLOOR=${floor} was measured against ${FLOOR_MEASURED_MODEL} and this server embeds with ${model}.${projectsLine} ` +
     'Cosine similarity is not comparable between models: if the new one scores lower, every search answers ' +
-    '"no good match". Re-measure the floor for this model or set SEARCH_SCORE_FLOOR=0.'
+    '"no good match". Re-measure the floor for this model, or set SEARCH_SCORE_FLOOR=0, which turns every ' +
+    "project's own floor off too."
   );
 }

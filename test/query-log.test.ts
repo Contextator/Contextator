@@ -36,6 +36,7 @@ const entry = (query: string): QueryLogEntry => ({
   limit: 5,
   hits: [{ relativePath: 'handbook/install.md', headingPath: 'Install > Docker', chunkIndex: 2, score: 0.87 }],
   belowFloor: false,
+  scoreFloor: 0.82,
   durationMs: 12,
   embeddingModel: 'local:multilingual-e5-small:fp32',
   liveGeneration: 3,
@@ -120,6 +121,8 @@ describe('buildQueryLogRows', () => {
     expect(query.queryNorm).toBe('where is the docker guide?');
     expect(query.hitCount).toBe(1);
     expect(query.topScore).toBe(0.87);
+    // The floor it was decided against travels with the verdict, so a window spanning a change can be split.
+    expect(query.scoreFloor).toBe(0.82);
     expect(hits).toEqual([{ rank: 1, relativePath: 'handbook/install.md', headingPath: 'Install > Docker', chunkIndex: 2, score: 0.87 }]);
   });
 

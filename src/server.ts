@@ -233,7 +233,7 @@ async function main(): Promise<void> {
   // Model download/load can take a while on first start; don't block the dashboard on it.
   void embeddings
     .warmup()
-    .then(() => {
+    .then(async () => {
       log.info(
         {
           provider: embeddings.provider,
@@ -254,8 +254,17 @@ async function main(): Promise<void> {
       // And the same shape of mistake one setting along (ADR-0042): SEARCH_SCORE_FLOOR is a cosine
       // similarity, cosine similarities are not comparable between encoders, and its default was
       // measured against one. Here rather than in `config.ts` because the model is a runtime fact.
-      const floorWarning = floorModelWarning(config.SEARCH_SCORE_FLOOR, embeddings.model);
-      if (floorWarning) log.warn({ floor: config.SEARCH_SCORE_FLOOR, model: embeddings.model }, floorWarning);
+      // The projects' own floors are just as model-bound, so the warning names them; it reads them
+      // only when there is something to warn about.
+      if (floorModelWarning(config.SEARCH_SCORE_FLOOR, embeddings.model) === null) return;
+      let projectFloors: { name: string; scoreFloor: number }[] = [];
+      try {
+        projectFloors = (await listProjects(db)).flatMap((p) => (p.scoreFloor === null ? [] : [{ name: p.name, scoreFloor: p.scoreFloor }]));
+      } catch (err) {
+        log.warn({ err }, "could not read the projects' own relevance floors; the warning below names only the server's");
+      }
+      const floorWarning = floorModelWarning(config.SEARCH_SCORE_FLOOR, embeddings.model, projectFloors);
+      if (floorWarning) log.warn({ floor: config.SEARCH_SCORE_FLOOR, model: embeddings.model, projectFloors }, floorWarning);
     })
     .catch((err: unknown) => log.error({ err }, 'embedding model failed to load; indexing and search will fail until it is available'));
 

@@ -218,6 +218,7 @@ export async function exportProject(
         exportedGeneration: generation,
         mcpAuth: project.mcpAuth,
         queryLogEnabled: project.queryLogEnabled,
+        scoreFloor: project.scoreFloor,
         lastIndexedAt: project.lastIndexedAt?.toISOString() ?? null,
       },
       counts: { sources: sources.length, documents: written.documents, chunks: written.chunks, ...uploads },

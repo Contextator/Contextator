@@ -279,12 +279,12 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
           // watching `docker logs` sees at the moment it happens. One is for analysis over weeks, the
           // other for the afternoon somebody is debugging a refusal.
           log.info(
-            { tool: 'search_docs', project: project.name, query, topScore: outcome.hits[0].score, floor: config.SEARCH_SCORE_FLOOR },
+            { tool: 'search_docs', project: project.name, query, topScore: outcome.hits[0].score, floor: outcome.scoreFloor },
             'search below the relevance floor',
           );
           return ok(
             `No good match for "${query}"${scoped} in project "${project.name}". The closest passage scored ` +
-              `${outcome.hits[0].score.toFixed(3)}, below this server's floor of ${config.SEARCH_SCORE_FLOOR}, which usually means the ` +
+              `${outcome.hits[0].score.toFixed(3)}, below this ${outcome.scoreFloorOverridden ? 'project' : 'server'}'s floor of ${outcome.scoreFloor}, which usually means the ` +
               'documentation does not cover it. Call list_topics to see what it does cover, or ask again in the words the documentation ' +
               'would use — an exact identifier, a header name or an error code searches best.',
           );

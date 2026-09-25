@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, type SQL, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { projects, searchQueries } from '../db/schema.js';
 import { RRF_K } from './rrf.js';
@@ -23,10 +23,14 @@ import { RRF_K } from './rrf.js';
  * a label. There is no minimum count, no score cut-off and no `HAVING`; see ADR-0050 for why the
  * `HAVING count(*) >= 3` of [OPERATIONS.md](../../.ssot/OPERATIONS.md) §6.1 was not carried over.
  *
- * **Every figure is scoped to one `embedding_model` and one `live_generation`**, which is what those
- * two columns are on every row for. A week that spans a model change averaged into one number is the
- * confusion this whole item was written about, so the scope is a parameter and never a default that
- * quietly spans two retrieval configurations.
+ * **Every figure is scoped to one `embedding_model`, one `live_generation` and one `score_floor`**,
+ * which is what those columns are on every row for. A week that spans a model change averaged into one
+ * number is the confusion this whole item was written about, so the scope is a parameter and never a
+ * default that quietly spans two retrieval configurations. The floor is part of the configuration
+ * because `below_floor` is a verdict against it: a week in which the floor moved from 0.82 to 0.77
+ * holds two different meanings of "refused", and counting them as one is the same confusion. Rows
+ * logged before the column existed carry `score_floor` NULL — "not recorded" — and are their own
+ * configuration rather than being guessed into either side.
  */
 
 /** How many days back the panel will look. A window beyond retention returns what retention left. */
@@ -55,6 +59,8 @@ export type SummaryActor = 'mcp' | 'dashboard' | 'all';
 export interface QueryConfiguration {
   embeddingModel: string;
   liveGeneration: number;
+  /** The floor these searches were decided against; `0` when it was off, `null` when it was not recorded. */
+  scoreFloor: number | null;
   queries: number;
   firstAt: string;
   lastAt: string;
@@ -67,7 +73,12 @@ export interface SummaryScope {
   actor: SummaryActor;
   embeddingModel: string;
   liveGeneration: number;
+  /** `null` selects the rows that were logged before the floor was recorded. */
+  scoreFloor: number | null;
 }
+
+/** A summary scope without the floor: the window, whose searches, one model and one generation. */
+export type ModelScope = Omit<SummaryScope, 'scoreFloor'>;
 
 /** One document a question returned, and how often it returned it. */
 export interface QuestionPath {
@@ -196,8 +207,19 @@ function denseCompetitionRank<T extends { queryNorm: string }>(rows: readonly T[
 /** `actor = 'mcp'`, or nothing at all for `all`. Spelled once; every figure below takes it. */
 const actorFilter = (actor: SummaryActor) => (actor === 'all' ? sql`` : sql` and q.actor = ${actor}`);
 
-/** The window and the one retrieval configuration, on `search_queries q`. Every figure carries it. */
+/**
+ * The window and the one retrieval configuration, on `search_queries q`. Every figure carries it.
+ * `is not distinct from` so that a `null` floor selects the unrecorded rows instead of none.
+ */
 const scopeFilter = (scope: SummaryScope) =>
+  sql`${modelFilter(scope)}
+      and q.score_floor is not distinct from ${scope.scoreFloor}::double precision`;
+
+/**
+ * The window, one model and one generation, across every floor — for the one question whose answer
+ * does not depend on the floor a search was decided against: what its best score was.
+ */
+const modelFilter = (scope: ModelScope) =>
   sql`q.project_id = ${scope.projectId}
       and q.created_at >= ${scope.from.toISOString()}::timestamptz
       and q.created_at < ${scope.to.toISOString()}::timestamptz
@@ -207,6 +229,7 @@ const scopeFilter = (scope: SummaryScope) =>
 interface ConfigurationRow extends Record<string, unknown> {
   embedding_model: string;
   live_generation: number;
+  score_floor: number | null;
   queries: number;
   first_at: Date;
   last_at: Date;
@@ -221,17 +244,18 @@ interface ConfigurationRow extends Record<string, unknown> {
  */
 export async function listQueryConfigurations(db: Db, projectId: string, from: Date, to: Date, actor: SummaryActor): Promise<QueryConfiguration[]> {
   const result = await db.execute<ConfigurationRow>(sql`
-    select q.embedding_model, q.live_generation, count(*)::int as queries,
+    select q.embedding_model, q.live_generation, q.score_floor, count(*)::int as queries,
            min(q.created_at) as first_at, max(q.created_at) as last_at
     from search_queries q
     where q.project_id = ${projectId}
       and q.created_at >= ${from.toISOString()}::timestamptz
       and q.created_at < ${to.toISOString()}::timestamptz${actorFilter(actor)}
-    group by 1, 2
+    group by 1, 2, 3
     order by queries desc, last_at desc`);
   return result.rows.map((row) => ({
     embeddingModel: row.embedding_model,
     liveGeneration: row.live_generation,
+    scoreFloor: row.score_floor === null ? null : Number(row.score_floor),
     queries: row.queries,
     firstAt: new Date(row.first_at).toISOString(),
     lastAt: new Date(row.last_at).toISOString(),
@@ -499,6 +523,103 @@ export async function volumeOverTime(db: Db, scope: SummaryScope): Promise<Volum
     refused: row.refused,
     avgTopScore: row.avg_top_score === null ? null : Number(row.avg_top_score),
   }));
+}
+
+// ---------- what a floor would cost ----------
+
+/** How many samples of each side a floor preview names. */
+export const FLOOR_PREVIEW_SAMPLES = 5;
+
+/** One question a floor change would answer, or stop answering, and its best score. */
+export interface FloorPreviewSample {
+  query: string;
+  asked: number;
+  topScore: number;
+}
+
+/**
+ * The price of a floor, read off the searches the window already holds.
+ *
+ * Every count is **at most**: the log keeps each search's best score, and `top_score < floor` is the
+ * whole of the floor's test except its escape hatch — an identifier-shaped question the lexical half
+ * matched is answered at any score ([`relevance.ts`](./relevance.ts)), and whether the lexical half
+ * matched is not logged. So a search counted as refused here may in fact have been answered; none that
+ * is counted as answered would have been refused.
+ */
+export interface FloorPreview {
+  /** Searches in the scope that returned anything — the only ones a floor can refuse. */
+  searches: number;
+  refusedAtCurrent: number;
+  refusedAtProposed: number;
+  /** Refused at the current floor, answered at the proposed one. */
+  gained: number;
+  /** Answered at the current floor, refused at the proposed one. */
+  lost: number;
+  gainedSamples: FloorPreviewSample[];
+  lostSamples: FloorPreviewSample[];
+}
+
+interface FloorCountsRow extends Record<string, unknown> {
+  searches: number;
+  refused_current: number;
+  refused_proposed: number;
+  gained: number;
+  lost: number;
+}
+
+interface FloorSampleRow extends Record<string, unknown> {
+  sample: string;
+  asked: number;
+  top_score: number;
+}
+
+/** The floor's own test on a logged row, less the escape hatch: `0` refuses nothing. */
+const refusedBy = (floor: number) => (floor > 0 ? sql`q.top_score < ${floor}::double precision` : sql`false`);
+
+/**
+ * What moving this project from `current` to `proposed` would have done to the searches in `scope`,
+ * before anybody moves it.
+ *
+ * **Across every floor the window holds**, and deliberately so: `top_score` does not depend on the
+ * floor a search was decided against, so a search refused at 0.82 last week is as good a witness for
+ * 0.77 as one answered at 0.77 yesterday. It is still one model and one generation — a score is a
+ * number about one encoder over one index, and that is the part a preview may not pool.
+ */
+export async function previewScoreFloor(db: Db, scope: ModelScope, current: number, proposed: number): Promise<FloorPreview> {
+  const inScope = sql`${modelFilter(scope)} and q.top_score is not null`;
+  const gainedBand = sql`${refusedBy(current)} and not (${refusedBy(proposed)})`;
+  const lostBand = sql`${refusedBy(proposed)} and not (${refusedBy(current)})`;
+  const counts = await db.execute<FloorCountsRow>(sql`
+    select count(*)::int as searches,
+           count(*) filter (where ${refusedBy(current)})::int as refused_current,
+           count(*) filter (where ${refusedBy(proposed)})::int as refused_proposed,
+           count(*) filter (where ${gainedBand})::int as gained,
+           count(*) filter (where ${lostBand})::int as lost
+    from search_queries q
+    where ${inScope}`);
+  const samples = async (band: SQL): Promise<FloorPreviewSample[]> => {
+    const result = await db.execute<FloorSampleRow>(sql`
+      select (array_agg(q.query order by q.created_at desc))[1] as sample,
+             count(*)::int as asked,
+             max(q.top_score) as top_score
+      from search_queries q
+      where ${inScope} and ${band}
+      group by q.query_norm
+      order by asked desc, top_score desc, sample
+      limit ${FLOOR_PREVIEW_SAMPLES}`);
+    return result.rows.map((row) => ({ query: row.sample, asked: row.asked, topScore: Number(row.top_score) }));
+  };
+  const [gainedSamples, lostSamples] = await Promise.all([samples(gainedBand), samples(lostBand)]);
+  const row = counts.rows[0];
+  return {
+    searches: row?.searches ?? 0,
+    refusedAtCurrent: row?.refused_current ?? 0,
+    refusedAtProposed: row?.refused_proposed ?? 0,
+    gained: row?.gained ?? 0,
+    lost: row?.lost ?? 0,
+    gainedSamples,
+    lostSamples,
+  };
 }
 
 // ---------- the switch, and the purge ----------

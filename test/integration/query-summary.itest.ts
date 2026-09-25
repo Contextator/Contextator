@@ -11,6 +11,7 @@ import {
   mostReturnedChunks,
   neverReturnedDocuments,
   oldestLoggedQuery,
+  previewScoreFloor,
   purgeProjectQueryLog,
   rankQuestionsByGap,
   repeatedQuestions,
@@ -37,6 +38,9 @@ import { applySchema, createTestDatabase, dropTestDatabase, TEST_EMBEDDING_DIMEN
  *   and the best match 0.99, both loudly wrong;
  * - four dashboard searches of it, which the default actor must ignore for the same reason
  *   [OPERATIONS.md](../../../.ssot/OPERATIONS.md) §6.1 tells an operator to write `actor = 'mcp'`;
+ * - five searches of the same model and generation decided against **other floors** — three at 0.77
+ *   and two logged before the floor was recorded — which every figure scoped to 0.82 must ignore, and
+ *   which the floor preview, whose question does not depend on the floor, must count;
  * - a document indexed thirty days ago that nothing ever returned, **and** one indexed half an hour
  *   ago that nothing ever returned, so that the figure has to tell "nobody can find this" from "this
  *   did not exist yet".
@@ -68,6 +72,8 @@ interface Seed {
   model: string;
   generation: number;
   tokenIndex: number | null;
+  /** The floor the search was decided against; `null` for a row logged before it was recorded. Default 0.82. */
+  floor?: number | null;
   /** `[path, chunkIndex, heading, score]` in the order the caller received them. */
   hits: [string, number, string, number][];
 }
@@ -79,6 +85,9 @@ const NEAR_DUPLICATE = 'How do I rotate webhook secrets?';
 const SAML = 'How do I configure SAML?';
 const DEPLOY = 'How do I deploy to Kubernetes?';
 const SWALLOW = 'What is the airspeed of an unladen swallow?';
+const REFUND = 'How do I request a refund?';
+const CHANGELOG = 'Where is the changelog?';
+const FLOOR = 0.82;
 
 const webhooksHit = (score: number): [string, number, string, number][] => [['handbook/webhooks.md', 0, 'Webhooks > Rotating the secret', score]];
 const oidcHit = (score: number): [string, number, string, number][] => [['handbook/oidc.md', 1, 'Single sign-on > OIDC', score]];
@@ -156,11 +165,42 @@ function seedRows(): Seed[] {
       hits: webhooksHit(0.95),
     });
   }
+
+  // Three searches decided against a lower floor, and answered at it — and returning the one page the
+  // 0.82 configuration never returned, so that a figure that dropped the floor from its predicate
+  // would stop calling that page unreturned.
+  for (let i = 0; i < 3; i++) {
+    rows.push({
+      query: REFUND,
+      createdAt: ago(2 * DAY),
+      actor: 'mcp',
+      model: MODEL_A,
+      generation: LIVE,
+      tokenIndex: 0,
+      floor: 0.77,
+      hits: [['handbook/attic.md', 0, 'The attic', 0.79]],
+    });
+  }
+  // Two from before the floor was recorded: their own configuration, guessed into neither side.
+  for (let i = 0; i < 2; i++) {
+    rows.push({
+      query: CHANGELOG,
+      createdAt: ago(4 * DAY),
+      actor: 'mcp',
+      model: MODEL_A,
+      generation: LIVE,
+      tokenIndex: 1,
+      floor: null,
+      hits: oidcHit(0.8),
+    });
+  }
   return rows;
 }
 
 /** The 54 `mcp` searches of the live configuration: every figure below is a figure over these. */
 const IN_SCOPE = 54;
+/** The same model and generation at another floor, or none recorded. */
+const OTHER_FLOORS = 5;
 
 const scope = (over: Partial<SummaryScope> = {}): SummaryScope => ({
   projectId,
@@ -169,6 +209,7 @@ const scope = (over: Partial<SummaryScope> = {}): SummaryScope => ({
   actor: 'mcp',
   embeddingModel: MODEL_A,
   liveGeneration: LIVE,
+  scoreFloor: FLOOR,
   ...over,
 });
 
@@ -224,6 +265,7 @@ beforeAll(async () => {
         hitCount: row.hits.length,
         topScore: row.hits.length > 0 ? row.hits[0][3] : null,
         belowFloor: false,
+        scoreFloor: row.floor === undefined ? FLOOR : row.floor,
         durationMs: 12,
         embeddingModel: row.model,
         liveGeneration: row.generation,
@@ -322,9 +364,27 @@ describe('one retrieval configuration at a time', () => {
 
   it('lists every configuration in the window, biggest first, so the panel can name the one it shows', async () => {
     const configurations = await listQueryConfigurations(db, projectId, ago(7 * DAY), new Date(NOW + MINUTE), 'mcp');
-    expect(configurations[0]).toMatchObject({ embeddingModel: MODEL_A, liveGeneration: LIVE, queries: IN_SCOPE });
-    expect(configurations.map((c) => `${c.embeddingModel}@${c.liveGeneration}`).sort()).toEqual([`${MODEL_A}@0`, `${MODEL_A}@1`, `${MODEL_B}@0`]);
-    expect(configurations.reduce((n, c) => n + c.queries, 0)).toBe(IN_SCOPE + 10);
+    expect(configurations[0]).toMatchObject({ embeddingModel: MODEL_A, liveGeneration: LIVE, scoreFloor: FLOOR, queries: IN_SCOPE });
+    expect(configurations.map((c) => `${c.embeddingModel}@${c.liveGeneration}@${c.scoreFloor}`).sort()).toEqual([
+      `${MODEL_A}@0@0.77`,
+      `${MODEL_A}@0@0.82`,
+      `${MODEL_A}@0@null`,
+      `${MODEL_A}@1@0.82`,
+      `${MODEL_B}@0@0.82`,
+    ]);
+    expect(configurations.reduce((n, c) => n + c.queries, 0)).toBe(IN_SCOPE + 10 + OTHER_FLOORS);
+  });
+
+  it('keeps a window that spans a change of floor as two configurations, and the unrecorded rows as a third', async () => {
+    // At 0.82 the three refund searches are not there: `below_floor` there meant something else.
+    expect((await repeatedQuestions(db, scope(), 20)).map((r) => r.queryNorm)).not.toContain('how do i request a refund?');
+    const lower = await repeatedQuestions(db, scope({ scoreFloor: 0.77 }), 20);
+    expect(lower.map((r) => [r.queryNorm, r.asked])).toEqual([['how do i request a refund?', 3]]);
+    const unrecorded = await repeatedQuestions(db, scope({ scoreFloor: null }), 20);
+    expect(unrecorded.map((r) => [r.queryNorm, r.asked])).toEqual([['where is the changelog?', 2]]);
+    // And every figure carries the floor, not only the question list.
+    expect((await volumeOverTime(db, scope({ scoreFloor: 0.77 }))).reduce((n, b) => n + b.searches, 0)).toBe(3);
+    expect((await mostReturnedChunks(db, scope({ scoreFloor: 0.77 }), 20)).map((c) => c.relativePath)).toEqual(['handbook/attic.md']);
   });
 
   it('reads the operator’s own dashboard searches back only when asked to', async () => {
@@ -429,6 +489,55 @@ describe('the export an operator runs against their own corpus', () => {
   });
 });
 
+/**
+ * What a floor would cost, read off the log before it is set. Across the floors the window holds — the
+ * best score does not depend on the floor — and within one model and generation.
+ *
+ * The 57 searches of `MODEL_A` generation 0 that returned anything: 41 of the rotate question between
+ * 0.833 and 0.841 (nine of them at 0.841), 7 at 0.863, 3 at 0.838, one at 0.312, three at 0.79 and two
+ * at 0.80.
+ */
+describe('the price of a floor, before it is set', () => {
+  const window = () => ({
+    projectId,
+    from: ago(7 * DAY),
+    to: new Date(NOW + MINUTE),
+    actor: 'mcp' as SummaryActor,
+    embeddingModel: MODEL_A,
+    liveGeneration: LIVE,
+  });
+
+  it('counts the searches a lower floor would answer, and names them', async () => {
+    const preview = await previewScoreFloor(db, window(), 0.82, 0.78);
+    expect(preview).toMatchObject({ searches: 57, refusedAtCurrent: 6, refusedAtProposed: 1, gained: 5, lost: 0 });
+    expect(preview.gainedSamples.map((s) => [s.query, s.asked])).toEqual([
+      [REFUND, 3],
+      [CHANGELOG, 2],
+    ]);
+    expect(preview.lostSamples).toEqual([]);
+  });
+
+  it('counts the searches a higher floor would refuse, and names them', async () => {
+    const preview = await previewScoreFloor(db, window(), 0.82, 0.84);
+    expect(preview).toMatchObject({ searches: 57, refusedAtCurrent: 6, refusedAtProposed: 41, gained: 0, lost: 35 });
+    expect(preview.lostSamples.map((s) => [s.query, s.asked])).toEqual([
+      [ROTATE, 32],
+      [NEAR_DUPLICATE, 3],
+    ]);
+    expect(preview.lostSamples[0].topScore).toBeCloseTo(0.839, 6);
+  });
+
+  it('treats a floor of 0 as refusing nothing, whatever the scores', async () => {
+    expect(await previewScoreFloor(db, window(), 0, 0.78)).toMatchObject({ refusedAtCurrent: 0, refusedAtProposed: 1, gained: 0, lost: 1 });
+    expect(await previewScoreFloor(db, window(), 0.82, 0)).toMatchObject({ refusedAtProposed: 0, gained: 6, lost: 0 });
+  });
+
+  it('does not pool another model or another generation', async () => {
+    expect((await previewScoreFloor(db, { ...window(), embeddingModel: MODEL_B }, 0.82, 0.78)).searches).toBe(5);
+    expect((await previewScoreFloor(db, { ...window(), liveGeneration: LIVE + 1 }, 0.82, 0.78)).searches).toBe(5);
+  });
+});
+
 /** Last, because it empties the table the tests above read. */
 describe('the manager’s two controls', () => {
   it('switches the recording off without deleting anything, and then deletes everything', async () => {
@@ -439,7 +548,7 @@ describe('the manager’s two controls', () => {
     expect((await repeatedQuestions(db, scope(), 20)).length).toBe(5);
 
     const deleted = await purgeProjectQueryLog(db, projectId);
-    expect(deleted).toBe(IN_SCOPE + 10 + 4);
+    expect(deleted).toBe(IN_SCOPE + 10 + 4 + OTHER_FLOORS);
     expect(await repeatedQuestions(db, scope(), 20)).toEqual([]);
     // The hits went with them, through the cascade rather than through a second statement.
     expect(await db.select().from(searchQueryHits)).toEqual([]);

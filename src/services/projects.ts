@@ -36,6 +36,17 @@ export async function getProjectById(db: Db, id: string): Promise<ProjectRow | u
   return row;
 }
 
+/**
+ * Sets this project's own relevance floor, or with `null` hands it back to `SEARCH_SCORE_FLOOR`.
+ *
+ * It takes effect on the next search: `searchProject` re-reads the row on every call. Returns what the
+ * row now holds, `undefined` when there is no such project.
+ */
+export async function setProjectScoreFloor(db: Db, id: string, floor: number | null): Promise<{ scoreFloor: number | null } | undefined> {
+  const [row] = await db.update(projects).set({ scoreFloor: floor }).where(eq(projects.id, id)).returning({ scoreFloor: projects.scoreFloor });
+  return row;
+}
+
 export async function getProjectByName(db: Db, name: string): Promise<ProjectRow | undefined> {
   const [row] = await db.select().from(projects).where(eq(projects.name, name)).limit(1);
   return row;

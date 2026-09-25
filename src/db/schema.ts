@@ -140,8 +140,23 @@ export const projects = pgTable(
      * after thirty days, and the privacy page says so.
      */
     queryLogEnabled: boolean('query_log_enabled').notNull().default(true),
+    /**
+     * This project's relevance floor, overriding `SEARCH_SCORE_FLOOR` for this project only
+     * ([ADR-0042](../../.ssot/ADR.md#adr-0042)).
+     *
+     * **`null` is the default and means "the instance's floor"**, so a project nobody has touched
+     * behaves exactly as it did before the column existed. The floor is a cosine similarity measured on
+     * one corpus shape; on encyclopaedic prose the same number refuses up to one answerable question in
+     * eight (eval/BASELINE.md, "The relevance floor across corpus shapes"), and the operator who knows
+     * the corpus is the one to lower it. A column for the reason `query_log_enabled` is one: the decision
+     * belongs to the project, and a `pg_dump` carries it. `0` switches the floor off for this project.
+     */
+    scoreFloor: doublePrecision('score_floor'),
   },
-  (t) => [check('projects_mcp_auth_check', sql`${t.mcpAuth} in ('open', 'token', 'account')`)],
+  (t) => [
+    check('projects_mcp_auth_check', sql`${t.mcpAuth} in ('open', 'token', 'account')`),
+    check('projects_score_floor_check', sql`${t.scoreFloor} is null or (${t.scoreFloor} >= 0 and ${t.scoreFloor} <= 1)`),
+  ],
 );
 
 /**
@@ -605,6 +620,13 @@ export const searchQueries = pgTable(
     topScore: doublePrecision('top_score'),
     /** Whether the agent was told "no good match" instead of being handed these hits (ADR-0042). */
     belowFloor: boolean('below_floor').notNull().default(false),
+    /**
+     * The relevance floor `below_floor` was decided against — the project's own or the server's, `0`
+     * when it was off. NULL on rows logged before the floor was recorded. Without it a window that
+     * spans a change of floor reads every refusal as the current floor's; with it the summary scopes
+     * to one floor the way it scopes to one model.
+     */
+    scoreFloor: doublePrecision('score_floor'),
     /** Wall clock of the whole search, embedding included. */
     durationMs: integer('duration_ms').notNull().default(0),
     /**

@@ -120,6 +120,13 @@
       "when": 1790175403707,
       "tag": "0016_session_auth_method",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1790292860241,
+      "tag": "0017_project_score_floor",
+      "breakpoints": true
     }
   ]
 }

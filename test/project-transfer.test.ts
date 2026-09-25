@@ -171,6 +171,27 @@ describe('the source types the manifest can name', () => {
   });
 });
 
+describe('the project floor the manifest carries', () => {
+  const project = (over: Record<string, unknown>) => Manifest.parse({ ...manifest(), project: { ...manifest().project, ...over } }).project;
+
+  it('carries a floor, null for the server default, and a 0 that turns this project off', () => {
+    expect(project({ scoreFloor: 0.78 }).scoreFloor).toBe(0.78);
+    expect(project({ scoreFloor: null }).scoreFloor).toBeNull();
+    expect(project({ scoreFloor: 0 }).scoreFloor).toBe(0);
+  });
+
+  it('reads an export taken before the column existed, as the server default that project ran', () => {
+    // The fixture is such an export: its project has no `scoreFloor` key at all.
+    expect('scoreFloor' in manifest().project).toBe(false);
+    expect(project({}).scoreFloor ?? null).toBeNull();
+  });
+
+  it('refuses a floor no search could be decided against', () => {
+    expect(() => project({ scoreFloor: 1.2 })).toThrow();
+    expect(() => project({ scoreFloor: -0.1 })).toThrow();
+  });
+});
+
 describe('the refusals, decided from the manifest before a byte of data is read', () => {
   it('accepts a file this instance is the right home for', () => {
     expect(() => checkManifest(manifest(), here)).not.toThrow();
