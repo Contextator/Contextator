@@ -951,7 +951,7 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
     /**
      * An authorization code is a credential of the account that is not a row yet: it lives in memory
      * for a minute, so the revoke's `UPDATE` on `mcp_tokens` cannot reach one in flight. The token
-     * endpoint re-checks the grant behind it instead — the account, the revoke stamp, the project —
+     * endpoint re-checks the grant behind it instead — the account, its credentials epoch, the project —
      * under the account row's `FOR SHARE`, in the transaction that inserts the pair (faz 10).
      */
     describe('against an authorization code approved before the revoke (faz 10)', () => {
@@ -1070,7 +1070,7 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
         expect(await res.json()).toMatchObject({ error: 'invalid_grant' });
         expect(await credentialsOf(f.account.userId)).toEqual([]);
 
-        // The stamp refuses what came before it, not the account: the person signing in again and
+        // The epoch refuses what came before it, not the account: the person signing in again and
         // approving again is a new decision, and it goes through.
         const login = await fetch(`${live.origin}/api/auth/login`, {
           method: 'POST',
@@ -1079,6 +1079,29 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
         });
         expect(login.status).toBe(200);
         const again = await exchange(f, await codeFor(f, jarFromSetCookie(login.headers.getSetCookie())));
+        expect(again.status).toBe(200);
+      });
+
+      it('refuses a code approved before a password change by the same session, and mints nothing', async () => {
+        // The one revoke that keeps the approving session alive: the account stays active, the
+        // membership stays, the session is still live at the exchange, so the epoch is the only
+        // thing that tells this code apart from one approved after the change.
+        const f = await codeFixture('code-then-password', { link: false });
+        const code = await codeFor(f);
+        const changed = await fetch(`${live.origin}/api/auth/password`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', cookie: cookieHeader(f.account.jar) },
+          body: JSON.stringify({ currentPassword: 'a-long-enough-password-2!', newPassword: 'a-completely-different-one-2!' }),
+        });
+        expect(changed.status).toBe(204);
+
+        const res = await exchange(f, code);
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ error: 'invalid_grant' });
+        expect(await credentialsOf(f.account.userId)).toEqual([]);
+
+        // The same session, still signed in, approving again after the change is a new decision.
+        const again = await exchange(f, await codeFor(f));
         expect(again.status).toBe(200);
       });
 

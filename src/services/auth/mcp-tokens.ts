@@ -197,19 +197,28 @@ export async function revokeMcpCredentialsOfGrant(db: Db, grant: McpGrant): Prom
  * `FOR UPDATE` the caller already holds, and either way the lock lasts until the revoke is committed.
  *
  * **And the codes not yet exchanged.** An authorization code lives in memory for up to a minute before
- * it becomes a row here, so the `UPDATE` below cannot reach it. The account's
- * `mcp_credentials_revoked_at` is stamped in the same transaction, and the code exchange refuses a code
- * issued at or before that stamp — which is what makes this revoke reach every credential of the
- * account, including the ones still on their way to being minted.
+ * it becomes a row here, so the `UPDATE` below cannot reach it. The account's `mcp_credentials_epoch`
+ * is incremented in the same transaction; the consent step copied the value it read under the row's
+ * `FOR SHARE` into the code, and the code exchange refuses a code whose copy no longer matches — which
+ * is what makes this revoke reach every credential of the account, including the ones still on their
+ * way to being minted. A counter and not a timestamp: the row lock already puts every approval either
+ * before or after this revoke, and a counter carries that order as it is, where two clock readings
+ * would re-derive it from a wall clock that can step backwards.
+ *
+ * **What counts as a revoke here, and what does not.** Only the events that call this — unlink, a
+ * password change, an administrator's reset — invalidate a code in flight. Ending sessions without
+ * revoking MCP credentials ("sign out everywhere", an administrator closing an account's sessions, a
+ * demotion) does not, deliberately: none of those take down the pairs already minted either, so a
+ * code approved before one of them gains nothing a pair would not already have, and making the code
+ * stricter than the pair it turns into would be a product change of its own (faz 10 review, MINOR-2).
  */
 export async function revokeMcpCredentialsOfUser(db: Db, userId: string): Promise<number> {
   return withUserRowLock(db, userId, async (tx) => {
-    // Read after the lock is held, and from this process's clock rather than `now()` (which is the
-    // transaction's start, possibly before the wait for the row): an authorization code approved
-    // before this revoke took the row has an `issuedAt` at or before it, one approved after it has
-    // one after, and `POST /oauth/token` tells them apart by exactly that.
+    await tx
+      .update(users)
+      .set({ mcpCredentialsEpoch: sql`${users.mcpCredentialsEpoch} + 1` })
+      .where(eq(users.id, userId));
     const now = new Date();
-    await tx.update(users).set({ mcpCredentialsRevokedAt: now }).where(eq(users.id, userId));
     const revoked = await tx
       .update(mcpTokens)
       .set({ revokedAt: now })

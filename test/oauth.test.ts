@@ -16,6 +16,7 @@ const grant = {
   userId: 'user-uuid',
   redirectUri: 'https://client.example/cb',
   resource: 'https://docs.example/mcp/handbook',
+  credentialsEpoch: 0,
 };
 
 const verifier = () => randomBytes(32).toString('base64url');

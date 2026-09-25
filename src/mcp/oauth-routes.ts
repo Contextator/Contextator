@@ -470,20 +470,20 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     const checked = await validateRequest(req, reply, params);
     if (!checked.ok) return reply;
 
-    // The instant this decision is made, read under the account row's `FOR SHARE` together with a
+    // The account's MCP credentials epoch, read under the account row's `FOR SHARE` together with a
     // fresh look at the session ([ADR-0090](../../.ssot/ADR.md#adr-0090), FR-616). The session above
-    // was resolved before any lock, so an unlink or a password change could have revoked it since and
-    // stamped `mcp_credentials_revoked_at` *before* a `Date.now()` taken out here — a code the token
-    // endpoint would then see as newer than the revoke. Under the lock the two are ordered: a revoke
-    // that committed first has already ended this session if it was meant to (an unlink, an
-    // administrator's reset, somebody else's password change; the one session a password change keeps
-    // is the one that just proved the new password), and one that waits for this commit stamps an
-    // instant at or after `issuedAt`, which the exchange refuses.
-    const issuedAt = await withRotationTransaction(db, async (tx) => {
-      await shareUserRowLock(tx, session.userId);
-      return (await isSessionLive(tx, session.sessionId)) ? Date.now() : null;
+    // was resolved before any lock, so an unlink or a password change could have revoked it since.
+    // Under the lock the two are ordered: a revoke that committed first has already ended this session
+    // if it was meant to (an unlink, an administrator's reset, somebody else's password change; the one
+    // session a password change keeps is the one that just proved the new password) and has already
+    // moved the epoch this reads, and one that waits for this commit moves it past the value the code
+    // carries, which the exchange refuses.
+    const credentialsEpoch = await withRotationTransaction(db, async (tx) => {
+      const account = await shareUserRowForGrant(tx, session.userId);
+      if (!account || !(await isSessionLive(tx, session.sessionId))) return null;
+      return account.mcpCredentialsEpoch;
     });
-    if (issuedAt === null) {
+    if (credentialsEpoch === null) {
       return reply.header('cache-control', 'no-store').redirect(`/login?next=${encodeURIComponent('/oauth/authorize')}`, 302);
     }
 
@@ -512,7 +512,7 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       redirectUri: params.redirect_uri,
       codeChallenge: params.code_challenge,
       resource: params.resource.replace(/\/+$/, ''),
-      issuedAt,
+      credentialsEpoch,
     });
     log.info({ project: checked.project.name, user: session.username, clientId: params.client_id }, 'issued an oauth authorization code');
     return backToClient(reply, params.redirect_uri, { code, state: params.state });
@@ -563,7 +563,9 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       // reset in the minute a code lives would be followed by a fresh pair minted from it. The checks,
       // and the two inserts, run in one transaction holding the account row `FOR SHARE` — the order
       // the refresh branch below uses — so a revoke either commits first and is seen here, or waits
-      // for this commit and takes the new pair down with the rest.
+      // for this commit and takes the new pair down with the rest. Only the events that revoke MCP
+      // credentials (`revokeMcpCredentialsOfUser`) move the epoch; ending sessions alone does not, since
+      // it leaves the pairs already minted running too (see that function).
       type Exchange =
         | { refused: string; reason: 'project_gone' | 'account_unusable' | 'revoked_after_issue' | 'no_project_access' }
         | { tokens: Awaited<ReturnType<typeof issuePair>>; projectName: string };
@@ -575,10 +577,9 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         if (!account?.isActive || account.mustChangePassword) {
           return { refused: 'The account this code was issued for can no longer be used', reason: 'account_unusable' };
         }
-        // At or before, not only before: the revoke reads its instant after taking the row, so a code
-        // approved in the same millisecond was approved before it.
-        const revokedAt = account.mcpCredentialsRevokedAt?.getTime();
-        if (revokedAt !== undefined && redeemed.issuedAt <= revokedAt) {
+        // Any difference, not only a smaller one: the epoch only grows, so a code that does not carry
+        // the current value was approved before at least one revoke that has since committed.
+        if (redeemed.credentialsEpoch !== account.mcpCredentialsEpoch) {
           return { refused: 'The account revoked its MCP credentials after this code was issued', reason: 'revoked_after_issue' };
         }
         // The rule the MCP endpoint applies on every request (`resolveMcpCredential`), applied once
@@ -588,6 +589,9 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
           role: account.role,
           userId: account.id,
           username: account.username,
+          // Not a dashboard session and none of a session's rights; `Principal` is the shape
+          // `resolveProjectAccess` reads, and it does not read this field. The code has no row id of
+          // its own yet, so the account's id stands in, as the token's does in `mcp/identity.ts`.
           sessionId: account.id,
           mustChangePassword: false,
         };

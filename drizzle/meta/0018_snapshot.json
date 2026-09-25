@@ -1,5 +1,5 @@
 {
-  "id": "ef50739a-ed82-4ce1-b3de-d2221924b91c",
+  "id": "29c80656-c8a2-4fa1-bc92-f28b1a271285",
   "prevId": "3557dcbc-dc88-4fa7-9abc-54d618eed747",
   "version": "7",
   "dialect": "postgresql",
@@ -2287,11 +2287,12 @@
           "notNull": true,
           "default": "now()"
         },
-        "mcp_credentials_revoked_at": {
-          "name": "mcp_credentials_revoked_at",
-          "type": "timestamp with time zone",
+        "mcp_credentials_epoch": {
+          "name": "mcp_credentials_epoch",
+          "type": "integer",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true,
+          "default": 0
         },
         "created_by": {
           "name": "created_by",

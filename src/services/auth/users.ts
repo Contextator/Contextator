@@ -228,10 +228,10 @@ export async function shareUserRowLock(tx: Db, userId: string): Promise<void> {
 }
 
 /**
- * `shareUserRowLock`, returning the row: what `POST /oauth/token` re-checks before it turns an
- * authorization code into a pair. Same lock, same rule about `tx`, and the same ordering against
- * `revokeMcpCredentialsOfUser` — the stamp it writes is either committed before this reads it or
- * written after this transaction has committed the pair it minted, which the revoke then takes down.
+ * `shareUserRowLock`, returning the row: what the consent step reads the credentials epoch from and
+ * what `POST /oauth/token` re-checks before it turns an authorization code into a pair. Same lock,
+ * same rule about `tx`, and the same ordering against `revokeMcpCredentialsOfUser` — its increment is
+ * either committed before this reads the epoch or made after this transaction has committed.
  */
 export async function shareUserRowForGrant(tx: Db, userId: string) {
   const [row] = await tx
@@ -241,7 +241,7 @@ export async function shareUserRowForGrant(tx: Db, userId: string) {
       role: users.role,
       isActive: users.isActive,
       mustChangePassword: users.mustChangePassword,
-      mcpCredentialsRevokedAt: users.mcpCredentialsRevokedAt,
+      mcpCredentialsEpoch: users.mcpCredentialsEpoch,
     })
     .from(users)
     .where(eq(users.id, userId))

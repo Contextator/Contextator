@@ -712,12 +712,13 @@ export const users = pgTable(
     lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
     passwordChangedAt: timestamp('password_changed_at', { withTimezone: true }).notNull().defaultNow(),
     /**
-     * When `revokeMcpCredentialsOfUser` last ran for this account — unlink, a password change, an
-     * administrator's reset. `POST /oauth/token` refuses an authorization code issued at or before it,
-     * because a code is an MCP credential that is not a row yet and so the revoke cannot reach it.
-     * NULL until the first revoke.
+     * How many times `revokeMcpCredentialsOfUser` has run for this account — unlink, a password change,
+     * an administrator's reset. The consent step copies it into the authorization code under the row's
+     * `FOR SHARE`; `POST /oauth/token` refuses a code whose copy no longer matches, because a code is an
+     * MCP credential that is not a row yet and so the revoke cannot reach it. A counter rather than a
+     * timestamp so the order the row lock establishes is the order compared, whatever the clock does.
      */
-    mcpCredentialsRevokedAt: timestamp('mcp_credentials_revoked_at', { withTimezone: true }),
+    mcpCredentialsEpoch: integer('mcp_credentials_epoch').notNull().default(0),
     createdBy: uuid('created_by'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
