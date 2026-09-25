@@ -1140,6 +1140,29 @@ describe('the structured output', () => {
     expect(data.guidance).toBe(answer.text);
   });
 
+  it("names the project's own floor, not the server's, when the project sets one", async () => {
+    // The floor a project sets replaces the server's ([ADR-0083](../../.ssot/ADR.md#adr-0083)), and the structured answer has to name
+    // the one the search was actually held to — the same one the text names.
+    const projectFloor = 0.99;
+    expect(projectFloor).not.toBe(fx.ctx.config.SEARCH_SCORE_FLOOR);
+    const [strict] = await fx.database.db
+      .insert(projects)
+      .values({ name: 'strict-structured', embeddingModel: MODEL_ID, scoreFloor: projectFloor, documentCount: 1, chunkCount: 1 })
+      .returning();
+    const [source] = await fx.database.db
+      .insert(documentSources)
+      .values({ projectId: strict.id, type: 'local', name: 'handbook', config: { path: fx.root, extensions: ['md'] } })
+      .returning();
+    await seed(fx.database.db, strict.id, source.id, 'handbook/guide.md', GUIDE, { store: true });
+
+    const answer = await structured('search_docs', { query: 'zebra quantum marmalade' }, strict);
+    const data = searchDocsOutput.parse(answer.data);
+    expect(data).toMatchObject({ status: 'below_floor', results: [], floor: strict.scoreFloor });
+    expect(data.closestScore).toBeLessThan(projectFloor);
+    expect(data.guidance).toContain(`below this project's floor of ${projectFloor}`);
+    expect(data.guidance).toBe(answer.text);
+  });
+
   it('says no_match and not_indexed as statuses, with the sentence that says what to do next', async () => {
     const noneAnswer = await structured('search_docs', { query: 'install the package', path_prefix: 'handbook/nowhere' });
     const none = searchDocsOutput.parse(noneAnswer.data);

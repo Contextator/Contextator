@@ -39,6 +39,15 @@ import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_E
  *
  * Raw JSON-RPC over an in-memory pair rather than the SDK `Client`, which would validate and reshape
  * what it received before a test could look at it.
+ *
+ * To re-record after a deliberate change to the tool surface:
+ *
+ *     npx vitest run --project integration test/integration/mcp-golden.itest.ts -u
+ *
+ * and review the diff under `__golden__/mcp-tools/` like any other change. Beware that outside CI a
+ * missing record file is not a failure: `toMatchFileSnapshot` silently writes it from whatever the
+ * server answers now, and the test passes. Only with `CI` set does a missing file fail — run this file
+ * with `CI=1` to check the record rather than extend it.
  */
 
 const baseUrl = inject('postgresBaseUrl');
