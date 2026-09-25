@@ -13,6 +13,7 @@ import {
   SyncIntervalMinutes,
   createSource,
   deleteSource,
+  disableWebhook,
   getSource,
   invalidateSourceDocuments,
   listSources,
@@ -187,6 +188,20 @@ export const sourceRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     const { id, sid } = SourceParams.parse(req.params);
     await requireProject(id);
     return toSourceView(await regenerateWebhookSecret(db, id, sid, serviceOpts), serviceOpts);
+  });
+
+  /**
+   * Turns a Confluence source's webhook off. For Confluence the `POST` above is also what turns it
+   * *on* — the source is created without a secret, and its delivery route refuses everything until
+   * an editor generates one — so this is the other half of that switch, not a general "forget the
+   * secret" for every type.
+   */
+  app.delete('/api/projects/:id/sources/:sid/webhook-secret', async (req) => {
+    const { id, sid } = SourceParams.parse(req.params);
+    await requireProject(id);
+    const row = await disableWebhook(db, id, sid);
+    log.info({ sourceId: sid }, 'confluence webhook turned off');
+    return toSourceView(row, serviceOpts);
   });
 
   await app.register(uploadRoutes, { ctx });

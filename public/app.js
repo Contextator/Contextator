@@ -1172,6 +1172,9 @@ function setKind(kind) {
   // The Notion box is the same affordance with the secret coming the other way: Notion generates the
   // token, the product captures it inside a window, and the operator carries it back into Notion.
   $('#notion-webhook-box').hidden = !(editing && meta.type === 'notion') || srcUi.readOnly;
+  // Confluence's secret goes git's way (generated here, pasted into Confluence), but it only exists once
+  // an editor turns the webhook on — until then the delivery route refuses everything.
+  $('#confluence-webhook-box').hidden = !(editing && meta.type === 'confluence') || srcUi.readOnly;
   $('#dropzone').hidden = srcUi.readOnly;
   $('#upload-mode-row').hidden = $('#upload-mode-row').hidden || srcUi.readOnly;
   $('#source-submit').hidden = srcUi.readOnly;
@@ -1216,6 +1219,7 @@ function openSourceDialog(project, source) {
 
   if (source?.type === 'git' && !srcUi.readOnly) renderWebhook(project, source);
   if (source?.type === 'notion' && !srcUi.readOnly) renderNotionWebhook(project, source);
+  if (source?.type === 'confluence' && !srcUi.readOnly) renderConfluenceWebhook(project, source);
   if (source?.type === 'upload' && !srcUi.readOnly) void loadSourceFiles(project, source);
 }
 
@@ -1338,6 +1342,41 @@ function renderNotionWebhook(project, source) {
       toast(err.message);
     }
   };
+}
+
+/**
+ * The Confluence webhook box: on or off, and "off" is the default rather than a fault. Turning it on
+ * generates the secret; pressing it again replaces the secret, which Confluence then has to be given.
+ */
+function renderConfluenceWebhook(project, source) {
+  const url = `${location.origin}/api/webhooks/confluence/${source.id}`;
+  const enabled = Boolean(source.webhookSecret || source.hasWebhookSecret);
+  $('#confluence-webhook-url').textContent = url;
+  $('#confluence-webhook-copy-url').onclick = () => copyText(url);
+  $('#confluence-webhook-copy-secret').hidden = !enabled;
+  $('#confluence-webhook-copy-secret').onclick = () =>
+    source.webhookSecret
+      ? copyText(source.webhookSecret)
+      : toast('The secret cannot be read with this instance\u2019s key \u2014 generate a new one');
+  $('#confluence-webhook-enable').textContent = enabled ? 'New secret' : 'Turn on';
+  $('#confluence-webhook-disable').hidden = !enabled;
+  $('#confluence-webhook-status').textContent = enabled
+    ? 'On. Add the URL above as a webhook in Confluence with this secret, and pick the page and blog post events. Deliveries signed with anything else are refused.'
+    : 'Off. This source syncs on its interval, which is not an error \u2014 turn the webhook on when you are ready to add it in Confluence.';
+  const update = async (method, message) => {
+    try {
+      const updated = await api(`/api/projects/${project.id}/sources/${source.id}/webhook-secret`, { method });
+      srcUi.editing = updated;
+      renderConfluenceWebhook(project, updated);
+      toast(message);
+      await loadSources(true);
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+  $('#confluence-webhook-enable').onclick = () =>
+    update('POST', enabled ? 'New secret generated \u2014 update it in Confluence' : 'Webhook on \u2014 add the URL and secret in Confluence');
+  $('#confluence-webhook-disable').onclick = () => update('DELETE', 'Webhook off \u2014 deliveries are refused until it is turned on again');
 }
 
 /** Three states, and "expired without a token" is not one of the broken ones. */

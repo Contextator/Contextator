@@ -63,6 +63,23 @@ export function verifyNotionSignature(headers: WebhookHeaders, rawBody: Buffer, 
   return hmacMatches(rawBody, secret, provided);
 }
 
+/**
+ * Confluence's signature: `X-Hub-Signature: sha256=<hex hmac>` over the **raw** body, keyed with the
+ * secret this product generated and the operator pasted into Confluence's webhook form — the direction
+ * of [ADR-0018](../../.ssot/ADR.md#adr-0018), not Notion's.
+ *
+ * **Not a branch of `verifyWebhook` either, although the header is the one Bitbucket uses.** Sharing a
+ * dispatcher would make the two routes accept each other's deliveries on nothing more than a header
+ * name; keeping them apart keeps every route's rule readable in one function. A missing header is a
+ * refusal, never "unsigned, therefore trusted".
+ */
+export function verifyConfluenceSignature(headers: WebhookHeaders, rawBody: Buffer, secret: string): boolean {
+  const provided = header(headers, 'x-hub-signature');
+  if (provided === undefined) return false;
+  if (!/^sha256=/i.test(provided.trim())) return false;
+  return hmacMatches(rawBody, secret, provided);
+}
+
 /** Branch names a push payload touches (empty when the payload shape is unknown → treat as "any"). */
 export function pushedBranches(payload: unknown): string[] {
   if (!payload || typeof payload !== 'object') return [];

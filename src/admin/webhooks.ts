@@ -2,9 +2,10 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import { decryptWebhookSecret, keyringOf, type SecretKeyring } from '../services/crypto.js';
+import { confluenceEventOf, decideConfluenceEvent } from '../services/confluence-webhook.js';
 import { captureVerificationToken, decideEvent, eventTypeOf, minIntervalOf, noteDelivery, verificationTokenOf } from '../services/notion-webhook.js';
 import { getSourceById } from '../services/sources.js';
-import { pushedBranches, verifyNotionSignature, verifyWebhook } from '../services/webhook-verify.js';
+import { pushedBranches, verifyConfluenceSignature, verifyNotionSignature, verifyWebhook } from '../services/webhook-verify.js';
 
 const Params = z.object({ sourceId: z.uuid() });
 
@@ -25,15 +26,16 @@ function openWebhookSecret(stored: string, keys: SecretKeyring): string | null {
 }
 
 /**
- * The two routes that authenticate themselves: `POST /api/webhooks/git/:sourceId` (push notifications
- * from GitHub/GitLab/Bitbucket/Gitea) and `POST /api/webhooks/notion/:sourceId`. Registered as their
- * own plugin (outside adminRoutes) because they authenticate with the per-source webhook secret
+ * The three routes that authenticate themselves: `POST /api/webhooks/git/:sourceId` (push notifications
+ * from GitHub/GitLab/Bitbucket/Gitea), `POST /api/webhooks/notion/:sourceId` and
+ * `POST /api/webhooks/confluence/:sourceId`. Registered as their own plugin (outside adminRoutes) because they authenticate with the per-source webhook secret
  * instead of ADMIN_TOKEN, and need the raw body for HMAC verification.
  *
  * **The two differ in where the secret came from**, and that is the whole of
  * [ADR-0049](../../.ssot/ADR.md#adr-0049): git's was generated here and carried outward by the
  * operator, Notion's is minted by Notion, POSTed once unsigned, and storable only inside a window an
- * editor opened.
+ * editor opened. Confluence's is git's direction again — generated here, pasted into Confluence's
+ * webhook form — but, unlike git's, it does not exist until an editor asks for one.
  */
 export const webhookRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
   const { db, config, indexer, log } = ctx;
@@ -150,6 +152,62 @@ export const webhookRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
     // must not queue behind the timer's backlog ([ADR-0048](../../.ssot/ADR.md#adr-0048)).
     const job = indexer.enqueue(source.projectId, { trigger: 'webhook' });
     log.info({ sourceId: source.id, type }, 'notion webhook accepted; re-index queued');
+    return reply.code(200).send({ queued: true, job: { phase: job.phase, queuedAt: job.queuedAt } });
+  });
+
+  /**
+   * `POST /api/webhooks/confluence/:sourceId` — deliveries from Confluence Data Center's webhooks
+   * (7.7+), or from anything else that signs its body the same way.
+   *
+   * **The window is the secret's existence.** A Confluence source is created with no webhook secret,
+   * and until an editor generates one through the admin API every delivery is refused with
+   * `not_enabled` and nothing is written — the half of [ADR-0049](../../.ssot/ADR.md#adr-0049) that
+   * matters, "refused and not stored". There is no inbound secret to capture: a body that looks like
+   * Notion's `verification_token` is just an unsigned delivery here, and is refused like one.
+   *
+   * After that it is the Notion route's second half unchanged: signature over the raw body, a filter
+   * for events that cannot change indexed content, the debounce, and the interactive lane. Every
+   * non-refusal answers `200`, because a Data Center webhook counts anything else as a failure and
+   * stops delivering after a run of them.
+   */
+  app.post('/api/webhooks/confluence/:sourceId', { bodyLimit: 2 * 1024 * 1024 }, async (req, reply) => {
+    const parsed = Params.safeParse(req.params);
+    if (!parsed.success) return reply.code(404).send({ error: 'not_found' });
+    const source = await getSourceById(db, parsed.data.sourceId);
+    if (!source || source.type !== 'confluence') return reply.code(404).send({ error: 'not_found' });
+
+    if (!source.webhookSecret) {
+      log.warn({ sourceId: source.id }, 'confluence webhook delivery for a source whose webhook is not enabled');
+      return reply.code(401).send({ error: 'not_enabled' });
+    }
+    const raw = Buffer.isBuffer(req.body) ? req.body : Buffer.from(typeof req.body === 'string' ? req.body : '');
+    const secret = openWebhookSecret(source.webhookSecret, keys);
+    if (secret === null) {
+      log.warn({ sourceId: source.id }, 'confluence webhook secret cannot be decrypted with the configured keys; regenerate it for this source');
+      return reply.code(401).send({ error: 'invalid_signature' });
+    }
+    if (!verifyConfluenceSignature(req.headers, raw, secret)) {
+      log.warn({ sourceId: source.id }, 'confluence webhook signature rejected');
+      return reply.code(401).send({ error: 'invalid_signature' });
+    }
+
+    let payload: unknown = null;
+    try {
+      payload = JSON.parse(raw.toString('utf8'));
+    } catch {
+      payload = null;
+    }
+    const event = confluenceEventOf(payload);
+    const decision = decideConfluenceEvent(event);
+    if (!decision.queue) return reply.code(200).send({ queued: false, reason: decision.reason });
+
+    const delivery = await noteDelivery(db, source, minIntervalOf(source, config.WEBHOOK_MIN_INTERVAL_MINUTES));
+    if (!delivery.enqueueNow) {
+      log.info({ sourceId: source.id, event, dueAt: delivery.dueAt }, 'confluence webhook accepted; run already due');
+      return reply.code(200).send({ queued: false, reason: 'within the minimum inter-run interval', dueAt: delivery.dueAt });
+    }
+    const job = indexer.enqueue(source.projectId, { trigger: 'webhook' });
+    log.info({ sourceId: source.id, event }, 'confluence webhook accepted; re-index queued');
     return reply.code(200).send({ queued: true, job: { phase: job.phase, queuedAt: job.queuedAt } });
   });
 };

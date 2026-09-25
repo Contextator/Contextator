@@ -253,9 +253,9 @@ describe('every state-changing /api route leaves a record', () => {
     const oauth = await buildOauthApi();
     const oauthUrls = new Set(routeTable(oauth.printRoutes({ commonPrefix: false })).map(([, url]) => url));
     await oauth.close();
-    // The two webhook routes are registered by a third plugin this file does not build; everything
+    // The three webhook routes are registered by a third plugin this file does not build; everything
     // else named in the list has to exist on one of the two surfaces the audit hooks are installed on.
-    const webhooks = ['/api/webhooks/git/:sourceId', '/api/webhooks/notion/:sourceId'];
+    const webhooks = ['/api/webhooks/git/:sourceId', '/api/webhooks/notion/:sourceId', '/api/webhooks/confluence/:sourceId'];
     for (const url of AUDIT_EXEMPT_ROUTES) {
       if (webhooks.includes(url)) continue;
       expect(admin.has(url) || oauthUrls.has(url)).toBe(true);
