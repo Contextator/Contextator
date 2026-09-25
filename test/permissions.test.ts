@@ -123,6 +123,17 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'GET', url: '/api/projects/:id/queries/export', actor: as('member'), membership: null, allowed: false },
   { method: 'GET', url: '/api/projects/:id/queries/export', actor: as('admin'), membership: null, allowed: true },
 
+  // The project's relevance floor ([ADR-0083](../.ssot/ADR.md#adr-0083)). Changing it decides which
+  // searches the project refuses, the `query-log` class of decision, so it is a manager's. The preview
+  // only re-reads the logged rows the panel already shows, so it is a viewer's like the summary.
+  { method: 'PATCH', url: '/api/projects/:id/score-floor', actor: as('member'), membership: 'viewer', allowed: false },
+  { method: 'PATCH', url: '/api/projects/:id/score-floor', actor: as('member'), membership: 'editor', allowed: false },
+  { method: 'PATCH', url: '/api/projects/:id/score-floor', actor: as('admin'), membership: null, allowed: true },
+  { method: 'PATCH', url: '/api/projects/:id/score-floor', actor: token, membership: null, allowed: true },
+  { method: 'GET', url: '/api/projects/:id/score-floor/preview', actor: as('member'), membership: 'viewer', allowed: true },
+  { method: 'GET', url: '/api/projects/:id/score-floor/preview', actor: as('member'), membership: null, allowed: false },
+  { method: 'GET', url: '/api/projects/:id/score-floor/preview', actor: as('admin'), membership: null, allowed: true },
+
   // Export and import ([ADR-0051](../.ssot/ADR.md#adr-0051)). Neither is an editor's act.
   //
   // The export is a `GET` and a `manager`'s anyway: a viewer can read any one document through the
