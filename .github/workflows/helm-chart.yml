@@ -137,6 +137,11 @@ jobs:
           check 'replicaCount' --set-string replicaCount=1            # not offered (ADR-0078)
           check 'service[./]port' --set-string service.port=80        # wrong type: string for integer
           check 'pullPolicy' --set image.pullPolicy=Sometimes         # outside the enum
+          # Host names only (ADR-0088): src/config.ts refuses a port or a URL at startup, so the schema
+          # refuses them at install instead of leaving a crash-looping Pod.
+          check 'confluenceAllowedHosts' --set 'config.confluenceAllowedHosts={wiki.corp.example:8443}'
+          check 'confluenceAllowedHosts' --set 'config.confluenceAllowedHosts={10.0.4.12:8443}'
+          check 'confluenceAllowedHosts' --set 'config.confluenceAllowedHosts={https://wiki.corp.example}'
 
       # TRUST_PROXY must never be inferred from ingress.enabled (ADR-0060, ADR-0078) — it is only ever
       # rendered when config.trustProxy is set explicitly. This regression-tests the tur 2 fix against
