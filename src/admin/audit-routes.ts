@@ -165,7 +165,9 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
   'DELETE /api/projects/:id/sources/:sid': { verb: 'deleted a source', prep: 'from', target: 'source' },
   'POST /api/projects/:id/sources/:sid/sync': { verb: 'queued a sync of a source', prep: 'of', target: 'source' },
   'DELETE /api/projects/:id/sources/:sid/files': { verb: 'deleted the uploaded files of a source', prep: 'of', target: 'source' },
-  'POST /api/projects/:id/sources/:sid/webhook-secret': { verb: 'rotated the webhook secret of a source', prep: 'of', target: 'source' },
+  // For a git source this rotates the secret; for Confluence the first one also turns the webhook on.
+  'POST /api/projects/:id/sources/:sid/webhook-secret': { verb: 'generated a new webhook secret for a source', prep: 'of', target: 'source' },
+  'DELETE /api/projects/:id/sources/:sid/webhook-secret': { verb: 'turned off the webhook of a source', prep: 'of', target: 'source' },
   'POST /api/projects/:id/sources/:sid/webhook-verification': { verb: 'opened a Notion verification window', prep: 'on', target: 'source' },
   // Uploads
   'POST /api/projects/:id/sources/:sid/uploads': { verb: 'started an upload', prep: 'to', target: 'upload' },

@@ -256,6 +256,18 @@
               <textarea name="spaceKeys" rows="2" placeholder="Space keys, one per line. Empty = every space this account can read."></textarea>
               <span class="field-hint">Pages are indexed as <code>&lt;name&gt;/&lt;space&gt;/&lt;parent page&gt;/&lt;page&gt;.md</code>, nested the way they are in Confluence.</span>
             </label>
+            <div id="confluence-webhook-box" class="webhook-box" hidden>
+              <span class="field-label">Confluence webhook <span class="muted">— optional, off until you turn it on</span></span>
+              <span class="field-hint">Page edits, moves and deletions start a sync without waiting for the interval — within the minimum webhook interval, since a burst of deliveries is collapsed into one run. Blog posts are not indexed, so their events are ignored. It does not notice everything — a delivery Confluence gave up on, a page that became unreadable to this account without an event, or deliveries Confluence skips for up to hours after repeated failures all go unseen until the next scheduled sync — so keep the interval switched on. Deliveries must be signed with the secret below in <code>X-Hub-Signature</code>, which is what Confluence Data Center's own webhooks (Administration → Webhooks) do; Confluence Cloud has no built-in equivalent. The endpoint has to be reachable from Confluence.</span>
+              <div class="webhook-row">
+                <code id="confluence-webhook-url"></code>
+                <button type="button" class="ghost small" id="confluence-webhook-copy-url">Copy URL</button>
+                <button type="button" class="ghost small" id="confluence-webhook-copy-secret">Copy secret</button>
+                <button type="button" class="ghost small" id="confluence-webhook-enable">Turn on</button>
+                <button type="button" class="ghost small" id="confluence-webhook-disable" title="Deliveries are refused until it is turned on again">Turn off</button>
+              </div>
+              <p class="field-hint" id="confluence-webhook-status"></p>
+            </div>
           </div>
 
           <div class="kind-only" data-kind="web">

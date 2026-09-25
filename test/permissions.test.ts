@@ -76,6 +76,12 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   // "Test connection" reaches the network with a stored token, so it is an editor's call.
   { method: 'POST', url: '/api/projects/:id/sources/:sid/test', actor: as('member'), membership: 'viewer', allowed: false },
   { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: 'editor', allowed: true },
+  // Generating a Confluence webhook secret is what turns its delivery route on, and deleting it turns
+  // the route off again — an editor's switch in both directions, never a viewer's.
+  { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: 'viewer', allowed: false },
+  { method: 'DELETE', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: 'editor', allowed: true },
+  { method: 'DELETE', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: 'viewer', allowed: false },
+  { method: 'DELETE', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: null, allowed: false },
   // Opening the Notion verification window is what authenticates the unauthenticated webhook route
   // ([ADR-0049](../.ssot/ADR.md#adr-0049)), so a viewer must not be able to open one.
   { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-verification', actor: as('member'), membership: 'editor', allowed: true },
@@ -635,10 +641,11 @@ describe('what the audit log records', () => {
     expect(subject('POST', '/oauth/token')).toBeNull();
   });
 
-  it('exempts exactly seven routes, and each of them for a reason written beside it', () => {
+  it('exempts exactly eight routes, and each of them for a reason written beside it', () => {
     expect([...AUDIT_EXEMPT_ROUTES].sort()).toEqual([
       '/api/projects/:id/sources/:sid/test',
       '/api/projects/:id/sources/:sid/uploads/:session/files',
+      '/api/webhooks/confluence/:sourceId',
       '/api/webhooks/git/:sourceId',
       '/api/webhooks/notion/:sourceId',
       '/oauth/register',

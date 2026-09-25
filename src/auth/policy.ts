@@ -175,8 +175,8 @@ export function apiTokenAllowsRoute(scope: readonly string[], method: string, ur
  *   `POST` because it carries a credential in a body, not because it changes anything.
  * - `.../uploads/:session/files` — staging, one request per file. Nothing the project serves changes
  *   until the commit, and the commit **is** audited; recording each file would bury the commit.
- * - the two `/api/webhooks/*` routes — **there is no actor at all.** A delivery is authenticated by a
- *   per-source HMAC and comes from a git host or Notion; the run it queues is recorded in
+ * - the three `/api/webhooks/*` routes — **there is no actor at all.** A delivery is authenticated by a
+ *   per-source HMAC and comes from a git host, Notion or Confluence; the run it queues is recorded in
  *   `index_runs.trigger`. They are registered outside `adminRoutes`, so this hook never sees one
  *   today, and they are named anyway: the day somebody moves them under it, the rule should already
  *   say what it thinks rather than start writing rows attributed to nobody.
@@ -195,6 +195,7 @@ export const AUDIT_EXEMPT_ROUTES: ReadonlySet<string> = new Set([
   '/api/projects/:id/sources/:sid/uploads/:session/files',
   '/api/webhooks/git/:sourceId',
   '/api/webhooks/notion/:sourceId',
+  '/api/webhooks/confluence/:sourceId',
   '/oauth/register',
   '/oauth/token',
   '/oauth/revoke',

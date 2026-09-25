@@ -299,8 +299,17 @@ export interface SourceView {
   createdAt: Date;
 }
 
-/** The two source types whose deliveries are signed, whichever side generated the secret. */
-const HAS_WEBHOOK = new Set<string>(['git', 'notion']);
+/** The source types whose deliveries are signed, whichever side generated the secret. */
+const HAS_WEBHOOK = new Set<string>(['git', 'notion', 'confluence']);
+
+/** The source types whose deliveries are debounced into a claim the scheduler takes ([ADR-0049](../../.ssot/ADR.md#adr-0049)). */
+const DEBOUNCED_WEBHOOK = new Set<string>(['notion', 'confluence']);
+
+/**
+ * The source types whose webhook secret this product generates on request: git's exists from creation,
+ * Confluence's only once an editor turns the webhook on — until then its route refuses everything.
+ */
+const GENERATED_WEBHOOK_SECRET = new Set<string>(['git', 'confluence']);
 
 export interface SourceViewOptions {
   /** The ring the stored webhook secret is opened with ([ADR-0075](../../.ssot/ADR.md#adr-0075)). */
@@ -342,7 +351,7 @@ export function toSourceView(row: DocumentSourceRow, opts: SourceViewOptions): S
     webhookSecret: reveal && HAS_WEBHOOK.has(row.type) ? webhookSecretView(row, opts.keys) : null,
     hasWebhookSecret: HAS_WEBHOOK.has(row.type) && Boolean(row.webhookSecret),
     webhookVerificationExpiresAt: row.type === 'notion' ? row.webhookVerificationExpiresAt : null,
-    webhookDueAt: row.type === 'notion' ? row.webhookDueAt : null,
+    webhookDueAt: DEBOUNCED_WEBHOOK.has(row.type) ? row.webhookDueAt : null,
     webhookMinIntervalMinutes: row.webhookMinIntervalMinutes,
     status: row.status,
     lastSyncedAt: row.lastSyncedAt,
@@ -613,9 +622,25 @@ export async function updateSource(
 export async function regenerateWebhookSecret(db: Db, projectId: string, sourceId: string, opts: SourceServiceOptions): Promise<DocumentSourceRow> {
   const existing = await getSource(db, projectId, sourceId);
   if (!existing) throw new NotFoundError('Source not found');
-  if (existing.type !== 'git') throw new ValidationError('Only git sources have a webhook secret');
+  if (!GENERATED_WEBHOOK_SECRET.has(existing.type)) throw new ValidationError('Only git and Confluence sources have a generated webhook secret');
   const webhookSecret = encryptWebhookSecret(randomSecret(), opts.keys);
   const [row] = await db.update(documentSources).set({ webhookSecret }).where(eq(documentSources.id, sourceId)).returning();
+  return row;
+}
+
+/**
+ * Turns a Confluence source's webhook off: the secret is dropped, and with it any claim a delivery
+ * left behind, so the route answers `not_enabled` again and the source is back on its interval alone.
+ *
+ * Confluence only. A git source's secret exists from creation and is replaced rather than removed, and
+ * a Notion source's is Notion's own — clearing it would silently break a subscription Notion still
+ * believes is verified.
+ */
+export async function disableWebhook(db: Db, projectId: string, sourceId: string): Promise<DocumentSourceRow> {
+  const existing = await getSource(db, projectId, sourceId);
+  if (!existing) throw new NotFoundError('Source not found');
+  if (existing.type !== 'confluence') throw new ValidationError('Only a Confluence source can turn its webhook off');
+  const [row] = await db.update(documentSources).set({ webhookSecret: null, webhookDueAt: null }).where(eq(documentSources.id, sourceId)).returning();
   return row;
 }
 
