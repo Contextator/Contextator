@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "contextator chart values",
+  "description": "Checks the shape of the top-level maps only. There is no replicaCount entry: the chart does not offer the key at all (ADR-0078). Draft-07 because Helm v3 validates with gojsonschema, which supports drafts 4, 6 and 7 only.",
+  "type": "object",
+  "properties": {
+    "image": {
+      "type": "object"
+    },
+    "database": {
+      "type": "object"
+    },
+    "secretKey": {
+      "type": "object"
+    },
+    "service": {
+      "type": "object"
+    },
+    "ingress": {
+      "type": "object"
+    },
+    "config": {
+      "type": "object"
+    },
+    "persistence": {
+      "type": "object"
+    },
+    "resources": {
+      "type": "object"
+    },
+    "probes": {
+      "type": "object"
+    },
+    "env": {
+      "type": "object"
+    },
+    "envSecret": {
+      "type": "object"
+    },
+    "imagePullSecrets": {
+      "type": "array"
+    },
+    "extraVolumes": {
+      "type": "array"
+    },
+    "extraVolumeMounts": {
+      "type": "array"
+    },
+    "tests": {
+      "type": "object"
+    }
+  }
+}
