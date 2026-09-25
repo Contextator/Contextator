@@ -416,7 +416,7 @@ describe('an ADR-0076 token over a real request', () => {
   });
 
   /**
-   * `actorUser` ([ADR-0080](../../.ssot/ADR.md#adr-0080), FR-617): the owner's id, matched exactly
+   * `actorUser` ([ADR-0076](../../.ssot/ADR.md#adr-0076), FR-617): the owner's id, matched exactly
    * against `actor_user_id`, so an account's tokens' events are found by the account — the one thing the
    * `actor` label filter above deliberately cannot do. Combines with the other filters; not a UUID is
    * `400 validation_failed`; leaving it out changes nothing.
@@ -425,6 +425,8 @@ describe('an ADR-0076 token over a real request', () => {
     const { db } = httpDb;
     const owner = await createUser(db, { username: 'rhea', role: 'admin', password: PASSWORD });
     const other = await createUser(db, { username: 'sami', role: 'admin', password: PASSWORD });
+    // An account that never acts: the picker must not offer it.
+    const idle = await createUser(db, { username: 'tove', role: 'member', password: PASSWORD });
     const project = await createProject(db, { name: 'rhea-audited' }, []);
     const scope = ['PATCH /api/projects/:id/mcp-auth', 'POST /api/projects/:id/mcp-tokens'];
     const mint = (userId: string, name: string) => createApiToken(db, { userId, name, scope, projectId: null, expiresAt: null, createdBy: userId });
@@ -442,7 +444,11 @@ describe('an ADR-0076 token over a real request', () => {
     await live.ctx.audit.settled();
 
     const cookie = await signIn('rhea');
-    type Page = { events: Array<{ action: string; actor: { kind: string; label: string; userId: string | null }; detail: Record<string, unknown> }> };
+    type Page = {
+      events: Array<{ action: string; actor: { kind: string; label: string; userId: string | null }; detail: Record<string, unknown> }>;
+      nextCursor: string | null;
+      filters: { accounts: Array<{ id: string; username: string }> } | null;
+    };
     const audit = async (query: string) => {
       const res = await live.app.inject({ method: 'GET', url: `/api/audit?limit=200&${query}`, headers: { cookie } });
       return { status: res.statusCode, body: res.json() as Page & { error?: string } };
@@ -480,6 +486,25 @@ describe('an ADR-0076 token over a real request', () => {
         .map((e) => e.detail.tokenId)
         .sort(),
     ).toEqual([mine.view.id, mine.view.id, theirs.view.id].sort());
+
+    // The picker behind it ([F06-MINOR-2], faz 06 review): the first page's `filters.accounts` offers
+    // each account with an event as `{ id, username }` — the id the filter takes, the name a person
+    // reads — and nobody who has none; a later page carries no facets at all.
+    const first = await audit('');
+    const accounts = first.body.filters?.accounts ?? [];
+    expect(accounts).toContainEqual({ id: owner.id, username: 'rhea' });
+    expect(accounts).toContainEqual({ id: other.id, username: 'sami' });
+    expect(accounts.map((a) => a.id)).not.toContain(idle.id);
+    const paged = await live.app.inject({ method: 'GET', url: '/api/audit?limit=1', headers: { cookie } });
+    const cursor = (paged.json() as Page).nextCursor;
+    expect(cursor).not.toBeNull();
+    const next = await live.app.inject({
+      method: 'GET',
+      url: `/api/audit?limit=1&cursor=${encodeURIComponent(cursor as string)}`,
+      headers: { cookie },
+    });
+    expect(next.statusCode).toBe(200);
+    expect((next.json() as Page).filters).toBeNull();
 
     // Not a UUID is refused before it reaches a `uuid` column.
     for (const bad of ['rhea', '1234', `${owner.id}x`]) {

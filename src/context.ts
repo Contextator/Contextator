@@ -101,5 +101,13 @@ export interface AppContext {
      * stale-promotion race test pauses here).
      */
     onUserUpdateBeforeLock?: () => Promise<void>;
+    /**
+     * Awaited by the token endpoint's refresh rotation right after it has claimed the presented refresh
+     * token and right before it inserts the new pair — inside the rotation's transaction, holding the
+     * account row `FOR SHARE` and the claimed row. That is the window a revoke-by-account (unlink, a
+     * password change) has to land in to miss the new pair or to deadlock against its insert
+     * ([F06-MINOR-1], faz 06 review; `test/integration/oidc.itest.ts` pauses here).
+     */
+    onRefreshClaimedBeforeIssue?: () => Promise<void>;
   };
 }

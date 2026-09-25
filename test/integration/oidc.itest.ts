@@ -19,7 +19,7 @@ import {
   userSessions,
   type AuditEventRow,
 } from '../../src/db/schema.js';
-import { issueMcpCredential } from '../../src/services/auth/mcp-tokens.js';
+import { issueMcpCredential, revokeMcpCredentialsOfUser } from '../../src/services/auth/mcp-tokens.js';
 import { setMemberRole } from '../../src/services/auth/memberships.js';
 import { linkFederatedIdentity, provisionFederatedUser, unlinkFederatedIdentity } from '../../src/services/auth/federated-identities.js';
 import { revokeSessionsOfUser } from '../../src/services/auth/sessions.js';
@@ -794,6 +794,158 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
       const recorded = await waitForEvents((e) => e.actorUserId === account.userId && e.action === 'DELETE /api/auth/oidc/link');
       expect(recorded).toHaveLength(1);
       expect(recorded[0].detail).toMatchObject({ revokedMcpCredentials: 0 });
+    });
+
+    /**
+     * A revoke-by-account and a refresh rotation of the same account, in both orders
+     * ([F06-MINOR-1], faz 06 review). Each test pins one order deterministically — a hook or a held
+     * row lock, then `waitForLockWaiter` as proof the other side is queued rather than a guess that it
+     * got there — and asserts on what is left live afterwards.
+     */
+    describe('against a concurrent refresh-token rotation ([F06-MINOR-1], faz 06 review)', () => {
+      /** An `account`-mode project, a member with one refresh credential for it, optionally SSO-linked. */
+      async function rotationFixture(slug: string, opts: { link: boolean }) {
+        const project = await seedProject(database.db, slug, { path: 'guide.md', body: '# Guide' });
+        await database.db.update(projects).set({ mcpAuth: 'account' }).where(eq(projects.id, project.id));
+        const [client] = await database.db
+          .insert(oauthClients)
+          .values({ clientId: `ctxc_${slug.replaceAll('-', '_')}`, name: 'connector', redirectUris: ['https://client.example/cb'] })
+          .returning();
+        const account = await signInLocalUser(`${slug}-owner`);
+        await setMemberRole(database.db, project.id, account.userId, 'viewer', null);
+        if (opts.link) {
+          provider.setNextIdentity({ sub: `${slug}-identity`, preferred_username: 'irrelevant-here' });
+          const flow = await startOidcFlow(live.origin, { startPath: '/api/auth/oidc/link', cookie: cookieHeader(account.jar) });
+          expect((await hitCallback(flow.callbackUrl, { ...account.jar, ...flow.jar })).status).toBe(302);
+        }
+        const refresh = await issueMcpCredential(database.db, {
+          projectId: project.id,
+          userId: account.userId,
+          clientId: client.clientId,
+          kind: 'refresh',
+          name: 'connector',
+          ttlMs: 60_000,
+        });
+        return { project, account, refresh };
+      }
+
+      const rotate = (refreshToken: string) =>
+        fetch(`${live.origin}/oauth/token`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken }),
+        });
+
+      const credentialsOf = (userId: string) => database.db.select().from(mcpTokens).where(eq(mcpTokens.userId, userId));
+
+      /** Parks the next refresh rotation after its claim and before it inserts the new pair. */
+      function parkRotationAfterClaim() {
+        const entered = deferred<void>();
+        const release = deferred<void>();
+        live.ctx.testHooks = {
+          onRefreshClaimedBeforeIssue: async () => {
+            entered.resolve();
+            await release.promise;
+          },
+        };
+        return { entered: entered.promise, release: release.resolve };
+      }
+
+      it("an unlink that arrives between a rotation's claim and its insert waits for it, then takes down the pair it minted", async () => {
+        const { project, account, refresh } = await rotationFixture('rotate-then-unlink', { link: true });
+        const parked = parkRotationAfterClaim();
+        try {
+          const rotation = rotate(refresh.token);
+          await parked.entered;
+
+          const unlink = fetch(`${live.origin}/api/auth/oidc/link`, {
+            method: 'DELETE',
+            headers: { cookie: cookieHeader(account.jar), 'sec-fetch-site': 'same-origin' },
+            redirect: 'manual',
+          });
+          // Queued behind the rotation's transaction: on the account row with the rotation's `FOR SHARE`.
+          // Without it the unlink takes the row, then its revoke queues on the claimed refresh row while
+          // the rotation's insert queues on the unlink's row lock (the pair's `user_id` foreign key) —
+          // a deadlock, which Postgres settles by failing one of the two requests.
+          expect(await waitForLockWaiter(database.pool)).toBe(true);
+
+          parked.release();
+          const [rotated, unlinked] = await Promise.all([rotation, unlink]);
+          expect(rotated.status).toBe(200);
+          expect(unlinked.status).toBe(204);
+          const pair = (await rotated.json()) as { access_token: string; refresh_token: string };
+
+          const rows = await credentialsOf(account.userId);
+          expect(rows).toHaveLength(3); // the presented refresh token and the pair it was rotated into
+          expect(rows.filter((r) => r.revokedAt === null)).toEqual([]);
+          expect((await initializeWith(project.name, pair.access_token)).status).toBe(401);
+          expect((await rotate(pair.refresh_token)).status).toBe(400);
+        } finally {
+          parked.release();
+          live.ctx.testHooks = undefined;
+        }
+      });
+
+      it("a password-change revoke (bare, outside any transaction) that arrives between a rotation's claim and its insert takes down the pair it minted", async () => {
+        // `POST /api/auth/password` and `POST /api/users/:id/password` call the revoke exactly like
+        // this, on `db` rather than on a transaction of their own. The route itself would queue earlier,
+        // on `setPassword`'s row update against the rotation's `FOR SHARE`, so it cannot show whether
+        // the revoke on its own is ordered; this can.
+        const { project, account, refresh } = await rotationFixture('rotate-then-password', { link: false });
+        const parked = parkRotationAfterClaim();
+        try {
+          const rotation = rotate(refresh.token);
+          await parked.entered;
+
+          const revoke = revokeMcpCredentialsOfUser(database.db, account.userId);
+          expect(await waitForLockWaiter(database.pool)).toBe(true);
+
+          parked.release();
+          const [rotated, revoked] = await Promise.all([rotation, revoke]);
+          expect(rotated.status).toBe(200);
+          expect(revoked).toBe(2); // the new pair; the presented token was already spent by the claim
+          const pair = (await rotated.json()) as { access_token: string };
+
+          const rows = await credentialsOf(account.userId);
+          expect(rows).toHaveLength(3);
+          expect(rows.filter((r) => r.revokedAt === null)).toEqual([]);
+          expect((await initializeWith(project.name, pair.access_token)).status).toBe(401);
+        } finally {
+          parked.release();
+          live.ctx.testHooks = undefined;
+        }
+      });
+
+      it('a rotation that arrives while an unlink holds the account row waits for it, then is refused and mints nothing', async () => {
+        const { account, refresh } = await rotationFixture('unlink-then-rotate', { link: false });
+        const locked = deferred<void>();
+        const release = deferred<void>();
+        // Unlink's own shape (`DELETE /api/auth/oidc/link`): the account row `FOR UPDATE`, then the
+        // revoke inside it — held open here so the rotation provably arrives in between.
+        const unlink = withUserRowLock(database.db, account.userId, async (tx) => {
+          locked.resolve();
+          await release.promise;
+          return revokeMcpCredentialsOfUser(tx, account.userId);
+        });
+        try {
+          await locked.promise;
+          const rotation = rotate(refresh.token);
+          expect(await waitForLockWaiter(database.pool)).toBe(true);
+
+          release.resolve();
+          const [revoked, rotated] = await Promise.all([unlink, rotation]);
+          expect(revoked).toBe(1);
+          expect(rotated.status).toBe(400);
+          expect(await rotated.json()).toMatchObject({ error: 'invalid_grant' });
+
+          const rows = await credentialsOf(account.userId);
+          expect(rows).toHaveLength(1); // nothing was minted
+          expect(rows[0].revokedAt).not.toBeNull();
+        } finally {
+          release.resolve();
+          await unlink.catch(() => {});
+        }
+      });
     });
   });
 

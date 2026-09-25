@@ -18,7 +18,9 @@ export type SourceType = (typeof SOURCE_TYPES)[number];
  *
  * Refused rather than ignored: a caller who sent a credential deserves to learn it was never going to
  * be read, rather than find it stored and counted by the backup's key check. `null`, and the empty
- * string a form sends for "no secret", remove nothing that is there and pass on every type.
+ * string a form sends for "no secret", carry no secret and so pass on every type — on an update they
+ * clear whatever secret is stored, which is how a source of a type that takes none gets rid of one
+ * written before this check existed.
  */
 function checkSecretAllowed(type: string, secret: string | null | undefined): void {
   if (!secret) return;

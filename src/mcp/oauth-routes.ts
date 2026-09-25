@@ -10,6 +10,7 @@ import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
 import { getProjectById, getProjectByName } from '../services/projects.js';
 import { findSessionUser } from '../services/auth/sessions.js';
+import { shareUserRowLock } from '../services/auth/users.js';
 import type { Db } from '../db/client.js';
 import {
   findSpentRefreshToken,
@@ -583,6 +584,12 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         const project = await getProjectById(tx, grant.projectId);
         if (!project) return { error: oauthError('invalid_grant', 'The project this grant was for no longer exists') };
 
+        // The account row, `FOR SHARE`, before the claim and until the commit ([F06-MINOR-1], faz 06
+        // review): an unlink or a password change revoking this account's credentials either commits
+        // before the claim below runs — which then finds the token revoked and takes the raced branch —
+        // or waits until this pair is committed and takes it down with the rest.
+        await shareUserRowLock(tx, grant.userId);
+
         /**
          * Rotation, and **the revoke is the claim rather than a formality**. `revoked_at IS NULL` is in
          * its `WHERE`, so two concurrent exchanges of the same refresh token race on one row and exactly
@@ -596,6 +603,7 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
           log.warn({ clientId: grant.clientId, revoked }, 'two exchanges raced for one refresh token; revoked the whole grant');
           return { error: oauthError('invalid_grant', 'That refresh token is unknown, expired or revoked') };
         }
+        await ctx.testHooks?.onRefreshClaimedBeforeIssue?.();
         return { tokens: await issuePair(tx, { projectId: grant.projectId, userId: grant.userId, clientId: grant.clientId }, project.name) };
       });
       if ('error' in outcome) return reply.code(400).send(outcome.error);

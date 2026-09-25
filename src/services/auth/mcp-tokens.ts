@@ -3,6 +3,7 @@ import { and, asc, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
 import { mcpTokens, projects, type McpAuthMode, type McpTokenKind, type McpTokenRow } from '../../db/schema.js';
 import { NotFoundError } from '../projects.js';
+import { withUserRowLock } from './users.js';
 
 /**
  * Bearer credentials for one project's MCP endpoint.
@@ -186,14 +187,24 @@ export async function revokeMcpCredentialsOfGrant(db: Db, grant: McpGrant): Prom
  * change did not reach, which is exactly the credential somebody with the old password could have taken.
  *
  * `mcp_tokens_user_idx` is the index this reads through, and this is its first caller.
+ *
+ * **Under the account row's `FOR UPDATE`, always** ([F06-MINOR-1], faz 06 review of
+ * [ADR-0090](../../../.ssot/ADR.md#adr-0090)). A refresh-token rotation holds the same row
+ * `FOR SHARE` from before its claim until it commits (`shareUserRowLock`), so this `UPDATE` never runs
+ * while a rotation has minted a pair it cannot see yet. Taken here rather than left to each caller,
+ * because the password change and the administrator's reset call this bare on `db` and unlink calls it
+ * inside its own `withUserRowLock`: on `db` it is a transaction of its own, on a `tx` a savepoint whose
+ * `FOR UPDATE` the caller already holds, and either way the lock lasts until the revoke is committed.
  */
 export async function revokeMcpCredentialsOfUser(db: Db, userId: string): Promise<number> {
-  const revoked = await db
-    .update(mcpTokens)
-    .set({ revokedAt: new Date() })
-    .where(and(eq(mcpTokens.userId, userId), sql`${mcpTokens.kind} <> 'static'`, isNull(mcpTokens.revokedAt)))
-    .returning({ id: mcpTokens.id });
-  return revoked.length;
+  return withUserRowLock(db, userId, async (tx) => {
+    const revoked = await tx
+      .update(mcpTokens)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(mcpTokens.userId, userId), sql`${mcpTokens.kind} <> 'static'`, isNull(mcpTokens.revokedAt)))
+      .returning({ id: mcpTokens.id });
+    return revoked.length;
+  });
 }
 
 /**
@@ -296,6 +307,17 @@ export async function verifyMcpToken(db: Db, projectId: string, raw: string): Pr
  * token queued on one key, each holding a pooled connection while it waited, and the pool is ten
  * (`src/db/client.ts`): a denial of service introduced by a fix, defending against a race the
  * transaction already settles.
+ *
+ * **What the transaction does not settle is a revoke by account**, and that one takes a lock
+ * ([F06-MINOR-1], faz 06 review of [ADR-0090](../../../.ssot/ADR.md#adr-0090)). Unlink, a password
+ * change and an administrator's reset revoke every credential of the account with one `UPDATE`; if
+ * it runs between a rotation's claim and its insert, it waits on the claimed row, re-checks only that
+ * row, and misses the pair the rotation then inserts — or, under unlink's row lock, deadlocks against
+ * that insert's foreign-key check on the same account row. The token endpoint therefore takes the
+ * account row `FOR SHARE` (`shareUserRowLock`) before the claim, and `revokeMcpCredentialsOfUser`
+ * takes it `FOR UPDATE`, so one of the two always commits before the other looks. That lock is keyed on a user
+ * id read from a verified credential, never on anything the caller chose, so it is not the queue the
+ * removed advisory lock was.
  */
 export async function withRotationTransaction<T>(db: Db, run: (tx: Db) => Promise<T>): Promise<T> {
   return db.transaction(async (tx) => run(tx as unknown as Db));

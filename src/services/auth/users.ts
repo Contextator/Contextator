@@ -205,6 +205,29 @@ export async function withUserRowLock<T>(db: Db, userId: string, run: (tx: Db) =
 }
 
 /**
+ * Takes the account row `FOR SHARE` inside the caller's transaction and holds it until that
+ * transaction ends ([F06-MINOR-1], faz 06 review of [ADR-0090](../../../.ssot/ADR.md#adr-0090)).
+ *
+ * This is the reader's half of `withUserRowLock`: a `FOR SHARE` does not conflict with another
+ * `FOR SHARE`, so any number of these run side by side, but it does conflict with the `FOR UPDATE`
+ * every per-account revoke takes (`withUserRowLock`, and `revokeMcpCredentialsOfUser` through it).
+ * A refresh-token rotation takes it before it claims and mints, which puts the two in one order: a
+ * revoke that got the row first has committed before the rotation's claim runs, so the claim finds
+ * its refresh token revoked; a rotation that got the row first has committed its new pair before the
+ * revoke's `UPDATE` takes its snapshot, so the pair is in what comes down. Without it a revoke landing
+ * between the claim and the insert fails one of two ways: a bare `UPDATE` waits on the claimed refresh
+ * row, re-checks only that row once the rotation commits, and never sees the pair inserted beside it;
+ * one holding the account row `FOR UPDATE` deadlocks against that insert, whose `user_id` foreign key
+ * asks the same row for `FOR KEY SHARE`.
+ *
+ * Same rule as `withUserRowLock` about the handle: `tx` must be the transaction the rest of the work
+ * runs in, or the lock guards nothing.
+ */
+export async function shareUserRowLock(tx: Db, userId: string): Promise<void> {
+  await tx.execute(sql`SELECT id FROM users WHERE id = ${userId} FOR SHARE`);
+}
+
+/**
  * Instrumentation for deterministic integration tests only — no route or process passes anything but
  * `onBeforeLock` (and that only from `ctx.testHooks`). `onRowLocked` is awaited right after the
  * account row lock is held, the window a second remover needs to be in for the lock order to matter.
