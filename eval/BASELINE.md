@@ -1549,7 +1549,8 @@ creates a project seventy times faster. It loses on what it asks of everything e
 
 - **`CREATE TABLE … PARTITION OF` takes `AccessExclusiveLock` on `chunks`** — every project's searches
   and writes stop behind every project creation, and behind any long search already running. A
-  partial index built `CONCURRENTLY` blocks nobody.
+  partial index built `CONCURRENTLY` blocks no reader or writer of `chunks`; other project creations
+  and deletions queue behind it.
 - **The primary key has to become `(id, project_id)`**, and `chunks_document_chunk_index_uq` has to
   carry `project_id`, because a partitioned table's unique constraints must include the partition key.
 - **The migration is a copy of the whole table** (604 ms at 210 500 chunks here, and a full rewrite
