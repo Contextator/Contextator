@@ -77,7 +77,10 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'POST', url: '/api/projects/:id/sources/:sid/test', actor: as('member'), membership: 'viewer', allowed: false },
   { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: 'editor', allowed: true },
   // Generating a Confluence webhook secret is what turns its delivery route on, and deleting it turns
-  // the route off again — an editor's switch in both directions, never a viewer's.
+  // the route off again — an editor's switch in both directions, never a viewer's. The delivery route
+  // itself, `POST /api/webhooks/confluence/:sourceId`, is not a row here: it has no session actor, is
+  // registered outside the admin API and is authenticated by the source's HMAC, which
+  // `confluence-webhook.test.ts` and `integration/confluence-webhook.itest.ts` hold it to.
   { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: 'viewer', allowed: false },
   { method: 'DELETE', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: 'editor', allowed: true },
   { method: 'DELETE', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: 'viewer', allowed: false },
