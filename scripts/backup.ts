@@ -1,12 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { sql } from 'drizzle-orm';
+import { inArray, sql } from 'drizzle-orm';
 import * as tar from 'tar';
 import { loadConfig, type Config } from '../src/config.js';
 import { createDb, type Db } from '../src/db/client.js';
 import { documentSources } from '../src/db/schema.js';
-import { encryptedRowFilter } from '../src/services/encrypted-fields.js';
+import { CREDENTIAL_SOURCE_TYPES, encryptedRowFilter } from '../src/services/encrypted-fields.js';
 import {
   BackupRefused,
   connectionFromEnv,
@@ -92,6 +92,12 @@ async function uploadSources(db: Db): Promise<UploadSource[]> {
  * instance generates and can generate again. Counting both in one number would mean a single public
  * repository with a webhook stops a restore that costs nothing, which is the case Faz 09 went out of
  * its way to let through.
+ *
+ * `encryptedSources` counts `git`, `notion` and `confluence` rows only
+ * ([ADR-0091](../.ssot/ADR.md#adr-0091)). Those are the types that use a credential; a `secret_enc` on
+ * a `local`, `upload` or `web` row is one nothing reads, and the restore drops it rather than refusing
+ * over it. The manifest says which types were counted, which is how a restore tells this archive from
+ * one written before the narrowing.
  */
 async function counts(
   db: Db,
@@ -100,7 +106,9 @@ async function counts(
     SELECT (SELECT count(*)::int FROM projects) AS projects,
            (SELECT count(*)::int FROM documents) AS documents,
            (SELECT count(*)::int FROM chunks) AS chunks,
-           (SELECT count(*)::int FROM document_sources WHERE ${encryptedRowFilter(documentSources, 'irrecoverable')}) AS encrypted_sources,
+           (SELECT count(*)::int FROM document_sources
+             WHERE ${inArray(documentSources.type, [...CREDENTIAL_SOURCE_TYPES])}
+               AND ${encryptedRowFilter(documentSources, 'irrecoverable')}) AS encrypted_sources,
            (SELECT count(*)::int FROM document_sources WHERE ${encryptedRowFilter(documentSources, 'regenerable')}) AS regenerable_secrets`);
   const row = result.rows[0] as {
     projects: number;
@@ -197,6 +205,7 @@ export async function runBackup(deps: BackupDeps, outPath: string): Promise<Back
       fingerprint: config.SECRET_KEY ? secretKeyFingerprint(config.SECRET_KEY) : null,
       encryptedSources: tally.encryptedSources,
       regenerableSecrets: tally.regenerableSecrets,
+      encryptedSourceTypes: [...CREDENTIAL_SOURCE_TYPES],
     },
     counts: {
       projects: tally.projects,
@@ -245,7 +254,7 @@ export function secretKeySentences(manifest: Manifest): string[] {
   const { encryptedSources, regenerableSecrets, fingerprint } = manifest.secretKey;
   return [
     `  SECRET_KEY is NOT in this file and never will be — only its fingerprint, ${fingerprint}.`,
-    `  ${encryptedSources} source(s) in the dump hold a sync credential encrypted under it — the token the provider` +
+    `  ${encryptedSources} git, Notion or Confluence source(s) in the dump hold a sync credential encrypted under it — the token the provider` +
       ' issued, which this instance cannot reissue. A restore without that exact key cannot decrypt any of them, and' +
       ' `restore` will refuse to start rather than leave you to find out.',
     `  ${regenerableSecrets} source(s) hold a webhook secret encrypted under it. Those a restore does not stop for.` +

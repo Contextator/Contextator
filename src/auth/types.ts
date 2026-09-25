@@ -1,4 +1,5 @@
 import type { UserRole } from '../db/schema.js';
+import type { AuditDetail } from './policy.js';
 
 export type { ProjectMemberRole, UserRole } from '../db/schema.js';
 
@@ -50,5 +51,13 @@ declare module 'fastify' {
     auditProjectId?: string | null;
     /** The created object's id, read back from the response by the audit hook's own allowlist. */
     auditTarget?: { type: string; id: string } | null;
+    /**
+     * Detail fields the handler computed itself and the request body cannot supply — a count of what
+     * the action changed, known only once its transaction has run (`DELETE /api/auth/oidc/link`'s
+     * `revokedMcpCredentials`, [ADR-0090](../../.ssot/ADR.md#adr-0090)). Merged over the allowlisted
+     * body fields by the audit hook. Set only from server-side values, never from request input, so
+     * `detail` stays a closed set.
+     */
+    auditDetail?: AuditDetail | null;
   }
 }

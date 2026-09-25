@@ -36,7 +36,8 @@ const CreateBody = z.object({
   label: z.string().max(200).optional(),
   flavor: z.enum(FLAVORS).optional(),
   config: z.record(z.string(), z.unknown()).optional(),
-  secret: z.string().min(1).max(4096).optional(),
+  /** `null` is "no secret" and is accepted on every type ([ADR-0091](../../.ssot/ADR.md#adr-0091)). */
+  secret: z.string().min(1).max(4096).nullable().optional(),
   /**
    * Minutes between scheduled syncs, `null` for none ([ADR-0048](../../.ssot/ADR.md#adr-0048)).
    * Omitted takes `SYNC_DEFAULT_INTERVAL_MINUTES`, and `0` there means the instance creates every new

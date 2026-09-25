@@ -58,6 +58,24 @@ export interface EncryptedField {
 /** @see EncryptedField.recovery */
 export type SecretRecovery = 'irrecoverable' | 'regenerable';
 
+/**
+ * The source types that authenticate with a credential, and so the only ones that may hold a
+ * `secret_enc` ([ADR-0091](../../.ssot/ADR.md#adr-0091)): a git token, a Notion integration secret, a
+ * Confluence API token or personal access token. A `local`, `upload` or `web` source reads nothing
+ * with one.
+ *
+ * Stated here, beside the list of encrypted columns, because three places have to agree on it: the
+ * source service refuses a secret for any other type, `scripts/backup.ts` counts only these types'
+ * credentials as what a wrong key would destroy, and `scripts/restore.ts` refuses only for those and
+ * drops a `secret_enc` it finds on any other type.
+ */
+export const CREDENTIAL_SOURCE_TYPES = ['git', 'notion', 'confluence'] as const;
+
+/** Whether a `document_sources.type` value is one of {@link CREDENTIAL_SOURCE_TYPES}. */
+export function isCredentialSourceType(type: string): boolean {
+  return (CREDENTIAL_SOURCE_TYPES as readonly string[]).includes(type);
+}
+
 function field(table: PgTable, column: PgColumn, id: PgColumn, legacyPlaintext: boolean, recovery: SecretRecovery): EncryptedField {
   const columns = getTableColumns(table) as Record<string, PgColumn>;
   const property = Object.keys(columns).find((key) => columns[key] === column);

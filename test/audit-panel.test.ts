@@ -33,6 +33,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock);
   Object.assign(state.audit, {
     actor: '',
+    actorUser: '',
     project: '',
     action: '',
     from: '',
@@ -79,13 +80,15 @@ describe('what the audit panel asks for, and how often', () => {
     await loadAudit();
     state.audit.project = 'none';
     await loadAudit();
+    state.audit.actorUser = '5f2c0a1b-0000-4000-8000-0000000000aa';
+    await loadAudit();
     state.audit.cursor = '5f2c0a1b-0000-4000-8000-000000000002';
     await loadAudit();
-    expect(sent()).toHaveLength(7);
+    expect(sent()).toHaveLength(8);
 
     // Nothing moved; the poll is still a no-op.
     await loadAudit();
-    expect(sent()).toHaveLength(7);
+    expect(sent()).toHaveLength(8);
   });
 
   it('reads on demand when the Refresh button asks, which is the way to get a fresh page', async () => {
@@ -105,6 +108,7 @@ describe('what the audit panel asks for, and how often', () => {
 
     Object.assign(state.audit, {
       actor: 'dana',
+      actorUser: '5f2c0a1b-0000-4000-8000-0000000000aa',
       action: 'PATCH /api/projects/:id/query-log',
       project: 'none',
       from: '2026-09-01',
@@ -117,6 +121,7 @@ describe('what the audit panel asks for, and how often', () => {
     expect(Object.fromEntries(url.searchParams)).toEqual({
       limit: '50',
       actor: 'dana',
+      actorUser: '5f2c0a1b-0000-4000-8000-0000000000aa',
       action: 'PATCH /api/projects/:id/query-log',
       project: 'none',
       from: '2026-09-01',

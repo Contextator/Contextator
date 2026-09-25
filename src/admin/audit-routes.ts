@@ -1,8 +1,9 @@
-import { and, desc, eq, gte, isNotNull, isNull, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, exists, gte, isNotNull, isNull, lt, sql } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
-import { type AuditActorKind, auditEvents, projects } from '../db/schema.js';
+import type { AuditDetail } from '../auth/policy.js';
+import { type AuditActorKind, auditEvents, projects, users } from '../db/schema.js';
 import { ValidationError } from '../services/projects.js';
 
 /**
@@ -28,10 +29,12 @@ import { ValidationError } from '../services/projects.js';
  * `(actor_label, created_at desc)` and `(action, created_at desc)`. The actor one is keyed on the
  * *label* rather than on `actor_user_id`, because the label is the column that survives the account
  * being deleted, which is half of what this panel is for. Measured at 200,004 rows, a selective actor
- * filter is 0.07 ms against 9.70 ms of sequential scan without it.
+ * filter is 0.07 ms against 9.70 ms of sequential scan without it. The owner filter, `actorUser`
+ * (FR-617), is the one keyed on `actor_user_id`, and lands on `audit_events_actor_created_idx`.
  *
  * The sixth is `facets()`. `SELECT DISTINCT` over a whole column is a full read whatever btree sits
- * beside it — PostgreSQL has no loose index scan — so the three cost about 24 ms of wall time at that
+ * beside it — PostgreSQL has no loose index scan — so the three (the accounts picker is an indexed `EXISTS`
+ * probe per account, not a fourth) cost about 24 ms of wall time at that
  * size, run concurrently. They are paid **once per filter run and never per page turn**, which is what
  * keeps them off the path somebody is using: a first page is 19–52 ms and a page turn 3 ms. The answer
  * if that is ever felt is a cache with a stated staleness, not an index that cannot help.
@@ -61,9 +64,21 @@ const optionalText = (max: number) =>
  */
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
+/** Version 4 UUID, which is the only shape a row id or a project id can have. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const AuditQuery = z.object({
   /** `actor_label` exactly — the name as it was at the time, which outlives the account. */
   actor: optionalText(200),
+  /**
+   * An account id, matched exactly against `actor_user_id` — the account's own events (`kind: user`)
+   * and its API tokens' events (`kind: api_token`), which carry the owner's id there
+   * ([ADR-0076](../../.ssot/ADR.md#adr-0076)). Separate from `actor`: that one is the label, which
+   * outlives the account; this one is the id, which `ON DELETE SET NULL` clears, so a deleted account's
+   * events are reachable by `actor` and not by this. Not a UUID is a `validation_failed`, checked here
+   * rather than reaching a `uuid` column. `audit_events_actor_created_idx` serves it.
+   */
+  actorUser: optionalText(64).refine((v) => v === undefined || UUID.test(v), { message: 'actorUser must be an account id (a UUID).' }),
   /** A project id, or `none` for the events that belong to no project (accounts, sessions, imports). */
   project: optionalText(64),
   /** `<METHOD> <route template>` exactly, as `audit_events.action` stores it. */
@@ -91,9 +106,6 @@ function startOfDay(day: string, plusDays: number): Date {
   if (Number.isNaN(at.getTime())) throw new ValidationError(`"${day}" is not a date that exists.`);
   return new Date(at.getTime() + plusDays * 86_400_000);
 }
-
-/** Version 4 UUID, which is the only shape a row id or a project id can have. */
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * The position of the last row handed out — **its id, and nothing else.**
@@ -147,7 +159,7 @@ export function decodeCursor(raw: string): string {
  * keys the verb has already said, so the sentence does not repeat them in its parenthetical.
  */
 type Phrase = {
-  verb: string | ((detail: Record<string, string | boolean>) => string);
+  verb: string | ((detail: AuditDetail) => string);
   prep?: string;
   target?: string;
   consumes?: readonly string[];
@@ -235,7 +247,7 @@ export interface AuditSummaryInput {
   projectName: string | null;
   targetType: string | null;
   targetId: string | null;
-  detail: Record<string, string | boolean>;
+  detail: AuditDetail;
 }
 
 /**
@@ -277,7 +289,7 @@ export function summarizeAuditEvent(event: AuditSummaryInput): string {
   return words.join(' ');
 }
 
-const verbOf = (phrase: Phrase | undefined, detail: Record<string, string | boolean>): string | null =>
+const verbOf = (phrase: Phrase | undefined, detail: AuditDetail): string | null =>
   phrase === undefined ? null : typeof phrase.verb === 'string' ? phrase.verb : phrase.verb(detail);
 
 // ---------------------------------------------------------------------------------------------
@@ -300,7 +312,7 @@ export interface AuditEventView {
   /** `null` for an event that belongs to no project; `name: null` when the project is gone. */
   project: { id: string; name: string | null } | null;
   target: { type: string; id: string } | null;
-  detail: Record<string, string | boolean>;
+  detail: AuditDetail;
   statusCode: number;
 }
 
@@ -315,6 +327,7 @@ export const auditRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
 
     const where = [
       query.actor === undefined ? null : eq(auditEvents.actorLabel, query.actor),
+      query.actorUser === undefined ? null : eq(auditEvents.actorUserId, query.actorUser),
       query.action === undefined ? null : eq(auditEvents.action, query.action),
       query.project === undefined
         ? null
@@ -389,7 +402,7 @@ export const auditRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     // One row past the cap, so "there are more than this" is a fact rather than a guess: at exactly
     // `MAX_FACET_ROWS` rows a query capped *at* the cap cannot tell a full list from a cut one.
     const probe = MAX_FACET_ROWS + 1;
-    const [actors, actions, withProject] = await Promise.all([
+    const [actors, actions, withProject, accounts] = await Promise.all([
       db
         .selectDistinct({ label: auditEvents.actorLabel, kind: auditEvents.actorKind })
         .from(auditEvents)
@@ -407,6 +420,16 @@ export const auditRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         // of the picker — which is where it belongs and not where it disappears.
         .orderBy(projects.name)
         .limit(probe),
+      // The `actorUser` picker: live accounts that have at least one event. Read from `users` with an
+      // `EXISTS` probe per account rather than a fourth `DISTINCT` scan — `audit_events_actor_created_idx`
+      // answers each probe — and named by today's username, since the filter is by id. A deleted
+      // account cannot be offered: its events no longer carry its id.
+      db
+        .select({ id: users.id, username: users.username })
+        .from(users)
+        .where(exists(db.select({ one: sql`1` }).from(auditEvents).where(eq(auditEvents.actorUserId, users.id))))
+        .orderBy(users.username)
+        .limit(probe),
     ]);
 
     return {
@@ -415,7 +438,9 @@ export const auditRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       // A project whose rows are still here and whose name is not is named by its id in the panel, so
       // the picker can still reach the events of something that has been deleted.
       projects: withProject.slice(0, MAX_FACET_ROWS).filter((p): p is { id: string; name: string | null } => p.id !== null),
-      truncated: actors.length > MAX_FACET_ROWS || actions.length > MAX_FACET_ROWS || withProject.length > MAX_FACET_ROWS,
+      accounts: accounts.slice(0, MAX_FACET_ROWS),
+      truncated:
+        actors.length > MAX_FACET_ROWS || actions.length > MAX_FACET_ROWS || withProject.length > MAX_FACET_ROWS || accounts.length > MAX_FACET_ROWS,
     };
   }
 };
@@ -473,7 +498,7 @@ type AuditRow = {
 };
 
 function toView(row: AuditRow): AuditEventView {
-  const detail = (typeof row.detail === 'object' && row.detail !== null ? row.detail : {}) as Record<string, string | boolean>;
+  const detail = (typeof row.detail === 'object' && row.detail !== null ? row.detail : {}) as AuditDetail;
   return {
     id: row.id,
     createdAt: row.createdAt.toISOString(),

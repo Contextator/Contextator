@@ -352,8 +352,9 @@ describe('an ADR-0076 token over a real request', () => {
 
   /**
    * An action taken with a token is recorded with the token's own id, and the audit panel's actor
-   * filter finds it under the owner's name. Two same-named tokens of one owner are told apart by the
-   * id alone, and a token whose *name* imitates another account stays its own owner's.
+   * filter finds it under the token's own label, told apart by `detail.tokenId` — not under the
+   * owner's name (that is `actorUser`, below). Two same-named tokens of one owner are told apart by
+   * the id alone, and a token whose *name* imitates another account stays its own owner's.
    */
   it("records the acting token's id beside its label, and the actor filter stays the label exactly", async () => {
     const { db } = httpDb;
@@ -412,5 +413,79 @@ describe('an ADR-0076 token over a real request', () => {
     // the imitation stays under its own, longer label.
     expect((await audit('pia')).filter((e) => e.actor.kind === 'api_token')).toEqual([]);
     expect((await audit('ops · pia · quinn')).map((e) => e.detail.tokenId)).toEqual([imitation.view.id]);
+  });
+
+  /**
+   * `actorUser` ([ADR-0080](../../.ssot/ADR.md#adr-0080), FR-617): the owner's id, matched exactly
+   * against `actor_user_id`, so an account's tokens' events are found by the account — the one thing the
+   * `actor` label filter above deliberately cannot do. Combines with the other filters; not a UUID is
+   * `400 validation_failed`; leaving it out changes nothing.
+   */
+  it("finds a token's events by its owner's id, exactly, and only its owner's", async () => {
+    const { db } = httpDb;
+    const owner = await createUser(db, { username: 'rhea', role: 'admin', password: PASSWORD });
+    const other = await createUser(db, { username: 'sami', role: 'admin', password: PASSWORD });
+    const project = await createProject(db, { name: 'rhea-audited' }, []);
+    const scope = ['PATCH /api/projects/:id/mcp-auth', 'POST /api/projects/:id/mcp-tokens'];
+    const mint = (userId: string, name: string) => createApiToken(db, { userId, name, scope, projectId: null, expiresAt: null, createdBy: userId });
+    const mine = await mint(owner.id, 'deploy');
+    // Named after the owner on purpose: a label that starts like hers must not be found by her id.
+    const theirs = await mint(other.id, 'deploy · rhea');
+
+    const act = async (token: string, method: 'PATCH' | 'POST', url: string, payload: object) => {
+      const res = await live.app.inject({ method, url, headers: { authorization: `Bearer ${token}` }, payload });
+      expect(res.statusCode, res.body).toBeLessThan(300);
+    };
+    await act(mine.token, 'PATCH', `/api/projects/${project.id}/mcp-auth`, { mode: 'token' });
+    await act(mine.token, 'POST', `/api/projects/${project.id}/mcp-tokens`, { name: 'ci' });
+    await act(theirs.token, 'PATCH', `/api/projects/${project.id}/mcp-auth`, { mode: 'account' });
+    await live.ctx.audit.settled();
+
+    const cookie = await signIn('rhea');
+    type Page = { events: Array<{ action: string; actor: { kind: string; label: string; userId: string | null }; detail: Record<string, unknown> }> };
+    const audit = async (query: string) => {
+      const res = await live.app.inject({ method: 'GET', url: `/api/audit?limit=200&${query}`, headers: { cookie } });
+      return { status: res.statusCode, body: res.json() as Page & { error?: string } };
+    };
+
+    // Positive: every event it answers carries her id, and it holds both of her token's acts.
+    const hers = await audit(`actorUser=${owner.id}`);
+    expect(hers.status).toBe(200);
+    expect(hers.body.events.length).toBeGreaterThan(0);
+    expect(hers.body.events.every((e) => e.actor.userId === owner.id)).toBe(true);
+    const hersByToken = hers.body.events.filter((e) => e.actor.kind === 'api_token');
+    expect(hersByToken.map((e) => e.detail.tokenId)).toEqual([mine.view.id, mine.view.id]);
+    expect(hersByToken.map((e) => e.action).sort()).toEqual(['PATCH /api/projects/:id/mcp-auth', 'POST /api/projects/:id/mcp-tokens']);
+
+    // Negative: the other owner's id answers only the other owner's token, and an id nobody holds
+    // answers nothing — an exact match, not a label or prefix search.
+    const his = await audit(`actorUser=${other.id}`);
+    expect(his.body.events.map((e) => e.detail.tokenId)).toEqual([theirs.view.id]);
+    expect((await audit('actorUser=00000000-0000-4000-8000-000000000002')).body.events).toEqual([]);
+
+    // Combined with the other filters, which still apply.
+    const narrowed = await audit(`actorUser=${owner.id}&action=${encodeURIComponent('PATCH /api/projects/:id/mcp-auth')}&project=${project.id}`);
+    expect(narrowed.body.events.map((e) => e.detail.tokenId)).toEqual([mine.view.id]);
+    // A token's label is `<name> · <owner>`: hers is `deploy · rhea`, his `deploy · rhea · sami`.
+    const ownLabel = await audit(`actorUser=${owner.id}&actor=${encodeURIComponent('deploy · rhea')}`);
+    expect(ownLabel.body.events.map((e) => e.detail.tokenId)).toEqual([mine.view.id, mine.view.id]);
+    const hisLabel = await audit(`actorUser=${owner.id}&actor=${encodeURIComponent('deploy · rhea · sami')}`);
+    expect(hisLabel.body.events).toEqual([]);
+
+    // Without the parameter the page is what it was: all three token acts are on it.
+    const everything = await audit(`project=${project.id}`);
+    expect(
+      everything.body.events
+        .filter((e) => e.actor.kind === 'api_token')
+        .map((e) => e.detail.tokenId)
+        .sort(),
+    ).toEqual([mine.view.id, mine.view.id, theirs.view.id].sort());
+
+    // Not a UUID is refused before it reaches a `uuid` column.
+    for (const bad of ['rhea', '1234', `${owner.id}x`]) {
+      const refused = await audit(`actorUser=${encodeURIComponent(bad)}`);
+      expect(refused.status, bad).toBe(400);
+      expect(refused.body.error).toBe('validation_failed');
+    }
   });
 });

@@ -4,6 +4,7 @@ import { PROJECT_NAME_RE, SYNC_MAX_INTERVAL_MINUTES, SYNC_MIN_INTERVAL_MINUTES }
 import type { Db } from '../db/client.js';
 import { documents, documentSources, type DocumentSourceRow } from '../db/schema.js';
 import { decryptWebhookSecret, encryptSecret, encryptWebhookSecret, randomSecret, type SecretKeyring } from './crypto.js';
+import { isCredentialSourceType } from './encrypted-fields.js';
 import { allowedExtensionsFor, FLAVOR_ONLY_EXTENSIONS, FLAVORS, type Flavor } from './flavors.js';
 import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './fs-scan.js';
 import { ConflictError, NotFoundError, ValidationError } from './projects.js';
@@ -11,6 +12,19 @@ import { TEXT_SEARCH_CONFIGS } from './text-search.js';
 
 export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion', 'confluence', 'web'] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
+
+/**
+ * Refuses a secret on a source type that never uses one ([ADR-0091](../../.ssot/ADR.md#adr-0091)).
+ *
+ * Refused rather than ignored: a caller who sent a credential deserves to learn it was never going to
+ * be read, rather than find it stored and counted by the backup's key check. `null`, and the empty
+ * string a form sends for "no secret", remove nothing that is there and pass on every type.
+ */
+function checkSecretAllowed(type: string, secret: string | null | undefined): void {
+  if (!secret) return;
+  if (isCredentialSourceType(type)) return;
+  throw new ValidationError(`A ${type} source takes no secret; only git, notion and confluence sources use one.`);
+}
 
 /**
  * **The widest set any flavor allows, narrowed to the source's own flavor by `checkExtensions` below.**
@@ -448,7 +462,7 @@ export interface CreateSourceInput {
   flavor?: Flavor;
   config?: unknown;
   /** Plain token; encrypted before it is stored. */
-  secret?: string;
+  secret?: string | null;
   /**
    * Minutes between scheduled syncs, `null` for none. The route defaults it to
    * `SYNC_DEFAULT_INTERVAL_MINUTES`; **undefined here means none**, so a caller that has never heard
@@ -495,6 +509,7 @@ export async function createSource(db: Db, projectId: string, input: CreateSourc
   if (!FLAVORS.includes(flavor)) throw new ValidationError(`Unknown flavor "${String(flavor)}"`);
   const config = await validateConfig(input.type, input.config, opts);
   checkExtensions(flavor, config);
+  checkSecretAllowed(input.type, input.secret);
   const secretEnc = input.secret ? encryptSecret(input.secret, opts.keys) : null;
   // Encrypted when the instance has a key and stored in the clear when it has none — a git source on a
   // public repository must not be the thing that forces SECRET_KEY on an operator (ADR-0017), and
@@ -601,7 +616,10 @@ export async function updateSource(
       if (kept.length !== stored.length) patch.config = { ...existing.config, extensions: kept };
     }
   }
-  if (input.secret !== undefined) patch.secretEnc = input.secret ? encryptSecret(input.secret, opts.keys) : null;
+  if (input.secret !== undefined) {
+    checkSecretAllowed(existing.type, input.secret);
+    patch.secretEnc = input.secret ? encryptSecret(input.secret, opts.keys) : null;
+  }
   if (input.syncIntervalMinutes !== undefined && input.syncIntervalMinutes !== existing.syncIntervalMinutes) {
     patch.syncIntervalMinutes = input.syncIntervalMinutes;
     // Re-jittered rather than carried over: a source moved from daily to hourly would otherwise keep

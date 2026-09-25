@@ -8,14 +8,26 @@ import type pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
 import { SESSION_COOKIE } from '../../src/auth/cookies.js';
-import { apiTokens, auditEvents, users, userFederatedIdentities, userSessions, type AuditEventRow } from '../../src/db/schema.js';
+import {
+  apiTokens,
+  auditEvents,
+  mcpTokens,
+  oauthClients,
+  projects,
+  users,
+  userFederatedIdentities,
+  userSessions,
+  type AuditEventRow,
+} from '../../src/db/schema.js';
+import { issueMcpCredential } from '../../src/services/auth/mcp-tokens.js';
+import { setMemberRole } from '../../src/services/auth/memberships.js';
 import { linkFederatedIdentity, provisionFederatedUser, unlinkFederatedIdentity } from '../../src/services/auth/federated-identities.js';
 import { revokeSessionsOfUser } from '../../src/services/auth/sessions.js';
 import { createUser, deleteUser, SSO_ONLY_PASSWORD_HASH, setPassword, updateUser, withUserRowLock } from '../../src/services/auth/users.js';
 import { PromotionRefusedError } from '../../src/services/errors.js';
 import { ConflictError } from '../../src/services/projects.js';
 import { applySchema, createTestDatabase, dropTestDatabase, type TestDatabase } from './support/postgres.js';
-import { startMcpInstance, type LiveInstance } from './support/mcp-instance.js';
+import { seedProject, startMcpInstance, type LiveInstance } from './support/mcp-instance.js';
 import { startLocalOidcProvider, type LocalOidcProvider } from './support/oidc-provider.js';
 
 /**
@@ -692,6 +704,97 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
       .where(eq(userFederatedIdentities.subject, 'unlink-scope-second-identity'));
     expect(secondRows).toHaveLength(1);
     expect(secondRows[0].userId).toBe(second.userId);
+  });
+
+  describe("revoking the account's MCP OAuth credentials on unlink ([ADR-0090](../../.ssot/ADR.md#adr-0090), FR-616)", () => {
+    /** One `initialize` on the project's MCP endpoint — `200` means the credential was accepted. */
+    const initializeWith = (projectName: string, token: string) =>
+      fetch(`${live.origin}/mcp/${projectName}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'p', version: '0' } },
+        }),
+      });
+
+    it("turns the unlinked account's access token away with 401, records how many it revoked, and leaves another account's alone", async () => {
+      const project = await seedProject(database.db, 'unlink-mcp', { path: 'guide.md', body: '# Guide\n\nSomething to read.' });
+      // The mode OAuth credentials exist for: no anonymous reader and no static token.
+      await database.db.update(projects).set({ mcpAuth: 'account' }).where(eq(projects.id, project.id));
+      const [client] = await database.db
+        .insert(oauthClients)
+        .values({ clientId: 'ctxc_unlink_mcp_test', name: 'connector', redirectUris: ['https://client.example/cb'] })
+        .returning();
+
+      const unlinker = await signInLocalUser('unlink-mcp-owner');
+      const bystander = await signInLocalUser('unlink-mcp-bystander');
+      for (const account of [unlinker, bystander]) await setMemberRole(database.db, project.id, account.userId, 'viewer', null);
+
+      provider.setNextIdentity({ sub: 'unlink-mcp-owner-identity', preferred_username: 'irrelevant-here' });
+      const flow = await startOidcFlow(live.origin, { startPath: '/api/auth/oidc/link', cookie: cookieHeader(unlinker.jar) });
+      expect((await hitCallback(flow.callbackUrl, { ...unlinker.jar, ...flow.jar })).status).toBe(302);
+
+      const grant = (userId: string) => ({ projectId: project.id, userId, clientId: client.clientId, name: 'connector', ttlMs: 60_000 });
+      const access = await issueMcpCredential(database.db, { ...grant(unlinker.userId), kind: 'access' });
+      const refresh = await issueMcpCredential(database.db, { ...grant(unlinker.userId), kind: 'refresh' });
+      const theirs = await issueMcpCredential(database.db, { ...grant(bystander.userId), kind: 'access' });
+      expect((await initializeWith(project.name, access.token)).status).toBe(200);
+      expect((await initializeWith(project.name, theirs.token)).status).toBe(200);
+
+      const unlink = await fetch(`${live.origin}/api/auth/oidc/link`, {
+        method: 'DELETE',
+        headers: { cookie: cookieHeader(unlinker.jar), 'sec-fetch-site': 'same-origin' },
+        redirect: 'manual',
+      });
+      expect(unlink.status).toBe(204);
+
+      expect((await initializeWith(project.name, access.token)).status).toBe(401);
+      expect((await initializeWith(project.name, theirs.token)).status).toBe(200);
+
+      const rows = await database.db.select().from(mcpTokens).where(eq(mcpTokens.clientId, client.clientId));
+      const revoked = new Map(rows.map((r) => [r.id, r.revokedAt !== null]));
+      expect(revoked.get(access.id)).toBe(true);
+      expect(revoked.get(refresh.id)).toBe(true); // the grant, not only the string a client presents
+      expect(revoked.get(theirs.id)).toBe(false);
+
+      const recorded = await waitForEvents((e) => e.actorUserId === unlinker.userId && e.action === 'DELETE /api/auth/oidc/link');
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].detail).toMatchObject({ revokedMcpCredentials: 2 });
+    });
+
+    it('records zero when there was nothing linked to remove, and revokes nothing', async () => {
+      const project = await seedProject(database.db, 'unlink-mcp-noop', { path: 'guide.md', body: '# Guide' });
+      await database.db.update(projects).set({ mcpAuth: 'account' }).where(eq(projects.id, project.id));
+      const [client] = await database.db
+        .insert(oauthClients)
+        .values({ clientId: 'ctxc_unlink_mcp_noop', name: 'connector', redirectUris: ['https://client.example/cb'] })
+        .returning();
+      const account = await signInLocalUser('unlink-mcp-never-linked');
+      await setMemberRole(database.db, project.id, account.userId, 'viewer', null);
+      const access = await issueMcpCredential(database.db, {
+        projectId: project.id,
+        userId: account.userId,
+        clientId: client.clientId,
+        kind: 'access',
+        name: 'connector',
+        ttlMs: 60_000,
+      });
+
+      const unlink = await fetch(`${live.origin}/api/auth/oidc/link`, {
+        method: 'DELETE',
+        headers: { cookie: cookieHeader(account.jar), 'sec-fetch-site': 'same-origin' },
+        redirect: 'manual',
+      });
+      expect(unlink.status).toBe(204);
+      expect((await initializeWith(project.name, access.token)).status).toBe(200);
+
+      const recorded = await waitForEvents((e) => e.actorUserId === account.userId && e.action === 'DELETE /api/auth/oidc/link');
+      expect(recorded).toHaveLength(1);
+      expect(recorded[0].detail).toMatchObject({ revokedMcpCredentials: 0 });
+    });
   });
 
   it('refuses to complete a linking flow when the callback arrives under a different session than the one that started it ([BLOCKER], tur 3 review of ADR-0077)', async () => {

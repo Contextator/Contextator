@@ -271,6 +271,8 @@ export function installAuditLog(app: FastifyInstance, ctx: AppContext): void {
         projectId: subject.projectId ?? req.auditProjectId ?? null,
         targetType: created?.type ?? subject.targetType,
         targetId: created?.id ?? subject.targetId,
+        // A handler-computed field (a count only it knows) sits beside the allowlisted body fields.
+        detail: req.auditDetail ? { ...subject.detail, ...req.auditDetail } : subject.detail,
       },
       { principal, ip: req.ip || null, statusCode: reply.statusCode },
     );

@@ -5,7 +5,7 @@
 // granted, a password reset — belongs to no project at all. Only root and admin reach it; the server
 // refuses /api/audit to anyone else.
 //
-// **Every filter and every page is the server's.** The panel sends actor, action, project and a UTC
+// **Every filter and every page is the server's.** The panel sends actor, account, action, project and a UTC
 // day range as query parameters and renders exactly the rows that come back. Nothing is narrowed in
 // the browser, because a year of every state-changing request is not something to download in order
 // to look at fifty rows of it.
@@ -22,11 +22,20 @@ const PAGE_SIZE = 50;
 
 /** Everything that decides which request to send; a change of any part of it refetches. */
 const requestKey = () =>
-  [state.audit.actor, state.audit.project, state.audit.action, state.audit.from, state.audit.to, state.audit.cursor ?? ''].join('|');
+  [
+    state.audit.actor,
+    state.audit.actorUser,
+    state.audit.project,
+    state.audit.action,
+    state.audit.from,
+    state.audit.to,
+    state.audit.cursor ?? '',
+  ].join('|');
 
 function params() {
   const search = new URLSearchParams({ limit: String(PAGE_SIZE) });
   if (state.audit.actor) search.set('actor', state.audit.actor);
+  if (state.audit.actorUser) search.set('actorUser', state.audit.actorUser);
   if (state.audit.action) search.set('action', state.audit.action);
   if (state.audit.project) search.set('project', state.audit.project);
   if (state.audit.from) search.set('from', state.audit.from);
@@ -165,6 +174,12 @@ function controls() {
       option('', 'anyone', state.audit.actor === ''),
       ...(f?.actors ?? []).map((a) => option(a.label, a.kind === 'token' ? `${a.label} (credential)` : a.label, state.audit.actor === a.label)),
     ]),
+    // By account id rather than by label: the account's own events and those of its API tokens, whose
+    // labels read "<token> · <owner>" and so never match the Who picker's name for the owner.
+    picker('actorUser', 'Account', [
+      option('', 'any account', state.audit.actorUser === ''),
+      ...(f?.accounts ?? []).map((a) => option(a.id, a.username, state.audit.actorUser === a.id)),
+    ]),
     picker('action', 'What', [
       option('', 'any action', state.audit.action === ''),
       ...(f?.actions ?? []).map((a) => option(a.action, a.summary, state.audit.action === a.action)),
@@ -195,10 +210,12 @@ const field = (label, control) => el('label', { class: 'audit-field' }, [el('spa
 /** `2026-09-19 08:30:12Z` — an ISO instant with the `T` opened out, still unambiguous and UTC. */
 const utcStamp = (when) => `${when.toISOString().slice(0, 19).replace('T', ' ')}Z`;
 
-const hasFilter = () => Boolean(state.audit.actor || state.audit.action || state.audit.project || state.audit.from || state.audit.to);
+const hasFilter = () =>
+  Boolean(state.audit.actor || state.audit.actorUser || state.audit.action || state.audit.project || state.audit.from || state.audit.to);
 
 function clearFilters() {
   state.audit.actor = '';
+  state.audit.actorUser = '';
   state.audit.action = '';
   state.audit.project = '';
   state.audit.from = '';

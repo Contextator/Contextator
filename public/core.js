@@ -121,8 +121,9 @@ export const state = {
    * that nothing declares reads `undefined` in the browser and fails nowhere else.
    */
   audit: {
-    /** The four filters, exactly as the endpoint takes them. `''` means "not filtering by this". */
+    /** The filters, exactly as the endpoint takes them. `''` means "not filtering by this". */
     actor: '',
+    actorUser: '', // an account id: its own events and its API tokens' events
     project: '', // a project id, or 'none' for the events that belong to no project
     action: '',
     from: '', // YYYY-MM-DD, UTC — the panel says so beside the inputs
@@ -137,7 +138,7 @@ export const state = {
     status: 'idle', // 'idle' | 'loading' | 'done' | 'error'
     error: '',
     events: [],
-    /** The distinct actors, actions and projects the pickers offer; kept from the last unpaged load. */
+    /** The distinct actors, accounts, actions and projects the pickers offer; kept from the last unpaged load. */
     filters: null,
     retentionDays: null,
     /** Which control had focus when the last rebuild wiped the panel, and where its caret was. */

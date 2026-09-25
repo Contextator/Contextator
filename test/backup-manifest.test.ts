@@ -10,6 +10,8 @@ import {
   checkSecretKey,
   checkServerVersion,
   connectionFromEnv,
+  countSecretsInSourceData,
+  countsNonCredentialSecrets,
   describeTopology,
   localPgTools,
   MANIFEST_KIND,
@@ -111,7 +113,7 @@ describe('restoring with the wrong SECRET_KEY, or none', () => {
       const verdict = checkSecretKey(empty, key);
       expect(verdict.ok).toBe(true);
       if (!verdict.ok) throw new Error('unreachable');
-      expect(verdict.note).toContain('no source in it holds a sync credential');
+      expect(verdict.note).toContain('no git, Notion or Confluence source in it holds a sync credential');
     }
   });
 
@@ -152,7 +154,7 @@ describe('restoring with the wrong SECRET_KEY, or none', () => {
     expect(verdict.ok).toBe(false);
     if (verdict.ok) throw new Error('unreachable');
     expect(verdict.code).toBe('secret_key_mismatch');
-    expect(verdict.message).toContain('1 source in this backup holds a sync credential');
+    expect(verdict.message).toContain('1 git, Notion or Confluence source in this backup holds a sync credential');
     expect(verdict.message).toContain('issued again by its provider and re-entered here by hand');
     // ADR-0075 point 7: named in the refusal too, never only in the acceptance — with both remedies.
     expect(verdict.message).toContain('4 webhook secret(s)');
@@ -211,7 +213,7 @@ describe('what a backup says about SECRET_KEY on the way out', () => {
       manifest({ secretKey: { present: true, fingerprint: secretKeyFingerprint(KEY), encryptedSources: 3, regenerableSecrets: 2 } }),
     ).join('\n');
     expect(text).toContain(`only its fingerprint, ${secretKeyFingerprint(KEY)}`);
-    expect(text).toContain('3 source(s) in the dump hold a sync credential');
+    expect(text).toContain('3 git, Notion or Confluence source(s) in the dump hold a sync credential');
     expect(text).toContain('2 source(s) hold a webhook secret encrypted under it');
     expect(text).toContain('Those a restore does not stop for');
     expect(text).toContain('For a git source, regenerate the secret here and paste the new one into the repository');
@@ -224,6 +226,58 @@ describe('what a backup says about SECRET_KEY on the way out', () => {
     const lines = secretKeySentences(manifest({ secretKey: { present: false, fingerprint: null, encryptedSources: 0, regenerableSecrets: 0 } }));
     expect(lines.join('\n')).toContain('this instance has none set');
     expect(lines.join('\n')).not.toContain('webhook secret');
+  });
+});
+
+/**
+ * ADR-0091: the key refusal counts only the types that use a credential. An archive written since
+ * says which types it counted; one written before did not, and may have counted a `local` row's
+ * leftover secret — so the restore reads the dump's own `document_sources` rows for that archive.
+ */
+describe('which secrets an archive counted, and what its dump actually holds', () => {
+  const CREDENTIAL = ['git', 'notion', 'confluence'] as const;
+  const secretKey = { present: true, fingerprint: secretKeyFingerprint(KEY), encryptedSources: 1, regenerableSecrets: 0 };
+
+  it('trusts a manifest that names the credential types, and doubts one that names none or more', () => {
+    expect(countsNonCredentialSecrets(manifest({ secretKey: { ...secretKey, encryptedSourceTypes: [...CREDENTIAL] } }), CREDENTIAL)).toBe(false);
+    expect(countsNonCredentialSecrets(manifest({ secretKey }), CREDENTIAL)).toBe(true);
+    expect(countsNonCredentialSecrets(manifest({ secretKey: { ...secretKey, encryptedSourceTypes: ['git', 'local'] } }), CREDENTIAL)).toBe(true);
+  });
+
+  it('reads an archive written before the field, and keeps the field when present', () => {
+    const old = parseManifest(JSON.parse(JSON.stringify(manifest({ secretKey }))));
+    expect(old.secretKey.encryptedSourceTypes).toBeUndefined();
+    const current = parseManifest(JSON.parse(JSON.stringify(manifest({ secretKey: { ...secretKey, encryptedSourceTypes: [...CREDENTIAL] } }))));
+    expect(current.secretKey.encryptedSourceTypes).toEqual([...CREDENTIAL]);
+  });
+
+  const dumpOf = (header: string, rows: string[]) =>
+    ['--', '-- Data for Name: document_sources; Type: TABLE DATA', '--', '', header, ...rows, '\\.', '', ''].join('\n');
+  const HEADER = 'COPY public.document_sources (id, project_id, name, type, config, secret_enc, webhook_secret) FROM stdin;';
+
+  it('splits stored secrets by whether the row type uses one, and ignores NULL and webhook columns', () => {
+    const text = dumpOf(HEADER, [
+      'a\tp\tdocs\tlocal\t{}\tv2.abc\t\\N',
+      'b\tp\trepo\tgit\t{"url":"x"}\tv2.def\tv2.hook',
+      'c\tp\tpub\tgit\t{}\t\\N\tv2.hook',
+      'd\tp\tsite\tweb\t{}\tv2.ghi\t\\N',
+      'e\tp\tws\tnotion\t{}\tv2.jkl\t\\N',
+    ]);
+    expect(countSecretsInSourceData(text, CREDENTIAL)).toEqual({ credential: 2, other: 2 });
+  });
+
+  it('finds the columns by name, quoted or not, whatever their order', () => {
+    const text = dumpOf('COPY public."document_sources" ("secret_enc", id, "type") FROM stdin;', ['v2.x\ta\tupload', '\\N\tb\tconfluence']);
+    expect(countSecretsInSourceData(text, CREDENTIAL)).toEqual({ credential: 0, other: 1 });
+  });
+
+  it('says it could not read the rows rather than reporting zero', () => {
+    expect(countSecretsInSourceData('', CREDENTIAL)).toBeNull();
+    expect(countSecretsInSourceData(dumpOf('COPY public.document_sources (id, type) FROM stdin;', ['a\tgit']), CREDENTIAL)).toBeNull();
+  });
+
+  it('counts an empty table as nothing at stake', () => {
+    expect(countSecretsInSourceData(dumpOf(HEADER, []), CREDENTIAL)).toEqual({ credential: 0, other: 0 });
   });
 });
 

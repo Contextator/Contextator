@@ -1160,4 +1160,138 @@ describe('the backup command, and the instance it is asked to bring back', () =>
       }
     });
   });
+  /**
+   * ADR-0091: the key refusal counts only the types that use a credential. An archive written before
+   * that decision counted a `secret_enc` on every type — a `local` source given a token by an API that
+   * accepted one — so the restore reads the dump's own rows for such an archive before it refuses, and
+   * after any restore it drops the secrets that no source type reads.
+   */
+  describe('an archive whose only secret sits on a source type that uses none (ADR-0091)', () => {
+    /** Every tool call with its arguments, so a read-only `pg_restore -f -` is told apart from a restore. */
+    const recording = (calls: string[][]): PgTools => {
+      const tools = containerTools(scratch.local, scratch.remote);
+      return {
+        ...tools,
+        run: (tool, args) => {
+          calls.push([tool, ...args]);
+          return tools.run(tool, args);
+        },
+      };
+    };
+
+    /** The archive at `from` with its manifest rewritten the way a build before ADR-0091 wrote it. */
+    async function asWrittenBeforeAdr0091(from: string, name: string, encryptedSources: number): Promise<string> {
+      const doctored = nodePath.join(exchangeDir, `${name}.tar.gz`);
+      const staging = nodePath.join(exchangeDir, name);
+      await fsp.rm(staging, { recursive: true, force: true });
+      await fsp.mkdir(staging, { recursive: true });
+      await tar.extract({ file: from, cwd: staging });
+      const manifestPath = nodePath.join(staging, 'manifest.json');
+      const manifest = JSON.parse(await fsp.readFile(manifestPath, 'utf8')) as BackupManifest;
+      delete manifest.secretKey.encryptedSourceTypes;
+      manifest.secretKey.encryptedSources = encryptedSources;
+      await fsp.writeFile(manifestPath, JSON.stringify(manifest), 'utf8');
+      const entries = (await fsp.readdir(staging)).includes('data')
+        ? ['manifest.json', 'README.txt', 'database.dump', 'data']
+        : ['manifest.json', 'README.txt', 'database.dump'];
+      await tar.create({ gzip: true, file: doctored, cwd: staging, portable: true }, entries);
+      await fsp.rm(staging, { recursive: true, force: true });
+      return doctored;
+    }
+
+    const localArchive = nodePath.join(exchangeDir, 'local-secret.tar.gz');
+    let localBackup: BackupManifest;
+    let oldLocalArchive: string;
+    let oldGitArchive: string;
+
+    beforeAll(async () => {
+      // The instance an older build could leave behind: a local source holding a token under the key.
+      await emptyInstance();
+      const [owner] = await cli.db.insert(projects).values({ name: 'legacy', embeddingModel: 'local:stub-bag-of-words:fp32' }).returning();
+      await createProjectVectorIndex(cli.db, owner.id);
+      await cli.db.insert(documentSources).values({
+        projectId: owner.id,
+        type: 'local',
+        name: 'docs',
+        config: { path: '/srv/docs', extensions: ['md'] },
+        secretEnc: encryptSecret('a_token_nothing_ever_read', { current: BACKUP_KEY }),
+      });
+      localBackup = (
+        await runBackup(
+          {
+            db: cli.db,
+            config: loadConfig({ DATABASE_URL: cli.url, DATA_DIR: dataDir, SECRET_KEY: BACKUP_KEY }),
+            tools: containerTools(scratch.local, scratch.remote),
+            topology: describeTopology({ DATABASE_URL: cli.url }),
+            say: () => {},
+          },
+          localArchive,
+        )
+      ).manifest;
+      // An older build counted that row: one "credential" at stake, and no word on which types.
+      oldLocalArchive = await asWrittenBeforeAdr0091(localArchive, 'local-secret-old', 1);
+      oldGitArchive = await asWrittenBeforeAdr0091(archive, 'git-secret-old', 1);
+    }, 600_000);
+
+    afterAll(async () => {
+      for (const file of [localArchive, oldLocalArchive, oldGitArchive]) if (file) await fsp.rm(file, { force: true });
+    });
+
+    it('is written with the local secret left out of the count, and says which types it counted', () => {
+      expect(localBackup.secretKey.encryptedSources).toBe(0);
+      expect(localBackup.secretKey.encryptedSourceTypes).toEqual(['git', 'notion', 'confluence']);
+    });
+
+    it('restores an old archive under the wrong key, reading the dump rather than refusing, and drops the secret', async () => {
+      await emptyInstance();
+      const calls: string[][] = [];
+      const said: string[] = [];
+      const report = await runRestore({ ...restoreDeps(WRONG_KEY), tools: recording(calls), say: (line) => said.push(line) }, oldLocalArchive);
+
+      // The dump was read before it was applied: first the one-table read to stdout, then the restore.
+      expect(calls.map((call) => call[0])).toEqual(['pg_restore', 'pg_restore']);
+      expect(calls[0]).toEqual(expect.arrayContaining(['--data-only', '--table=document_sources', '-f', '-']));
+      expect(calls[0]).not.toContain('-d');
+      expect(calls[1]).toContain('--clean');
+
+      expect(report.checkedOnly).toBe(false);
+      expect(report.droppedSecrets).toBe(1);
+      const rows = await cli.db.select({ type: documentSources.type, secretEnc: documentSources.secretEnc }).from(documentSources);
+      expect(rows).toEqual([{ type: 'local', secretEnc: null }]);
+      const output = said.join('\n');
+      expect(output).toContain('0 git, Notion or Confluence credential(s) and 1 secret(s) on local, upload or web sources');
+      expect(output).toContain('1 secret(s) on local, upload or web sources dropped');
+      // The staging the dump read used is gone; only the restore's own unpacking is left for main() to remove.
+      expect(await fsp.readdir(scratch.local)).toContain('database.dump');
+    });
+
+    it('passes --check on the same old archive and leaves nothing behind', async () => {
+      await emptyInstance();
+      const calls: string[][] = [];
+      const report = await runRestore({ ...restoreDeps(WRONG_KEY), tools: recording(calls) }, oldLocalArchive, { check: true });
+      expect(report.checkedOnly).toBe(true);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toContain('-f');
+      expect(await fsp.stat(scratch.local).catch(() => null)).toBeNull();
+      const rows = await cli.db.execute(sql`SELECT count(*)::int AS n FROM projects`);
+      expect((rows.rows[0] as { n: number }).n).toBe(0);
+    });
+
+    it('still refuses an old archive whose secret sits on a git source, and writes nothing', async () => {
+      await emptyInstance();
+      const calls: string[][] = [];
+      await expect(runRestore({ ...restoreDeps(WRONG_KEY), tools: recording(calls) }, oldGitArchive)).rejects.toMatchObject({
+        code: 'secret_key_mismatch',
+        message: expect.stringContaining('1 git, Notion or Confluence source in this backup holds a sync credential'),
+      });
+      // Only the read-only look at the dump ran; nothing was restored into the target.
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).not.toContain('--clean');
+      expect(calls[0]).not.toContain('-d');
+      const rows = await cli.db.execute(sql`SELECT count(*)::int AS n FROM projects`);
+      expect((rows.rows[0] as { n: number }).n).toBe(0);
+      expect(await treeContents(dataDir)).toEqual({});
+      expect(await fsp.stat(scratch.local).catch(() => null)).toBeNull();
+    });
+  });
 });

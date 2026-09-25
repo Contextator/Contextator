@@ -335,6 +335,19 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
    * session making this very call, which is why there is no `exceptSessionId` here. A no-op unlink
    * (nothing was linked) revokes nothing.
    *
+   * **It revokes the account's MCP OAuth credentials too** ([ADR-0090](../../.ssot/ADR.md#adr-0090),
+   * FR-616): every live `mcp_tokens` row of kind `access` or `refresh` carrying this account's id, in
+   * the same transaction as the unlink — the same revocation a password change and an admin password
+   * reset already make. A connector a person authorised while their account was tied to the identity
+   * provider is as much "something opened while still linked" as a session is. A project's static MCP
+   * tokens carry no account and are not touched. How many were revoked goes into the event this route
+   * writes, as `detail.revokedMcpCredentials` — `0` when none were live, or when nothing was linked —
+   * through `req.auditDetail`, since the count is only known once the transaction has run.
+   *
+   * This is the only unlink path there is. There is no admin unlink route; deleting an account
+   * removes its `mcp_tokens` by `ON DELETE CASCADE`; `PATCH /api/users/:id`'s `root_requires_unlink`
+   * refuses and unlinks nothing; the SSO callback's own re-check refuses a sign-in and removes no link.
+   *
    * Runs inside `withUserRowLock` ([T6-MAJOR-1], tur 6 review): an SSO login callback in flight for
    * this same account re-checks the link and writes its session under the same lock, so this either
    * finishes first — and the callback's re-check then sees no link and refuses — or waits for the
@@ -352,26 +365,31 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
    */
   app.delete('/api/auth/oidc/link', async (req, reply) => {
     const principal = requireSession(req);
-    const refused = await withUserRowLock(db, principal.userId, async (tx): Promise<boolean> => {
-      const fresh = await getUserById(tx, principal.userId);
-      if (fresh?.passwordHash === SSO_ONLY_PASSWORD_HASH) {
-        const links = await listFederatedIdentitiesOfUser(tx, principal.userId);
-        if (links.length > 0) return true;
-      }
-      const removed = await unlinkFederatedIdentity(tx, principal.userId);
-      if (removed > 0) {
+    const outcome = await withUserRowLock(
+      db,
+      principal.userId,
+      async (tx): Promise<{ refused: true } | { refused: false; revokedMcpCredentials: number }> => {
+        const fresh = await getUserById(tx, principal.userId);
+        if (fresh?.passwordHash === SSO_ONLY_PASSWORD_HASH) {
+          const links = await listFederatedIdentitiesOfUser(tx, principal.userId);
+          if (links.length > 0) return { refused: true };
+        }
+        const removed = await unlinkFederatedIdentity(tx, principal.userId);
+        if (removed === 0) return { refused: false, revokedMcpCredentials: 0 };
         await revokeSessionsOfUser(tx, principal.userId);
         await revokeApiTokensOfUser(tx, principal.userId);
-      }
-      return false;
-    });
-    if (refused) {
+        const revokedMcpCredentials = await revokeMcpCredentialsOfUser(tx, principal.userId);
+        return { refused: false, revokedMcpCredentials };
+      },
+    );
+    if (outcome.refused) {
       return reply.code(409).send({
         error: 'last_sign_in_method',
         message:
           'This account has no password of its own; unlinking SSO would leave it with no way to sign in. Ask an admin to set a password first.',
       });
     }
+    req.auditDetail = { revokedMcpCredentials: outcome.revokedMcpCredentials };
     return reply.code(204).send();
   });
 

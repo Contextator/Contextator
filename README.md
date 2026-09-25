@@ -639,7 +639,11 @@ anonymous request rather than completing it.
 session and every API token that account holds is invalidated the moment `DELETE /api/auth/oidc/link`
 removes the identity — including the very session making that call — because unlinking is also what
 clears the way for a later promotion, and nothing opened while the account was still provably tied to an
-external identity provider should outlive that link. Sign back in (locally, since the link is gone) to
+external identity provider should outlive that link. The same transaction revokes the account's **MCP OAuth
+credentials** — every access and refresh token it was issued for `/mcp/<project>` — so an MCP client
+signed in as that account gets `401` on its next request and has to authorize again; other accounts'
+credentials are untouched. The audit event of the unlink records how many were revoked, as
+`detail.revokedMcpCredentials`. Sign back in (locally, since the link is gone) to
 get a working session again. Only after unlinking can another root account grant this one the `root`
 role.
 See `POST /api/auth/oidc/link` and `DELETE
@@ -805,7 +809,11 @@ in one file, on a volume with a weaker access story than the environment it came
 a fingerprint of the key — 128 bits of keyed HMAC — which is what lets `restore` **refuse a wrong or
 missing key before it writes anything, when that key would cost something real** — an archive whose
 sources hold no sync credential encrypted under it restores anyway, with a note, instead of stopping
-the one case that is unambiguously safe. Keep the key where the archive is not.
+the one case that is unambiguously safe. Only `git`, `notion` and `confluence` sources hold a sync
+credential, so only their secrets count. An archive taken before the manifest recorded which types it
+counted is judged on the rows of its own dump, still before the target is touched: a secret stored on a
+`local`, `upload` or `web` source by an older release does not refuse the restore, and after the restore
+such secrets — which nothing ever read — are set to empty and their number is printed. Keep the key where the archive is not.
 
 That key is rotatable — a four-step runbook (`npm run rotate-secret` is step 3, ADR-0075 is the record
 of why) — which gives the paragraph above a second edge: **rotating the key, and then retiring the old
@@ -1471,8 +1479,8 @@ no ambient credential.
 | `GET /api/projects/:id/search?q=…&limit=…&source=…&path_prefix=…&version=…` | The same search the project's `search_docs` tool runs, as JSON: `{ query, limit, source, pathPrefix, version, belowFloor, scoreFloor, hits: [{ score, fusedScore, denseRank, lexicalRank, path, title, headingPath, chunkIndex, content, contextBefore, contextAfter }] }`. `score` is the cosine similarity and is shown rather than ranked on; `fusedScore` is what ordered the list, and the two ranks say which half of search found the excerpt (`null` for the half that did not). `belowFloor` is whether an agent would have been told *no good match* — the hits come back either way, so the dashboard can show what was withheld. `limit` is 1–20 (default 5); `source`, `path_prefix` and `version` are optional. `400 invalid_request` for a source or a version this project does not have (the message names the ones it does), `409 not_indexed` when the project has no chunks, `409 model_mismatch` when they were embedded with another model |
 | `DELETE /api/projects/:id` | Delete project, its chunks and open MCP sessions (`409` while indexing) |
 | `GET /api/projects/:id/sources` | The project's sources (type, name, config, status, document count). Secrets are never returned — only `hasSecret` |
-| `POST /api/projects/:id/sources` `{ type, name, label?, flavor?, config?, secret?, syncIntervalMinutes?, index? }` | Add a source. `type` is `local`, `git`, `upload` or `notion`; `config` is type-specific (`path` / `url`+`branch`+`subdir` / `rootIds`). `syncIntervalMinutes` is 5–43200 or `null`; omitted takes the instance default |
-| `PATCH /api/projects/:id/sources/:sid` | Change label, content type, config, token (`secret: null` removes it) or `syncIntervalMinutes` (`null` switches the schedule off). Type and name are immutable |
+| `POST /api/projects/:id/sources` `{ type, name, label?, flavor?, config?, secret?, syncIntervalMinutes?, index? }` | Add a source. `type` is `local`, `git`, `upload` or `notion`; `config` is type-specific (`path` / `url`+`branch`+`subdir` / `rootIds`). `secret` is taken only by the types that use a credential — `git`, `notion`, `confluence`; on `local`, `upload` or `web` it answers `400 invalid_request` naming the type. `secret: null` means "no secret" and is accepted on every type. `syncIntervalMinutes` is 5–43200 or `null`; omitted takes the instance default |
+| `PATCH /api/projects/:id/sources/:sid` | Change label, content type, config, token (`secret: null` removes it) or `syncIntervalMinutes` (`null` switches the schedule off). Type and name are immutable. A `secret` on a `local`, `upload` or `web` source is `400 invalid_request`, as on create; one an older release already stored stays until `secret: null` removes it |
 | `DELETE /api/projects/:id/sources/:sid` | Remove the source, its documents, chunks and materialised directory (`409` while indexing) |
 | `POST /api/projects/:id/sources/:sid/sync` | Queue a re-index (every source is synced at the start of it) → `202 { job }` |
 | `POST /api/projects/:id/sources/:sid/test` | Connectivity check without indexing → `{ ok, message }` |
@@ -1515,7 +1523,7 @@ no ambient credential.
 | `GET /api/projects/:id/members` | Accounts with access to this project and their role (any member of it) |
 | `PUT /api/projects/:id/members/:userId` `{ role }` | Grant or change `viewer` / `editor` (root/admin) |
 | `DELETE /api/projects/:id/members/:userId` | Revoke access (root/admin) |
-| `GET /api/audit?actor&action&project&from&to&limit&cursor` | The audit log, newest first (root/admin). Every filter is applied in SQL: `actor` is the label as it was at the time, `action` is `<METHOD> <route template>`, `project` is a project id or `none`; `from`/`to` are **UTC days** and `to` is inclusive of the day named. `limit` is 1–200 (default 50). `cursor` is the previous page's `nextCursor` — **a row id**, never an encoded instant, so two events inside one millisecond cannot lose one of themselves at a page boundary; a cursor naming no row answers `400` rather than an empty page. Answers `{ events, nextCursor, filters, retentionDays }`; `nextCursor` is `null` on the last page, and `filters` carries the distinct actors, actions and projects for the pickers and comes back with the first page only |
+| `GET /api/audit?actor&actorUser&action&project&from&to&limit&cursor` | The audit log, newest first (root/admin). Every filter is applied in SQL: `actor` is the label as it was at the time, `actorUser` is an account id matched **exactly** against the acting account — the events of that account's sessions **and** of every API token it owns, whatever the tokens are named; a value that is not a UUID answers `400 validation_failed`. `action` is `<METHOD> <route template>`, `project` is a project id or `none`; `from`/`to` are **UTC days** and `to` is inclusive of the day named. `limit` is 1–200 (default 50). `cursor` is the previous page's `nextCursor` — **a row id**, never an encoded instant, so two events inside one millisecond cannot lose one of themselves at a page boundary; a cursor naming no row answers `400` rather than an empty page. Answers `{ events, nextCursor, filters, retentionDays }`; `nextCursor` is `null` on the last page, and `filters` carries the distinct actors, actions and projects, and the accounts (`{ id, username }`) that have events, for the pickers, and comes back with the first page only |
 
 A project a member has no access to answers `404`, not `403`, so project ids cannot be probed. `409` guards the last
 root account; `403` guards an admin reaching for a root one.
@@ -1551,7 +1559,9 @@ it as the limit it is.
 that. Both are root/admin only: the log is instance-wide, and a project membership is not standing to read who was
 given the root role. Each row is rendered as a sentence ("dana deleted a source from handbook") rather than as the
 columns it is stored in, and every filter — who, what, which project, and a range of UTC days — is applied in SQL,
-one keyset page at a time. A project that has since been deleted still has its rows: `project_id` carries no foreign
+one keyset page at a time. "Who" is two pickers: **Actor** is the label as it was recorded, and **Account** is the
+account id, which finds that account's own actions together with those of every API token it owns — a token's label
+is its name and owner, so the label alone cannot gather them. A project that has since been deleted still has its rows: `project_id` carries no foreign
 key, so what the panel cannot do is look its *name* up, and it says so on the row rather than leaving it blank.
 
 The two columns the panel filters on — `actor_label`, because it outlives the account, and `action` — are indexed by

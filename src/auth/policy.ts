@@ -15,9 +15,11 @@ export const PUBLIC_ROUTES = new Set([
   '/api/setup/status',
   '/api/setup',
   '/api/auth/login',
-  // OIDC sign-in ([ADR-0077](../../.ssot/ADR.md#adr-0077)): the browser has no session yet when it
-  // asks for the redirect, and the identity provider itself calls the callback with the code — neither
-  // request can carry a Contextator cookie.
+  // OIDC sign-in ([ADR-0077](../../.ssot/ADR.md#adr-0077), [ADR-0089](../../.ssot/ADR.md#adr-0089)):
+  // the browser has no session yet when it asks for the redirect, and it is the browser again — sent
+  // back by the identity provider's redirect, carrying the code — that requests the callback. The
+  // callback authenticates that request by its short-lived flow cookie (state, nonce, PKCE verifier),
+  // not by a Contextator session, so neither route can require one.
   '/api/auth/oidc/login',
   '/api/auth/oidc/callback',
 ]);
@@ -274,6 +276,12 @@ export function auditCreatedTarget(method: string, url: string, body: unknown): 
 /** Whether this route's response is worth parsing at all — asked before the body is deserialised. */
 export const auditReadsResponse = (method: string, url: string): boolean => AUDIT_CREATED.some((r) => r.method === method && r.url === url);
 
+/**
+ * One event's `detail`. Strings and booleans come from a request body through `AUDIT_DETAIL`; a number
+ * is only ever a count a handler computed itself (`req.auditDetail`), never a value a caller sent.
+ */
+export type AuditDetail = Record<string, string | number | boolean>;
+
 /** What the policy layer decided to record about one request; `null` when the request is not an event. */
 export interface AuditSubject {
   /** `<METHOD> <route template>`, which is the whole identity of the action. */
@@ -281,7 +289,7 @@ export interface AuditSubject {
   projectId: string | null;
   targetType: string | null;
   targetId: string | null;
-  detail: Record<string, string | boolean>;
+  detail: AuditDetail;
 }
 
 /** Path parameters as Fastify resolved them. Values are strings; anything else is ignored. */

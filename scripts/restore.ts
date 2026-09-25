@@ -2,15 +2,19 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { sql } from 'drizzle-orm';
+import { and, isNotNull, notInArray, sql } from 'drizzle-orm';
 import * as tar from 'tar';
 import { loadConfig, type Config } from '../src/config.js';
 import { createDb, type Db } from '../src/db/client.js';
+import { documentSources } from '../src/db/schema.js';
+import { CREDENTIAL_SOURCE_TYPES } from '../src/services/encrypted-fields.js';
 import {
   BackupRefused,
   checkSecretKey,
   checkServerVersion,
   connectionFromEnv,
+  countSecretsInSourceData,
+  countsNonCredentialSecrets,
   DATABASE_ENTRY,
   DATA_PREFIX,
   describeTopology,
@@ -38,6 +42,14 @@ import { useEmbeddedDatabaseWhenNothingElseSays } from './embedded-database.js';
  *
  * `--check` stops after the refusals and prints what a real run would do. It writes nothing, so it is
  * the safe way to ask "is this archive the one I think it is, and can this instance take it".
+ *
+ * **Only a credential stops it** ([ADR-0091](../.ssot/ADR.md#adr-0091)). The key refusal counts the
+ * `git`, `notion` and `confluence` rows holding a `secret_enc`; a secret on a `local`, `upload` or
+ * `web` row is one nothing ever read, and it is dropped after the restore — set to NULL, and the
+ * number printed — rather than refusing over it. An archive written before the manifest said which
+ * types it counted may have counted those rows too; when that archive would be refused, the restore
+ * reads the one table out of the dump and judges on the rows themselves, still before it touches the
+ * target. That read unpacks only the dump into staging and removes it again, under `--check` too.
  */
 
 const STAGING = '.restore';
@@ -57,6 +69,40 @@ export interface RestoreResult {
   /** True when `--check` stopped it: every refusal was evaluated and nothing was written. */
   checkedOnly: boolean;
   uploadsRestored: number;
+  /** `secret_enc` values set to NULL on `local`, `upload` and `web` rows after the restore (ADR-0091). */
+  droppedSecrets: number;
+}
+
+/**
+ * The credential-type secret count of an archive whose manifest may have counted every type — read
+ * from the dump's `document_sources` rows, not from the manifest's claim about them.
+ *
+ * Only `database.dump` is unpacked, into the same staging the restore itself uses, and the staging is
+ * removed again whatever happens: this runs before any refusal is final, and a refused restore leaves
+ * nothing behind. `null` when the rows could not be read; the caller then keeps the manifest's number,
+ * which can only refuse more.
+ */
+async function secretsInDump(tools: PgTools, archive: string): Promise<{ credential: number; other: number } | null> {
+  await tools.version('pg_restore');
+  await fs.rm(tools.scratch.local, { recursive: true, force: true });
+  await fs.mkdir(tools.scratch.local, { recursive: true });
+  try {
+    await tar.extract({ file: archive, cwd: tools.scratch.local, filter: (entry) => entry === DATABASE_ENTRY });
+    const found = await fs.stat(path.join(tools.scratch.local, DATABASE_ENTRY)).catch(() => null);
+    if (!found?.isFile()) return null;
+    // Without `-d`, `pg_restore` writes SQL; `-f -` sends it to stdout (PostgreSQL 12+ requires it).
+    // Nothing connects to a database here.
+    const sqlText = await tools.run('pg_restore', [
+      '--data-only',
+      '--table=document_sources',
+      '-f',
+      '-',
+      path.join(tools.scratch.remote, DATABASE_ENTRY),
+    ]);
+    return countSecretsInSourceData(sqlText, CREDENTIAL_SOURCE_TYPES);
+  } finally {
+    await fs.rm(tools.scratch.local, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -93,7 +139,18 @@ export async function runRestore(deps: RestoreDeps, archivePath: string, opts: {
   say(`  from PostgreSQL ${manifest.database.serverVersion} (${manifest.database.mode})`);
   say(topology.notice);
 
-  const key = checkSecretKey(manifest, secretKey);
+  let key = checkSecretKey(manifest, secretKey);
+  if (!key.ok && countsNonCredentialSecrets(manifest, CREDENTIAL_SOURCE_TYPES)) {
+    // An archive from before ADR-0091 counted a secret on every source type. Judge it on its rows.
+    const found = await secretsInDump(tools, archive);
+    if (found) {
+      say(
+        `  this backup predates per-type secret counts; its dump holds ${found.credential} git, Notion or Confluence ` +
+          `credential(s) and ${found.other} secret(s) on local, upload or web sources, which a restore drops.`,
+      );
+      key = checkSecretKey({ ...manifest, secretKey: { ...manifest.secretKey, encryptedSources: found.credential } }, secretKey);
+    }
+  }
   if (!key.ok) throw new BackupRefused(key.code, key.message);
   if (key.note) say(`  note: ${key.note}`);
 
@@ -116,7 +173,7 @@ export async function runRestore(deps: RestoreDeps, archivePath: string, opts: {
     say('');
     say('--check: every refusal was evaluated and this archive passed them. Nothing was written.');
     say(`  a real run would replace the database "${tools.database}" and ${manifest.uploads.length} upload tree(s) under ${config.DATA_DIR}.`);
-    return { manifest, checkedOnly: true, uploadsRestored: 0 };
+    return { manifest, checkedOnly: true, uploadsRestored: 0, droppedSecrets: 0 };
   }
 
   // ── Unpacked, and checked again — still before anything is written ────────────────────────────────
@@ -166,6 +223,16 @@ export async function runRestore(deps: RestoreDeps, archivePath: string, opts: {
   await tools.run('pg_restore', ['--clean', '--if-exists', '-d', tools.database, dumpRemote]);
   say('  database restored.');
 
+  // ADR-0091: a secret on a type that uses none is dropped, and said so. The API has refused to store
+  // one since the same decision; this is what clears the ones an older instance kept.
+  const dropped = await db
+    .update(documentSources)
+    .set({ secretEnc: null })
+    // Every type outside the credential list — today `local`, `upload` and `web`.
+    .where(and(notInArray(documentSources.type, [...CREDENTIAL_SOURCE_TYPES]), isNotNull(documentSources.secretEnc)))
+    .returning({ id: documentSources.id });
+  say(`  ${dropped.length} secret(s) on local, upload or web sources dropped — those types use no credential (ADR-0091).`);
+
   let uploadsRestored = 0;
   for (const upload of manifest.uploads) {
     const from = path.join(tools.scratch.local, DATA_PREFIX, upload.path);
@@ -186,7 +253,7 @@ export async function runRestore(deps: RestoreDeps, archivePath: string, opts: {
   if (manifest.secretKey.present) {
     say(`SECRET_KEY was checked against this backup's fingerprint (${manifest.secretKey.fingerprint}) before anything was written.`);
   }
-  return { manifest, checkedOnly: false, uploadsRestored };
+  return { manifest, checkedOnly: false, uploadsRestored, droppedSecrets: dropped.length };
 }
 
 async function main(): Promise<void> {

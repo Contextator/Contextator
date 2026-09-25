@@ -98,12 +98,21 @@ const Manifest = z.object({
    * again; they are reported and not refused for ([ADR-0075](../.ssot/ADR.md#adr-0075)). It defaults
    * to zero so that an archive written before that split — where the number meant exactly today's
    * `encryptedSources` — still reads correctly here.
+   *
+   * `encryptedSourceTypes` names the source types `encryptedSources` was counted over. An archive
+   * written since [ADR-0091](../.ssot/ADR.md#adr-0091) counts `git`, `notion` and `confluence` only and
+   * says so here; an archive written before it has no such field and counted a `secret_enc` on every
+   * type, a `local`, `upload` or `web` row included. `restore` reads the absence as "the number may be
+   * too large" and derives the credential-type count from the dump itself before it refuses. Added
+   * rather than bumped, per the rule above: a build that predates the field still reads the archive,
+   * and its narrower number is the one ADR-0091 wants that build to refuse on anyway.
    */
   secretKey: z.object({
     present: z.boolean(),
     fingerprint: z.string().max(64).nullable(),
     encryptedSources: z.number().int().min(0),
     regenerableSecrets: z.number().int().min(0).default(0),
+    encryptedSourceTypes: z.array(z.string().max(32)).max(16).optional(),
   }),
   counts: z.object({
     projects: z.number().int().min(0),
@@ -207,8 +216,10 @@ export type SecretKeyVerdict = { ok: true; note: string | null } | { ok: false; 
  */
 export function checkSecretKey(manifest: Manifest, secretKey: string | undefined): SecretKeyVerdict {
   const { present, fingerprint, encryptedSources, regenerableSecrets } = manifest.secretKey;
+  // Named by type since ADR-0091: only a git, Notion or Confluence source's credential is counted, so
+  // the sentence says which sources an operator should expect to re-enter tokens for.
   const atStake =
-    `${encryptedSources} source${encryptedSources === 1 ? '' : 's'} in this backup ` +
+    `${encryptedSources} git, Notion or Confluence source${encryptedSources === 1 ? '' : 's'} in this backup ` +
     `${encryptedSources === 1 ? 'holds a sync credential' : 'hold sync credentials'} encrypted under it`;
   const remedy =
     'For a git source, regenerate the secret here and paste the new one into the repository; for a Notion source, ' +
@@ -237,8 +248,8 @@ export function checkSecretKey(manifest: Manifest, secretKey: string | undefined
       return {
         ok: true,
         note:
-          'This backup was taken under a SECRET_KEY and this environment has none; no source in it holds a sync ' +
-          'credential, so nothing it carries is lost for good — but set the key before adding a private source.' +
+          'This backup was taken under a SECRET_KEY and this environment has none; no git, Notion or Confluence source ' +
+          'in it holds a sync credential, so nothing it carries is lost for good — but set the key before adding a private source.' +
           regenerable,
       };
     }
@@ -259,8 +270,9 @@ export function checkSecretKey(manifest: Manifest, secretKey: string | undefined
       return {
         ok: true,
         note:
-          'The SECRET_KEY in this environment is not the one this backup was taken under; no source in it holds a sync ' +
-          'credential, so nothing it carries is lost for good — but any credential entered before this backup would not have survived.' +
+          'The SECRET_KEY in this environment is not the one this backup was taken under; no git, Notion or Confluence ' +
+          'source in it holds a sync credential, so nothing it carries is lost for good — but any credential entered before ' +
+          'this backup would not have survived.' +
           regenerable,
       };
     }
@@ -278,6 +290,57 @@ export function checkSecretKey(manifest: Manifest, secretKey: string | undefined
   }
 
   return { ok: true, note: null };
+}
+
+/**
+ * Whether `encryptedSources` in this manifest may count more than the credential-bearing types
+ * ([ADR-0091](../.ssot/ADR.md#adr-0091)): true for an archive written before the manifest named the
+ * types it counted, or one naming a type outside `credentialTypes`.
+ */
+export function countsNonCredentialSecrets(manifest: Manifest, credentialTypes: readonly string[]): boolean {
+  const counted = manifest.secretKey.encryptedSourceTypes;
+  if (counted === undefined) return true;
+  return counted.some((type) => !credentialTypes.includes(type));
+}
+
+/** What `countSecretsInSourceData` found: stored secrets, split by whether the type uses one. */
+export interface DumpSecretCounts {
+  credential: number;
+  other: number;
+}
+
+/**
+ * Counts the `document_sources` rows that hold a `secret_enc`, split into credential-bearing types and
+ * the rest, from the plain-SQL rendering of that one table's data that `pg_restore --data-only
+ * --table=document_sources -f -` writes.
+ *
+ * This is how an archive written before [ADR-0091](../.ssot/ADR.md#adr-0091) is judged: its manifest
+ * counted a secret on every type, so the restore reads the dump itself — the rows, not a claim about
+ * them — before it touches the target. `null` when the text holds no `COPY` block for the table or the
+ * block lacks either column; the caller then keeps the manifest's own, wider count, which can only
+ * refuse more, never less.
+ *
+ * COPY's text format: one row per line, columns separated by a tab, `\N` for NULL, `\.` ending the
+ * block. Neither a type name nor an envelope contains a tab or a newline, so a split is exact here.
+ */
+export function countSecretsInSourceData(sqlText: string, credentialTypes: readonly string[]): DumpSecretCounts | null {
+  const lines = sqlText.split('\n');
+  const header = /^COPY (?:[^\s(]+\.)?"?document_sources"? \(([^)]*)\) FROM stdin;$/;
+  const start = lines.findIndex((line) => header.test(line));
+  if (start === -1) return null;
+  const columns = (header.exec(lines[start])?.[1] ?? '').split(',').map((c) => c.trim().replace(/^"|"$/g, ''));
+  const typeAt = columns.indexOf('type');
+  const secretAt = columns.indexOf('secret_enc');
+  if (typeAt === -1 || secretAt === -1) return null;
+  const counts: DumpSecretCounts = { credential: 0, other: 0 };
+  for (let i = start + 1; i < lines.length && lines[i] !== '\\.'; i++) {
+    const fields = lines[i].split('\t');
+    const secret = fields[secretAt];
+    if (secret === undefined || secret === '\\N' || secret === '') continue;
+    if (credentialTypes.includes(fields[typeAt] ?? '')) counts.credential++;
+    else counts.other++;
+  }
+  return counts;
 }
 
 export type DatabaseMode = 'embedded' | 'external';
@@ -640,7 +703,7 @@ export function readmeFor(manifest: Manifest): string {
     '',
     'What is NOT in it, and will not be:',
     secretKey.present
-      ? `  - SECRET_KEY. The instance had one, and ${secretKey.encryptedSources} source(s) hold a sync credential ` +
+      ? `  - SECRET_KEY. The instance had one, and ${secretKey.encryptedSources} git, Notion or Confluence source(s) hold a sync credential ` +
         `encrypted under it, ${secretKey.regenerableSecrets} a webhook secret. ` +
         `Only a key check value travels (${secretKey.fingerprint}), which is enough for a restore to refuse the wrong key and ` +
         'nothing like enough to be the key. Keep the key somewhere this file is not: a backup carrying it would be the whole ' +
