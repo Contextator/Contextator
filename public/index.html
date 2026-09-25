@@ -207,7 +207,7 @@
             </label>
             <div id="notion-webhook-box" class="webhook-box" hidden>
               <span class="field-label">Notion webhook <span class="muted">— optional</span></span>
-              <span class="field-hint">Edits, deletions and moves reach the index in seconds instead of waiting for the interval. It does not notice a page <em>unshared</em> from the integration — Notion sends no event for that — so keep the interval switched on. The endpoint has to be reachable from the internet over HTTPS.</span>
+              <span class="field-hint">Edits, deletions and moves start a sync without waiting for the interval — within the minimum webhook interval, since a burst of deliveries is collapsed into one run. It does not notice a page <em>unshared</em> from the integration — Notion sends no event for that — so keep the interval switched on. The endpoint has to be reachable from the internet over HTTPS.</span>
               <div class="webhook-row">
                 <code id="notion-webhook-url"></code>
                 <button type="button" class="ghost small" id="notion-webhook-copy-url">Copy URL</button>

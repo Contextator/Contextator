@@ -52,6 +52,43 @@ ships, that stops.
   `anahtarı` now finds a page that says `anahtarın`. Changing the setting re-indexes that source, as
   changing its content type already did.
 
+- **A published documentation site is a source type.** Point a **Documentation site** source at a
+  `sitemap.xml`, an `llms.txt` or one start URL, and it reads public pages over HTTP — staying on that
+  host and under that path when it crawls. It refuses an entry point it cannot recognise rather than
+  guessing, stores no credential at all, and stops at five ceilings (`WEB_MAX_PAGES`, `WEB_MAX_DEPTH`,
+  `WEB_REQUEST_DELAY_MS`, `WEB_CRAWL_BUDGET_MS`, `WEB_RESPECT_ROBOTS`) that say which one ended a run.
+- **Confluence Data Center 7.9 and later**, beside Cloud. Pick the *Deployment* when adding the source:
+  Data Center takes a base URL with its context path and a personal access token. Its version is read
+  before any credential is sent, and an older release or a server that is not Confluence is refused by
+  name. Confluence Server is not supported.
+- **A signed Confluence Data Center webhook**, off until an editor turns it on per source:
+  `POST /api/webhooks/confluence/<source-id>` queues a sync through the same debounce as the git
+  webhooks. Confluence Cloud cannot send these, so there the sync interval stays the only trigger.
+- **Sign in through an OIDC identity provider.** `OIDC_ISSUER_URL` adds an SSO button beside the
+  password form, which never goes away. By default SSO signs in accounts an admin already created;
+  `OIDC_AUTO_PROVISION=1` lets a first sign-in create one with `OIDC_DEFAULT_ROLE`, which is never
+  `root`.
+- **Per-account API tokens.** Any account can mint one from its menu, restricted to a project, an
+  expiry date and an exact list of routes, and revoke it on its own. A token never does more than the
+  account behind it, and the audit log names the token that acted. It is now the recommended
+  credential for scripts instead of `ADMIN_TOKEN`, which is unchanged.
+- **`SECRET_KEY` can be rotated.** Set the old key as `SECRET_KEY_PREVIOUS` and the new one as
+  `SECRET_KEY`, restart, run `npm run rotate-secret`, then remove `SECRET_KEY_PREVIOUS`. Reads fall back
+  to the previous key while it is set; every write uses the new one.
+- **A project can set its own relevance floor**, or turn it off, from its query-log panel, which shows
+  what the new floor would have done to the searches already logged before it is applied.
+  `SEARCH_SCORE_FLOOR=0` still turns every project's floor off.
+- **Indexed documents are MCP resources** (`contextator://<project>/<source>/<path>`), listed and read
+  behind the same auth as the tools and never beyond what `read_document` reaches.
+- **`MCP_STRUCTURED_OUTPUT=1` adds structured JSON to every tool answer** — an `outputSchema` and
+  `structuredContent` beside the text, which stays exactly the same. It is off by default, because
+  Claude Code reads the structured part instead of the text when both are present.
+- **A Helm chart, `charts/contextator/` (chart version 1.0.0)**, for the `-slim` image against an
+  external database, published to `https://contextator.github.io/Contextator` by every release. It
+  runs exactly one Pod, and its values schema is strict: a misspelt key fails `helm install` by name.
+- `GET /api/audit` takes `actorUser`, which finds an account's own events and those of every API token
+  it owns; the dashboard's audit view gains an account picker.
+
 ### Changed
 
 - **`.env.example` now ships `DATABASE_URL` empty, and this is the one thing to check before you
@@ -77,6 +114,23 @@ ships, that stops.
   indexed one way and asked another, and contributed nothing to the keyword half at all. Each source
   is now read in its own configuration and one search reaches all of them. A project that names no
   language on any source is unaffected, down to the ordering of its results.
+- **Every project has its own partial HNSW index**, built with `CREATE INDEX CONCURRENTLY` when the
+  project is created. A search now scans its own project's rows instead of every chunk in the instance,
+  so `HNSW_MAX_SCAN_TUPLES` is counted per project. The first start after upgrading builds one index
+  per existing project.
+- **Where a Confluence source may connect is bounded** (ADR-0088). Loopback, link-local — the cloud
+  metadata address included — unspecified and multicast addresses are always refused; a private
+  address is reached only when its host is listed in `CONFLUENCE_ALLOWED_HOSTS`. The check runs on the
+  connected address, after DNS and on every redirect.
+- **Unlinking an SSO identity revokes that account's MCP OAuth tokens** in the same transaction, as it
+  already invalidated its sessions and API tokens.
+- **A secret on a `local`, `upload` or `web` source is refused** with `400 invalid_request` naming the
+  type, instead of being stored and never used. `secret: null` is accepted on every type.
+- Files are converted on a worker thread. A file that takes seconds to parse no longer blocks search,
+  and one that exhausts its thread or runs past `CONVERSION_TIMEOUT_MS` is refused by name while the
+  run carries on.
+- Document text in MCP tool answers is fenced, and the fence widens rather than escaping the document,
+  so a page cannot pass itself off as the tool's own words.
 
 ### Fixed
 
@@ -94,6 +148,11 @@ ships, that stops.
   different fifth result after a rebuild, with nothing having changed but the rebuild. Equal results
   are now ordered by the documents themselves: the shorter excerpt first, then the document's own
   path and the position of the passage within it.
+- **Revoking an account's MCP credentials could miss a sign-in already in flight.** An SSO unlink, a
+  password change or an administrator's reset did not reach an authorization code approved in the
+  minute before it, and a refresh rotation racing the revoke could mint a pair it never saw. The
+  exchange now re-checks the account, its access to the project and a revoke counter under the account
+  row's lock, and refuses a stale code with `invalid_grant`.
 - Documentation said PostgreSQL has no Turkish configuration. It has one, and Turkish sources were
   being indexed without stemming because of that claim.
 
