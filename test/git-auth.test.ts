@@ -22,6 +22,16 @@ describe('git provider detection', () => {
     expect(credentialsFor('generic', 'tok', 'bob')).toEqual({ username: 'bob', password: 'tok' });
   });
 
+  it('lets a typed username override the default, which a GitLab deploy token needs (ADR-0086)', () => {
+    // A deploy token authenticates as its generated username; `oauth2` is only right for personal,
+    // project and group access tokens.
+    expect(credentialsFor('gitlab', 'gldt-tok', 'gitlab+deploy-token-42')).toEqual({ username: 'gitlab+deploy-token-42', password: 'gldt-tok' });
+    expect(credentialsFor('github', 'github_pat_tok', 'ci-bot')).toEqual({ username: 'ci-bot', password: 'github_pat_tok' });
+    expect(credentialsFor('bitbucket', 'tok', 'x-token-auth')).toEqual({ username: 'x-token-auth', password: 'tok' });
+    // A username of blanks is no username: the provider default applies.
+    expect(credentialsFor('gitlab', 'tok', '   ')).toEqual({ username: 'oauth2', password: 'tok' });
+  });
+
   it('strips credentials pasted into the URL', () => {
     expect(sanitizeGitUrl('https://user:secret@github.com/org/repo.git')).toBe('https://github.com/org/repo.git');
     expect(sanitizeGitUrl('nonsense')).toBe('nonsense');
