@@ -82,6 +82,9 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'DELETE', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: 'editor', allowed: true },
   { method: 'DELETE', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: 'viewer', allowed: false },
   { method: 'DELETE', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: null, allowed: false },
+  { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('member'), membership: null, allowed: false },
+  { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: as('admin'), membership: null, allowed: true },
+  { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-secret', actor: token, membership: null, allowed: true },
   // Opening the Notion verification window is what authenticates the unauthenticated webhook route
   // ([ADR-0049](../.ssot/ADR.md#adr-0049)), so a viewer must not be able to open one.
   { method: 'POST', url: '/api/projects/:id/sources/:sid/webhook-verification', actor: as('member'), membership: 'editor', allowed: true },
@@ -255,6 +258,8 @@ describe('API tokens (ADR-0076)', () => {
     expect(apiTokenAllowsRoute(scope, 'GET', '/api/projects/:id/sources')).toBe(false);
     expect(apiTokenAllowsRoute(scope, 'DELETE', '/api/projects/:id')).toBe(false);
     expect(apiTokenAllowsRoute([], 'POST', '/api/projects/:id/reindex')).toBe(false);
+    // Nor can it switch a Confluence or git delivery route on by minting its webhook secret.
+    expect(apiTokenAllowsRoute(scope, 'POST', '/api/projects/:id/sources/:sid/webhook-secret')).toBe(false);
   });
 
   it('checkRequest lets a reindex-scoped token reindex and refuses it everything else', () => {

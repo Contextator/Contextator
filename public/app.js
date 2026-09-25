@@ -1284,7 +1284,6 @@ function setHint(el, before, code, after) {
  * Cloud and Data Center ask for different credentials, so the form says which one it wants. Static
  * strings only: nothing an operator typed is written back into markup here.
  */
-
 function syncConfluenceDeployment() {
   const dataCenter = srcForm.elements.confluenceDeployment.value === 'datacenter';
   $('#confluence-email-field').hidden = dataCenter;
