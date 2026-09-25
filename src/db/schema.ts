@@ -711,6 +711,13 @@ export const users = pgTable(
     lockedUntil: timestamp('locked_until', { withTimezone: true }),
     lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
     passwordChangedAt: timestamp('password_changed_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * When `revokeMcpCredentialsOfUser` last ran for this account — unlink, a password change, an
+     * administrator's reset. `POST /oauth/token` refuses an authorization code issued at or before it,
+     * because a code is an MCP credential that is not a row yet and so the revoke cannot reach it.
+     * NULL until the first revoke.
+     */
+    mcpCredentialsRevokedAt: timestamp('mcp_credentials_revoked_at', { withTimezone: true }),
     createdBy: uuid('created_by'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },

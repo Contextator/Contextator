@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { and, asc, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { mcpTokens, projects, type McpAuthMode, type McpTokenKind, type McpTokenRow } from '../../db/schema.js';
+import { mcpTokens, projects, users, type McpAuthMode, type McpTokenKind, type McpTokenRow } from '../../db/schema.js';
 import { NotFoundError } from '../projects.js';
 import { withUserRowLock } from './users.js';
 
@@ -195,12 +195,24 @@ export async function revokeMcpCredentialsOfGrant(db: Db, grant: McpGrant): Prom
  * because the password change and the administrator's reset call this bare on `db` and unlink calls it
  * inside its own `withUserRowLock`: on `db` it is a transaction of its own, on a `tx` a savepoint whose
  * `FOR UPDATE` the caller already holds, and either way the lock lasts until the revoke is committed.
+ *
+ * **And the codes not yet exchanged.** An authorization code lives in memory for up to a minute before
+ * it becomes a row here, so the `UPDATE` below cannot reach it. The account's
+ * `mcp_credentials_revoked_at` is stamped in the same transaction, and the code exchange refuses a code
+ * issued at or before that stamp — which is what makes this revoke reach every credential of the
+ * account, including the ones still on their way to being minted.
  */
 export async function revokeMcpCredentialsOfUser(db: Db, userId: string): Promise<number> {
   return withUserRowLock(db, userId, async (tx) => {
+    // Read after the lock is held, and from this process's clock rather than `now()` (which is the
+    // transaction's start, possibly before the wait for the row): an authorization code approved
+    // before this revoke took the row has an `issuedAt` at or before it, one approved after it has
+    // one after, and `POST /oauth/token` tells them apart by exactly that.
+    const now = new Date();
+    await tx.update(users).set({ mcpCredentialsRevokedAt: now }).where(eq(users.id, userId));
     const revoked = await tx
       .update(mcpTokens)
-      .set({ revokedAt: new Date() })
+      .set({ revokedAt: now })
       .where(and(eq(mcpTokens.userId, userId), sql`${mcpTokens.kind} <> 'static'`, isNull(mcpTokens.revokedAt)))
       .returning({ id: mcpTokens.id });
     return revoked.length;

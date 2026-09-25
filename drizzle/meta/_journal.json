@@ -127,6 +127,13 @@
       "when": 1790292860241,
       "tag": "0017_project_score_floor",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1790331988824,
+      "tag": "0018_user_mcp_credentials_revoked_at",
+      "breakpoints": true
     }
   ]
 }

@@ -20,7 +20,7 @@ import {
   type AuditEventRow,
 } from '../../src/db/schema.js';
 import { issueMcpCredential, revokeMcpCredentialsOfUser } from '../../src/services/auth/mcp-tokens.js';
-import { setMemberRole } from '../../src/services/auth/memberships.js';
+import { removeMember, setMemberRole } from '../../src/services/auth/memberships.js';
 import { linkFederatedIdentity, provisionFederatedUser, unlinkFederatedIdentity } from '../../src/services/auth/federated-identities.js';
 import { revokeSessionsOfUser } from '../../src/services/auth/sessions.js';
 import { createUser, deleteUser, SSO_ONLY_PASSWORD_HASH, setPassword, updateUser, withUserRowLock } from '../../src/services/auth/users.js';
@@ -941,6 +941,254 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
           const rows = await credentialsOf(account.userId);
           expect(rows).toHaveLength(1); // nothing was minted
           expect(rows[0].revokedAt).not.toBeNull();
+        } finally {
+          release.resolve();
+          await unlink.catch(() => {});
+        }
+      });
+    });
+
+    /**
+     * An authorization code is a credential of the account that is not a row yet: it lives in memory
+     * for a minute, so the revoke's `UPDATE` on `mcp_tokens` cannot reach one in flight. The token
+     * endpoint re-checks the grant behind it instead — the account, the revoke stamp, the project —
+     * under the account row's `FOR SHARE`, in the transaction that inserts the pair (faz 10).
+     */
+    describe('against an authorization code approved before the revoke (faz 10)', () => {
+      const REDIRECT_URI = 'https://client.example/cb';
+
+      /** An `account`-mode project, a viewer on it with a live session, and a client; optionally SSO-linked. */
+      async function codeFixture(slug: string, opts: { link: boolean }) {
+        const project = await seedProject(database.db, slug, { path: 'guide.md', body: '# Guide' });
+        await database.db.update(projects).set({ mcpAuth: 'account' }).where(eq(projects.id, project.id));
+        const [client] = await database.db
+          .insert(oauthClients)
+          .values({ clientId: `ctxc_${slug.replaceAll('-', '_')}`, name: 'connector', redirectUris: [REDIRECT_URI] })
+          .returning();
+        const username = `${slug}-owner`;
+        const account = await signInLocalUser(username);
+        await setMemberRole(database.db, project.id, account.userId, 'viewer', null);
+        if (opts.link) {
+          provider.setNextIdentity({ sub: `${slug}-identity`, preferred_username: 'irrelevant-here' });
+          const flow = await startOidcFlow(live.origin, { startPath: '/api/auth/oidc/link', cookie: cookieHeader(account.jar) });
+          expect((await hitCallback(flow.callbackUrl, { ...account.jar, ...flow.jar })).status).toBe(302);
+        }
+        return { project, clientId: client.clientId, account, username };
+      }
+
+      type Fixture = Awaited<ReturnType<typeof codeFixture>>;
+
+      /** The consent page's hidden fields, read the way a browser would submit them. */
+      async function consentForm(f: Fixture, jar: Record<string, string> = f.account.jar): Promise<URLSearchParams> {
+        const url = new URL(`${live.origin}/oauth/authorize`);
+        for (const [key, value] of Object.entries({
+          response_type: 'code',
+          client_id: f.clientId,
+          redirect_uri: REDIRECT_URI,
+          // sha256('a-verifier') in base64url, so the verifier `exchange` presents is the real one.
+          code_challenge: 'NORfwpEYKakZsuYgaey8PFmACPx5Ikq_PyZGYQ7p8NI',
+          code_challenge_method: 'S256',
+          resource: `${live.origin}/mcp/${f.project.name}`,
+        })) {
+          url.searchParams.set(key, value);
+        }
+        const page = await fetch(url, { headers: { cookie: cookieHeader(jar) }, redirect: 'manual' });
+        expect(page.status).toBe(200);
+        const form = new URLSearchParams();
+        for (const match of (await page.text()).matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)"/g)) {
+          form.set(
+            match[1],
+            match[2]
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'")
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&amp;/g, '&'),
+          );
+        }
+        form.set('decision', 'approve');
+        return form;
+      }
+
+      const approve = (form: URLSearchParams, jar: Record<string, string>) =>
+        fetch(`${live.origin}/oauth/authorize`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded', 'sec-fetch-site': 'same-origin', cookie: cookieHeader(jar) },
+          body: form,
+          redirect: 'manual',
+        });
+
+      /** The code the consent page hands back to the client for an approval by `jar`'s session. */
+      async function codeFor(f: Fixture, jar: Record<string, string> = f.account.jar): Promise<string> {
+        const res = await approve(await consentForm(f, jar), jar);
+        const location = res.headers.get('location');
+        if (!location?.startsWith(REDIRECT_URI)) throw new Error(`Expected a redirect back to the client, got ${res.status} to ${location}`);
+        const code = new URL(location).searchParams.get('code');
+        expect(code).toBeTruthy();
+        return code as string;
+      }
+
+      const exchange = (f: Fixture, code: string) =>
+        fetch(`${live.origin}/oauth/token`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'authorization_code',
+            code,
+            code_verifier: 'a-verifier',
+            client_id: f.clientId,
+            redirect_uri: REDIRECT_URI,
+          }),
+        });
+
+      const unlinkAs = (jar: Record<string, string>) =>
+        fetch(`${live.origin}/api/auth/oidc/link`, {
+          method: 'DELETE',
+          headers: { cookie: cookieHeader(jar), 'sec-fetch-site': 'same-origin' },
+          redirect: 'manual',
+        });
+
+      const credentialsOf = (userId: string) => database.db.select().from(mcpTokens).where(eq(mcpTokens.userId, userId));
+
+      it('exchanges a code whose grant still holds for a pair the MCP endpoint accepts', async () => {
+        const f = await codeFixture('code-plain', { link: false });
+        const res = await exchange(f, await codeFor(f));
+        expect(res.status).toBe(200);
+        const pair = (await res.json()) as { access_token: string; refresh_token: string };
+        expect(pair.refresh_token).toBeTruthy();
+        expect((await initializeWith(f.project.name, pair.access_token)).status).toBe(200);
+        expect(await credentialsOf(f.account.userId)).toHaveLength(2);
+      });
+
+      it('refuses a code approved before an SSO unlink, mints nothing, and takes a code approved after signing in again', async () => {
+        const f = await codeFixture('code-then-unlink', { link: true });
+        const code = await codeFor(f);
+        expect((await unlinkAs(f.account.jar)).status).toBe(204);
+
+        const res = await exchange(f, code);
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ error: 'invalid_grant' });
+        expect(await credentialsOf(f.account.userId)).toEqual([]);
+
+        // The stamp refuses what came before it, not the account: the person signing in again and
+        // approving again is a new decision, and it goes through.
+        const login = await fetch(`${live.origin}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ username: f.username, password: 'a-long-enough-password-2!' }),
+        });
+        expect(login.status).toBe(200);
+        const again = await exchange(f, await codeFor(f, jarFromSetCookie(login.headers.getSetCookie())));
+        expect(again.status).toBe(200);
+      });
+
+      it('refuses a code approved before the account lost its access to the project, and mints nothing', async () => {
+        const f = await codeFixture('code-then-removed', { link: false });
+        const code = await codeFor(f);
+        await removeMember(database.db, f.project.id, f.account.userId);
+
+        const res = await exchange(f, code);
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ error: 'invalid_grant' });
+        expect(await credentialsOf(f.account.userId)).toEqual([]);
+      });
+
+      it('refuses a code approved before the account was deactivated, and mints nothing', async () => {
+        const f = await codeFixture('code-then-disabled', { link: false });
+        const code = await codeFor(f);
+        await database.db.update(users).set({ isActive: false }).where(eq(users.id, f.account.userId));
+
+        const res = await exchange(f, code);
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ error: 'invalid_grant' });
+        expect(await credentialsOf(f.account.userId)).toEqual([]);
+      });
+
+      it('an unlink that arrives after an exchange re-checked the grant waits for it, then takes down the pair it minted', async () => {
+        const f = await codeFixture('exchange-then-unlink', { link: true });
+        const code = await codeFor(f);
+        const entered = deferred<void>();
+        const release = deferred<void>();
+        live.ctx.testHooks = {
+          onCodeVerifiedBeforeIssue: async () => {
+            entered.resolve();
+            await release.promise;
+          },
+        };
+        try {
+          const exchanged = exchange(f, code);
+          await entered.promise;
+
+          const unlink = unlinkAs(f.account.jar);
+          // Queued on the account row behind the exchange's `FOR SHARE`, so it cannot land between
+          // the re-check and the inserts.
+          expect(await waitForLockWaiter(database.pool)).toBe(true);
+
+          release.resolve();
+          const [res, unlinked] = await Promise.all([exchanged, unlink]);
+          expect(res.status).toBe(200);
+          expect(unlinked.status).toBe(204);
+          const pair = (await res.json()) as { access_token: string; refresh_token: string };
+
+          const rows = await credentialsOf(f.account.userId);
+          expect(rows).toHaveLength(2);
+          expect(rows.filter((r) => r.revokedAt === null)).toEqual([]);
+          expect((await initializeWith(f.project.name, pair.access_token)).status).toBe(401);
+        } finally {
+          release.resolve();
+          live.ctx.testHooks = undefined;
+        }
+      });
+
+      it('an exchange that arrives while an unlink holds the account row waits for it, then is refused and mints nothing', async () => {
+        const f = await codeFixture('unlink-then-exchange', { link: false });
+        const code = await codeFor(f);
+        const locked = deferred<void>();
+        const release = deferred<void>();
+        // Unlink's own shape: the account row `FOR UPDATE`, then the revoke inside it.
+        const unlink = withUserRowLock(database.db, f.account.userId, async (tx) => {
+          locked.resolve();
+          await release.promise;
+          return revokeMcpCredentialsOfUser(tx, f.account.userId);
+        });
+        try {
+          await locked.promise;
+          const exchanged = exchange(f, code);
+          expect(await waitForLockWaiter(database.pool)).toBe(true);
+
+          release.resolve();
+          const [revoked, res] = await Promise.all([unlink, exchanged]);
+          expect(revoked).toBe(0);
+          expect(res.status).toBe(400);
+          expect(await res.json()).toMatchObject({ error: 'invalid_grant' });
+          expect(await credentialsOf(f.account.userId)).toEqual([]);
+        } finally {
+          release.resolve();
+          await unlink.catch(() => {});
+        }
+      });
+
+      it('an approval that arrives while an unlink holds the account row waits for it, then is sent to sign in and issues no code', async () => {
+        const f = await codeFixture('unlink-then-approve', { link: false });
+        const form = await consentForm(f);
+        const locked = deferred<void>();
+        const release = deferred<void>();
+        // Unlink's own shape: the account row `FOR UPDATE`, the sessions and the MCP credentials in it.
+        const unlink = withUserRowLock(database.db, f.account.userId, async (tx) => {
+          locked.resolve();
+          await release.promise;
+          await revokeSessionsOfUser(tx, f.account.userId);
+          return revokeMcpCredentialsOfUser(tx, f.account.userId);
+        });
+        try {
+          await locked.promise;
+          const approval = approve(form, f.account.jar);
+          expect(await waitForLockWaiter(database.pool)).toBe(true);
+
+          release.resolve();
+          const [, res] = await Promise.all([unlink, approval]);
+          expect(res.status).toBe(302);
+          expect(res.headers.get('location')).toMatch(/^\/login\?next=/);
         } finally {
           release.resolve();
           await unlink.catch(() => {});

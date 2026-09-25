@@ -228,6 +228,28 @@ export async function shareUserRowLock(tx: Db, userId: string): Promise<void> {
 }
 
 /**
+ * `shareUserRowLock`, returning the row: what `POST /oauth/token` re-checks before it turns an
+ * authorization code into a pair. Same lock, same rule about `tx`, and the same ordering against
+ * `revokeMcpCredentialsOfUser` — the stamp it writes is either committed before this reads it or
+ * written after this transaction has committed the pair it minted, which the revoke then takes down.
+ */
+export async function shareUserRowForGrant(tx: Db, userId: string) {
+  const [row] = await tx
+    .select({
+      id: users.id,
+      username: users.username,
+      role: users.role,
+      isActive: users.isActive,
+      mustChangePassword: users.mustChangePassword,
+      mcpCredentialsRevokedAt: users.mcpCredentialsRevokedAt,
+    })
+    .from(users)
+    .where(eq(users.id, userId))
+    .for('share');
+  return row;
+}
+
+/**
  * Instrumentation for deterministic integration tests only — no route or process passes anything but
  * `onBeforeLock` (and that only from `ctx.testHooks`). `onRowLocked` is awaited right after the
  * account row lock is held, the window a second remover needs to be in for the lock order to matter.

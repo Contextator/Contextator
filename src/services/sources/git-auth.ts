@@ -21,7 +21,8 @@ export function detectProvider(url: string, configured: 'auto' | 'github' | 'git
  * Username/password pair for token auth per provider:
  * - GitHub: `x-access-token` works for classic PATs, fine-grained PATs and App installation tokens.
  * - GitLab: `oauth2` works for OAuth tokens and personal/project access tokens.
- * - Bitbucket Cloud: repository/workspace access tokens use `x-token-auth`; app passwords need the real username.
+ * - Bitbucket Cloud: repository/workspace access tokens use `x-token-auth`; an API token needs the Bitbucket
+ *   username, or `x-bitbucket-api-token-auth`, in the Username field.
  * - Gitea/Forgejo/Codeberg and generic servers: any username with the token as password.
  */
 export function credentialsFor(provider: GitProvider, token: string, username = ''): { username: string; password: string } {

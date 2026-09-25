@@ -164,17 +164,28 @@ interface PendingCode {
   codeChallenge: string;
   /** RFC 8707: the resource the code was issued for, echoed back and checked at the token endpoint. */
   resource: string;
+  /**
+   * When the person approved it, in `Date.now()` milliseconds. The token endpoint refuses a code
+   * issued at or before the account's `mcp_credentials_revoked_at`: the revoke could not reach a code
+   * that was not a row yet, so the exchange has to ask whether it came before or after one.
+   */
+  issuedAt: number;
   expiresAt: number;
 }
 
 export class AuthorizationCodeStore {
   private readonly codes = new Map<string, PendingCode>();
 
-  /** Returns the code to hand the browser; only its sha256 is kept, like every other credential here. */
-  issue(grant: Omit<PendingCode, 'expiresAt'>, ttlMs = AUTHORIZATION_CODE_TTL_MS): string {
+  /**
+   * Returns the code to hand the browser; only its sha256 is kept, like every other credential here.
+   * `issuedAt` defaults to now; the authorization endpoint passes the instant it read under the
+   * account row's lock, which is the one that orders it against a concurrent revoke.
+   */
+  issue(grant: Omit<PendingCode, 'expiresAt' | 'issuedAt'> & { issuedAt?: number }, ttlMs = AUTHORIZATION_CODE_TTL_MS): string {
     this.sweep();
     const code = CODE_PREFIX + randomBytes(32).toString('hex');
-    this.codes.set(hashCode(code), { ...grant, expiresAt: Date.now() + ttlMs });
+    const issuedAt = grant.issuedAt ?? Date.now();
+    this.codes.set(hashCode(code), { ...grant, issuedAt, expiresAt: issuedAt + ttlMs });
     return code;
   }
 

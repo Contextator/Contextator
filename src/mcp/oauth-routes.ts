@@ -9,8 +9,11 @@ import { OAUTH_REGISTER_MAX_PER_HOST, OAUTH_REGISTER_WINDOW_MS, PROJECT_NAME_RE 
 import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
 import { getProjectById, getProjectByName } from '../services/projects.js';
-import { findSessionUser } from '../services/auth/sessions.js';
-import { shareUserRowLock } from '../services/auth/users.js';
+import { findSessionUser, isSessionLive } from '../services/auth/sessions.js';
+import { resolveProjectAccess } from '../services/auth/memberships.js';
+import { shareUserRowForGrant, shareUserRowLock } from '../services/auth/users.js';
+import { MCP_READ_ACCESS, satisfies } from '../auth/policy.js';
+import type { Principal } from '../auth/types.js';
 import type { Db } from '../db/client.js';
 import {
   findSpentRefreshToken,
@@ -467,6 +470,23 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     const checked = await validateRequest(req, reply, params);
     if (!checked.ok) return reply;
 
+    // The instant this decision is made, read under the account row's `FOR SHARE` together with a
+    // fresh look at the session ([ADR-0090](../../.ssot/ADR.md#adr-0090), FR-616). The session above
+    // was resolved before any lock, so an unlink or a password change could have revoked it since and
+    // stamped `mcp_credentials_revoked_at` *before* a `Date.now()` taken out here — a code the token
+    // endpoint would then see as newer than the revoke. Under the lock the two are ordered: a revoke
+    // that committed first has already ended this session if it was meant to (an unlink, an
+    // administrator's reset, somebody else's password change; the one session a password change keeps
+    // is the one that just proved the new password), and one that waits for this commit stamps an
+    // instant at or after `issuedAt`, which the exchange refuses.
+    const issuedAt = await withRotationTransaction(db, async (tx) => {
+      await shareUserRowLock(tx, session.userId);
+      return (await isSessionLive(tx, session.sessionId)) ? Date.now() : null;
+    });
+    if (issuedAt === null) {
+      return reply.header('cache-control', 'no-store').redirect(`/login?next=${encodeURIComponent('/oauth/authorize')}`, 302);
+    }
+
     // The audit row's actor and project, set **here** rather than where the session was resolved:
     // everything above this point is a request that was refused or redirected, and an event for one of
     // those would say a person decided something they never got to decide.
@@ -492,6 +512,7 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       redirectUri: params.redirect_uri,
       codeChallenge: params.code_challenge,
       resource: params.resource.replace(/\/+$/, ''),
+      issuedAt,
     });
     log.info({ project: checked.project.name, user: session.username, clientId: params.client_id }, 'issued an oauth authorization code');
     return backToClient(reply, params.redirect_uri, { code, state: params.state });
@@ -536,13 +557,59 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       if (body.resource && body.resource.replace(/\/+$/, '') !== redeemed.resource) {
         return reply.code(400).send(oauthError('invalid_target', 'resource does not match the one the code was issued for'));
       }
-      const project = await getProjectById(db, redeemed.projectId);
-      if (!project) {
-        return reply.code(400).send(oauthError('invalid_grant', 'The project this code was issued for no longer exists'));
+      // **The person behind the code, again** ([ADR-0090](../../.ssot/ADR.md#adr-0090), FR-616). A code
+      // is a credential of the account that is not a row yet, so nothing that revokes the account's
+      // credentials can reach it: without this an unlink, a password change or an administrator's
+      // reset in the minute a code lives would be followed by a fresh pair minted from it. The checks,
+      // and the two inserts, run in one transaction holding the account row `FOR SHARE` — the order
+      // the refresh branch below uses — so a revoke either commits first and is seen here, or waits
+      // for this commit and takes the new pair down with the rest.
+      type Exchange =
+        | { refused: string; reason: 'project_gone' | 'account_unusable' | 'revoked_after_issue' | 'no_project_access' }
+        | { tokens: Awaited<ReturnType<typeof issuePair>>; projectName: string };
+      const outcome = await withRotationTransaction(db, async (tx): Promise<Exchange> => {
+        const project = await getProjectById(tx, redeemed.projectId);
+        if (!project) return { refused: 'The project this code was issued for no longer exists', reason: 'project_gone' };
+
+        const account = await shareUserRowForGrant(tx, redeemed.userId);
+        if (!account?.isActive || account.mustChangePassword) {
+          return { refused: 'The account this code was issued for can no longer be used', reason: 'account_unusable' };
+        }
+        // At or before, not only before: the revoke reads its instant after taking the row, so a code
+        // approved in the same millisecond was approved before it.
+        const revokedAt = account.mcpCredentialsRevokedAt?.getTime();
+        if (revokedAt !== undefined && redeemed.issuedAt <= revokedAt) {
+          return { refused: 'The account revoked its MCP credentials after this code was issued', reason: 'revoked_after_issue' };
+        }
+        // The rule the MCP endpoint applies on every request (`resolveMcpCredential`), applied once
+        // before anything is minted: a pair the endpoint would refuse at its first use is not issued.
+        const principal: Principal = {
+          kind: 'session',
+          role: account.role,
+          userId: account.id,
+          username: account.username,
+          sessionId: account.id,
+          mustChangePassword: false,
+        };
+        if (!satisfies(await resolveProjectAccess(tx, principal, redeemed.projectId), MCP_READ_ACCESS)) {
+          return { refused: 'The account this code was issued for can no longer read that project', reason: 'no_project_access' };
+        }
+
+        await ctx.testHooks?.onCodeVerifiedBeforeIssue?.();
+        const grant = { projectId: redeemed.projectId, userId: redeemed.userId, clientId: redeemed.clientId };
+        return { tokens: await issuePair(tx, grant, project.name), projectName: project.name };
+      });
+      if ('refused' in outcome) {
+        // A warning and not an audit event, the way the refresh branch's refusals are: this endpoint is
+        // outside the audit log (`auth/policy.ts`), and a 4xx is never audited anyway.
+        log.warn(
+          { projectId: redeemed.projectId, clientId: redeemed.clientId, userId: redeemed.userId, reason: outcome.reason },
+          'refused an authorization code exchange; the grant behind it no longer holds',
+        );
+        return reply.code(400).send(oauthError('invalid_grant', outcome.refused));
       }
-      const tokens = await issuePair(db, { projectId: redeemed.projectId, userId: redeemed.userId, clientId: redeemed.clientId }, project.name);
-      log.info({ project: project.name, clientId: redeemed.clientId }, 'exchanged an authorization code for an mcp credential');
-      return tokens;
+      log.info({ project: outcome.projectName, clientId: redeemed.clientId }, 'exchanged an authorization code for an mcp credential');
+      return outcome.tokens;
     }
 
     if (body.grant_type === 'refresh_token') {

@@ -80,6 +80,14 @@ export interface AppContext {
      */
     onTokenMintBeforeInsert?: () => Promise<void>;
     /**
+     * Awaited by `POST /oauth/token`'s `authorization_code` branch right after it re-checks, under the
+     * account row's `FOR SHARE`, that the grant behind the code still holds (account usable, no revoke
+     * since the code was issued, project still readable) — and right before it inserts the pair. An
+     * unlink racing the exchange queues behind that lock here, so the test in
+     * `test/integration/oidc.itest.ts` can observe that the pair it mints dies with the unlink (FR-616).
+     */
+    onCodeVerifiedBeforeIssue?: () => Promise<void>;
+    /**
      * Awaited by `POST /api/tokens` right before it ever calls `withUserRowLock` — before it even
      * attempts to acquire the account row's lock. `onTokenMintBeforeInsert` above can only ever pause a
      * mint that already holds the lock, so a racing unlink can only ever queue behind it; that order
