@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
@@ -189,9 +189,14 @@ function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => voi
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
- * Waits until some backend connected to `pool`'s database is queued on a lock — the observable proof
- * that a request is blocked behind a row a test is holding, rather than a guess that 200 ms was long
- * enough for it to get there. Returns `false` if nothing ever queued within `timeoutMs`.
+ * Waits until some backend connected to `pool`'s database is queued on a lock — observed rather than a
+ * guess that 200 ms was long enough for a request to get there. Returns `false` if nothing ever queued
+ * within `timeoutMs`.
+ *
+ * It counts *any* lock waiter, so it does not prove that the request under test is the one queued: a
+ * fire-and-forget insert that references a held account row through a foreign key (an audit event) queues
+ * on that row too and satisfies it ([A3]). New race tests on the account row should use
+ * `waitForUserRowLockWaiter` instead.
  */
 async function waitForLockWaiter(pool: pg.Pool, timeoutMs = 5_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -203,6 +208,63 @@ async function waitForLockWaiter(pool: pg.Pool, timeoutMs = 5_000): Promise<bool
     if (Date.now() > deadline) return false;
     await sleep(20);
   }
+}
+
+/** The statement `withUserRowLock` (`src/services/auth/users.ts`) takes an account row with, as `pg_stat_activity.query` shows it. */
+const USER_ROW_LOCK_SQL = 'SELECT id FROM users WHERE id = $1 FOR UPDATE';
+
+/**
+ * Failure message for a `waitForUserRowLockWaiter` that never matched. The match is on the exact text of
+ * `USER_ROW_LOCK_SQL`, a hand copy of the query in `withUserRowLock`, so a reworded query there looks
+ * exactly like a lost lock here unless the message says which to check first.
+ */
+const NO_USER_ROW_LOCK_WAITER =
+  "no backend queued on withUserRowLock's statement behind the holder (did the SQL text in src/services/auth/users.ts drift from USER_ROW_LOCK_SQL?)";
+
+/**
+ * Waits until a backend is queued on `withUserRowLock`'s own statement — and, given `holderPid`,
+ * queued behind that one backend — rather than on any lock at all ([A3], the L-b flake of
+ * [F14-T7-MINOR-3]).
+ *
+ * `waitForLockWaiter` counts every lock waiter in the database, and an account row held
+ * `FOR UPDATE` is not only what a racing SSO write queues on: every insert that names the account
+ * through a foreign key has to lock that row `FOR KEY SHARE`, which conflicts with `FOR UPDATE`. The
+ * audit event the link callback writes once its reply has gone (`audit_events.actor_user_id`) is one
+ * such insert. On a slow CI runner it was still pending when the test took the row, so it was the
+ * waiter `waitForLockWaiter` saw; the test released the row before the login callback had even looked
+ * the identity up, the lookup ran after the unlink had committed, found no link, and
+ * `OIDC_AUTO_PROVISION=1` minted a fresh account and signed it in — `'/'` instead of
+ * `'/login?oidc_error=no_account'` (CI run 36145638888). Matching the statement text makes the wait
+ * mean what the race tests need it to mean: the request under test has already made its pre-lock read
+ * and is now parked on the lock the holder took.
+ *
+ * Given `holderPid`, the holder has to be somewhere in the waiter's blocking chain, not necessarily
+ * its direct blocker: a row lock queues its waiters, so a callback that arrives behind such an audit
+ * insert waits on that insert (`wait_event = 'tuple'`), which in turn waits on the holder.
+ */
+async function waitForUserRowLockWaiter(pool: pg.Pool, opts: { holderPid?: number; timeoutMs?: number } = {}): Promise<boolean> {
+  const deadline = Date.now() + (opts.timeoutMs ?? 5_000);
+  for (;;) {
+    const res = await pool.query<{ n: number }>(
+      `WITH RECURSIVE chain (waiter, blocker) AS (
+         SELECT a.pid, b.pid FROM pg_stat_activity a, unnest(pg_blocking_pids(a.pid)) AS b (pid)
+          WHERE a.datname = current_database() AND a.wait_event_type = 'Lock' AND a.query = $1
+         UNION
+         SELECT c.waiter, n.pid FROM chain c, unnest(pg_blocking_pids(c.blocker)) AS n (pid)
+       )
+       SELECT count(DISTINCT waiter)::int AS n FROM chain WHERE $2::int IS NULL OR blocker = $2::int`,
+      [USER_ROW_LOCK_SQL, opts.holderPid ?? null],
+    );
+    if ((res.rows[0]?.n ?? 0) > 0) return true;
+    if (Date.now() > deadline) return false;
+    await sleep(20);
+  }
+}
+
+/** The server process id of the connection `tx` runs on — what `waitForUserRowLockWaiter` checks a waiter is blocked by. */
+async function backendPid(tx: TestDatabase['db']): Promise<number> {
+  const res = await tx.execute(sql`SELECT pg_backend_pid() AS pid`);
+  return (res.rows[0] as { pid: number }).pid;
 }
 
 /** The SQLSTATE of a driver error, whether it arrives bare or wrapped in Drizzle's query error. */
@@ -1882,18 +1944,21 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
 
       // The unlink's own transaction, parked while it holds the row: it has deleted the link and revoked
       // the sessions, and not yet committed — so the callback's pre-lock lookup still finds the link.
-      const entered = deferred<void>();
+      const entered = deferred<number>();
       const release = deferred<void>();
       const holder = withUserRowLock(database.db, userId, async (tx) => {
         await unlinkFederatedIdentity(tx, userId);
         await revokeSessionsOfUser(tx, userId);
-        entered.resolve();
+        entered.resolve(await backendPid(tx));
         await release.promise;
       });
       try {
-        await entered.promise;
+        const holderPid = await entered.promise;
         const callbackPromise = hitCallback(loginCallbackUrl, loginFlowJar);
-        expect(await waitForLockWaiter(database.pool)).toBe(true);
+        // The row is released only once the callback itself is parked on it — which it can only be
+        // after its pre-lock lookup found the still-uncommitted link. Any lock waiter will not do: the
+        // link flow's audit events reference this account and queue on the same row ([A3]).
+        expect(await waitForUserRowLockWaiter(database.pool, { holderPid }), NO_USER_ROW_LOCK_WAITER).toBe(true);
         release.resolve();
         await holder;
         const callback = await callbackPromise;
@@ -1933,8 +1998,9 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
         const callbackPromise = hitCallback(callbackUrl, { ...jar, ...flowJar }).finally(() => {
           settled = true;
         });
-        // The callback is queued on the row the promotion holds — observed, not assumed.
-        expect(await waitForLockWaiter(database.pool)).toBe(true);
+        // The callback is queued on the row the promotion holds — observed, not assumed, and on the
+        // account row lock itself rather than on an audit insert that references the account ([A3]).
+        expect(await waitForUserRowLockWaiter(database.pool), NO_USER_ROW_LOCK_WAITER).toBe(true);
         expect(settled).toBe(false);
         release.resolve();
 
@@ -1955,18 +2021,18 @@ describe('self-service linking and unlinking of an SSO identity ([MAJOR-1], tur 
       const { userId } = await signInLocalUser('le-link-first');
       const lookup = { issuer: provider.issuer, subject: 'le-link-first-identity' };
 
-      const entered = deferred<void>();
+      const entered = deferred<number>();
       const release = deferred<void>();
       const holder = withUserRowLock(database.db, userId, async (tx) => {
         await linkFederatedIdentity(tx, { userId, provider: 'local', ...lookup });
-        entered.resolve();
+        entered.resolve(await backendPid(tx));
         await release.promise;
       });
       try {
-        await entered.promise;
+        const holderPid = await entered.promise;
         const promotion = updateUser(database.db, userId, { role: 'root' });
         promotion.catch(() => undefined);
-        expect(await waitForLockWaiter(database.pool)).toBe(true);
+        expect(await waitForUserRowLockWaiter(database.pool, { holderPid }), NO_USER_ROW_LOCK_WAITER).toBe(true);
         release.resolve();
         await holder;
 
