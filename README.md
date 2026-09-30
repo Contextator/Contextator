@@ -1,5 +1,7 @@
 # Contextator
 
+[![Designed & Maintained with Tan](https://www.muhammetsafak.com.tr/badges/designed-maintained-with-tan.svg)](https://www.muhammetsafak.com.tr/en/tan/)
+
 **Self-hosted, multi-tenant MCP documentation server.** Give a project its document sources — mounted
 folders, git repositories, uploaded archives, a Notion workspace, a Confluence Cloud site or Data Center instance, a published
 documentation site — and it
