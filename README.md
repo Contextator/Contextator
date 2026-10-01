@@ -264,6 +264,14 @@ A check that cannot answer — a directory that has gone, a rate-limited API, a 
 counts as *changed*, so the run happens and reports the real error. The check is an optimisation; it is
 never a reason a source silently stops syncing.
 
+**An unchanged answer can only skip so long.** Some changes move nothing the check looks at — a Notion
+page *unshared* from the integration keeps its edit time, a local file rewritten with its old
+modification time keeps the count and the maximum. So a due source whose last successful sync is older
+than `SYNC_MAX_SKIP_HOURS` (24 by default; `0` switches this off) is synced anyway, and that run removes
+whatever is no longer there. An unshared page therefore leaves search within about a day plus one
+interval — or at once, with *Sync now*. The log says `scheduled sync queued a run (max skip age)` when
+this is why a run happened.
+
 Two things about the timing are deliberate. A source that is switched on is given a **random** first
 due time inside its first interval, so a hundred sources added by one script do not all wake in the
 same minute — and keep not waking together afterwards. And scheduled runs queue **behind** anything a

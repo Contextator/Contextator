@@ -19,6 +19,11 @@ import { storedProbeToken } from './sources.js';
  * git fetch, and above all a Notion pull at 350 ms per request. So each driver answers a cheap
  * `probe()` instead, and the tick compares that one token.
  *
+ * **The skip is bounded** ([ADR-0095](../../.ssot/ADR.md#adr-0095)). A probe cannot see everything (FR-320): an unshared Notion page moves no
+ * `last_edited_time`, a file rewritten with its mtime restored moves neither count nor maximum. So a
+ * due source whose `last_synced_at` is NULL or older than `SYNC_MAX_SKIP_HOURS` is run without asking
+ * the probe, and the run's own `seen` set removes what is gone (see `pastMaxSkipAge`).
+ *
  * Shaped like `startSessionReaper` in `services/auth/sessions.ts` — `setInterval`, `unref`, a stop
  * function — rather than as a third kind of background thing.
  */
@@ -35,7 +40,12 @@ export interface SchedulerDeps {
   db: Db;
   indexer: SchedulerIndexer;
   log: Logger;
-  config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS' | 'SYNC_PROBES_PER_TICK'> &
+  // `SYNC_MAX_SKIP_HOURS` is required, not optional: a caller that builds its own config must say "off"
+  // (`0`) out loud rather than switch FR-320's bound off by leaving the key out.
+  config: Pick<
+    Config,
+    'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS' | 'SYNC_PROBES_PER_TICK' | 'SYNC_MAX_SKIP_HOURS'
+  > &
     Partial<Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS'>> &
     WebLimits;
 }
@@ -61,9 +71,41 @@ export interface SyncTickResult {
   failed: number;
   /** Sources taken because a webhook delivery claimed them, and therefore run without a probe. */
   claimed: number;
+  /**
+   * Sources run because their last successful sync is NULL or older than `SYNC_MAX_SKIP_HOURS`, and
+   * therefore run without a probe — the runs a probe that keeps saying "unchanged" can no longer veto.
+   */
+  stale: number;
 }
 
-const EMPTY_TICK: SyncTickResult = { due: 0, considered: 0, probed: 0, unchanged: 0, enqueued: 0, busy: 0, failed: 0, claimed: 0 };
+const EMPTY_TICK: SyncTickResult = { due: 0, considered: 0, probed: 0, unchanged: 0, enqueued: 0, busy: 0, failed: 0, claimed: 0, stale: 0 };
+
+const HOUR_MS = 3_600_000;
+
+/**
+ * Whether a due source has gone too long without a successful sync to let a probe skip it.
+ *
+ * `0` hours is "off": nothing is ever past the age, and the tick is ADR-0048's exactly. A NULL
+ * `last_synced_at` — a source that has never completed a sync — is past any age that is switched on,
+ * because the bound is about how long the index may disagree with the source, and for that row nobody
+ * knows.
+ *
+ * Three consequences worth knowing, all accepted. After a deploy, every source whose last sync is older
+ * than the bound runs at its next due time; because `next_sync_at` was jittered when the row was
+ * scheduled, those runs are spread across the interval rather than arriving as one herd, and a
+ * successful run resets the age. A bound shorter than a source's interval makes that source run at
+ * every due time — the probe is then never asked — which config validation does not refuse. And
+ * `last_synced_at` is written **only by a successful sync**, so a source whose sync keeps failing
+ * (a Notion page read answering 403, a git fetch on a full disk) while its probe still answers stays
+ * past the age and gets a full run — with every other source of its project — at **every** due time,
+ * for as long as it keeps failing. That is the decision being taken on the sync's own result
+ * (ADR-0095); the source's `error` status and `last_error` are where that loop shows.
+ */
+export function pastMaxSkipAge(lastSyncedAt: Date | null, maxSkipHours: number, now: number = Date.now()): boolean {
+  if (maxSkipHours <= 0) return false;
+  if (lastSyncedAt === null) return true;
+  return now - lastSyncedAt.getTime() > maxSkipHours * HOUR_MS;
+}
 
 /**
  * When a row is claiming this tick's attention: the earlier of its schedule and a webhook's claim.
@@ -221,6 +263,22 @@ export async function runSyncTick(deps: SchedulerDeps): Promise<SyncTickResult> 
         indexer.enqueue(source.projectId, { trigger: 'webhook' });
       }
       log.info({ source: source.name, sourceId: source.id, projectId: source.projectId }, 'webhook delivery queued a run');
+      continue;
+    }
+
+    // **The age is checked before the probe**, not after an "unchanged" answer. A source past the age
+    // runs whatever the probe would say — equal, moved, or thrown — so asking would spend an outbound
+    // request (a Notion `search`, a `git ls-remote`) on an answer that cannot change the decision.
+    if (pastMaxSkipAge(source.lastSyncedAt, config.SYNC_MAX_SKIP_HOURS)) {
+      result.stale++;
+      if (!enqueued.has(source.projectId)) {
+        enqueued.add(source.projectId);
+        indexer.enqueue(source.projectId, { trigger: 'scheduled' });
+      }
+      log.info(
+        { source: source.name, sourceId: source.id, projectId: source.projectId, lastSyncedAt: source.lastSyncedAt },
+        'scheduled sync queued a run (max skip age)',
+      );
       continue;
     }
 

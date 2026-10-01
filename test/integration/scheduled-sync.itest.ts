@@ -170,7 +170,7 @@ interface Fixture {
   roots: Map<string, string>;
   projectIds: Map<string, string>;
   sourceIds: Map<string, string>;
-  schedulerConfig: typeof indexerConfig & { SYNC_PROBES_PER_TICK: number };
+  schedulerConfig: typeof indexerConfig & { SYNC_PROBES_PER_TICK: number; SYNC_MAX_SKIP_HOURS: number };
 }
 
 async function buildFixture(name: string, markers: string[]): Promise<Fixture> {
@@ -200,7 +200,7 @@ async function buildFixture(name: string, markers: string[]): Promise<Fixture> {
 
   const config = { ...indexerConfig, ALLOWED_DOC_ROOTS: [parent], DATA_DIR: path.join(parent, '.data') };
   const indexer = new Indexer({ db: database.db, embeddings, config, log: silentLogger, locks: new KeyedMutex() });
-  return { database, indexer, roots, projectIds, sourceIds, schedulerConfig: { ...config, SYNC_PROBES_PER_TICK: 10 } };
+  return { database, indexer, roots, projectIds, sourceIds, schedulerConfig: { ...config, SYNC_PROBES_PER_TICK: 10, SYNC_MAX_SKIP_HOURS: 0 } };
 }
 
 const sourceRow = async (db: Db, id: string): Promise<DocumentSourceRow> => {

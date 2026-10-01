@@ -1019,6 +1019,30 @@ export const EnvSchema = z
      */
     SYNC_PROBES_PER_TICK: z.coerce.number().int().min(1).max(1000).default(10),
     /**
+     * The longest a due source may go without a successful sync **while its probe keeps answering
+     * "unchanged"**, in hours ([ADR-0095](../.ssot/ADR.md#adr-0095), amending
+     * [ADR-0048](../.ssot/ADR.md#adr-0048)). `0` switches the bound off and restores the plain probe skip.
+     *
+     * It exists for FR-320: a probe cannot see everything. A Notion page unshared from the integration
+     * moves no `last_edited_time`, and a local file rewritten with its mtime restored moves neither the
+     * count nor the maximum — so without a bound the skip is unbounded and the stale page stays
+     * searchable until something unrelated is edited. With it, a due source whose `last_synced_at` is
+     * NULL or older than this is run anyway, and the run's own `seen` set removes what is gone: at most
+     * this many hours, plus one interval, plus one tick.
+     *
+     * The price is one real sync per source per this many hours even when nothing changed — for Notion
+     * about what the probe would have cost to look wider, since an incremental run over unchanged pages
+     * reads no blocks. A value below a source's own interval makes that source run on every due time,
+     * which is accepted rather than refused: it is how an operator says "always sync".
+     *
+     * `last_synced_at` moves only on a successful sync, so a source whose sync keeps failing while its
+     * probe answers stays past the bound and runs at every due time until it succeeds.
+     *
+     * Twenty-four is a product choice — "about a day" — not a measured optimum. 720 (30 days) is the
+     * same ceiling as a source interval's.
+     */
+    SYNC_MAX_SKIP_HOURS: z.coerce.number().int().min(0).max(720).default(24),
+    /**
      * The minimum number of minutes between two **webhook-triggered** runs of one source
      * ([ADR-0049](../.ssot/ADR.md#adr-0049)), when the source itself does not name one.
      *

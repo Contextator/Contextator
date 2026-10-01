@@ -79,6 +79,7 @@ let schedulerConfig: WebLimits & {
   SECRET_KEY: string;
   IGNORE_GLOBS: string[];
   SYNC_PROBES_PER_TICK: number;
+  SYNC_MAX_SKIP_HOURS: number;
 };
 
 const sourceRow = async (id: string): Promise<DocumentSourceRow> => {
@@ -138,6 +139,8 @@ beforeAll(async () => {
     SECRET_KEY: '0'.repeat(64),
     IGNORE_GLOBS: [],
     SYNC_PROBES_PER_TICK: 10,
+    // Off: these sources never complete a sync, so the age bound would decide every tick here.
+    SYNC_MAX_SKIP_HOURS: 0,
   };
 
   app = Fastify({ logger: false });

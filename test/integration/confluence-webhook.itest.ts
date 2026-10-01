@@ -102,7 +102,15 @@ const tick = () =>
     db,
     indexer: recorder,
     log: silentLogger,
-    config: { ...WEB_LIMIT_DEFAULTS, ALLOWED_DOC_ROOTS: [], DATA_DIR: '/nonexistent', SECRET_KEY, IGNORE_GLOBS: [], SYNC_PROBES_PER_TICK: 10 },
+    config: {
+      ...WEB_LIMIT_DEFAULTS,
+      ALLOWED_DOC_ROOTS: [],
+      DATA_DIR: '/nonexistent',
+      SECRET_KEY,
+      IGNORE_GLOBS: [],
+      SYNC_PROBES_PER_TICK: 10,
+      SYNC_MAX_SKIP_HOURS: 0,
+    },
   });
 
 /** A source that synced a moment ago, so a delivery is debounced rather than enqueued. */
