@@ -10,6 +10,20 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Added
+
+- **Every OAuth authorization response names its issuer (RFC 9207).** The redirect back to an MCP
+  client now carries `iss` on a code and on an error alike, and the authorization server metadata
+  announces it with `authorization_response_iss_parameter_supported: true`. A client that talks to
+  more than one authorization server can now tell which one answered; one that ignores `iss` sees no
+  difference.
+- **Dynamic client registration reads `application_type` (RFC 7591).** `native` may register an
+  `http` loopback callback (`127.0.0.1`, `[::1]`, `localhost`) on whatever port it picks, which the
+  authorization request must then repeat exactly, or a private-use scheme such as
+  `com.example.app:/callback`; `web` may register `https` on a non-loopback host only and is answered
+  `invalid_redirect_uri` otherwise. An unknown value is `invalid_client_metadata`. A registration that
+  leaves the field out is checked exactly as before.
+
 ## [0.2.0] - 2026-09-25
 
 ### Added

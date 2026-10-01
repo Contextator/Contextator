@@ -231,3 +231,73 @@ function verifierMatches(verifier: string, challenge: string): boolean {
  * authorization code is handed to whatever the browser is sent to.
  */
 export const redirectUriRegistered = (client: OauthClientRow, redirectUri: string): boolean => client.redirectUris.includes(redirectUri);
+
+/**
+ * RFC 7591 §2 defers `application_type` to OpenID Connect Dynamic Client Registration §2: `native`
+ * for an app on the person's own device, `web` for a client served from somewhere else.
+ */
+export const APPLICATION_TYPES = ['native', 'web'] as const;
+export type ApplicationType = (typeof APPLICATION_TYPES)[number];
+
+/** The two loopback spellings the redirect rule accepted before `application_type` was read. */
+const LEGACY_LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1']);
+
+/**
+ * A loopback address written as one — `localhost`, any `127.0.0.0/8` address, or `[::1]` — which is
+ * what a native app may **register** a plain-`http` callback on. Deliberately narrow: a name that
+ * merely tends to resolve to loopback is not accepted here, because an `http` callback that a
+ * resolver sends anywhere else is an authorization code on the network in the clear.
+ */
+const isLoopbackLiteral = (hostname: string): boolean => hostname === 'localhost' || hostname === '[::1]' || /^127(?:\.\d{1,3}){3}$/.test(hostname);
+
+/**
+ * Any spelling that names this device, which is what a `web` client is **refused**. Broader than
+ * `isLoopbackLiteral` on purpose, since a refusal that a different spelling walks past is not one:
+ * `*.localhost` (RFC 6761 §6.3, which browsers resolve to loopback), the absolute form `localhost.`,
+ * and an IPv4-mapped loopback such as `[::ffff:127.0.0.1]`, which `URL` normalises to
+ * `[::ffff:7f00:1]`.
+ */
+const namesLoopback = (hostname: string): boolean => {
+  const host = hostname.replace(/\.$/, '');
+  return isLoopbackLiteral(host) || host.endsWith('.localhost') || /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/.test(host);
+};
+
+/**
+ * A private-use URI scheme in the form RFC 8252 §7.1 asks for: a reverse domain name, so it contains a
+ * period. That requirement is also what keeps `file:`, `blob:` and every other built-in scheme out —
+ * none of them has one.
+ */
+const isPrivateUseScheme = (protocol: string): boolean => {
+  const scheme = protocol.slice(0, -1);
+  return scheme.includes('.') && scheme !== 'http' && scheme !== 'https';
+};
+
+/**
+ * Whether a redirect URI may be **registered** for a client of this `application_type`. What is
+ * registered is then matched as a whole string at the authorization endpoint
+ * (`redirectUriRegistered`), port included: a native app that registered `http://127.0.0.1:53682/cb`
+ * must come back with exactly that, not with another port.
+ *
+ * - **absent** — `https`, or `http` on `localhost`/`127.0.0.1`: the rule as it stood before the field
+ *   was read, kept byte for byte so no existing registration changes its answer.
+ * - **`native`** — `https`, `http` on a loopback address with whatever port the app chose to register,
+ *   or a private-use scheme (RFC 8252 §7.1). An app on the person's own device receives its code there.
+ * - **`web`** — `https` on a host that does not name loopback, and nothing else. A web client's
+ *   callback lives on a server; a loopback or app-scheme URI in a `web` registration is a native
+ *   client mislabelled, or a client hoping to receive codes somewhere its own server cannot see.
+ */
+export function redirectUriAllowed(uri: string, applicationType: ApplicationType | undefined): boolean {
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    return false;
+  }
+  if (applicationType === undefined) {
+    return url.protocol === 'https:' || (url.protocol === 'http:' && LEGACY_LOOPBACK_HOSTS.has(url.hostname));
+  }
+  if (applicationType === 'web') return url.protocol === 'https:' && !namesLoopback(url.hostname);
+  if (url.protocol === 'https:') return true;
+  if (url.protocol === 'http:') return isLoopbackLiteral(url.hostname);
+  return isPrivateUseScheme(url.protocol);
+}

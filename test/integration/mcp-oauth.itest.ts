@@ -534,6 +534,12 @@ describe('the metadata a client discovers', () => {
     expect(as.code_challenge_methods_supported).toEqual(['S256']);
   });
 
+  /** RFC 9207 §3: the server says it sends `iss`, so a client knows to require it. */
+  it('announces that every authorization response carries iss', async () => {
+    const as = await fetch(`${live.origin}/.well-known/oauth-authorization-server`).then((r) => r.json());
+    expect(as.authorization_response_iss_parameter_supported).toBe(true);
+  });
+
   it('is reachable by a client holding nothing at all, which is the only way it is any use', async () => {
     for (const url of [
       '/.well-known/oauth-protected-resource',
@@ -631,6 +637,35 @@ describe('the authorization endpoint refuses what it must', () => {
     const res = await approveInBrowser(await authorizeUrl(), { decision: 'deny' });
     expect(callbackParams(res).get('error')).toBe('access_denied');
     expect(callbackParams(res).get('code')).toBeNull();
+  });
+
+  /**
+   * **RFC 9207: the response names its issuer, whichever way it went.** A client that talks to more
+   * than one authorization server compares this against the `issuer` it discovered — as strings — and
+   * a code that arrives without it, or with another one, is a mix-up attack's code. The error path is
+   * held as well as the success path, because an `error` a client acts on is a response too.
+   */
+  describe('names its issuer on the way back (RFC 9207)', () => {
+    const issuer = async () => (await fetch(`${live.origin}/.well-known/oauth-authorization-server`).then((r) => r.json())).issuer;
+
+    it('on a code', async () => {
+      const params = callbackParams(await approveInBrowser(await authorizeUrl()));
+      expect(params.get('code')).toBeTruthy();
+      expect(params.get('iss')).toBe(await issuer());
+      expect(params.get('iss')).toBe(live.origin);
+    });
+
+    it('on a refusal by the person', async () => {
+      const params = callbackParams(await approveInBrowser(await authorizeUrl(), { decision: 'deny' }));
+      expect(params.get('error')).toBe('access_denied');
+      expect(params.get('iss')).toBe(await issuer());
+    });
+
+    it('on an error the request itself caused', async () => {
+      const res = await fetch(await authorizeUrl({ scope: 'admin' }), { headers: { cookie: cookieHeader() }, redirect: 'manual' });
+      expect(callbackParams(res).get('error')).toBe('invalid_scope');
+      expect(callbackParams(res).get('iss')).toBe(await issuer());
+    });
   });
 
   /**
@@ -959,6 +994,84 @@ describe('registering a client', () => {
     const res = await registerClient({ client_name: 'insecure', redirect_uris: ['http://attacker.test/cb'] });
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe('invalid_redirect_uri');
+  });
+
+  /**
+   * **RFC 7591 `application_type`.** `native` opens the redirect URIs an app on the person's own
+   * device receives its code at — any loopback port, or its own private-use scheme — and `web`
+   * closes them, because a web client's callback lives on a server. Leaving the field out changes
+   * nothing, which every other registration in this file already holds.
+   */
+  describe('by application_type', () => {
+    const LOOPBACK = 'http://127.0.0.1:53682/cb';
+
+    it('accepts a loopback callback from a native app, and says back what it was told', async () => {
+      const res = await registerClient({ client_name: 'desktop', application_type: 'native', redirect_uris: [LOOPBACK] });
+      expect(res.status).toBe(201);
+      const body = await res.json();
+      expect(body.application_type).toBe('native');
+      expect(body.redirect_uris).toEqual([LOOPBACK]);
+    });
+
+    it('refuses the same callback from a web client', async () => {
+      const res = await registerClient({ client_name: 'site', application_type: 'web', redirect_uris: [LOOPBACK] });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe('invalid_redirect_uri');
+    });
+
+    it('refuses a private-use scheme from a web client, and accepts https from one', async () => {
+      const scheme = await registerClient({ client_name: 'site', application_type: 'web', redirect_uris: ['com.example.app:/cb'] });
+      expect(scheme.status).toBe(400);
+      expect((await scheme.json()).error).toBe('invalid_redirect_uri');
+
+      const https = await registerClient({ client_name: 'site', application_type: 'web', redirect_uris: ['https://client.example/cb'] });
+      expect(https.status).toBe(201);
+      expect((await https.json()).application_type).toBe('web');
+    });
+
+    it('refuses an application_type it does not know, as invalid client metadata', async () => {
+      const res = await registerClient({ client_name: 'odd', application_type: 'desktop', redirect_uris: [LOOPBACK] });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe('invalid_client_metadata');
+    });
+
+    it('answers a registration without the field exactly as before, and does not invent one', async () => {
+      const res = await registerClient({ client_name: 'legacy', redirect_uris: [LOOPBACK] });
+      expect(res.status).toBe(201);
+      expect(await res.json()).not.toHaveProperty('application_type');
+      const scheme = await registerClient({ client_name: 'legacy', redirect_uris: ['com.example.app:/cb'] });
+      expect(scheme.status).toBe(400);
+    });
+
+    /**
+     * The scheme is only worth registering if the code actually arrives there: the approval sends the
+     * browser to `com.example.app:/cb?code=…&iss=…`, which is the operating system handing it to the app.
+     */
+    it('sends a native app its code at its own private-use scheme, with the issuer beside it', async () => {
+      const callback = 'com.example.app:/oauth/cb';
+      const registration = await registerClient({ client_name: 'mobile', application_type: 'native', redirect_uris: [callback] });
+      expect(registration.status).toBe(201);
+      const { client_id } = await registration.json();
+      const url = new URL(`${live.origin}/oauth/authorize`);
+      for (const [key, value] of Object.entries({
+        response_type: 'code',
+        client_id,
+        redirect_uri: callback,
+        code_challenge: 'x'.repeat(43),
+        code_challenge_method: 'S256',
+        resource: `${live.origin}/mcp/${project.name}`,
+        state: 'native-state',
+      })) {
+        url.searchParams.set(key, value);
+      }
+      const res = await approveInBrowser(url);
+      const location = res.headers.get('location') ?? '';
+      expect(location.startsWith(`${callback}?`)).toBe(true);
+      const params = new URL(location).searchParams;
+      expect(params.get('code')).toBeTruthy();
+      expect(params.get('state')).toBe('native-state');
+      expect(params.get('iss')).toBe(live.origin);
+    });
   });
 
   /**

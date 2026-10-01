@@ -28,9 +28,12 @@ import {
 import { installAuditLog } from '../auth/plugin.js';
 import { SlidingWindow } from '../services/rate-limit.js';
 import {
+  APPLICATION_TYPES,
+  type ApplicationType,
   AuthorizationCodeStore,
   ClientLimitError,
   getOauthClient,
+  redirectUriAllowed,
   redirectUriRegistered,
   registerOauthClient,
   touchOauthClient,
@@ -63,7 +66,20 @@ import {
 
 const PAGES_DIR = new URL('../../public/pages/', import.meta.url);
 
-const RegisterBody = OAuthClientMetadataSchema;
+/**
+ * RFC 7591 §2 defers `application_type` to OpenID Connect Dynamic Client Registration §2: `native`
+ * for an app on the person's own device, `web` for a client served from somewhere else. It is
+ * optional, and a registration that leaves it out keeps exactly the redirect rule this server had
+ * before the field was read — existing connectors register the way they always did.
+ */
+const RegisterBody = OAuthClientMetadataSchema.extend({ application_type: z.enum(APPLICATION_TYPES).optional() });
+
+const REDIRECT_RULE: Record<ApplicationType | 'default', string> = {
+  default: 'Every redirect_uri must be https, or http on localhost — an authorization code must not travel in the clear',
+  native:
+    'For a native client, every redirect_uri must be https, http on a loopback address, or a private-use scheme such as com.example.app:/callback',
+  web: 'For a web client, every redirect_uri must be https on a host that is not loopback',
+};
 
 const AuthorizeQuery = z.object({
   response_type: z.string(),
@@ -253,6 +269,9 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       revocation_endpoint_auth_methods_supported: ['none'],
       // S256 only. OAuth 2.1 drops `plain`, and `plain` proves nothing anyone watching cannot replay.
       code_challenge_methods_supported: ['S256'],
+      // RFC 9207: every redirect back to the client carries `iss`, so a client talking to more than one
+      // authorization server can tell which one answered — the mix-up attack's whole premise.
+      authorization_response_iss_parameter_supported: true,
       service_documentation: `${base}/about`,
     };
   });
@@ -281,24 +300,12 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     }
     const metadata = parsed.data;
     // `http://` only for loopback, which is where a desktop connector's callback lives. Anything else
-    // has to be TLS: an authorization code travelling in the clear is the code being handed away.
-    const usable = metadata.redirect_uris.filter((uri) => {
-      try {
-        const url = new URL(uri);
-        return url.protocol === 'https:' || (url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1'));
-      } catch {
-        return false;
-      }
-    });
+    // has to be TLS or, for a declared native app, its own private-use scheme: an authorization code
+    // travelling in the clear is the code being handed away.
+    const applicationType = metadata.application_type;
+    const usable = metadata.redirect_uris.filter((uri) => redirectUriAllowed(uri, applicationType));
     if (usable.length === 0) {
-      return reply
-        .code(400)
-        .send(
-          oauthError(
-            'invalid_redirect_uri',
-            'Every redirect_uri must be https, or http on localhost — an authorization code must not travel in the clear',
-          ),
-        );
+      return reply.code(400).send(oauthError('invalid_redirect_uri', REDIRECT_RULE[applicationType ?? 'default']));
     }
     try {
       const client = await registerOauthClient(db, {
@@ -315,6 +322,9 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         grant_types: ['authorization_code', 'refresh_token'],
         response_types: ['code'],
         token_endpoint_auth_method: 'none',
+        // Echoed only when the client sent it: the server stores no type of its own, and a default it
+        // never applied would describe a rule this registration was not checked against.
+        ...(applicationType ? { application_type: applicationType } : {}),
       });
     } catch (err) {
       if (err instanceof ClientLimitError) {
@@ -352,10 +362,16 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     );
   };
 
-  /** The redirect back to the client, with either the code or an error, and the state it sent. */
-  const backToClient = (reply: FastifyReply, redirectUri: string, params: Record<string, string | undefined>) => {
+  /**
+   * The redirect back to the client, with either the code or an error, and the state it sent — and,
+   * on both, `iss` (RFC 9207). It is the `issuer` of the authorization server metadata, computed by the
+   * same `baseUrl`, so the two can never disagree: a client compares them as strings, and a mismatch
+   * is the signal that the response came from a server it did not send the person to.
+   */
+  const backToClient = (req: FastifyRequest, reply: FastifyReply, redirectUri: string, params: Record<string, string | undefined>) => {
     const url = new URL(redirectUri);
     for (const [key, value] of Object.entries(params)) if (value !== undefined) url.searchParams.set(key, value);
+    url.searchParams.set('iss', baseUrl(req));
     return reply.header('cache-control', 'no-store').redirect(url.toString(), 302);
   };
 
@@ -373,6 +389,7 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
    * a connector needs no new case for it.
    */
   const refuseForNoAccess = (
+    req: FastifyRequest,
     reply: FastifyReply,
     params: { redirect_uri: string; state?: string | undefined; client_id: string },
     project: ProjectRow,
@@ -386,7 +403,7 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     if (answer === 'in-place') {
       return refuseInPlace(reply, 403, 'No access to this project', 'The signed-in account cannot read that project.');
     }
-    return backToClient(reply, params.redirect_uri, {
+    return backToClient(req, reply, params.redirect_uri, {
       error: 'access_denied',
       error_description: 'The signed-in account cannot read that project',
       state: params.state,
@@ -426,7 +443,7 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         { clientId: params.client_id, scope: params.scope },
         'refused an authorization request that asked for a scope; this server issues none',
       );
-      await backToClient(reply, params.redirect_uri, {
+      await backToClient(req, reply, params.redirect_uri, {
         error: 'invalid_scope',
         error_description: 'This server issues no scopes; an account-backed credential reaches exactly what its account may read',
         state: params.state,
@@ -434,11 +451,11 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       return refused;
     }
     if (params.response_type !== 'code') {
-      await backToClient(reply, params.redirect_uri, { error: 'unsupported_response_type', state: params.state });
+      await backToClient(req, reply, params.redirect_uri, { error: 'unsupported_response_type', state: params.state });
       return refused;
     }
     if (params.code_challenge_method !== 'S256') {
-      await backToClient(reply, params.redirect_uri, {
+      await backToClient(req, reply, params.redirect_uri, {
         error: 'invalid_request',
         error_description: 'code_challenge_method must be S256',
         state: params.state,
@@ -448,7 +465,7 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     const name = projectNameFromResource(baseUrl(req), params.resource);
     const project = name ? await getProjectByName(db, name) : undefined;
     if (!project) {
-      await backToClient(reply, params.redirect_uri, {
+      await backToClient(req, reply, params.redirect_uri, {
         error: 'invalid_target',
         error_description: 'The resource parameter must name an MCP endpoint of this instance',
         state: params.state,
@@ -476,7 +493,7 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     // Somebody who cannot read the project is not asked whether a client may read it on their behalf.
     // The refusal is shown here, not sent to the client: nothing the person did led to this request.
     if (!(await accountMayReadProject(db, { id: session.userId, username: session.username, role: session.role }, checked.project.id))) {
-      return refuseForNoAccess(reply, params, checked.project, session.username, 'in-place');
+      return refuseForNoAccess(req, reply, params, checked.project, session.username, 'in-place');
     }
 
     reply.type('text/html; charset=utf-8').header('cache-control', 'no-store');
@@ -554,7 +571,7 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     if ('signedOut' in grantable) {
       return reply.header('cache-control', 'no-store').redirect(`/login?next=${encodeURIComponent('/oauth/authorize')}`, 302);
     }
-    if ('noAccess' in grantable) return refuseForNoAccess(reply, params, checked.project, session.username, 'to-client');
+    if ('noAccess' in grantable) return refuseForNoAccess(req, reply, params, checked.project, session.username, 'to-client');
     const { credentialsEpoch } = grantable;
 
     // The audit row's actor and project, set **here** rather than where the session was resolved:
@@ -572,7 +589,7 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
 
     if (params.decision === 'deny') {
       log.info({ project: checked.project.name, user: session.username }, 'an oauth authorization was refused by the person');
-      return backToClient(reply, params.redirect_uri, { error: 'access_denied', state: params.state });
+      return backToClient(req, reply, params.redirect_uri, { error: 'access_denied', state: params.state });
     }
 
     const code = codes.issue({
@@ -585,7 +602,7 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       credentialsEpoch,
     });
     log.info({ project: checked.project.name, user: session.username, clientId: params.client_id }, 'issued an oauth authorization code');
-    return backToClient(reply, params.redirect_uri, { code, state: params.state });
+    return backToClient(req, reply, params.redirect_uri, { code, state: params.state });
   });
 
   // ---- The token endpoint ----

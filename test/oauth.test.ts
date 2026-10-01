@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { AuthorizationCodeStore, redirectUriRegistered, s256Challenge } from '../src/services/auth/oauth.js';
+import { AuthorizationCodeStore, redirectUriAllowed, redirectUriRegistered, s256Challenge } from '../src/services/auth/oauth.js';
 import type { OauthClientRow } from '../src/db/schema.js';
 
 /**
@@ -110,4 +110,43 @@ describe('the redirect URI comparison', () => {
       expect(redirectUriRegistered(client, uri)).toBe(false);
     }
   });
+});
+
+/**
+ * Which redirect URIs a registration may carry, by RFC 7591 `application_type`. The absent row is the
+ * one that matters for compatibility: every connector registered before the field was read sends
+ * none, and its answers must be the ones it always got.
+ */
+describe('the redirect URI a registration may carry', () => {
+  const table: Array<[string, { absent: boolean; native: boolean; web: boolean }]> = [
+    ['https://client.example/cb', { absent: true, native: true, web: true }],
+    ['http://127.0.0.1:53682/cb', { absent: true, native: true, web: false }],
+    ['http://localhost:53682/cb', { absent: true, native: true, web: false }],
+    ['http://[::1]:53682/cb', { absent: false, native: true, web: false }],
+    ['http://127.0.0.2/cb', { absent: false, native: true, web: false }],
+    ['https://localhost/cb', { absent: true, native: true, web: false }],
+    ['https://127.0.0.1/cb', { absent: true, native: true, web: false }],
+    // Spellings that name loopback without being a loopback literal: refused to `web`, and not taken
+    // as a loopback `http` callback for `native` either, since a resolver may send them elsewhere.
+    ['https://app.localhost/cb', { absent: true, native: true, web: false }],
+    ['https://localhost./cb', { absent: true, native: true, web: false }],
+    ['https://[::ffff:127.0.0.1]/cb', { absent: true, native: true, web: false }],
+    ['http://app.localhost/cb', { absent: false, native: false, web: false }],
+    ['com.example.app:/cb', { absent: false, native: true, web: false }],
+    ['com.example.app://oauth/cb', { absent: false, native: true, web: false }],
+    ['http://client.example/cb', { absent: false, native: false, web: false }],
+    ['http://127.0.0.1.attacker.test/cb', { absent: false, native: false, web: false }],
+    ['myapp:/cb', { absent: false, native: false, web: false }],
+    ['file:///etc/passwd', { absent: false, native: false, web: false }],
+    ['ftp://client.example/cb', { absent: false, native: false, web: false }],
+    ['not a url', { absent: false, native: false, web: false }],
+  ];
+
+  for (const [uri, expected] of table) {
+    it(`answers ${uri} as absent=${expected.absent}, native=${expected.native}, web=${expected.web}`, () => {
+      expect(redirectUriAllowed(uri, undefined)).toBe(expected.absent);
+      expect(redirectUriAllowed(uri, 'native')).toBe(expected.native);
+      expect(redirectUriAllowed(uri, 'web')).toBe(expected.web);
+    });
+  }
 });
