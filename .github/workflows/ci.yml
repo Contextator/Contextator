@@ -222,8 +222,13 @@ jobs:
           # EMBEDDING_OFFLINE so the boot does not fetch 470 MB of model to answer a question about
           # backups; the model failing to load is logged and the server still serves (ADR-0032).
           docker run -d --name ctx-ops -e EMBEDDING_OFFLINE=1 -e SECRET_KEY="$(head -c 32 /dev/urandom | xxd -p -c 64)" contextator:ci
-          for _ in $(seq 1 60); do docker exec ctx-ops pg_isready -q -U contextator -d contextator && break; sleep 2; done
-          docker exec ctx-ops pg_isready -U contextator -d contextator
+          # Wait for the server, not for PostgreSQL: pg_isready answers as soon as the cluster accepts
+          # connections, before bootstrapDatabase has migrated, and reset-password then met
+          # 'relation "users" does not exist'. The server listens only after the migrations ran
+          # (src/server.ts), and /api/health is 200 once it does and the database is up.
+          health='fetch("http://127.0.0.1:3444/api/health").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))'
+          for _ in $(seq 1 90); do docker exec ctx-ops node -e "$health" && break; sleep 2; done
+          docker exec ctx-ops node -e "$health" || { docker logs ctx-ops; exit 1; }
 
           # The recovery tool, past its usage line and all the way to a query.
           reset=$(docker exec ctx-ops npm run reset-password -- nobody 2>&1 || true)
