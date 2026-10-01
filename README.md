@@ -478,8 +478,6 @@ goes through the container.
 
 **One command takes the backup, because a `pg_dump` is not the installation:**
 
-<!-- MIRRORED-IN backup-and-restore: ../wiki/Backup-and-Data.md ../.ssot/OPERATIONS.md -->
-
 ```bash
 docker exec contextator npm run backup -- /data/backups/contextator-$(date +%F).tar.gz
 docker cp contextator:/data/backups/contextator-$(date +%F).tar.gz .
@@ -499,21 +497,14 @@ docker exec contextator npm run restore -- /data/backups/contextator-2026-09-22.
 docker compose restart contextator
 ```
 
-<!-- /MIRRORED-IN -->
-
 Run `npm run backup` with no path at all and it writes `<DATA_DIR>/backups/contextator-backup-<timestamp>.tar.gz`
 — on the data volume, never in the container's working directory, which is an image layer.
 
-**These two blocks are mirrored in two other places**, and both follow this one:
-
-| Mirror | Why it exists |
-|---|---|
-| `wiki/Backup-and-Data.md` → *Backing up*, *Restoring* | The wiki is the only published documentation until this branch merges |
-| `.ssot/OPERATIONS.md` → §4.1, §4.2 | The operations record, read by a maintainer who holds both working trees |
-
-`restore` overwrites a live database, so these must not drift: change a command **here**, then in
-both. `test/readme-mirrors.test.ts` fails when they differ — in either direction, and also when one
-of them is dropped from the list above.
+**These two blocks are the only copy of this procedure.** The wiki, the documentation site and
+`.ssot/OPERATIONS.md` carry no commands for it and point here. `restore` overwrites a live database,
+so a command is changed **here** and nowhere else. `test/readme-mirrors.test.ts` fails if a copy that
+declares itself a mirror (a `MIRRORED-IN` / `MIRRORED-FROM` marker) appears; it cannot see an unmarked
+copy in another repository, and review is what catches that.
 
 The archive holds the database, the materialised files of every **upload** source — which exist nowhere
 else — and a manifest that is the first entry in it, so `--check` costs one small read of a file that
@@ -546,7 +537,7 @@ converted and before `SECRET_KEY_PREVIOUS` is removed, under the new key — the
 rotated instance can restore; and the retired key kept in the secret store, labelled and not beside
 the archives, until the retention of the oldest pre-rotation archive expires — only then discarded.
 The full runbook, with each step's command, is
-[wiki/Security#rotating-secret_key](https://github.com/Contextator/Contextator/wiki/Security#rotating-secret_key).
+[Security → Rotating things](https://contextator.com/en/docs/security/#rotating-things).
 
 The restore also refuses a dump taken from a newer PostgreSQL major version than the server it is going
 into; going the other way, 16 to 17, is the documented upgrade and is what the command exists for.
@@ -649,8 +640,6 @@ On an instance that keeps the cluster in a host directory (`CONTEXTATOR_PGDATA_P
 volume in any of this: copy that directory aside with `cp -a` on the host, check the copy, and empty
 the original instead of removing a volume.
 
-<!-- MIRRORED-IN postgres-major-upgrade: ../wiki/Backup-and-Data.md -->
-
 ```bash
 PGVOL=${CONTEXTATOR_PGDATA_VOLUME:-contextator-pgdata}   # from your .env; the default is shown
 OLD=16                                                   # the major you are leaving
@@ -717,8 +706,6 @@ docker volume inspect "$PGVOL-pg$OLD" >/dev/null &&
     "refills $PGVOL from scratch, so repeating it is safe."
 ```
 
-<!-- /MIRRORED-IN -->
-
 That throws away whatever the new major had in it, which after step 5 is the restored instance — so it
 is a rollback to the moment of step 1 and not to the moment you run it. Anything indexed in between is
 re-indexed.
@@ -735,18 +722,10 @@ re-indexed.
 - **The restore refuses the other direction.** A dump taken from 17 will not go into a 16 server, and it
   says so before writing rather than half-applying. So a rollback is the *volume*, not the dump.
 
-**This section is the source for this procedure, and it is not the only copy of it.** It is written
-here, beside the code that implements `backup` and `restore` and versioned with it, because a
-procedure that deletes a cluster has to have exactly one copy that decides what it says.
-
-| Mirror | Why it exists | Rule |
-|---|---|---|
-| `wiki/Backup-and-Data.md` → *Upgrading PostgreSQL across a major version* | The wiki is the only published documentation until this branch merges, and an operator whose cluster will not start cannot be sent to a page they cannot reach | Kept **byte-identical** to the commands above. **If you change a command here, change it there.** Where the two disagree, **this copy wins** |
-
-`test/readme-mirrors.test.ts` checks that byte-identity on every `npm test` run that can see the
-mirror checkouts, fails rather than shrugs when a listed mirror is missing, and pins how many mirrors
-this file claims — a list that can quietly get shorter is not a list. See ADR-0073 as amended by
-ADR-0074.
+**This section is the only copy of this procedure.** It is written here, beside the code that
+implements `backup` and `restore` and versioned with it, because a procedure that deletes a cluster has
+to have exactly one copy that decides what it says. The wiki and the documentation site point here and
+do not repeat the commands. See ADR-0073 as amended by ADR-0074.
 
 ## Connecting AI clients
 

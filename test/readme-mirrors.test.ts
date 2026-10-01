@@ -1,114 +1,84 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
- * `README.md` is the source for two destructive procedures — the backup and restore of ADR-0072, and
- * the PostgreSQL major-version upgrade — and three other documents carry mirrors of them
- * ([ADR-0073](../.ssot/ADR.md) as amended by ADR-0074). A mirror exists where the source cannot be
- * reached by the audience that needs it: the wiki is the only published documentation until this
- * branch merges, and `.ssot/OPERATIONS.md` is the operations record a maintainer reads.
+ * `README.md` is the only copy of two destructive procedures — the backup and restore of ADR-0072,
+ * and the PostgreSQL major-version upgrade ([ADR-0073](../.ssot/ADR.md) as amended by ADR-0074).
+ * There are no mirrors left: the wiki, the documentation site and `.ssot/OPERATIONS.md` link to the
+ * README instead of repeating the commands.
  *
- * ADR-0074 promised the person editing the README a written list of what else to change. A list is
- * itself a claim, so this file measures it — and measures it in the three ways a list goes wrong:
+ * A mirror is a copy of a command that overwrites a live database, and a copy is a command nobody
+ * reviewed when the source changes. So this file guards the absence of *declared* mirrors. It does
+ * NOT detect an unmarked copy — someone pasting the restore block into a wiki or site page without a
+ * marker passes. That is caught in review, not here:
  *
- *  1. **The copies drift.** Every shell block in a bracketed region has to appear, byte for byte, in
- *     every file the region names.
- *  2. **A mirror grows something the source does not have.** The comparison is an equality of block
- *     lists, not a subset test — a `docker volume rm -f` added to the wiki and to nowhere else is a
- *     destructive command nobody reviewed, and it used to pass.
- *  3. **The list gets shorter.** Region count and per-region mirror counts are pinned to numbers, and
- *     a named file that is not there when its checkout is fails instead of being skipped. A test that
- *     goes quiet as its subject disappears is the failure mode this repository keeps finding, and it
- *     would be absurd for the file that exists to catch it to have it.
+ *  1. **No `MIRRORED-IN` / `MIRRORED-FROM` marker may appear** in the README, in `.ssot/OPERATIONS.md`,
+ *     or in any Markdown file of the wiki and site checkouts. If one appears, a mirror was added — the
+ *     way to a green run is to remove it and link to the README, or to take it to a new ADR and
+ *     restore the byte-identity comparison from git history, not to loosen this number.
+ *  2. **`EXPECTED` is pinned to 0.** Raising it is a decision to write down in the commit.
  *
- * WHAT THIS CANNOT BE, and it is worth being plain about: the wiki and `.ssot` are **separate
- * repositories**, so this cannot be a gate that always runs. It runs for whoever has the checkouts —
- * which is whoever can edit them — and when a checkout is genuinely absent it says so as a `todo`
- * rather than as a pass. Absent checkout and misspelt path are different things and are reported
- * differently; that distinction is the whole of point 3.
+ * WHAT THIS CANNOT BE: the wiki, the site and `.ssot` are **separate checkouts**, so this cannot be a
+ * gate that always runs. It scans the ones that are present and says plainly, as a `todo`, which are
+ * not — a skip in a summary line reads as a pass.
  */
 
 const REPO = path.join(__dirname, '..');
 const readme = readFileSync(path.join(REPO, 'README.md'), 'utf8');
 
-/**
- * What this README claims, pinned. These two numbers are the list's own length, and they are the
- * assertion that deleting a marker pair — the quickest way to make a red run go green — is itself red.
- */
-const EXPECTED = { regions: 2, mirrors: { 'backup-and-restore': 2, 'postgres-major-upgrade': 1 } } as const;
+/** The number of mirrors README.md declares. Zero on purpose; see point 2 above. */
+const EXPECTED = { regions: 0 } as const;
 
-/** `<!-- MIRRORED-IN <id>: <path> <path> -->` … `<!-- /MIRRORED-IN -->` in the source. */
-const SOURCE_REGION = /<!--\s*MIRRORED-IN\s+([\w-]+):\s*([^>]*?)\s*-->([\s\S]*?)<!--\s*\/MIRRORED-IN\s*-->/g;
-/** `<!-- MIRRORED-FROM <id>: … -->` … `<!-- /MIRRORED-FROM -->` in a mirror. Several per file is fine. */
-const mirrorRegion = (id: string) => new RegExp(`<!--\\s*MIRRORED-FROM\\s+${id}:[^>]*-->([\\s\\S]*?)<!--\\s*/MIRRORED-FROM\\s*-->`, 'g');
+const MARKER = /<!--\s*\/?MIRRORED-(IN|FROM)\b/g;
+const SOURCE_REGION = /<!--\s*MIRRORED-IN\s+([\w-]+):/g;
 
-const shellBlocks = (text: string): string[] => [...text.matchAll(/```bash\n[\s\S]*?\n```/g)].map((m) => m[0]);
+/** Sibling checkouts, tried at both the ordinary-clone depth and the git-worktree depth. */
+const CHECKOUTS: Array<{ name: string; relative: string; kind: 'file' | 'dir' }> = [
+  { name: '.ssot/OPERATIONS.md', relative: '.ssot/OPERATIONS.md', kind: 'file' },
+  { name: 'wiki', relative: 'wiki', kind: 'dir' },
+  { name: 'contextator.com docs', relative: 'contextator.com/src/content/docs', kind: 'dir' },
+];
 
-const regions = [...readme.matchAll(SOURCE_REGION)].map((m) => ({
-  id: m[1],
-  targets: m[2].split(/\s+/).filter(Boolean),
-  blocks: shellBlocks(m[3]),
-}));
-
-/** An opened region that is never closed matches nothing above, so it would vanish rather than fail. */
-const openers = (readme.match(/<!--\s*MIRRORED-IN\s/g) ?? []).length;
-
-/**
- * Where a mirror lives, and whether its repository is checked out at all.
- *
- * A marker's path is relative to the repository root on an ordinary clone (`…/Contextator`, `…/wiki`
- * and `…/.ssot` as siblings). A git worktree puts the repository somewhere else — `…/.worktrees/x` —
- * and the sibling is then one level further up, so both bases are tried rather than one being declared
- * the right layout. `checkoutPresent` is the parent directory: if that is there and the file is not,
- * the path in the README is wrong and that is a failure, not a skip.
- */
-function locate(relative: string): { file: string | null; checkoutPresent: boolean } {
-  let checkoutPresent = false;
+function locate(relative: string): string | null {
   for (const base of [REPO, path.join(REPO, '..')]) {
     const candidate = path.resolve(base, relative);
-    if (existsSync(candidate)) return { file: candidate, checkoutPresent: true };
-    if (existsSync(path.dirname(candidate))) checkoutPresent = true;
+    if (existsSync(candidate)) return candidate;
   }
-  return { file: null, checkoutPresent };
+  return null;
+}
+
+function markdownFiles(target: string): string[] {
+  if (statSync(target).isFile()) return [target];
+  return readdirSync(target, { withFileTypes: true }).flatMap((entry) => {
+    if (entry.name === '.git' || entry.name === 'node_modules') return [];
+    const full = path.join(target, entry.name);
+    if (entry.isDirectory()) return markdownFiles(full);
+    return entry.name.endsWith('.md') ? [full] : [];
+  });
 }
 
 describe('README mirrors', () => {
-  it('still claims as many mirrors as it did when this was written', () => {
-    expect(openers, 'a MIRRORED-IN region is opened and never closed').toBe(regions.length);
+  it('declares no mirror regions, and the pinned count says so', () => {
+    const regions = [...readme.matchAll(SOURCE_REGION)].map((m) => m[1]);
     expect(
-      regions.map((r) => r.id).sort(),
-      'a MIRRORED-IN region was removed or renamed — if that is deliberate, change EXPECTED and say why in the commit',
-    ).toEqual(Object.keys(EXPECTED.mirrors).sort());
-    expect(regions.length).toBe(EXPECTED.regions);
-    for (const region of regions) {
-      expect(region.blocks.length, `the region ${region.id} holds no shell block`).toBeGreaterThan(0);
-      expect(region.targets.length, `${region.id} lost a mirror from its list`).toBe(EXPECTED.mirrors[region.id as keyof typeof EXPECTED.mirrors]);
-    }
+      regions.length,
+      'a MIRRORED-IN region appeared in README.md — a mirror of a destructive command was added; link to the README instead',
+    ).toBe(EXPECTED.regions);
+    expect((readme.match(MARKER) ?? []).length, 'a mirror marker is left in README.md').toBe(0);
   });
 
-  for (const region of regions) {
-    for (const [n, target] of region.targets.entries()) {
-      const { file, checkoutPresent } = locate(target);
-      const name = `${region.id} → mirror ${n + 1} (${target})`;
-
-      if (file === null && !checkoutPresent) {
-        // Not `it.skip`: a skip in a summary line reads as a pass. This states the reason.
-        it.todo(`${name} — checkout not present, byte-identity NOT verified in this run`);
-        continue;
-      }
-
-      it(`${name} — carries exactly the source's blocks, in order`, () => {
-        expect(file, `${target} is named by README.md but is not there — fix the path, or drop the mirror on purpose`).not.toBeNull();
-        const text = readFileSync(file as string, 'utf8');
-        const claimed = [...text.matchAll(mirrorRegion(region.id))].flatMap((m) => shellBlocks(m[1]));
-        expect(claimed.length, `${target} has no MIRRORED-FROM ${region.id} region — the mirror stopped declaring itself`).toBeGreaterThan(0);
-        // Equality, not inclusion: this is what catches a block the mirror grew on its own.
-        expect(
-          claimed,
-          `${target} does not carry exactly the blocks README.md marks as mirrored.\nThe README is the source: change it there, then copy across.`,
-        ).toEqual(region.blocks);
-      });
+  for (const checkout of CHECKOUTS) {
+    const target = locate(checkout.relative);
+    if (target === null) {
+      it.todo(`${checkout.name} — checkout not present, absence of mirrors NOT verified in this run`);
+      continue;
     }
+    it(`${checkout.name} carries no mirror marker`, () => {
+      for (const file of markdownFiles(target)) {
+        const hits = readFileSync(file, 'utf8').match(MARKER) ?? [];
+        expect(hits.length, `${file} carries a MIRRORED marker — a copy of the README's destructive commands; replace it with a link`).toBe(0);
+      }
+    });
   }
 });
