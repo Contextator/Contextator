@@ -6,7 +6,7 @@
 // (ADR-0054), and it is the one where a member's MCP access is their membership. The copy says which
 // is which, because the difference is the whole decision this panel is asking the operator to make.
 
-import { $, ApiError, api, closeDialog, copyText, el, emit, openDialog, relativeTime, state, toast } from './core.js';
+import { $, ApiError, api, closeDialog, copyText, el, emit, openDialog, relativeTime, serverNow, state, toast } from './core.js';
 import { canEdit, isAdmin } from './auth.js';
 
 export async function loadMcpTokens(force = false) {
@@ -28,41 +28,84 @@ export async function loadMcpTokens(force = false) {
   }
 }
 
-/** The three access modes, in the order they narrow: what the pill says, and what the copy explains. */
+/**
+ * The three access modes, in the order they narrow: what the badge says, and what the copy explains.
+ *
+ * The badge is the same neutral pill for all three (ADR-0065): `open` is a mode an operator chose, not
+ * a fault, so it gets no warning colour, icon or wording. `fact` is the badge's tooltip and says only
+ * what a client has to present.
+ */
 const MODES = {
   open: {
-    pill: 'open',
-    tone: 'error',
     label: 'Open',
+    fact: 'Any client that can reach this URL reads this project; no token or account is asked for.',
     blurb:
       'Anyone who can reach this URL can read every document indexed here — no account, no token. No project is created this way: it is a choice, for documentation nobody should have to be anybody to read.',
   },
   token: {
-    pill: 'token required',
-    tone: 'idle',
     label: 'Token required',
+    fact: "A client has to send one of this project's MCP tokens.",
     blurb:
       'Only a client presenting one of the tokens below can read this project over MCP. A token carries no identity: whoever holds it reads everything indexed here, whatever their role in this dashboard. Revoking one cuts its client off immediately.',
   },
   account: {
-    pill: 'account required',
-    tone: 'account',
     label: 'Account required',
+    fact: 'A client has to sign in as an account that is a member of this project.',
     blurb:
       'A client has to sign in as somebody, and it then reads this project only if that account is a member of it. The tokens below stop working here — they name nobody. This is the mode where the memberships on this page reach the MCP endpoint.',
   },
 };
 
+const modeOf = (project) => (MODES[project.mcpAuth] ? project.mcpAuth : 'open');
+
+/** The project's MCP access mode as a neutral pill — the project list, the detail header, this panel. */
+export function authModeBadge(project, small = false) {
+  const mode = modeOf(project);
+  return el('span', { class: `pill auth-mode${small ? ' small' : ''}`, title: `MCP access: ${mode}. ${MODES[mode].fact}` }, [
+    el('span', { class: 'sr-only', text: 'MCP access: ' }),
+    mode,
+  ]);
+}
+
+/** Lifetimes the API accepts for a static token, in days; an empty choice is a token that never expires. */
+export const TOKEN_LIFETIMES = [30, 90, 365];
+
+// By the server's clock, not the browser's: the server is the one that refuses the token.
+const isExpired = (t) => Boolean(t.expiresAt) && new Date(t.expiresAt).getTime() <= serverNow();
+
+/** "in 3 h", "in 12 d", or the date once it is further out than a fortnight. */
+function timeUntil(iso) {
+  const s = Math.round((new Date(iso).getTime() - serverNow()) / 1000);
+  const m = Math.round(s / 60);
+  if (m < 60) return `in ${Math.max(1, m)} min`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `in ${h} h`;
+  const d = Math.round(h / 24);
+  if (d < 14) return `in ${d} d`;
+  return `on ${new Date(iso).toLocaleDateString()}`;
+}
+
+/** The token's lifetime cell: a pill once it has run out — it stays listed until revoked — a line before. */
+function tokenExpiry(t) {
+  if (!t.expiresAt) return el('span', { class: 'sub', text: 'no expiry', title: 'Works until it is revoked' });
+  const when = new Date(t.expiresAt).toLocaleString();
+  if (isExpired(t))
+    return el('span', { class: 'pill small error', text: 'expired', title: `Expired ${when}; it is refused — revoke it and mint a new one` });
+  return el('span', { class: 'sub', text: `expires ${timeUntil(t.expiresAt)}`, title: `Expires ${when}` });
+}
+
 export function renderMcpAccess(project) {
-  const mode = MODES[project.mcpAuth] ? project.mcpAuth : 'open';
+  const mode = modeOf(project);
   const tokens = state.mcpTokensFor === project.id ? state.mcpTokens : [];
   const mayToggle = isAdmin();
   const mayMint = canEdit(project);
 
   const rows = tokens.map((t) =>
-    el('div', { class: 'user-row token-row' }, [
+    el('div', { class: 'user-row token-row mcp-token-row' }, [
       el('span', { class: 'source-glyph token', 'aria-hidden': 'true', text: 'KEY' }),
       el('span', { class: 'source-cell' }, [el('code', { text: t.prefix }), el('span', { class: 'sub', text: t.name || 'unnamed' })]),
+      // Third, so it is still on screen when a narrow layout drops the columns after it.
+      tokenExpiry(t),
       el('span', { class: 'sub', text: `created ${relativeTime(t.createdAt)}` }),
       el('span', { class: 'sub', text: t.lastUsedAt ? `used ${relativeTime(t.lastUsedAt)}` : 'never used' }),
       el(
@@ -75,10 +118,7 @@ export function renderMcpAccess(project) {
 
   return el('section', { class: 'panel' }, [
     el('div', { class: 'sources-head' }, [
-      el('div', {}, [
-        el('h3', {}, ['MCP access ', el('span', { class: `pill small ${MODES[mode].tone}`, text: MODES[mode].pill })]),
-        el('p', { text: MODES[mode].blurb }),
-      ]),
+      el('div', {}, [el('h3', {}, ['MCP access ', authModeBadge(project, true)]), el('p', { text: MODES[mode].blurb })]),
       // Three modes, so this is a choice and no longer a toggle: a two-state button would have to
       // pick which of the other two it means, and an operator would find out by pressing it.
       mayToggle
@@ -92,11 +132,14 @@ export function renderMcpAccess(project) {
         : null,
     ]),
 
-    // A `token` project with no live token is unreachable; say so where the mistake is made.
-    mode === 'token' && rows.length === 0
+    // A `token` project with no live token is unreachable; say so where the mistake is made. An expired
+    // token is still listed, but it opens nothing.
+    mode === 'token' && !tokens.some((t) => !isExpired(t))
       ? el('p', { class: 'members-note' }, [
           el('strong', { text: 'No token, no access. ' }),
-          'This project requires a token and has none, so nothing can connect to it right now.',
+          tokens.length
+            ? 'This project requires a token and every token it has has expired, so nothing can connect to it right now.'
+            : 'This project requires a token and has none, so nothing can connect to it right now.',
         ])
       : null,
 
@@ -201,9 +244,11 @@ export function initMcpUi() {
     const submit = $('#token-submit');
     submit.disabled = true;
     try {
+      const data = new FormData(form);
+      const days = Number(data.get('expiresInDays'));
       const { secret } = await api(`/api/projects/${dialogProject.id}/mcp-tokens`, {
         method: 'POST',
-        body: { name: String(new FormData(form).get('name')).trim() },
+        body: { name: String(data.get('name')).trim(), expiresInDays: TOKEN_LIFETIMES.includes(days) ? days : null },
       });
       closeDialog(dialog);
       showMcpSecret(dialogProject, secret);

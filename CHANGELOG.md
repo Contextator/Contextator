@@ -68,6 +68,15 @@ ships, that stops.
   `expiresAt` is refused with `401` by a `token` or `account` project, like a revoked one; an expired
   token stays in the list until it is revoked. An `open` project still ignores the bearer it is given,
   expired or not (ADR-0054). No migration: `mcp_tokens.expires_at` already existed.
+- **The dashboard sets and shows MCP token lifetimes.** The New MCP token dialog has an Expires
+  choice — Never (the default), 30, 90 or 365 days. Each row of a project's token list shows
+  "no expiry", the expiry date, or the time left once it is under two weeks; a token past its date
+  is marked "expired" and stays listed until it is revoked. The "No token, no access" note of a
+  `token` project now also appears when every token it has is expired.
+- **The dashboard tells which projects still have a legacy SSE client.** A project whose
+  `lastLegacySseAt` falls within the last seven days shows an informational note on its page, saying
+  when a client last connected over legacy SSE and that the same URL takes Streamable HTTP. It gives
+  no removal date, because none has been set (ADR-0096).
 
 ### Changed
 
@@ -91,6 +100,13 @@ ships, that stops.
 - **`OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` are no longer sent to a self-hosted endpoint.** The SDK
   read them from the process environment and sent them as `OpenAI-Organization` / `OpenAI-Project`
   headers to whatever server it was pointed at; they now reach `api.openai.com` only.
+- **Every project shows its MCP access mode as a neutral badge** — `open`, `token` or `account` —
+  in the project list and on the project page, the three alike in weight and colour. `open` carries
+  no warning colour, icon or text (ADR-0065); the badge's tooltip states what a client has to send.
+- **The dashboard's connection snippets lead with Streamable HTTP.** A new Streamable HTTP tab gives
+  the URL (and the `Authorization` header for a `token` project) for any other MCP client; the
+  Legacy SSE tab comes last and is labelled deprecated, for a client that cannot speak Streamable
+  HTTP.
 
 ### Deprecated
 
@@ -103,12 +119,16 @@ ships, that stops.
   origin can read it too. Move clients to Streamable HTTP (`POST /mcp/:project`) at your own pace.
   To tell which projects still have such clients, `GET /api/projects` and
   `GET /api/projects/:id/status` now carry each project's `lastLegacySseAt` (ISO 8601, or `null` when
-  no legacy client has reached it), updated at most once a minute; the dashboard will warn from it.
-  Migration `0019` adds the nullable `projects.last_legacy_sse_at` column; it is not carried by a
-  project export.
+  no legacy client has reached it), updated at most once a minute; the dashboard shows a note on
+  such a project's page. Migration `0019` adds the nullable `projects.last_legacy_sse_at` column;
+  it is not carried by a project export.
 
 ### Fixed
 
+- **The dashboard's Claude Desktop snippet works on Windows.** For a `token` project it passed
+  `--header "Authorization: Bearer …"` to `mcp-remote` as one argument with spaces, which Windows
+  splits, so the server answered 401. It now passes `Authorization:${AUTH_HEADER}` and sets
+  `AUTH_HEADER` in the server's `env`, the form the documentation already uses.
 - **A Notion source no longer overshoots its page ceiling.** The limit was checked only after a
   whole search batch had been taken, so a source could pull up to one batch more than the ceiling;
   it is now applied page by page, and a source that fills the ceiling exactly is not reported as cut.

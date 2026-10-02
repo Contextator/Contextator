@@ -70,6 +70,31 @@ describe('the dashboard markup and its modules agree', () => {
     expect(js.match(/syncFlavorFields\(\);/g) ?? []).toHaveLength(2);
   });
 
+  /**
+   * An access mode is a choice, not a fault ([ADR-0065](../.ssot/ADR.md#adr-0065)): the badge is the
+   * same neutral pill for `open`, `token` and `account`. The panel used to paint `open` red, and nothing
+   * failed when it did; this fails the moment a warning tone or class comes back.
+   */
+  it('badges every MCP access mode with the same neutral pill', async () => {
+    const js = await readFile(new URL('mcp.js', PUBLIC), 'utf8');
+    const css = await readFile(new URL('style.css', PUBLIC), 'utf8');
+    const modes = js.match(/const MODES = \{[\s\S]*?\n\};/)?.[0] ?? '';
+    expect(modes).toContain('open:');
+    expect(modes).not.toMatch(/\b(tone|pill|warn|danger|error)\b/);
+    expect(js).toMatch(/class: `pill auth-mode\$\{small \? ' small' : ''\}`/);
+    // The pill's own rules: no colour of the warning family, and no icon.
+    const rules = [...css.matchAll(/\.pill\.auth-mode[^{]*\{([^}]*)\}/g)].map((m) => m[1]).join('\n');
+    expect(rules).not.toBe('');
+    expect(rules).not.toMatch(/--(warn|danger|error|err)\b|url\(/);
+  });
+
+  it('offers exactly the token lifetimes the API accepts, with no expiry as the default', async () => {
+    const html = await readFile(new URL('index.html', PUBLIC), 'utf8');
+    const select = html.match(/<select name="expiresInDays">([\s\S]*?)<\/select>/)?.[1] ?? '';
+    expect([...select.matchAll(/value="([^"]*)"/g)].map((m) => m[1])).toEqual(['', '30', '90', '365']);
+    expect(select).toMatch(/<option value="" selected>Never<\/option>/);
+  });
+
   it('shows a source its last error even when the source did not fail', async () => {
     const js = await readFile(new URL('app.js', PUBLIC), 'utf8');
     expect(js).toMatch(/const warned = !failed && Boolean\(s\.lastError\);/);

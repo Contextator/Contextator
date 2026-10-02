@@ -2200,8 +2200,7 @@ button.user-btn:hover {
 
 .pill.admin,
 .pill.editor,
-/* The MCP access panel's third mode (ADR-0054): the accent, because "account required" is the
-   strongest of the three and the other two already own the red and the green. */
+/* An active API token. The MCP access modes no longer use it: they share the neutral .auth-mode pill. */
 .pill.account {
   background: var(--accent-tint);
   color: var(--accent);
@@ -2215,14 +2214,18 @@ button.user-btn:hover {
 
 .pill.member,
 .pill.viewer,
-.pill.you {
+.pill.you,
+/* A project's MCP access mode. One look for all three — open, token, account — because each is a choice
+   the operator made and none of them is a fault (ADR-0065): no warning colour, no icon. */
+.pill.auth-mode {
   background: var(--neutral-tint);
   color: var(--muted);
 }
 
 .pill.member::before,
 .pill.viewer::before,
-.pill.you::before {
+.pill.you::before,
+.pill.auth-mode::before {
   background: var(--faint);
 }
 
@@ -2408,6 +2411,21 @@ body.auth .gate-card a {
 
 .token-row {
   grid-template-columns: 34px minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+}
+
+.mcp-token-row {
+  grid-template-columns: 34px minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+}
+
+.mcp-token-row > .pill {
+  justify-self: start;
+}
+
+/* Narrow: the created and used columns drop out (the .user-row rule above); the expiry stays. */
+@media (max-width: 900px) {
+  .mcp-token-row {
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+  }
 }
 
 .source-glyph.token {

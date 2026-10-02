@@ -185,6 +185,21 @@ export function gotoChangePassword() {
   location.replace('/change-password');
 }
 
+// How far the server's clock is ahead of this browser's, from the `Date` header of the last API
+// response. Whatever the server decides by its own clock — a token's expiry, say — is shown by it too,
+// so a browser running a few minutes late does not call a refused token live.
+let serverClockOffset = 0;
+
+function noteServerClock(res) {
+  const at = Date.parse(res.headers?.get?.('date') ?? ''); // test doubles may carry no headers
+  if (Number.isFinite(at)) serverClockOffset = at - Date.now();
+}
+
+/** The current time by the server's clock, as far as the last response told us (one-second grain). */
+export function serverNow() {
+  return Date.now() + serverClockOffset;
+}
+
 async function readBody(res) {
   const text = await res.text();
   return text ? JSON.parse(text) : null;
@@ -195,6 +210,7 @@ export async function api(path, { method = 'GET', body } = {}) {
   const headers = { accept: 'application/json' };
   if (body !== undefined) headers['content-type'] = 'application/json';
   const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  noteServerClock(res);
   if (res.status === 401) {
     gotoLogin();
     throw new ApiError(401, { message: 'Not signed in' });

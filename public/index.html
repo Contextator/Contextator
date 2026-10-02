@@ -523,6 +523,16 @@
             <input name="name" maxlength="100" autocomplete="off" placeholder="Cursor on my laptop" />
             <span class="field-hint">Only a label, so you can tell two tokens apart and revoke the right one.</span>
           </label>
+          <label class="field">
+            <span class="field-label">Expires</span>
+            <select name="expiresInDays">
+              <option value="" selected>Never</option>
+              <option value="30">In 30 days</option>
+              <option value="90">In 90 days</option>
+              <option value="365">In 365 days</option>
+            </select>
+            <span class="field-hint">An expired token is refused and stays listed until you revoke it. Never means it works until it is revoked.</span>
+          </label>
           <p id="token-error" class="form-error" role="alert" hidden></p>
         </div>
         <div class="dialog-foot">

@@ -26,7 +26,7 @@ import {
 } from './core.js';
 import { captureAuditFocus, loadAudit, renderAuditView } from './audit.js';
 import { canCreateProject, canDeleteProject, canEdit, initAuthUi, loadMe, renderUserMenu } from './auth.js';
-import { authHeaderFor, initMcpUi, loadMcpTokens, renderMcpAccess, showMcpSecret } from './mcp.js';
+import { authHeaderFor, authModeBadge, initMcpUi, loadMcpTokens, renderMcpAccess, showMcpSecret } from './mcp.js';
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
 import { loadQuerySummary, renderQueries } from './queries.js';
 import { captureSearchFocus, renderSearch } from './search.js';
@@ -145,6 +145,14 @@ function runResult(run) {
   return `${fmt(run.filesSkipped)} unchanged · ${fmt(run.filesUpdated)} updated · ${fmt(run.filesRemoved)} removed · ${fmt(run.chunksWritten)} chunks embedded`;
 }
 
+/** How recently a legacy SSE client must have connected for the detail view to mention it. */
+const LEGACY_SSE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+function seesLegacySse(project) {
+  const at = project.lastLegacySseAt ? new Date(project.lastLegacySseAt).getTime() : Number.NaN;
+  return Number.isFinite(at) && Date.now() - at < LEGACY_SSE_WINDOW_MS;
+}
+
 function snippetsFor(project) {
   const url = project.mcpUrl;
   const id = `${project.name}-docs`;
@@ -166,17 +174,35 @@ function snippetsFor(project) {
     {
       tab: 'Claude Desktop',
       hint: `claude_desktop_config.json — via the mcp-remote stdio bridge.${tokenHint}`,
+      // No space inside an argument: Windows splits "Authorization: Bearer …" and the server answers
+      // 401. The value goes through an environment variable that mcp-remote expands instead.
       code: JSON.stringify(
-        { mcpServers: { [id]: { command: 'npx', args: locked ? ['-y', 'mcp-remote', url, '--header', header] : ['-y', 'mcp-remote', url] } } },
+        {
+          mcpServers: {
+            [id]: locked
+              ? {
+                  command: 'npx',
+                  // biome-ignore lint/suspicious/noTemplateCurlyInString: mcp-remote expands it, not JavaScript.
+                  args: ['-y', 'mcp-remote', url, '--header', 'Authorization:${AUTH_HEADER}'],
+                  env: { AUTH_HEADER: 'Bearer <your token>' },
+                }
+              : { command: 'npx', args: ['-y', 'mcp-remote', url] },
+          },
+        },
         null,
         2,
       ),
     },
     {
+      tab: 'Streamable HTTP',
+      hint: `Any other MCP client: give it this URL with the Streamable HTTP transport (often called "http").${tokenHint}`,
+      code: locked ? `${url}\n${header}` : url,
+    },
+    {
       tab: 'Legacy SSE',
       hint: locked
-        ? 'GET opens the SSE stream; both it and the messages channel need the Authorization header, which a browser EventSource cannot send.'
-        : 'GET opens the SSE stream; the server answers with the messages endpoint.',
+        ? 'Deprecated — only for a client that cannot speak Streamable HTTP. GET opens the SSE stream; both it and the messages channel need the Authorization header, which a browser EventSource cannot send.'
+        : 'Deprecated — only for a client that cannot speak Streamable HTTP. GET opens the SSE stream; the server answers with the messages endpoint.',
       code: `${url}\n→ POST ${url}/messages?sessionId=…`,
     },
   ];
@@ -392,6 +418,7 @@ function renderList() {
         el('span', { class: 'row-top' }, [
           el('span', { class: `dot ${status}` }),
           el('span', { class: 'row-name', text: p.name }),
+          authModeBadge(p, true),
           el('span', { class: `pill small ${status}`, text: status }),
         ]),
         el('span', { class: 'row-bottom' }, [
@@ -476,7 +503,7 @@ function renderDetail() {
   main.append(
     el('div', { class: 'detail-head' }, [
       el('div', { class: 'detail-title' }, [
-        el('div', { class: 'title-row' }, [el('h1', { text: p.name }), el('span', { class: `pill ${status}`, text: status })]),
+        el('div', { class: 'title-row' }, [el('h1', { text: p.name }), el('span', { class: `pill ${status}`, text: status }), authModeBadge(p)]),
         el('div', { class: 'url-row' }, [
           el('code', { class: 'url', text: p.mcpUrl }),
           el(
@@ -594,6 +621,21 @@ function renderDetail() {
     );
   }
 
+  // Legacy SSE is deprecated with no removal date (ADR-0096), so this informs and points the way; it
+  // names no deadline, and it is not a warning: the client still works.
+  if (seesLegacySse(p)) {
+    main.append(
+      el('div', { class: 'callout' }, [
+        el('span', { class: 'callout-title', text: 'A client still connects over legacy SSE' }),
+        el('span', {}, [
+          'A client reached this project over the legacy HTTP+SSE transport ',
+          el('time', { datetime: p.lastLegacySseAt, title: new Date(p.lastLegacySseAt).toLocaleString(), text: relativeTime(p.lastLegacySseAt) }),
+          '. It keeps working, but the transport is deprecated: point that client at the same URL with Streamable HTTP — the snippets under Connect an agent use it. No removal date has been set.',
+        ]),
+      ]),
+    );
+  }
+
   // Stat tiles
   const runs = state.runsFor === p.id ? state.runs : [];
   const lastDone = runs.find((r) => r.status === 'done');
@@ -638,7 +680,7 @@ function renderDetail() {
       el('section', { class: 'panel' }, [
         el('div', { class: 'panel-head' }, [
           el('h3', { text: 'Connect an agent' }),
-          el('p', { text: 'One URL serves both Streamable HTTP and legacy SSE. Newer clients pick Streamable HTTP automatically.' }),
+          el('p', { text: 'Connect over Streamable HTTP. The same URL still answers legacy SSE clients; that transport is deprecated.' }),
         ]),
         el(
           'div',
