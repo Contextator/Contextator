@@ -251,6 +251,18 @@ describe('the legacy SSE transport (ADR-0096)', () => {
     expect(refused.headers.get('sunset')).toBeNull();
   });
 
+  it('answers a HEAD of the SSE stream with its head alone, and does not count it as a legacy client', async () => {
+    const probe = await fetch(`${live.origin}/mcp/${modern.name}`, { method: 'HEAD' });
+    expect(probe.status).toBe(200);
+    expect(probe.headers.get('content-type')).toMatch(/^text\/event-stream/);
+    expect(probe.headers.get('deprecation')).toBe('true');
+    expect(probe.headers.get('sunset')).toBeNull();
+
+    // A stamp is written in the background; give one the time it would need before asserting none came.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect((await projectFromList(modern)).lastLegacySseAt).toBeNull();
+  });
+
   it('still connects, lists the tools and answers a call', async () => {
     const client = new Client({ name: 'legacy-sse-itest', version: '0.0.0' });
     await client.connect(new SSEClientTransport(new URL(`${live.origin}/mcp/${legacy.name}`)));

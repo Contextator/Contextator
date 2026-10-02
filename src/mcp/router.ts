@@ -48,12 +48,13 @@ const headerValue = (value: string | string[] | undefined): string | undefined =
 
 /**
  * Whether a request belongs to the legacy HTTP+SSE transport: the stream (`GET` without an
- * `mcp-session-id`) or its inbound `/messages` channel. Streamable HTTP never matches.
+ * `mcp-session-id`) or its inbound `/messages` channel. Streamable HTTP never matches. `HEAD` of the
+ * stream matches too: Fastify answers it from the `GET` route, and a `HEAD` carries `GET`'s header fields.
  */
 export const isLegacySseRequest = (method: string, routeUrl: string | undefined, sessionHeader: string | undefined): boolean => {
   if (!routeUrl) return false;
   if (method === 'POST' && routeUrl.endsWith('/mcp/:project/messages')) return true;
-  return method === 'GET' && routeUrl.endsWith('/mcp/:project') && !sessionHeader;
+  return (method === 'GET' || method === 'HEAD') && routeUrl.endsWith('/mcp/:project') && !sessionHeader;
 };
 
 /**
@@ -204,6 +205,11 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
       await guarded(reply, () => session.transport.handleRequest(req.raw, reply.raw));
       return;
     }
+
+    // A `HEAD` of the legacy stream (Fastify answers it from this route) is a probe — an uptime check,
+    // `curl -I` — and not a client: it gets the stream's head, opens no session and is not counted
+    // as legacy activity, or one health check would keep `lastLegacySseAt` fresh forever (ADR-0096).
+    if (req.method === 'HEAD') return reply.code(200).header('content-type', 'text/event-stream').send();
 
     // Legacy HTTP+SSE transport. hijack() must precede connect(): SSEServerTransport.start() writes the response head.
     const server = createProjectMcpServer(ctx, project, req.mcpTokenId);

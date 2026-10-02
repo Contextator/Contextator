@@ -10,6 +10,8 @@ ships, that stops.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-02
+
 ### Added
 
 - **`EMBEDDING_PROVIDER=openai` talks to any OpenAI-compatible endpoint.** `EMBEDDING_BASE_URL`
@@ -60,6 +62,18 @@ ships, that stops.
 - **Text inside an inline SVG is indexed.** An HTML page's `<svg>` used to be dropped whole; its
   `<text>` (with `<tspan>`), `<title>` and `<desc>` now become paragraphs of the document, so a
   diagram's labels are searchable. Shapes, paths and styling are still dropped.
+- **A scheduled source is never skipped for longer than `SYNC_MAX_SKIP_HOURS`** (default 24, `0`
+  turns it off, at most 720; ADR-0095). The change check cannot see everything — a Notion page
+  unshared from the integration keeps its edit time, a local file rewritten with its old modification
+  time keeps the count and the newest time — so a due source whose last successful sync is older than
+  this, or that never synced, is synced anyway, and that run removes what is gone. The price is one
+  real sync per source per this many hours even when nothing changed. The log says
+  `scheduled sync queued a run (max skip age)` when this is why a run happened. The dashboard's sync
+  and webhook hints now say so instead of implying the interval alone catches an unshare.
+- **`server.json` describes Contextator for the MCP Registry** (schema `2025-12-11`): one Streamable
+  HTTP remote, `https://{host}/mcp/{project}`, whose `Authorization` header is needed only by a
+  project in `token` mode. It is in the repository so a registry or a client can read it; it has not
+  been published to the registry.
 - **Static MCP tokens can expire.** `POST /api/projects/:id/mcp-tokens` takes an optional
   `expiresInDays` (`30`, `90` or `365`; any other value is a `400`) and
   defaults to `null`, a token that never expires — so a script that sends only `name` mints exactly
@@ -77,6 +91,12 @@ ships, that stops.
   `lastLegacySseAt` falls within the last seven days shows an informational note on its page, saying
   when a client last connected over legacy SSE and that the same URL takes Streamable HTTP. It gives
   no removal date, because none has been set (ADR-0096).
+- **Helm chart 1.1.0 can render a Prometheus Operator `ServiceMonitor`.** Set
+  `metrics.serviceMonitor.enabled` (off by default) to have `/metrics` scraped; `interval`,
+  `scrapeTimeout`, `labels`, `annotations`, `honorLabels`, `relabelings` and `metricRelabelings` are
+  passed through. The scraper's bearer credential is read from the same Secret entry as the Pod's
+  `METRICS_TOKEN` (`envSecret.METRICS_TOKEN`). The chart README now covers the Kubernetes-specific
+  parts of a backup and restore and points to the product README for the procedure itself.
 
 ### Changed
 
@@ -111,7 +131,7 @@ ships, that stops.
 ### Deprecated
 
 - **The legacy HTTP+SSE MCP transport (protocol 2024-11-05) is deprecated** (ADR-0096). Every
-  response of it — the `GET /mcp/:project` stream opened without an `mcp-session-id` and every answer
+  response of it — the `GET /mcp/:project` stream (and a `HEAD` of it) opened without an `mcp-session-id` and every answer
   of `POST /mcp/:project/messages`, refusals included — now carries `Deprecation: true`. No `Sunset`
   header is sent, because no date has been set: the transport behaves exactly as before, and it will
   not be removed before 1.0 nor sooner than twelve months from this release. Streamable HTTP answers
@@ -129,6 +149,16 @@ ships, that stops.
   `--header "Authorization: Bearer …"` to `mcp-remote` as one argument with spaces, which Windows
   splits, so the server answered 401. It now passes `Authorization:${AUTH_HEADER}` and sets
   `AUTH_HEADER` in the server's `env`, the form the documentation already uses.
+- **The OAuth authorization page no longer tells a stranger who belongs to a project.** A signed-in
+  account without access to the project is now refused on the consent page itself (`403`) instead of
+  being redirected, so a self-registered client cannot use the redirect to learn whether a given
+  person is a member; refusing on the consent form still redirects with `access_denied`.
+- **Exchanging an authorization code for a project deleted in the meantime answers `invalid_grant`**
+  instead of `500`, and a token refresh racing a project deletion no longer deadlocks. A project can no
+  longer be deleted in the moment between its busy check and the delete.
+- **The query-log panel no longer shows an older answer as the current one.** When the floor preview
+  was asked again before the previous answer arrived, the late answer could replace the newer one; it
+  is now matched to the latest request and stale data is marked as such.
 - **A Notion source no longer overshoots its page ceiling.** The limit was checked only after a
   whole search batch had been taken, so a source could pull up to one batch more than the ceiling;
   it is now applied page by page, and a source that fills the ceiling exactly is not reported as cut.
@@ -138,6 +168,19 @@ ships, that stops.
   queued for it in the background lane, whatever the lost run was: if it was a forced re-index,
   force it again. The dashboard's history shows the row as interrupted. A project whose recovery
   fails is logged and does not stop the others from being recovered.
+
+### Upgrade notes
+
+- **No full re-index is needed.** Migration `0019` adds one nullable column and runs at startup.
+  An installation that sets `OPENAI_BASE_URL` keeps its model id; only moving to
+  `EMBEDDING_BASE_URL` re-indexes, and only once (see Changed).
+- **On a web source whose site negotiates Markdown, listed pages are re-embedded once.** Their next
+  sync stores them as `.md` instead of `.html`, so a `read_document` path saved before the upgrade
+  stops resolving (see Changed). With `SYNC_MAX_SKIP_HOURS` at its default this happens within a day.
+- **Expect one real sync per scheduled source shortly after the upgrade.** A source whose last
+  successful sync is older than `SYNC_MAX_SKIP_HOURS` runs at its next due time even if its check
+  says unchanged. Set `SYNC_MAX_SKIP_HOURS=0` to keep the old behaviour.
+- **Existing MCP tokens do not expire.** Only a token created with a lifetime does.
 
 ## [0.2.0] - 2026-09-25
 
@@ -333,6 +376,7 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Contextator/Contextator/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Contextator/Contextator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Contextator/Contextator/releases/tag/v0.1.0

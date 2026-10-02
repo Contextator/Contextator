@@ -1,0 +1,46 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Contextator/contextator",
+  "title": "Contextator",
+  "description": "Self-hosted documentation server: each project's indexed docs as its own MCP endpoint.",
+  "version": "0.2.1",
+  "websiteUrl": "https://contextator.com",
+  "repository": {
+    "url": "https://github.com/Contextator/Contextator",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://{host}/mcp/{project}",
+      "variables": {
+        "host": {
+          "description": "Host (and port, if not 443) of your own Contextator deployment.",
+          "isRequired": true,
+          "placeholder": "docs.example.com"
+        },
+        "project": {
+          "description": "Name of the project to connect to, as it appears in the dashboard and in its MCP URL.",
+          "isRequired": true,
+          "placeholder": "handbook"
+        }
+      },
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Only for a project in token mode: a static MCP token created on the project's page. A project in account mode signs in with OAuth instead, and an open project needs no header.",
+          "value": "Bearer {token}",
+          "isRequired": false,
+          "isSecret": true,
+          "variables": {
+            "token": {
+              "description": "The project's static MCP token.",
+              "isRequired": true,
+              "isSecret": true
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

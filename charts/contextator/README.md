@@ -72,7 +72,7 @@ numbers move for different reasons and do not have to match:
   removed or renamed value or one the schema newly rejects. A product release that leaves the chart
   alone publishes no new chart version.
 - `appVersion` is the application release the chart was last tested with. It is informational: it is
-  not an image default, and `image.tag` stays required. Chart `1.1.0` with `appVersion: "0.2.0"` and
+  not an image default, and `image.tag` stays required. Chart `1.0.0` with `appVersion: "0.2.0"` and
   an image tag of `0.2.1-slim` is a normal combination, as long as the chart's values cover what that
   image needs.
 

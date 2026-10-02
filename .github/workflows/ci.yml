@@ -91,6 +91,38 @@ jobs:
       # loudly rather than reporting green with three fewer assertions than they claim.
       - run: npm test
 
+  # A reminder, not a gate: a pull request that changes `src/` while `[Unreleased]` has no entry gets
+  # a warning on the run, never a red check — plenty of `src/` changes have nothing a user would
+  # notice. A release pull request, which turns `[Unreleased]` into a version section and leaves it
+  # empty on purpose, is recognised by the version heading it adds and left alone.
+  changelog:
+    name: Changelog reminder
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Warn when src/ changed and [Unreleased] is empty
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --quiet "$BASE_SHA"...HEAD -- src/; then
+            echo "src/ unchanged, nothing to check."
+            exit 0
+          fi
+          if git diff "$BASE_SHA"...HEAD -- CHANGELOG.md | grep -qE '^\+## \[[0-9]+\.[0-9]+\.[0-9]+\]'; then
+            echo "This pull request adds a release section; [Unreleased] may be empty."
+            exit 0
+          fi
+          entries=$(awk '/^## \[Unreleased\]/ { inside = 1; next } /^## \[/ { inside = 0 } inside && /^- / { n++ } END { print n + 0 }' CHANGELOG.md)
+          if [ "$entries" -eq 0 ]; then
+            echo "::warning file=CHANGELOG.md,title=Changelog::src/ changed but [Unreleased] has no entry. Add one if a user would notice this change."
+          else
+            echo "[Unreleased] has $entries entries."
+          fi
+
   integration:
     name: Integration tests against PostgreSQL
     runs-on: ubuntu-latest

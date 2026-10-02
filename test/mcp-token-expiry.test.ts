@@ -44,6 +44,7 @@ describe('expiryFromDays', () => {
 describe('isLegacySseRequest', () => {
   it('matches the SSE stream and its /messages channel', () => {
     expect(isLegacySseRequest('GET', '/mcp/:project', undefined)).toBe(true);
+    expect(isLegacySseRequest('HEAD', '/mcp/:project', undefined)).toBe(true);
     expect(isLegacySseRequest('POST', '/mcp/:project/messages', undefined)).toBe(true);
   });
 
