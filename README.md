@@ -23,7 +23,9 @@ http://localhost:3444/mcp/<project-name>
 - **100 % local by default.** Embeddings are generated on the CPU with
   [transformers.js](https://huggingface.co/docs/transformers.js) (`Xenova/multilingual-e5-small`, a
   retrieval model covering 100 languages incl. Turkish). Switch to OpenAI embeddings with two env vars.
-- **Both MCP transports on the same URL.** Streamable HTTP for current clients, legacy HTTP+SSE for older ones.
+- **One URL, Streamable HTTP first.** Streamable HTTP is the way to connect. The legacy HTTP+SSE transport is
+  **deprecated** (ADR-0096): it still answers on the same URL and keeps working, no removal date is set, and its
+  responses carry a `Deprecation: true` header.
 - **Admin dashboard** at `http://localhost:3444/` to manage projects and their sources — add a repository, drop a folder or an archive on the page, test a connection, trigger re-indexing and watch progress.
 - **Accounts and roles.** People sign in with their own account. `root` and `admin` manage everything and everyone; a
   `member` sees only the projects it is assigned to, as a read-only `viewer` or an `editor` that adds sources, uploads
@@ -93,7 +95,7 @@ in `.env` and put a TLS-terminating reverse proxy or a VPN in front of it — se
    add its sources afterwards with **Add source**.
 4. Watch the project's status go `indexing → idle` in the list; the **Document sources** panel shows every
    source with its document count, last sync and any error.
-5. Use the **Connect an agent** tabs (Claude Code, Cursor, Claude Desktop, legacy SSE) for copy-paste snippets. From
+5. Use the **Connect an agent** tabs (Claude Code, Cursor, Claude Desktop, and the deprecated legacy SSE) for copy-paste snippets. From
    a source checkout, the bundled smoke test does the same thing from the command line:
 
 ```bash
@@ -446,9 +448,29 @@ dashboard. And a closed project answers `401` where an unknown project answers `
 name is still discoverable by anyone who can reach the server — hiding that would mean answering `404` to a client
 with a wrong token, which is worse to debug than it is worth.
 
-Clients that cannot set an `Authorization` header — a browser `EventSource` on the legacy SSE transport, for one —
+Clients that cannot set an `Authorization` header — a browser `EventSource` on the legacy (deprecated) SSE transport, for one —
 cannot reach a token-protected project at all. Leave those projects open, or put the whole instance behind an
 authenticating proxy.
+
+## Where your data goes
+
+Three things leave the machine, or stay on it, in ways worth knowing before a security review. Everything
+else in this README happens inside your own deployment.
+
+1. **The default embedding model is downloaded once, on first start.** `Xenova/multilingual-e5-small` is
+   fetched into the `contextator-models` volume from the Hugging Face Hub, the transformers.js default.
+   After that, embedding runs on the CPU of your own host and document text is not sent anywhere for it. On a
+   host with no route out, fill the volume beforehand and set `EMBEDDING_OFFLINE=1`; see
+   [Embedding Models](https://contextator.com/en/docs/embedding-models/).
+2. **Remote sources make outbound requests; local ones do not.** A git, Notion, Confluence or Documentation
+   site source contacts its host, from this server, when it syncs: on demand, on a source's schedule, and
+   when a push webhook arrives. A local directory and an upload source contact nobody. And if you set
+   `EMBEDDING_PROVIDER=openai`, document text and search queries go to the endpoint named by
+   `EMBEDDING_BASE_URL`, which is OpenAI unless you point it at a server of your own.
+3. **The `-slim` image and the Helm chart bring no database.** They use an external PostgreSQL that you
+   provision (`DATABASE_URL` is required), so where that server runs, who runs it and what backs it up decide
+   where projects, documents, embeddings, accounts and logs live. See
+   [Bringing your own PostgreSQL](#bringing-your-own-postgresql).
 
 ## Data and persistence
 
@@ -814,6 +836,41 @@ AUTH_COOKIE_SECURE=1
 
 Full reasoning for each of the three, what breaks without them, and the "name the proxy, not the
 network your clients are on" rule for `TRUST_PROXY`: [Configuration](https://contextator.com/en/docs/configuration/#running-behind-a-reverse-proxy).
+
+### Embedding with a server of your own
+
+`EMBEDDING_PROVIDER=openai` speaks to any server that offers an OpenAI-compatible `/embeddings` endpoint.
+Point `EMBEDDING_BASE_URL` at it, with the path, and name the model that server serves in
+`OPENAI_EMBEDDING_MODEL`. `OPENAI_API_KEY` is optional with a base URL; when set it is sent as a bearer
+token. `EMBEDDING_DIMENSIONS` must match the model's vector size.
+
+```bash
+# Ollama
+EMBEDDING_PROVIDER=openai
+EMBEDDING_BASE_URL=http://localhost:11434/v1
+OPENAI_EMBEDDING_MODEL=nomic-embed-text
+EMBEDDING_DIMENSIONS=768
+
+# LM Studio: its local server
+EMBEDDING_BASE_URL=http://localhost:1234/v1
+
+# Text Embeddings Inference, started with -p 8080:80
+EMBEDDING_BASE_URL=http://localhost:8080/v1
+
+# vLLM: the host and port you started `vllm serve` on
+EMBEDDING_BASE_URL=http://gpu-box:<port>/v1
+EMBEDDING_REQUEST_DIMENSIONS=always   # only for a model that shortens its vectors on request
+```
+
+Inside the Contextator container, `localhost` is the container, not your machine: use an address the
+container can reach the server on, such as `host.docker.internal` where your Docker provides it, or the
+server's service name on a shared network. Set the model name and `EMBEDDING_DIMENSIONS` to the model you
+loaded in every case; the lines above show only what differs. `RESET_VECTORS=1` is needed only when the database already records a vector dimension and the new one differs from it, as moving a 384-dimension install to a 768-dimension model does; a first install needs none.
+It is set for one start only; see [Changing the embedding model](#changing-the-embedding-model). `EMBEDDING_REQUEST_DIMENSIONS` is `auto` by default and sends `dimensions` only for
+`text-embedding-3-*`; use `always` for a model that accepts it and `never` for a server that rejects it. The
+endpoint's host and port become part of the model id every project is stamped with, so pointing at another
+server re-indexes every project. The annotated list is in [`.env.example`](.env.example); the model
+guidance is in [Embedding Models](https://contextator.com/en/docs/embedding-models/).
 
 ### Changing the embedding model
 

@@ -132,3 +132,44 @@ database dump, cross-project leakage, a route that skips the policy table, a web
 valid signature, a session that outlives its revocation, a state-changing admin request that **succeeds**
 and leaves no audit row or leaves one naming the wrong account, user content reaching a column of
 `audit_events` — is a vulnerability. Report it.
+
+## Sensitive material: give it a project of its own
+
+**Source permissions are not mirrored.** When Contextator indexes a Confluence space, a Notion workspace, a
+git repository or a folder, it reads what its credential can read and keeps no record of who was allowed
+to see which page at the source. A page restricted to three people in Confluence is, once indexed, a
+document like any other in the project that holds it. Access is decided by the project, and by nothing
+finer: whoever can open the project's MCP endpoint (anyone for `open`, a token holder for `token`, a
+member or any administrator for `account`) reads every document in it, and a `viewer` reads every document in it in the
+dashboard too. See [MCP access](README.md#mcp-access) for what each mode does and does not do.
+
+So material that not everyone with access to the rest of the documentation may read — HR policies, security
+runbooks, customer contracts, anything with its own audience — belongs in **a project of its own**, with
+its own sources, its own memberships and its own tokens. Projects are isolated from each other: each has its
+own documents and embeddings, and a client connected to one never sees another. Do not point a source whose
+pages have different audiences at one shared project and expect the audience to survive the indexing; it
+does not. Use a source credential that can read only what the project's audience may read, and put
+`account required` on the project so that its readers are its members, plus every `root` and `admin`
+account of the instance and anyone holding `ADMIN_TOKEN`, which reach every project whatever its
+memberships say. For a project like this, keep the number of those accounts small.
+
+## Prompt injection: what is in place, and the residual risk
+
+Indexed text can contain instructions, and an agent that reads it may follow them. Contextator limits what it
+can, and does not claim more than that:
+
+- Every `search_docs` excerpt and every `read_document` body arrives between `<<<BEGIN DOCUMENT TEXT>>>` and
+  `<<<END DOCUMENT TEXT>>>` markers. A document that contains a marker does not close the fence early:
+  the fence is widened by one angle bracket at each end until the text cannot close it. The text itself is
+  returned byte for byte, never rewritten.
+- The server's instructions to the client say that what arrives between the markers is data and not
+  instructions, and ask the agent to quote and cite it rather than act on it.
+- Documents are chunked and returned as text. They are never rendered, evaluated or executed by this server.
+
+**Residual risk.** The fence is a mark an agent can see, not a barrier it has to respect. Whether a model
+treats fenced text as data is the model's behaviour, and nothing in this server can force it. An indexed
+document that tells an agent to do something is still a document that tells an agent to do something, and
+an agent with write or network tools connected next to Contextator can be steered by it. The text of a
+`contextator://` resource is one whole document and carries no markers. The mitigation that works
+regardless of the model is upstream: index only text whose authors you trust, keep the agent's other tools
+to what it needs, and require a human to approve actions with side effects.
