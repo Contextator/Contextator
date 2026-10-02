@@ -53,9 +53,24 @@ ships, that stops.
   default — means no cap, as before. When set, a file whose conversion needs more than that many MiB
   becomes one refused document whose reason names the heap limit, distinct from a timeout or a crash;
   the thread is replaced and the run carries on with the next file (ADR-0097).
+- **`CONFLUENCE_MAX_PAGES` and `NOTION_MAX_PAGES` set the page ceiling per source run** (default
+  5000 each, as the built-in limit was; 1–100000). A source that reaches it stops there, logs a
+  warning and writes `STOPPED AT THE N-PAGE CEILING (…_MAX_PAGES)` into the run's note, naming the
+  setting to raise.
+- **Text inside an inline SVG is indexed.** An HTML page's `<svg>` used to be dropped whole; its
+  `<text>` (with `<tspan>`), `<title>` and `<desc>` now become paragraphs of the document, so a
+  diagram's labels are searchable. Shapes, paths and styling are still dropped.
 
 ### Changed
 
+- **A web source asks for Markdown first for the pages a sitemap or `llms.txt` lists.** Those
+  requests' `Accept` header ranks `text/markdown` above `text/html`, so a site that negotiates
+  answers with the page's Markdown source, which is indexed as `.md` without an HTML conversion. The
+  entry URL and every page a crawl visits still ask for HTML first, because the crawl reads its links
+  from HTML and the entry's type decides the mode. On a negotiating site a listed page's path moves
+  from `.html` to `.md` once: the next sync re-embeds those pages and `read_document` paths change.
+  A server that answers a stored ETag with `304 Not Modified` keeps the old `.html` copy until the
+  page changes. A site that does not negotiate serves HTML as before.
 - **`EMBEDDING_BASE_URL`'s host is part of the model id** (`openai:<model>:<dims>@<host:port>…`), so
   pointing the provider at another server re-indexes every project, because two servers answering to
   the same model name are not guaranteed to produce the same vectors. Unset, or naming `api.openai.com`,
@@ -71,6 +86,9 @@ ships, that stops.
 
 ### Fixed
 
+- **A Notion source no longer overshoots its page ceiling.** The limit was checked only after a
+  whole search batch had been taken, so a source could pull up to one batch more than the ceiling;
+  it is now applied page by page, and a source that fills the ceiling exactly is not reported as cut.
 - **A run cut short by a restart no longer leaves its project stuck in `indexing`.** On startup every
   project the previous process left indexing gets an `interrupted` row in its run history, leaves the
   `indexing` state — which was blocking source edits and deletion — and an **incremental** run is

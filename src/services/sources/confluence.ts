@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { SOURCE_PAGE_LIMIT_DEFAULTS } from '../../config.js';
 import type { DocumentSourceRow } from '../../db/schema.js';
 import { decryptSecret, keyringOf } from '../crypto.js';
 import { sourceCurrentDir } from '../data-dir.js';
@@ -23,9 +24,11 @@ import { frontmatter, pageFileStem } from './notion-render.js';
  * thousand, reports "5000 pages, 0 removed", and then answers "not in the documentation" about pages
  * that exist — which is the worst answer this product can give and the whole reason
  * [ADR-0045](../../../.ssot/ADR.md#adr-0045) put a floor under a bad match rather than letting one be
- * returned. So `sync()` says it was cut, in the sentence an operator reads on the run.
+ * returned. So `sync()` says it was cut, in the sentence an operator reads on the run, and logs it.
+ *
+ * This is the default; `CONFLUENCE_MAX_PAGES` moves it for an instance whose wikis are larger.
  */
-export const MAX_PAGES = 5000;
+export const MAX_PAGES = SOURCE_PAGE_LIMIT_DEFAULTS.CONFLUENCE_MAX_PAGES;
 
 /**
  * How much of a file has to be read to find the version it was written from.
@@ -141,7 +144,7 @@ export class ConfluenceDriver implements SourceDriver {
   }
 
   /**
-   * Every page in scope, paged until Confluence stops offering a cursor or `MAX_PAGES` stops it.
+   * Every page in scope, paged until Confluence stops offering a cursor or `CONFLUENCE_MAX_PAGES` stops it.
    *
    * `truncated` is the half that matters: a ceiling nobody is told about is a wiki that looks indexed.
    */
@@ -150,13 +153,14 @@ export class ConfluenceDriver implements SourceDriver {
     const seen = new Set<string>();
     let cursor: string | undefined;
     let truncated = false;
+    const maxPages = this.maxPages;
     do {
       const batch = await client.listPages(this.cql, cursor);
       for (const page of batch.results) {
         // A cursor that repeats a row — a page edited between two requests, under a sort that is
         // stable but not unique across concurrent writes — would otherwise become two files.
         if (seen.has(page.id)) continue;
-        if (pages.length >= MAX_PAGES) {
+        if (pages.length >= maxPages) {
           truncated = true;
           break;
         }
@@ -166,6 +170,11 @@ export class ConfluenceDriver implements SourceDriver {
       cursor = batch.nextCursor;
     } while (cursor && !truncated);
     return { pages, truncated };
+  }
+
+  /** `CONFLUENCE_MAX_PAGES`, or the default for a context built without it. */
+  private get maxPages(): number {
+    return this.ctx.config.CONFLUENCE_MAX_PAGES ?? MAX_PAGES;
   }
 
   /**
@@ -285,9 +294,15 @@ export class ConfluenceDriver implements SourceDriver {
     // Said in the note rather than only in a constant, because the alternative is an operator who
     // believes the wiki is indexed. The probe's own token carries the real total, so the two numbers
     // sitting side by side in the dashboard are the measurement.
+    if (truncated) {
+      this.ctx.log.warn(
+        { source: this.source.name, maxPages: this.maxPages },
+        'confluence source reached CONFLUENCE_MAX_PAGES; the pages past the ceiling are not indexed',
+      );
+    }
     const note = truncated
-      ? `${counted} — STOPPED AT THE ${MAX_PAGES}-PAGE CEILING: this source holds more pages than that and the rest are NOT indexed. ` +
-        'Narrow it by naming fewer spaces, or split it across several sources.'
+      ? `${counted} — STOPPED AT THE ${this.maxPages}-PAGE CEILING (CONFLUENCE_MAX_PAGES): this source holds more pages than that and the rest are NOT indexed. ` +
+        'Narrow it by naming fewer spaces, split it across several sources, or raise CONFLUENCE_MAX_PAGES.'
       : counted;
     // One more request at the end of a sync that just made many, buying every future consideration of
     // this source the chance to cost exactly one ([ADR-0048](../../../.ssot/ADR.md#adr-0048)). It is

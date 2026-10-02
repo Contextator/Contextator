@@ -576,6 +576,42 @@ describe('the time budget and the pacing, on the client that actually makes the 
     expect(result.status).toBe(304);
     expect(result.body).toBeUndefined();
   });
+
+  const acceptWeights = (accept: string): Map<string, number> =>
+    new Map(
+      accept.split(',').map((part) => {
+        const [type, ...params] = part.split(';').map((s) => s.trim());
+        const q = params.find((p) => p.startsWith('q='));
+        return [type, q ? Number(q.slice(2)) : 1] as const;
+      }),
+    );
+
+  it('asks for Markdown ahead of HTML when told to, so a negotiating site answers with the source', async () => {
+    let seen: Record<string, string> = {};
+    const client = new HttpWebClient({ delayMs: 0, budgetMs: 10_000 }, async (_url, init) => {
+      seen = init.headers;
+      return answer();
+    });
+    await client.get('https://docs.example.com/a', {}, { preferMarkdown: true });
+
+    const weights = acceptWeights(seen.accept);
+    expect(weights.get('text/markdown')).toBeGreaterThan(weights.get('text/html') ?? 1);
+    // What the driver also fetches through this client must still be acceptable.
+    for (const type of ['text/html', 'application/xml', 'text/plain']) expect(weights.get(type)).toBeGreaterThan(0);
+  });
+
+  it('asks for HTML first by default, because the entry point and a crawl read structure out of the answer', async () => {
+    let seen: Record<string, string> = {};
+    const client = new HttpWebClient({ delayMs: 0, budgetMs: 10_000 }, async (_url, init) => {
+      seen = init.headers;
+      return answer();
+    });
+    await client.get('https://docs.example.com/a');
+
+    const weights = acceptWeights(seen.accept);
+    expect(weights.get('text/markdown') ?? 0).toBeLessThan(weights.get('text/html') ?? 0);
+    expect(weights.get('text/plain') ?? 0).toBeLessThan(weights.get('text/html') ?? 0);
+  });
 });
 
 describe('what a second run costs, and what the probe decides', () => {
@@ -846,5 +882,44 @@ describe('extractLinks', () => {
       'https://docs.example.com/b',
       'https://docs.example.com/c',
     ]);
+  });
+});
+
+/**
+ * **Which requests ask for Markdown first, and which may not.** A negotiating site answers whatever it
+ * is asked for, so the request is the whole of the defence: an entry point answered in Markdown is
+ * classified as an `llms.txt`, and a crawl page answered in Markdown has no `<a href>` to follow — the
+ * source collapses to one page and the removal pass deletes the rest.
+ */
+describe('the Accept profile each request carries', () => {
+  it('a crawl never asks for Markdown first: its pages are where its links come from', async () => {
+    const { web, stub } = driver(
+      {
+        'https://docs.example.com/robots.txt': { status: 404 },
+        'https://docs.example.com/docs/': { body: page('Docs', '<a href="a">a</a><a href="b">b</a>') },
+        'https://docs.example.com/docs/a': { body: page('A', '<p>Alpha.</p>') },
+        'https://docs.example.com/docs/b': { body: page('B', '<p>Beta.</p>') },
+      },
+      { entryUrl: 'https://docs.example.com/docs/', entryKind: 'auto' },
+    );
+    await web.sync();
+    expect(stub.urls).toContain('https://docs.example.com/docs/b');
+    expect(stub.requests.filter((r) => r.preferMarkdown)).toEqual([]);
+  });
+
+  it('a sitemap asks for Markdown first for the pages it names, and for nothing else', async () => {
+    const { web, stub } = driver({
+      'https://docs.example.com/robots.txt': { status: 404 },
+      'https://docs.example.com/sitemap.xml': {
+        contentType: 'application/xml',
+        body: '<urlset><url><loc>https://docs.example.com/a</loc></url><url><loc>https://docs.example.com/b</loc></url></urlset>',
+      },
+      'https://docs.example.com/a': { body: page('A', '<p>Alpha.</p>') },
+      'https://docs.example.com/b': { body: page('B', '<p>Beta.</p>') },
+    });
+    await web.sync();
+    const markdownFirst = stub.requests.filter((r) => r.preferMarkdown).map((r) => r.url);
+    expect(markdownFirst).toEqual(['https://docs.example.com/a', 'https://docs.example.com/b']);
+    expect(stub.urls).toContain('https://docs.example.com/sitemap.xml');
   });
 });

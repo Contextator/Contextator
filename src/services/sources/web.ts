@@ -226,8 +226,7 @@ export class WebDriver implements SourceDriver {
     const robots = await this.robotsFor(client);
     const { kind, response } = await this.readEntry(client, robots);
 
-    const fetch = (url: string, prefetched?: WebResponse): Promise<string | undefined> =>
-      this.fetchPage({ client, robots, run, root, previous, existingFiles, url, prefetched });
+    const fetch: Fetch = (url, options = {}) => this.fetchPage({ client, robots, run, root, previous, existingFiles, url, ...options });
 
     try {
       if (kind === 'crawl') await this.crawl(run, response, fetch);
@@ -363,7 +362,9 @@ export class WebDriver implements SourceDriver {
         run.offSite++;
         continue;
       }
-      await fetch(listed.url);
+      // A listed page is indexed and nothing else is read out of it, so it is the one request that may
+      // ask for Markdown first (`ACCEPT_MARKDOWN`); a crawl's pages are where its links come from.
+      await fetch(listed.url, { preferMarkdown: true });
     }
   }
 
@@ -380,7 +381,7 @@ export class WebDriver implements SourceDriver {
       const next: Array<{ url: string; prefetched?: WebResponse }> = [];
       for (const page of frontier) {
         if (run.full()) return run.stopAtPageCeiling();
-        const body = await fetch(page.url, page.prefetched);
+        const body = await fetch(page.url, { prefetched: page.prefetched });
         if (!body) continue;
         for (const link of extractLinks(body, page.url)) {
           if (queued.has(link) || !inCrawlScope(link, this.cfg.entryUrl)) continue;
@@ -412,6 +413,8 @@ export class WebDriver implements SourceDriver {
     existingFiles: ReadonlySet<string>;
     url: string;
     prefetched?: WebResponse;
+    /** Ask for the page's Markdown source first — only for a page nothing but the indexer reads. */
+    preferMarkdown?: boolean;
   }): Promise<string | undefined> {
     const { client, robots, run, root, previous, existingFiles, url } = args;
     const parsed = new URL(url);
@@ -432,7 +435,7 @@ export class WebDriver implements SourceDriver {
       // 304 would keep a document whose bytes are gone.
       const conditional = known && existingFiles.has(known.path) ? { etag: known.etag, lastModified: known.lastModified } : {};
       try {
-        response = await client.get(url, conditional);
+        response = await client.get(url, conditional, { preferMarkdown: args.preferMarkdown === true });
       } catch (err) {
         if (err instanceof WebBudgetExhaustedError) throw err;
         run.failures.push(`${url} (${err instanceof Error ? err.message : String(err)})`);
@@ -546,7 +549,7 @@ export class WebDriver implements SourceDriver {
 }
 
 /** What `sync()` hands its two walkers so neither of them has to know how a page is fetched. */
-type Fetch = (url: string, prefetched?: WebResponse) => Promise<string | undefined>;
+type Fetch = (url: string, options?: { prefetched?: WebResponse; preferMarkdown?: boolean }) => Promise<string | undefined>;
 
 const STATE_VERSION = 1;
 

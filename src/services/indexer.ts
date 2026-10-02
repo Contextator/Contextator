@@ -111,7 +111,17 @@ export interface IndexerDeps {
     | 'CONVERSION_TIMEOUT_MS'
     | 'CONVERSION_IDLE_MS'
   > &
-    Partial<Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS' | 'DATA_DIR_MIN_FREE_BYTES' | 'CONTEXTATOR_EMBEDDED_PGDATA' | 'CONVERSION_WORKER_MAX_HEAP_MB'>> &
+    Partial<
+      Pick<
+        Config,
+        | 'CONFLUENCE_ALLOWED_HOSTS'
+        | 'CONFLUENCE_MAX_PAGES'
+        | 'NOTION_MAX_PAGES'
+        | 'DATA_DIR_MIN_FREE_BYTES'
+        | 'CONTEXTATOR_EMBEDDED_PGDATA'
+        | 'CONVERSION_WORKER_MAX_HEAP_MB'
+      >
+    > &
     WebLimits;
   log: Logger;
   locks: KeyedMutex;

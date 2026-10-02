@@ -39,6 +39,19 @@ export const WEB_LIMIT_DEFAULTS = {
 } as const;
 
 /**
+ * How many pages one Confluence or Notion sync may index before it stops and says so.
+ *
+ * 5000 is the ceiling both drivers have always had ([ADR-0015](../../.ssot/ADR.md#adr-0015)); these are
+ * now the defaults of `CONFLUENCE_MAX_PAGES` and `NOTION_MAX_PAGES` rather than constants nobody could
+ * move. Kept here, beside the schema that uses them, so the drivers fall back to the same number a
+ * context built without them (a test, an older caller) would otherwise have to repeat.
+ */
+export const SOURCE_PAGE_LIMIT_DEFAULTS = {
+  CONFLUENCE_MAX_PAGES: 5000,
+  NOTION_MAX_PAGES: 5000,
+} as const;
+
+/**
  * The three subnet names `proxy-addr` — the library behind Fastify's `trustProxy` — understands, and
  * the only entries in `TRUST_PROXY` that are not a literal address. `loopback` is the one a
  * single-container deployment with a proxy on the host actually wants.
@@ -519,6 +532,14 @@ export const EnvSchema = z
       .refine((hosts) => hosts.every((h) => net.isIP(h) !== 0 || /^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?)*$/.test(h)), {
         message: 'must be a comma-separated list of host names, without scheme, port or path (for example "wiki.corp.example,10.0.4.12")',
       }),
+    /**
+     * Pages one Confluence sync indexes at most. A space past it is indexed up to the ceiling, the run
+     * logs a warning and its note says in capitals that the rest was not indexed — a partial index that
+     * looks complete is the failure this exists to prevent.
+     */
+    CONFLUENCE_MAX_PAGES: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.CONFLUENCE_MAX_PAGES),
+    /** The same ceiling for one Notion sync, announced the same way. */
+    NOTION_MAX_PAGES: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.NOTION_MAX_PAGES),
     /** Writable directory for materialised sources (git checkouts, uploads, Notion pulls). */
     DATA_DIR: z
       .string()

@@ -380,6 +380,84 @@ function picturesOnlyDocx(): Buffer {
   ]);
 }
 
+/**
+ * A policy note whose one load-bearing fact is in a footnote, the way Word writes one: a
+ * `w:footnoteReference` in the body run and the note's text in `word/footnotes.xml`, behind the two
+ * separator notes (ids -1 and 0) Word always emits. The phrase only the footnote holds is
+ * "quarterly reconciliation ledger"; `test/doc-types.test.ts` asks whether it can be found.
+ */
+function footnotedDocx(): Buffer {
+  const document =
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:document ${NS}><w:body>` +
+    paragraph('Heading1', 'Refund policy') +
+    '<w:p><w:pPr/><w:r><w:t xml:space="preserve">Refunds above the regional limit are approved by finance before they are paid.</w:t></w:r>' +
+    '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p>' +
+    paragraph(null, 'Everything below the limit is approved by the support lead on duty.') +
+    '</w:body></w:document>';
+
+  const footnotes =
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:footnotes ${NS}>` +
+    '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>' +
+    '<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>' +
+    '<w:footnote w:id="1"><w:p><w:pPr><w:pStyle w:val="FootnoteText"/></w:pPr>' +
+    '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r>' +
+    '<w:r><w:t xml:space="preserve"> The limit is set each quarter and recorded in the quarterly reconciliation ledger.</w:t></w:r></w:p></w:footnote>' +
+    '</w:footnotes>';
+
+  const styles =
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:styles ${NS}>` +
+    '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style>' +
+    '<w:style w:type="paragraph" w:styleId="FootnoteText"><w:name w:val="footnote text"/></w:style>' +
+    '<w:style w:type="character" w:styleId="FootnoteReference"><w:name w:val="footnote reference"/></w:style>' +
+    '</w:styles>';
+
+  const contentTypes =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>' +
+    '<Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>' +
+    '</Types>';
+
+  const rels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+    '</Relationships>';
+
+  const documentRels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>' +
+    '</Relationships>';
+
+  return buildZip([
+    { name: '[Content_Types].xml', data: contentTypes },
+    { name: '_rels/.rels', data: rels },
+    { name: 'word/_rels/document.xml.rels', data: documentRels },
+    { name: 'word/document.xml', data: document },
+    { name: 'word/styles.xml', data: styles },
+    { name: 'word/footnotes.xml', data: footnotes },
+  ]);
+}
+
+/**
+ * The same note as a PDF, which has no notion of a footnote at all: a superscript "1" raised beside
+ * the sentence, and the note's text set small at the foot of the page, above the running foot. The
+ * phrase only the footnote holds is again "quarterly reconciliation ledger".
+ */
+function footnotedPdf(): Buffer {
+  const runs: Run[] = [
+    { size: 18, x: 72, top: 96, text: 'Refund Policy' },
+    { size: 10, x: 72, top: 140, text: 'Refunds above the regional limit are approved by finance before they are paid.' },
+    { size: 6, x: 438, top: 136, text: '1' },
+    { size: 10, x: 72, top: 158, text: 'Everything below the limit is approved by the support lead on duty.' },
+    { size: 8, x: 72, top: 712, text: '1 The limit is set each quarter and recorded in the quarterly reconciliation ledger.' },
+    { size: 8, x: 300, top: 756, text: 'Page 1 of 1' },
+  ];
+  return buildPdf([contentStream(runs)], 'Refund Policy');
+}
+
 async function main(): Promise<void> {
   const files: Array<[string, Buffer]> = [
     ['support-handbook.pdf', handbookPdf()],
@@ -389,6 +467,8 @@ async function main(): Promise<void> {
     ['onboarding-checklist.docx', onboardingDocx()],
     ['notes-renamed.docx', renamedZipDocx()],
     ['pictures-only.docx', picturesOnlyDocx()],
+    ['footnoted-policy.docx', footnotedDocx()],
+    ['footnoted-policy.pdf', footnotedPdf()],
   ];
   for (const [name, data] of files) {
     await fs.writeFile(path.join(OUT, name), data);

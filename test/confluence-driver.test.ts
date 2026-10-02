@@ -265,6 +265,84 @@ describe('confluence source', () => {
   }, 120_000);
 
   /**
+   * `CONFLUENCE_MAX_PAGES` moves the ceiling, and reaching the moved one is announced the same two ways:
+   * in the run's note and as a warning in the log. Ten is the number the acceptance criterion names.
+   */
+  it('stops at CONFLUENCE_MAX_PAGES when it is set, and warns that it did', async () => {
+    const many: StubPage[] = Array.from({ length: 25 }, (_, i) => ({
+      ...HANDBOOK,
+      id: `8${String(i).padStart(6, '0')}`,
+      title: `Page ${i}`,
+      ancestors: [],
+      storage: '<p>x</p>',
+    }));
+    const stub = new StubConfluence(many);
+    stub.pageSize = 7;
+    const warnings: unknown[][] = [];
+    const recording = {
+      warn: (...args: unknown[]) => warnings.push(args),
+      info: () => undefined,
+      debug: () => undefined,
+      error: () => undefined,
+      child: () => recording,
+    } as never;
+    const driver = new ConfluenceDriver(
+      source({}),
+      {
+        db: null as never,
+        log: recording,
+        config: {
+          ...WEB_LIMIT_DEFAULTS,
+          CONFLUENCE_MAX_PAGES: 10,
+          DATA_DIR: dataDir,
+          SECRET_KEY: undefined,
+          ALLOWED_DOC_ROOTS: [],
+          IGNORE_GLOBS: [],
+        },
+      },
+      stub,
+    );
+    const result = await driver.sync();
+
+    expect(await listFiles()).toHaveLength(10);
+    expect(result.note).toContain('10 pages');
+    expect(result.note).toContain('STOPPED AT THE 10-PAGE CEILING (CONFLUENCE_MAX_PAGES)');
+    const ceiling = warnings.filter(([, msg]) => typeof msg === 'string' && msg.includes('CONFLUENCE_MAX_PAGES'));
+    expect(ceiling).toHaveLength(1);
+    expect(ceiling[0]?.[0]).toMatchObject({ maxPages: 10 });
+  });
+
+  it('does not warn about a ceiling a source never reached', async () => {
+    const warnings: unknown[][] = [];
+    const recording = {
+      warn: (...args: unknown[]) => warnings.push(args),
+      info: () => undefined,
+      debug: () => undefined,
+      error: () => undefined,
+      child: () => recording,
+    } as never;
+    const driver = new ConfluenceDriver(
+      source({}),
+      {
+        db: null as never,
+        log: recording,
+        config: {
+          ...WEB_LIMIT_DEFAULTS,
+          CONFLUENCE_MAX_PAGES: 10,
+          DATA_DIR: dataDir,
+          SECRET_KEY: undefined,
+          ALLOWED_DOC_ROOTS: [],
+          IGNORE_GLOBS: [],
+        },
+      },
+      new StubConfluence([HANDBOOK, ROTATION]),
+    );
+    const result = await driver.sync();
+    expect(result.note).not.toContain('CEILING');
+    expect(warnings.filter(([, msg]) => typeof msg === 'string' && msg.includes('MAX_PAGES'))).toHaveLength(0);
+  });
+
+  /**
    * The subset of the empty-scope case that a count cannot see: two spaces configured, one of them
    * renamed. The listing is not empty, so the guard on `pages.length` is satisfied, and the removal
    * pass would delete every document of the space that went away while the run reports success.

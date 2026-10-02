@@ -36,9 +36,18 @@ export interface Validators {
   lastModified?: string;
 }
 
+/** How one request asks for its answer, beyond the validators. */
+export interface RequestOptions {
+  /**
+   * Ask for the page's Markdown source ahead of its HTML (`ACCEPT_MARKDOWN`). Only for a page this
+   * driver will index and read nothing else out of — see `ACCEPT_MARKDOWN` for why not every request.
+   */
+  preferMarkdown?: boolean;
+}
+
 export interface WebClient {
   /** One GET. Throws for a transport failure or a timeout; a 4xx or 5xx comes back as a status. */
-  get(url: string, validators?: Validators): Promise<WebResponse>;
+  get(url: string, validators?: Validators, options?: RequestOptions): Promise<WebResponse>;
   /**
    * Widen the gap between requests, for a site whose `robots.txt` asked for more than the instance
    * configured. It only ever widens: a `Crawl-delay: 0` is not permission to go faster than
@@ -87,6 +96,38 @@ export class WebBudgetExhaustedError extends Error {
  * that is worth indexing takes to answer.
  */
 export const REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * The `Accept` header a request carries unless it asks for Markdown: HTML first.
+ *
+ * **The default, because most requests read structure out of the answer.** The entry point is
+ * classified by what it answers (`detectEntryKind`), and a crawl finds its next pages in the `<a href>`
+ * of the page it just fetched (`extractLinks`). A docs host that negotiates would answer either with
+ * Markdown, which the first reads as an `llms.txt` and the second finds no links in — a crawl source
+ * collapses to its entry page and the removal pass deletes every other document it held.
+ *
+ * The rest of the list is what the driver also asks for through this one client — a sitemap is XML,
+ * `robots.txt` and `llms.txt` are plain text — so narrowing the header to the two document types would
+ * invite a strict server to answer those with a 406.
+ */
+export const ACCEPT = 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5';
+
+/**
+ * The `Accept` header for a page that is only indexed: **Markdown first, and HTML only just behind it.**
+ *
+ * A site that can answer the same URL with the page's Markdown source — the content negotiation that
+ * docs hosts increasingly offer to agents — hands this driver the text it would otherwise have to
+ * reconstruct from rendered HTML through turndown, which loses what a Markdown author wrote and an
+ * HTML page only implies. `extensionFor` in `web.ts` writes a `text/markdown` answer as `.md`, so
+ * preferring it is all it takes for such a page to be indexed without an HTML conversion at all. A
+ * site that does not negotiate ignores the header and serves HTML exactly as before.
+ *
+ * **Only for pages a sitemap or an `llms.txt` named**, whose bodies nothing reads but the indexer. A
+ * page a crawl fetched is also where the crawl's next links come from, and the entry point is what
+ * decides the entry format; both keep `ACCEPT`.
+ */
+export const ACCEPT_MARKDOWN =
+  'text/markdown;q=1.0,text/x-markdown;q=1.0,text/html;q=0.9,application/xhtml+xml;q=0.9,application/xml;q=0.8,text/plain;q=0.8,*/*;q=0.5';
 
 /**
  * What one page may weigh before it is refused unread.
@@ -154,7 +195,7 @@ export class HttpWebClient implements WebClient {
     return this.deadlineAt === 0 ? Number.POSITIVE_INFINITY : this.deadlineAt - Date.now();
   }
 
-  async get(url: string, validators: Validators = {}): Promise<WebResponse> {
+  async get(url: string, validators: Validators = {}, options: RequestOptions = {}): Promise<WebResponse> {
     if (this.deadlineAt === 0) this.deadlineAt = Date.now() + this.options.budgetMs;
 
     // **Checked before the wait and again after it.** The pacing delay can be the thing that spends
@@ -169,7 +210,7 @@ export class HttpWebClient implements WebClient {
     this.count++;
 
     const headers: Record<string, string> = {
-      accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5',
+      accept: options.preferMarkdown ? ACCEPT_MARKDOWN : ACCEPT,
       'accept-encoding': 'gzip, deflate',
       'user-agent': `${USER_AGENT}/1.0 (+https://github.com/contextator)`,
     };

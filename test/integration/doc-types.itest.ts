@@ -223,8 +223,11 @@ describe('a project of mixed file types', () => {
       .from(documents)
       .where(eq(documents.projectId, fx.project.id));
     expect(rows.map((r) => r.relativePath).sort()).toEqual([
+      'handbook/architecture-diagram.html',
       'handbook/changelog.htm',
       'handbook/escalation-policy.txt',
+      'handbook/footnoted-policy.docx',
+      'handbook/footnoted-policy.pdf',
       'handbook/onboarding-checklist.docx',
       'handbook/release-notes.html',
       'handbook/service-owners.csv',
@@ -233,7 +236,9 @@ describe('a project of mixed file types', () => {
     ]);
     // The title came from the converted Markdown, so no document is called "Service-owners.csv".
     expect(rows.find((r) => r.relativePath.endsWith('.csv'))?.title).toBe('Service Owners');
-    expect(rows.find((r) => r.relativePath.endsWith('.html'))?.title).toBe('Release 4.2');
+    expect(rows.find((r) => r.relativePath.endsWith('release-notes.html'))?.title).toBe('Release 4.2');
+    // An inline SVG's own `<title>` is diagram text, not the page's title.
+    expect(rows.find((r) => r.relativePath.endsWith('architecture-diagram.html'))?.title).toBe('Ingestion architecture');
   });
 
   it('finds each new type through search_docs', async () => {
@@ -273,7 +278,7 @@ describe('a project of mixed file types', () => {
 
   it('writes every refusal onto the source, and indexes nothing for any of them', async () => {
     const [source] = await fx.database.db.select().from(documentSources).where(eq(documentSources.id, fx.sourceId));
-    expect(source.lastError).toMatch(/4 of 11 file\(s\) could not be indexed/);
+    expect(source.lastError).toMatch(/4 of 14 file\(s\) could not be indexed/);
     expect(source.lastError).toContain('scanned-invoice.pdf');
     expect(source.lastError).toMatch(/no text layer/);
     expect(source.lastError).toMatch(/character recognition is out of scope/);
@@ -300,14 +305,14 @@ describe('a project of mixed file types', () => {
    * **The blocker this file exists for.** Before `extractDocument` grew its boundary, the damaged PDF
    * and the renamed zip each threw a library exception straight past the indexer's `instanceof` check
    * and into the catch outside the file loop. That marked the project `error`, and because both
-   * failures are deterministic it would have done so on every run after this one — so the other seven
+   * failures are deterministic it would have done so on every run after this one — so the other readable
    * documents would never be updated again until somebody found the two files by hand.
    */
   it('finished the run and left the project healthy, with four unreadable files in it', async () => {
     const project = await getProjectById(fx.database.db, fx.project.id);
     expect(project?.status).toBe('idle');
     expect(project?.lastError).toBeNull();
-    expect(project?.documentCount).toBe(7);
+    expect(project?.documentCount).toBe(10);
   });
 
   /**
@@ -394,8 +399,8 @@ describe('a project of mixed file types', () => {
     const indexer = new Indexer({ db: fx.database.db, embeddings, config: indexerConfig(fx.root), log: silentLogger, locks: new KeyedMutex() });
     const job = await settle(fx.database.db, indexer.enqueue(fx.project.id));
     expect(job.phase).toBe('done');
-    // Seven unchanged documents plus the four that are refused again.
-    expect(job.filesSkipped).toBe(11);
+    // Ten unchanged documents plus the four that are refused again.
+    expect(job.filesSkipped).toBe(14);
     expect(job.chunksDone).toBe(0);
     expect(job.filesRemoved).toBe(0);
   }, 120_000);

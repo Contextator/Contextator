@@ -307,4 +307,134 @@ describe('notion source', () => {
     expect(result.note).toContain('1 removed');
     expect(await listFiles()).toEqual(['product-handbook--aaaaaaaa.md']);
   }, 30_000);
+
+  describe('NOTION_MAX_PAGES', () => {
+    const manyPages = (count: number): StubPage[] =>
+      Array.from({ length: count }, (_, i) => ({
+        id: `${String(i).padStart(8, '0')}bbbbccccddddeeeeeeeeeeee`,
+        title: `Page ${i}`,
+        lastEdited: `2026-09-01T10:${String(i).padStart(2, '0')}:00.000Z`,
+        parent: { type: 'workspace' },
+        blocks: [{ id: `b${i}`, type: 'paragraph', paragraph: { rich_text: [rt(`Body ${i}.`)] } }],
+      }));
+
+    const recordingLog = () => {
+      const warnings: unknown[][] = [];
+      const recording = {
+        warn: (...args: unknown[]) => warnings.push(args),
+        info: () => undefined,
+        debug: () => undefined,
+        error: () => undefined,
+        child: () => recording,
+      } as never;
+      return { warnings, recording };
+    };
+
+    const ceilingWarnings = (warnings: unknown[][]) => warnings.filter(([, msg]) => typeof msg === 'string' && msg.includes('NOTION_MAX_PAGES'));
+
+    /**
+     * Ten is the acceptance criterion's number. The stub answers the search in two batches of 13 and
+     * 12, so a ceiling checked only at the end of a batch — which is what this driver used to do —
+     * would index 13 here, not 10.
+     */
+    it('stops at NOTION_MAX_PAGES when it is set, says so in the note, and warns', async () => {
+      await fs.rm(currentDir(), { recursive: true, force: true });
+      const { warnings, recording } = recordingLog();
+      const driver = new NotionDriver(
+        source(sourceId, projectId),
+        {
+          db: null as never,
+          log: recording,
+          config: { ...WEB_LIMIT_DEFAULTS, NOTION_MAX_PAGES: 10, DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
+        },
+        new StubNotion(manyPages(25)) as never,
+      );
+
+      const result = await driver.sync();
+      expect(await listFiles()).toHaveLength(10);
+      expect(result.note).toContain('10 pages');
+      expect(result.note).toContain('STOPPED AT THE 10-PAGE CEILING (NOTION_MAX_PAGES)');
+      expect(result.note).toContain('are NOT indexed');
+      const ceiling = ceilingWarnings(warnings);
+      expect(ceiling).toHaveLength(1);
+      expect(ceiling[0]?.[0]).toMatchObject({ maxPages: 10 });
+    }, 30_000);
+
+    it('does not call a workspace that exactly fills the ceiling truncated', async () => {
+      await fs.rm(currentDir(), { recursive: true, force: true });
+      const { warnings, recording } = recordingLog();
+      const driver = new NotionDriver(
+        source(sourceId, projectId),
+        {
+          db: null as never,
+          log: recording,
+          config: { ...WEB_LIMIT_DEFAULTS, NOTION_MAX_PAGES: 4, DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
+        },
+        new StubNotion(manyPages(4)) as never,
+      );
+
+      const result = await driver.sync();
+      expect(await listFiles()).toHaveLength(4);
+      expect(result.note).not.toContain('CEILING');
+      expect(ceilingWarnings(warnings)).toHaveLength(0);
+    }, 30_000);
+
+    /**
+     * The `rootIds` path, through a database root: the pages arrive from a database query rather than
+     * from the search. The query answers ten at a time and the ceiling is ten, so a walk that stopped
+     * paging the moment it held the ceiling's worth would never see the eleventh page — the database
+     * would read as exactly full and nothing would say that fifteen of its pages were left out.
+     */
+    it('stops at NOTION_MAX_PAGES inside a database root that is larger than the ceiling', async () => {
+      await fs.rm(currentDir(), { recursive: true, force: true });
+      const { warnings, recording } = recordingLog();
+      const DATABASE_ID = 'dbdbdbdb111122223333444455556666';
+      const pages = manyPages(25).map((p) => ({ ...p, parent: { type: 'database_id', database_id: DATABASE_ID } }));
+      const stub = new StubNotion(pages);
+      const queried: Array<string | undefined> = [];
+      Object.assign(stub, {
+        databases: {
+          retrieve: async () => ({ object: 'database', id: DATABASE_ID, data_sources: [] }),
+          query: async (args: { start_cursor?: string }) => {
+            queried.push(args.start_cursor);
+            const from = Number(args.start_cursor ?? 0);
+            const slice = pages.slice(from, from + 10);
+            return {
+              results: slice.map((p) => ({
+                object: 'page',
+                id: p.id,
+                url: `https://notion.so/${p.id}`,
+                last_edited_time: p.lastEdited,
+                parent: p.parent,
+                properties: titleProp(p.title),
+              })),
+              next_cursor: from + 10 < pages.length ? String(from + 10) : null,
+            };
+          },
+        },
+      });
+      const driver = new NotionDriver(
+        { ...source(sourceId, projectId), config: { rootIds: [DATABASE_ID], extensions: ['md'] } } as DocumentSourceRow,
+        {
+          db: null as never,
+          log: recording,
+          config: { ...WEB_LIMIT_DEFAULTS, NOTION_MAX_PAGES: 10, DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
+        },
+        stub as never,
+      );
+
+      const result = await driver.sync();
+      expect(await listFiles()).toHaveLength(10);
+      expect(result.note).toContain('STOPPED AT THE 10-PAGE CEILING (NOTION_MAX_PAGES)');
+      expect(result.note).toContain('are NOT indexed');
+      const ceiling = ceilingWarnings(warnings);
+      expect(ceiling).toHaveLength(1);
+      expect(ceiling[0]?.[0]).toMatchObject({ maxPages: 10 });
+      // One query past the ceiling to see that there is more, and not the rest of the database.
+      expect(queried).toEqual([undefined, '10']);
+      // And the walk below the roots does not run once the ceiling is reached: each indexed page's
+      // blocks are read once, to render it, and never again to look for child pages to queue.
+      expect(stub.calls.filter((call) => call.startsWith('blocks:'))).toHaveLength(10);
+    }, 30_000);
+  });
 });

@@ -11,7 +11,7 @@
  * sent a validator pass every test in the file.
  */
 
-import type { Validators, WebClient, WebResponse } from '../../src/services/sources/web-client.js';
+import type { RequestOptions, Validators, WebClient, WebResponse } from '../../src/services/sources/web-client.js';
 
 export interface StubPage {
   status?: number;
@@ -25,7 +25,7 @@ export interface StubPage {
 }
 
 export class StubWeb implements WebClient {
-  readonly requests: Array<{ url: string; validators: Validators }> = [];
+  readonly requests: Array<{ url: string; validators: Validators; preferMarkdown: boolean }> = [];
   /** What `robots.txt`'s `Crawl-delay` raised the pacing to, so a test can assert it was read. */
   delayMs = 0;
 
@@ -58,8 +58,8 @@ export class StubWeb implements WebClient {
     this.budgetRenewals++;
   }
 
-  async get(url: string, validators: Validators = {}): Promise<WebResponse> {
-    this.requests.push({ url, validators });
+  async get(url: string, validators: Validators = {}, options: RequestOptions = {}): Promise<WebResponse> {
+    this.requests.push({ url, validators, preferMarkdown: options.preferMarkdown === true });
     const page = this.pages[url];
     // A URL nothing was registered for is a 404, which is what a site answers for a link that rotted.
     if (!page) return { url, status: 404, contentType: 'text/html' };

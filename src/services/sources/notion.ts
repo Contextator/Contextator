@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Client } from '@notionhq/client';
+import { SOURCE_PAGE_LIMIT_DEFAULTS } from '../../config.js';
 import type { DocumentSourceRow } from '../../db/schema.js';
 import { decryptSecret, keyringOf, SecretKeyMissingError } from '../crypto.js';
 import { sourceCurrentDir } from '../data-dir.js';
@@ -9,7 +10,11 @@ import { PROBE_TOKEN_KEY, parseSourceConfig, type NotionConfig } from '../source
 import { registerDriver, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
 import { frontmatter, pageFileStem, pageTitle, renderBlocks, type NotionBlock } from './notion-render.js';
 
-const MAX_PAGES = 5000;
+/**
+ * The default ceiling on pages one sync indexes; `NOTION_MAX_PAGES` moves it. Reaching it is logged and
+ * written into the run's note — a workspace cut at the ceiling must not look fully indexed.
+ */
+export const MAX_PAGES = SOURCE_PAGE_LIMIT_DEFAULTS.NOTION_MAX_PAGES;
 const MAX_DEPTH = 25;
 const MIN_INTERVAL_MS = 350; // ~3 requests/second, Notion's documented limit
 
@@ -34,6 +39,8 @@ export class NotionDriver implements SourceDriver {
   private lastRequest = 0;
   /** Roots and databases that could not be read while others could; reported on the run. */
   private readonly partialFailures: string[] = [];
+  /** Set by discovery when a page past `NOTION_MAX_PAGES` was seen and left out. */
+  private truncated = false;
 
   constructor(
     private readonly source: DocumentSourceRow,
@@ -96,9 +103,20 @@ export class NotionDriver implements SourceDriver {
   /** All pages the integration can see (search) or the configured roots plus their descendants. */
   private async discoverPages(client: Client): Promise<Map<string, PageInfo>> {
     const pages = new Map<string, PageInfo>();
+    const maxPages = this.maxPages;
+    this.truncated = false;
+    // The ceiling is applied page by page, not batch by batch: a search answers a hundred at a time,
+    // and a check after the batch let a ceiling of 10 index 100.
     const add = (raw: AnyRecord) => {
       const info = this.toPageInfo(raw);
-      if (info && !pages.has(info.id)) pages.set(info.id, info);
+      if (!info) return info;
+      if (!pages.has(info.id)) {
+        if (pages.size >= maxPages) {
+          this.truncated = true;
+          return undefined;
+        }
+        pages.set(info.id, info);
+      }
       return info;
     };
 
@@ -108,10 +126,12 @@ export class NotionDriver implements SourceDriver {
         const res = (await this.throttle(() =>
           client.search({ filter: { property: 'object', value: 'page' }, page_size: 100, start_cursor: cursor }),
         )) as { results: AnyRecord[]; next_cursor: string | null };
-        for (const r of res.results) add(r);
+        for (const r of res.results) {
+          add(r);
+          if (this.truncated) break;
+        }
         cursor = res.next_cursor ?? undefined;
-        if (pages.size >= MAX_PAGES) break;
-      } while (cursor);
+      } while (cursor && !this.truncated);
       return pages;
     }
 
@@ -139,7 +159,7 @@ export class NotionDriver implements SourceDriver {
       throw new ValidationError(`No configured Notion root could be read — ${rootFailures.join('; ')}`);
     }
     if (rootFailures.length > 0) this.partialFailures.push(...rootFailures);
-    while (queue.length > 0 && pages.size < MAX_PAGES) {
+    while (queue.length > 0 && !this.truncated) {
       const item = queue.shift()!;
       if (item.depth > MAX_DEPTH) continue;
       if (item.kind === 'database') {
@@ -161,6 +181,11 @@ export class NotionDriver implements SourceDriver {
       }
     }
     return pages;
+  }
+
+  /** `NOTION_MAX_PAGES`, or the default for a context built without it. */
+  private get maxPages(): number {
+    return this.ctx.config.NOTION_MAX_PAGES ?? MAX_PAGES;
   }
 
   /** Pages of a database: 2025-09 API queries data sources; older tokens still answer `databases.query`. */
@@ -194,7 +219,8 @@ export class NotionDriver implements SourceDriver {
         };
         out.push(...res.results.filter((r) => r.object === 'page'));
         cursor = res.next_cursor ?? undefined;
-      } while (cursor && out.length < MAX_PAGES);
+        // One past the ceiling, so that a database larger than it is seen to be larger by `add`.
+      } while (cursor && out.length <= this.maxPages);
     }
     return out;
   }
@@ -283,7 +309,17 @@ export class NotionDriver implements SourceDriver {
     };
     await walk(root, []);
 
-    const note = `${pages.size} pages, ${written} rendered, ${removed} removed`;
+    const counted = `${pages.size} pages, ${written} rendered, ${removed} removed`;
+    if (this.truncated) {
+      this.ctx.log.warn(
+        { source: this.source.name, maxPages: this.maxPages },
+        'notion source reached NOTION_MAX_PAGES; the pages past the ceiling are not indexed',
+      );
+    }
+    const note = this.truncated
+      ? `${counted} — STOPPED AT THE ${this.maxPages}-PAGE CEILING (NOTION_MAX_PAGES): this workspace shares more pages than that and the rest are NOT indexed. ` +
+        'Narrow it with root pages, split it across several sources, or raise NOTION_MAX_PAGES.'
+      : counted;
     // One more request, at the end of a sync that just made hundreds, and it buys every *future* run
     // of this source the chance to cost one request in total ([ADR-0048](../../../.ssot/ADR.md#adr-0048)).
     // Deliberately `probe()` and not `max(page.lastEdited)` computed from the map above: with

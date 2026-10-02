@@ -18,8 +18,9 @@ import { decodeUtf8, titleFromPath, withTitle } from './index.js';
  *
  * `script` and `style` are the obvious two — their bodies are code, and turndown's default is to keep
  * the text of any element it has no rule for, so a page's stylesheet would otherwise be indexed as
- * prose. The rest are elements whose content is never text: an `svg`'s path data, a `canvas`'s
- * fallback, a `template`'s inert body. **Nothing structural is stripped** — no `nav`, no `footer`, no
+ * prose. The rest are elements whose content is never text: a `canvas`'s fallback, a `template`'s
+ * inert body. An `svg` is not on the list any more: its path data is still dropped, but the words a
+ * diagram carries are kept by the `svgText` rule below. **Nothing structural is stripped** — no `nav`, no `footer`, no
  * `aside`: boilerplate removal guesses, and a documentation page whose entire body is inside a
  * `<nav>`-labelled shell is a page this would silently index as empty.
  *
@@ -27,7 +28,113 @@ import { decodeUtf8, titleFromPath, withTitle } from './index.js';
  * before parsing it, so a whole document's `<head>` is never a head and its `<title>` arrives as a
  * stray line of body text above the page's own `<h1>`. It is read off the raw HTML instead, below.
  */
-const NON_CONTENT = ['script', 'style', 'noscript', 'iframe', 'object', 'embed', 'template', 'svg', 'canvas', 'link', 'meta', 'title'];
+const NON_CONTENT = ['script', 'style', 'noscript', 'iframe', 'object', 'embed', 'template', 'canvas', 'link', 'meta', 'title'];
+
+/** The SVG elements whose content is text a reader sees (`text`) or is told (`title`, `desc`). */
+const SVG_TEXT_ELEMENTS = new Set(['text', 'title', 'desc']);
+
+/**
+ * Parents an SVG is drawn *inside a line of* rather than between blocks: a heading's anchor icon, a
+ * "copy" button, an icon in a sentence or a table cell. Text out of an SVG in one of these stays on
+ * the line — a paragraph break there would split the heading or the sentence it sits in, and a table
+ * cell cannot hold one at all.
+ */
+const PHRASING_PARENTS = new Set([
+  'a',
+  'abbr',
+  'b',
+  'button',
+  'cite',
+  'code',
+  'em',
+  'i',
+  'kbd',
+  'label',
+  'mark',
+  'p',
+  'q',
+  's',
+  'small',
+  'span',
+  'strong',
+  'sub',
+  'summary',
+  'sup',
+  'u',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'td',
+  'th',
+  'dt',
+  'caption',
+  'figcaption',
+  'legend',
+]);
+
+/** Just the DOM an SVG walk needs; turndown hands over domino nodes, typed as the browser's. */
+interface SvgNode {
+  nodeType: number;
+  nodeName: string;
+  textContent: string | null;
+  childNodes: ArrayLike<SvgNode>;
+  parentNode?: SvgNode | null;
+  getAttribute?(name: string): string | null;
+}
+
+/** Whether the SVG draws any `<text>` — what tells a diagram with labels apart from an icon with a tooltip. */
+function hasTextElement(node: SvgNode): boolean {
+  return Array.from(node.childNodes).some((child) => child.nodeType === 1 && (child.nodeName.toLowerCase() === 'text' || hasTextElement(child)));
+}
+
+/**
+ * Whether the SVG's words become paragraphs of their own or stay inside the line around it.
+ *
+ * **Paragraphs only for a drawing: an SVG that draws `<text>` and sits between blocks** — not inside a
+ * phrasing element, and not beside text of its parent's own. Every other
+ * SVG with words in it is an icon whose `<title>` is a tooltip — the anchor link beside a heading, the
+ * copy button in a sentence — and breaking the line there would turn `## Setup` into `## Setup [`
+ * followed by a stray paragraph.
+ */
+function svgIsBlock(svg: SvgNode): boolean {
+  const parent = svg.parentNode;
+  if (parent && parent.nodeType === 1) {
+    if (PHRASING_PARENTS.has(parent.nodeName.toLowerCase())) return false;
+    // A container that may hold either blocks or text (`li`, `dd`, `div`) is a line when it has
+    // words of its own beside the SVG: `<li>Step <svg>…</svg> done</li>` reads as one sentence.
+    if (Array.from(parent.childNodes).some((sibling) => sibling !== svg && sibling.nodeType === 3 && (sibling.textContent ?? '').trim() !== ''))
+      return false;
+  }
+  return hasTextElement(svg);
+}
+
+/**
+ * The words in an inline SVG, one line per `<text>`, `<title>` or `<desc>`, in document order.
+ *
+ * Architecture diagrams and charts exported as inline SVG carry their labels as `<text>`, and those
+ * labels are the only part of the drawing anyone will ever search for. A text element's own content —
+ * `<tspan>`s included — is taken whole and not descended into again, so a label is never counted
+ * twice. Everything else — paths, shapes, gradients, `foreignObject` — is still dropped.
+ */
+function svgText(svg: SvgNode): string[] {
+  const lines: string[] = [];
+  const walk = (node: SvgNode): void => {
+    for (const child of Array.from(node.childNodes)) {
+      if (child.nodeType !== 1) continue;
+      if (SVG_TEXT_ELEMENTS.has(child.nodeName.toLowerCase())) {
+        const text = (child.textContent ?? '').replace(/\s+/g, ' ').trim();
+        if (text) lines.push(text);
+        continue;
+      }
+      walk(child);
+    }
+  };
+  walk(svg);
+  return lines;
+}
 
 /** `<title>Getting started</title>` — read off the raw text, because turndown only ever sees the body. */
 const TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
@@ -67,9 +174,27 @@ function turndown(): TurndownService {
     linkStyle: 'inlined',
   });
   created.use(gfm);
-  // Cast because turndown's types spell a tag name as `keyof HTMLElementTagNameMap`, and `svg` is not
-  // in that map — it is an SVG element, and it is one of the tags whose body is never prose.
+  // Cast because turndown's types spell the filter as `keyof HTMLElementTagNameMap` entries, and a
+  // mutable `string[]` does not narrow to that union.
   created.remove(NON_CONTENT as unknown as Parameters<TurndownService['remove']>[0]);
+  /**
+   * An inline SVG becomes the text it shows and nothing else. A rule added with `addRule` is consulted
+   * before the `remove` list, which is why this one can sit beside it; an SVG with no text at all is
+   * blank to turndown and never reaches it.
+   */
+  created.addRule('svgText', {
+    filter: (node: HTMLElement): boolean => node.nodeName.toLowerCase() === 'svg',
+    replacement: (_content: string, node: Node): string => {
+      const svg = node as unknown as SvgNode;
+      // `aria-hidden` is the page's own statement that the drawing says nothing a reader needs —
+      // decoration, or an icon whose meaning the text beside it already carries.
+      if (svg.getAttribute?.('aria-hidden')?.trim().toLowerCase() === 'true') return '';
+      // Escaped the way turndown escapes any other text, so a label like `1. Ingest` stays a label.
+      const lines = svgText(svg).map((line) => created.escape(line));
+      if (lines.length === 0) return '';
+      return svgIsBlock(svg) ? `\n\n${lines.join('\n\n')}\n\n` : lines.join(' ');
+    },
+  });
   /**
    * A `data:` image is the whole file inline. Word embeds every picture that way and so do exported
    * pages, and the default rule would put a base64 megabyte into `documents.content` where an agent

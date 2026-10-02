@@ -106,6 +106,58 @@ function sitemapXml(origin: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${entries}</urlset>`;
 }
 
+/**
+ * A second, smaller site under `/md/` that negotiates: the same URL answers with the page's Markdown
+ * source to a client whose `Accept` ranks `text/markdown` above `text/html`, and with rendered HTML to
+ * one that does not. The HTML variant carries a marker the Markdown does not, so a document that went
+ * through the HTML conversion is told apart from one that did not by its content alone.
+ *
+ * `/md/docs/` is the same kind of site as a crawl would meet it: three pages that link to each other,
+ * each answering in either form. Its Markdown variant links with Markdown links, the way such a host
+ * writes them — which is exactly what makes a Markdown entry point look like an `llms.txt`.
+ */
+const NEGOTIATED_CRAWL: Record<string, { title: string; html: string; markdown: string }> = {
+  '/md/docs/': {
+    title: 'Docs',
+    html: '<p>Start here.</p><a href="/md/docs/a.html">A</a> <a href="/md/docs/b.html">B</a>',
+    markdown: '# Docs\n\nStart here.\n\n- [A](/md/docs/a.html)\n- [B](/md/docs/b.html)\n',
+  },
+  '/md/docs/a.html': { title: 'A', html: '<p>Alpha page.</p><a href="/md/docs/">home</a>', markdown: '# A\n\nAlpha page.\n' },
+  '/md/docs/b.html': { title: 'B', html: '<p>Beta page.</p><a href="/md/docs/">home</a>', markdown: '# B\n\nBeta page.\n' },
+};
+const NEGOTIATED_MARKDOWN = '# Setup\n\nRun `ctx init` once per workspace.\n\n- reconciled ledgers stay put\n';
+const NEGOTIATED_HTML = html('Setup', '<p>HTML-VARIANT-ONLY rendered page.</p>');
+
+function prefersMarkdown(accept: string): boolean {
+  const weights = new Map<string, number>();
+  for (const part of accept.split(',')) {
+    const [type, ...params] = part.split(';').map((s) => s.trim().toLowerCase());
+    const q = params.find((p) => p.startsWith('q='));
+    weights.set(type, q ? Number(q.slice(2)) : 1);
+  }
+  return (weights.get('text/markdown') ?? 0) > (weights.get('text/html') ?? weights.get('*/*') ?? 0);
+}
+
+function negotiatingSite(pathname: string, accept: string, res: http.ServerResponse): void {
+  if (pathname === '/md/sitemap.xml') {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${origin}/md/guide/setup.html</loc></url></urlset>`;
+    res.writeHead(200, { 'content-type': 'application/xml' }).end(xml);
+    return;
+  }
+  const crawlPage = NEGOTIATED_CRAWL[pathname];
+  if (crawlPage) {
+    if (prefersMarkdown(accept)) res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', vary: 'accept' }).end(crawlPage.markdown);
+    else res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', vary: 'accept' }).end(html(crawlPage.title, crawlPage.html));
+    return;
+  }
+  if (pathname !== '/md/guide/setup.html') {
+    res.writeHead(404, { 'content-type': 'text/html' }).end('<html><body>not found</body></html>');
+    return;
+  }
+  if (prefersMarkdown(accept)) res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8', vary: 'accept' }).end(NEGOTIATED_MARKDOWN);
+  else res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', vary: 'accept' }).end(NEGOTIATED_HTML);
+}
+
 const ROBOTS = 'User-agent: *\nCrawl-delay: 0\nDisallow: /internal/\n';
 
 let server: http.Server;
@@ -186,6 +238,10 @@ beforeAll(async () => {
     }
     if (url.pathname === '/sitemap.xml') {
       res.writeHead(200, { 'content-type': 'application/xml' }).end(sitemapXml(origin));
+      return;
+    }
+    if (url.pathname.startsWith('/md/')) {
+      negotiatingSite(url.pathname, req.headers.accept ?? '', res);
       return;
     }
     const body = site.pages[url.pathname];
@@ -430,5 +486,71 @@ describe('the page ceiling, against a site that has more pages than it', () => {
 
     expect(requested.filter((p) => p.startsWith('/guide/') || p.startsWith('/internal/'))).toHaveLength(2);
     expect(result.note).toContain('STOPPED AT THE 2-PAGE CEILING (WEB_MAX_PAGES)');
+  });
+});
+
+describe('a site that negotiates, asked for Markdown first', () => {
+  it('indexes the Markdown source as .md, without an HTML conversion', async () => {
+    // A project of its own, so the paths the cases above assert on stay exactly what they were.
+    const [mdProject] = await database.db.insert(projects).values({ name: 'web-md-project', embeddingModel: MODEL_ID }).returning();
+    await database.db.insert(documentSources).values({
+      projectId: mdProject.id,
+      type: 'web',
+      name: 'neg',
+      config: { entryUrl: `${origin}/md/sitemap.xml`, entryKind: 'sitemap', extensions: ['html', 'md', 'txt'] },
+    });
+
+    const job = await settle(database.db, indexer.enqueue(mdProject.id, { trigger: 'manual' }));
+    indexer.forget(mdProject.id);
+    expect(job.phase).toBe('done');
+
+    const rows = await database.db
+      .select({ p: documents.relativePath, content: documents.content })
+      .from(documents)
+      .where(eq(documents.projectId, mdProject.id));
+    expect(rows.map((r) => r.p)).toEqual(['neg/md/guide/setup.md']);
+    // The author's Markdown, as written — not turndown's reconstruction of a rendered page.
+    expect(rows[0].content).toContain('Run `ctx init` once per workspace.');
+    expect(rows[0].content).not.toContain('HTML-VARIANT-ONLY');
+  });
+
+  /**
+   * **The regression a Markdown-first `Accept` on every request caused.** A crawl reads its next links
+   * out of the page it just fetched and `auto` classifies the entry point by what it answered; both
+   * received Markdown from this site, the crawl found no `<a href>`, `auto` took the entry for an
+   * `llms.txt`, and the removal pass deleted every page but the entry. Asserted over two runs, because
+   * the second is the one that deletes what the first indexed.
+   */
+  it.each(['crawl', 'auto'] as const)('a %s source follows every link and removes nothing, run after run', async (entryKind) => {
+    const [crawlProject] = await database.db
+      .insert(projects)
+      .values({ name: `web-md-${entryKind}`, embeddingModel: MODEL_ID })
+      .returning();
+    const [row] = await database.db
+      .insert(documentSources)
+      .values({
+        projectId: crawlProject.id,
+        type: 'web',
+        name: `neg-${entryKind}`,
+        config: { entryUrl: `${origin}/md/docs/`, entryKind, extensions: ['html', 'md', 'txt'] },
+      })
+      .returning();
+    const run = () => new WebDriver(row, { db: database.db, log: silentLogger, config: { ...config, WEB_REQUEST_DELAY_MS: 0 } }).sync();
+
+    const first = await run();
+    expect(first.note).toContain('crawl: 3 page(s) fetched, 3 written, 0 unchanged, 0 removed');
+    const second = await run();
+    expect(second.note).toMatch(/^crawl: 3 page\(s\) fetched, \d+ written, \d+ unchanged, 0 removed/);
+
+    // And through the indexer, which is what an operator sees: three documents, every one of them.
+    const job = await settle(database.db, indexer.enqueue(crawlProject.id, { trigger: 'manual' }));
+    indexer.forget(crawlProject.id);
+    expect(job.phase).toBe('done');
+    const rows = await database.db.select({ p: documents.relativePath }).from(documents).where(eq(documents.projectId, crawlProject.id));
+    expect(rows.map((r) => r.p).sort()).toEqual([
+      `neg-${entryKind}/md/docs/a.html`,
+      `neg-${entryKind}/md/docs/b.html`,
+      `neg-${entryKind}/md/docs/index.html`,
+    ]);
   });
 });

@@ -13,9 +13,11 @@ export interface DriverContext {
   /**
    * `CONFLUENCE_ALLOWED_HOSTS` is optional here only so that a context built for another driver need not
    * carry it; absent reads as the empty list, which is the strictest the Confluence egress can be.
+   * `CONFLUENCE_MAX_PAGES` and `NOTION_MAX_PAGES` are optional for the same reason; absent reads as
+   * `SOURCE_PAGE_LIMIT_DEFAULTS`.
    */
   config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS'> &
-    Partial<Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS'>> &
+    Partial<Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS' | 'CONFLUENCE_MAX_PAGES' | 'NOTION_MAX_PAGES'>> &
     WebLimits;
 }
 

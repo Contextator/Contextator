@@ -45,6 +45,18 @@ async function readable(name: string): Promise<string> {
 }
 
 /**
+ * **Whether a phrase in a fixture can be found**, in the two places a search looks: the stored content
+ * `read_document` serves, and the chunks the lexical and dense indexes are built from. A phrase that
+ * survives extraction but is split across chunks, or dropped by the chunker, is not searchable.
+ */
+async function searchable(name: string, phrase: string): Promise<boolean> {
+  const content = await readable(name);
+  const { chunks } = chunkMarkdown(await extract(name, bytesOf(name)), `handbook/${name}`, { maxTokens: 400, overlapTokens: 40 });
+  const flat = (text: string): string => text.replace(/\s+/g, ' ');
+  return flat(content).includes(phrase) && chunks.some((chunk) => flat(chunk.content).includes(phrase));
+}
+
+/**
  * A zip whose parts inflate to `size` bytes and whose directory claims they inflate to almost nothing.
  * Written here rather than committed as a fixture: an archive built to break a reader is an artefact
  * of this test, not a specimen of what the world sends.
@@ -192,6 +204,98 @@ describe('.html', () => {
     expect(without).toBe('# Install & upgrade\n\nbody');
     const neither = await htmlToMarkdown(Buffer.from('<p>body</p>'), 'guides/deep-dive.html');
     expect(neither).toBe('# Deep Dive\n\nbody');
+  });
+
+  /**
+   * An architecture diagram drawn as inline SVG carries its labels as `<text>`, and its `<title>` and
+   * `<desc>` say what it shows. Those are searchable; the geometry around them is not indexed.
+   */
+  it('keeps the text an inline SVG shows and drops the drawing', async () => {
+    expect(await searchable('architecture-diagram.html', 'ledger-settlement-7')).toBe(true);
+    expect(await searchable('architecture-diagram.html', 'Intake gateway')).toBe(true);
+    expect(await searchable('architecture-diagram.html', 'Ingestion pipeline overview')).toBe(true);
+    expect(await searchable('architecture-diagram.html', 'hands each batch to the reconciliation worker')).toBe(true);
+
+    const markdown = await readable('architecture-diagram.html');
+    // `<tspan>`s of one label are one line, and the label is not repeated by a nested walk.
+    expect(markdown).toContain('Reconciliation worker');
+    expect(markdown.match(/Reconciliation worker/g)).toHaveLength(1);
+    // Path data, gradients and attributes are not text.
+    expect(markdown).not.toContain('M190');
+    expect(markdown).not.toContain('stop-color');
+    expect(markdown).not.toContain('linearGradient');
+    // The page's own text around the drawing is untouched, in order.
+    expect(markdown.indexOf('only place the queue names')).toBeLessThan(markdown.indexOf('Intake gateway'));
+    expect(markdown.indexOf('Intake gateway')).toBeLessThan(markdown.indexOf('Retries are described'));
+    expect(headings(markdown)).toEqual(['# Ingestion architecture']);
+  });
+
+  it('drops an SVG that has no text at all', async () => {
+    const markdown = await htmlToMarkdown(
+      Buffer.from('<h1>Icons</h1><p>before</p><svg viewBox="0 0 10 10"><path d="M0 0 L10 10"/></svg><p>after</p>'),
+      'icons.html',
+    );
+    expect(markdown).toBe('# Icons\n\nbefore\n\nafter');
+  });
+
+  /**
+   * **An icon is not a diagram.** Doc sites put an SVG with a `<title>` beside every heading (the
+   * anchor link) and inside sentences (the copy button). Its words are a tooltip: they stay on the line
+   * they sit in, and `aria-hidden` ones are not indexed at all — the page said so itself.
+   */
+  const page = (body: string): Buffer => Buffer.from(`<html><head><title>Guide</title></head><body>${body}</body></html>`);
+
+  it('drops an aria-hidden icon without splitting the heading it sits in', async () => {
+    const markdown = await htmlToMarkdown(
+      page('<h2>Setup <a href="#setup"><svg aria-hidden="true"><title>Link to this section</title><path/></svg></a></h2><p>Body text.</p>'),
+      'guide.html',
+    );
+    expect(markdown).toBe('# Guide\n\n## Setup [](#setup)\n\nBody text.');
+    expect(headings(markdown)).toEqual(['# Guide', '## Setup [](#setup)']);
+  });
+
+  it('drops an aria-hidden icon without splitting the sentence it sits in', async () => {
+    const markdown = await htmlToMarkdown(
+      page('<p>Press <svg aria-hidden="true" viewBox="0 0 8 8"><title>Copy</title><path d="M0 0h8v8"/></svg> to copy the command.</p>'),
+      'guide.html',
+    );
+    expect(markdown).toBe('# Guide\n\nPress  to copy the command.');
+    expect(markdown).not.toContain('Copy');
+  });
+
+  it('keeps the words of an icon that is not hidden, on the line it sits in', async () => {
+    const heading = await htmlToMarkdown(
+      page('<h2>Setup <a href="#setup"><svg><title>Link to this section</title><path/></svg></a></h2><p>Body text.</p>'),
+      'guide.html',
+    );
+    expect(heading).toBe('# Guide\n\n## Setup [Link to this section](#setup)\n\nBody text.');
+
+    const sentence = await htmlToMarkdown(page('<p>Press <svg><title>Copy</title><desc>Clipboard</desc><path/></svg> to copy.</p>'), 'guide.html');
+    expect(sentence).toBe('# Guide\n\nPress Copy Clipboard to copy.');
+
+    // Between blocks but drawing no `<text>`, a logo is still a tooltip and not a paragraph of labels.
+    const logo = await htmlToMarkdown(page('<p>before</p><svg><title>Logo</title><desc>Company mark</desc><path/></svg><p>after</p>'), 'guide.html');
+    expect(logo).toBe('# Guide\n\nbefore\n\nLogo Company mark\n\nafter');
+  });
+
+  it('gives a labelled diagram inside a table cell its labels without breaking the table', async () => {
+    const markdown = await htmlToMarkdown(
+      page(
+        '<table><tr><th>Stage</th><th>Shape</th></tr><tr><td>Intake</td><td><svg><text>Queue A</text><text>Queue B</text></svg></td></tr></table>',
+      ),
+      'guide.html',
+    );
+    expect(markdown).toContain('| Intake | Queue A Queue B |');
+  });
+
+  it('keeps a labelled diagram in the sentence of the list item it sits in', async () => {
+    const inline = await htmlToMarkdown(page('<ul><li>Step <svg><text>A</text><text>B</text></svg> done</li></ul>'), 'guide.html');
+    expect(inline).toMatch(/^-\s+Step A B done$/m);
+
+    // Alone in its item, the same drawing is still a diagram: each label gets a paragraph.
+    const alone = await htmlToMarkdown(page('<ul><li><svg><text>A</text><text>B</text></svg></li></ul>'), 'guide.html');
+    expect(alone).not.toMatch(/A B/);
+    expect(alone).toMatch(/A\n\s*\n\s*B/);
   });
 
   it('moves a table header up when the converter produced a blank one', () => {
@@ -380,6 +484,35 @@ describe('.pdf', () => {
 
   it('refuses a file that is not a PDF at all', async () => {
     await expect(extract('broken.pdf', Buffer.from('not a pdf, just some bytes'))).rejects.toBeInstanceOf(DocumentExtractionError);
+  });
+});
+
+/**
+ * **Is the text of a footnote searchable?** Measured, not assumed, on one fixture per format whose
+ * only copy of the phrase "quarterly reconciliation ledger" is the footnote. Both answers are yes as
+ * of 0.2.1: mammoth writes a `.docx`'s footnotes as a list at the end of the document, and a PDF has no
+ * footnotes at all — the note is text set small at the foot of the page, which the extractor reads
+ * like any other line. If either of these turns red, the footnote went missing; that is a regression,
+ * not a test to relax.
+ */
+describe('footnotes', () => {
+  const PHRASE = 'quarterly reconciliation ledger';
+
+  it('.docx: the footnote text is searchable', async () => {
+    expect(await searchable('footnoted-policy.docx', PHRASE)).toBe(true);
+    const markdown = await readable('footnoted-policy.docx');
+    // Once, at the end, after the body it annotates — not inlined into the sentence, not twice.
+    expect(markdown.match(/quarterly reconciliation ledger/g)).toHaveLength(1);
+    expect(markdown.indexOf('approved by finance')).toBeLessThan(markdown.indexOf(PHRASE));
+    // The separator notes Word always writes (ids -1 and 0) are not text.
+    expect(markdown).not.toContain('separator');
+  });
+
+  it('.pdf: the footnote text is searchable', async () => {
+    expect(await searchable('footnoted-policy.pdf', PHRASE)).toBe(true);
+    const markdown = await readable('footnoted-policy.pdf');
+    expect(markdown.match(/quarterly reconciliation ledger/g)).toHaveLength(1);
+    expect(markdown.indexOf('approved by finance')).toBeLessThan(markdown.indexOf(PHRASE));
   });
 });
 
