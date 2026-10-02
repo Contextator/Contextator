@@ -152,6 +152,15 @@ export const projects = pgTable(
      * belongs to the project, and a `pg_dump` carries it. `0` switches the floor off for this project.
      */
     scoreFloor: doublePrecision('score_floor'),
+    /**
+     * When a legacy HTTP+SSE client last reached this project's MCP endpoint — the stream or its
+     * `/messages` channel — and `null` when none ever has ([ADR-0096](../../.ssot/ADR.md#adr-0096)).
+     * The dashboard reads it to warn that a client on a deprecated transport still talks to this
+     * project. Written at most once a minute per project, off the response path, and never by a
+     * Streamable HTTP request. Instance-local: an export does not carry it, because the clients it
+     * describes are this instance's.
+     */
+    lastLegacySseAt: timestamp('last_legacy_sse_at', { withTimezone: true }),
   },
   (t) => [
     check('projects_mcp_auth_check', sql`${t.mcpAuth} in ('open', 'token', 'account')`),

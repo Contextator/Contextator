@@ -60,6 +60,14 @@ ships, that stops.
 - **Text inside an inline SVG is indexed.** An HTML page's `<svg>` used to be dropped whole; its
   `<text>` (with `<tspan>`), `<title>` and `<desc>` now become paragraphs of the document, so a
   diagram's labels are searchable. Shapes, paths and styling are still dropped.
+- **Static MCP tokens can expire.** `POST /api/projects/:id/mcp-tokens` takes an optional
+  `expiresInDays` (`30`, `90` or `365`; any other value is a `400`) and
+  defaults to `null`, a token that never expires — so a script that sends only `name` mints exactly
+  what it did before, and so does a new project's first token. `GET /api/projects/:id/mcp-tokens`
+  and the `token` of the `POST` answer now carry `expiresAt` (ISO 8601, or `null`). A token past its
+  `expiresAt` is refused with `401` by a `token` or `account` project, like a revoked one; an expired
+  token stays in the list until it is revoked. An `open` project still ignores the bearer it is given,
+  expired or not (ADR-0054). No migration: `mcp_tokens.expires_at` already existed.
 
 ### Changed
 
@@ -83,6 +91,21 @@ ships, that stops.
 - **`OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` are no longer sent to a self-hosted endpoint.** The SDK
   read them from the process environment and sent them as `OpenAI-Organization` / `OpenAI-Project`
   headers to whatever server it was pointed at; they now reach `api.openai.com` only.
+
+### Deprecated
+
+- **The legacy HTTP+SSE MCP transport (protocol 2024-11-05) is deprecated** (ADR-0096). Every
+  response of it — the `GET /mcp/:project` stream opened without an `mcp-session-id` and every answer
+  of `POST /mcp/:project/messages`, refusals included — now carries `Deprecation: true`. No `Sunset`
+  header is sent, because no date has been set: the transport behaves exactly as before, and it will
+  not be removed before 1.0 nor sooner than twelve months from this release. Streamable HTTP answers
+  carry neither header. CORS now exposes `Deprecation`, so a browser client on an `ALLOWED_ORIGINS`
+  origin can read it too. Move clients to Streamable HTTP (`POST /mcp/:project`) at your own pace.
+  To tell which projects still have such clients, `GET /api/projects` and
+  `GET /api/projects/:id/status` now carry each project's `lastLegacySseAt` (ISO 8601, or `null` when
+  no legacy client has reached it), updated at most once a minute; the dashboard will warn from it.
+  Migration `0019` adds the nullable `projects.last_legacy_sse_at` column; it is not carried by a
+  project export.
 
 ### Fixed
 

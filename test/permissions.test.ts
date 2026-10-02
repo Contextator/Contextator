@@ -111,6 +111,18 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'DELETE', url: '/api/projects/:id/mcp-tokens/:tokenId', actor: as('member'), membership: 'editor', allowed: true },
   { method: 'PATCH', url: '/api/projects/:id/mcp-auth', actor: as('member'), membership: 'editor', allowed: false },
   { method: 'PATCH', url: '/api/projects/:id/mcp-auth', actor: as('admin'), membership: null, allowed: true },
+  // 0.2.1 Faz 05: minting now takes an optional lifetime (`expiresInDays`). The body grew, the rule
+  // did not — a lifetime is part of minting, so it is still an editor's and never a non-member's.
+  { method: 'POST', url: '/api/projects/:id/mcp-tokens', actor: as('member'), membership: null, allowed: false },
+  { method: 'POST', url: '/api/projects/:id/mcp-tokens', actor: as('admin'), membership: null, allowed: true },
+  { method: 'POST', url: '/api/projects/:id/mcp-tokens', actor: token, membership: null, allowed: true },
+  { method: 'GET', url: '/api/projects/:id/mcp-tokens', actor: as('member'), membership: null, allowed: false },
+  // The project list and status now carry `lastLegacySseAt` (ADR-0096). A read of the project row
+  // that a viewer already had, so a viewer's — and nobody's outside the project.
+  { method: 'GET', url: '/api/projects', actor: as('member'), membership: null, allowed: true },
+  { method: 'GET', url: '/api/projects/:id/status', actor: as('member'), membership: 'viewer', allowed: true },
+  { method: 'GET', url: '/api/projects/:id/status', actor: as('member'), membership: null, allowed: false },
+  { method: 'GET', url: '/api/projects/:id/status', actor: as('admin'), membership: null, allowed: true },
 
   // The query log (ADR-0047). Reading what agents asked is the same access as running the search
   // panel that asks; deciding whether the project records it at all, and throwing away what it has

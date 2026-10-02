@@ -6,7 +6,24 @@ import { createMcpToken, listMcpTokens, revokeMcpToken, setProjectMcpAuth } from
 
 const ProjectParams = z.object({ id: z.uuid() });
 const TokenParams = ProjectParams.extend({ tokenId: z.uuid() });
-const CreateBody = z.object({ name: z.string().max(100).default('') });
+/** The lifetimes a static MCP token may be minted with, in days; `null` (not listed) never expires. */
+export const TOKEN_LIFETIME_DAYS = [30, 90, 365] as const;
+
+/**
+ * `expiresInDays` is a lifetime rather than a date: a count of days cannot be in the past or in the
+ * caller's time zone. It is one of `TOKEN_LIFETIME_DAYS`, the choices the panel offers; `null` (the
+ * default) never expires.
+ */
+export const CreateBody = z.object({
+  name: z.string().max(100).default(''),
+  expiresInDays: z.literal(TOKEN_LIFETIME_DAYS).nullable().default(null),
+});
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** The moment a token minted at `now` with this lifetime stops being accepted; `null` for never. */
+export const expiryFromDays = (days: number | null, now: Date = new Date()): Date | null =>
+  days === null ? null : new Date(now.getTime() + days * DAY_MS);
 
 /**
  * `/api/projects/:id/mcp-tokens/*`. The project guard in src/auth/plugin.ts has already decided
@@ -24,8 +41,8 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
   app.post('/api/projects/:id/mcp-tokens', async (req, reply) => {
     const principal = requirePrincipal(req);
     const { id } = ProjectParams.parse(req.params);
-    const { name } = CreateBody.parse(req.body ?? {});
-    const { token, view } = await createMcpToken(db, id, name, principal.userId);
+    const { name, expiresInDays } = CreateBody.parse(req.body ?? {});
+    const { token, view } = await createMcpToken(db, id, name, principal.userId, expiryFromDays(expiresInDays));
     // Returned once and never again: the database holds only its hash.
     return reply.code(201).send({ token: view, secret: token });
   });

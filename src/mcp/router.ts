@@ -6,7 +6,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
 import { isOriginAllowed } from '../services/origin.js';
-import { getProjectByName } from '../services/projects.js';
+import { getProjectByName, recordLegacySseActivity } from '../services/projects.js';
 import { mcpAccessDecision, mcpAccessMessage, mcpAccessStatus, readMcpBearer } from './access.js';
 import { resolveMcpCredential } from './identity.js';
 import { createProjectMcpServer } from './server-factory.js';
@@ -46,6 +46,22 @@ declare module 'fastify' {
 const rpcError = (code: number, message: string) => ({ jsonrpc: '2.0' as const, error: { code, message }, id: null });
 const headerValue = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
 
+/**
+ * Whether a request belongs to the legacy HTTP+SSE transport: the stream (`GET` without an
+ * `mcp-session-id`) or its inbound `/messages` channel. Streamable HTTP never matches.
+ */
+export const isLegacySseRequest = (method: string, routeUrl: string | undefined, sessionHeader: string | undefined): boolean => {
+  if (!routeUrl) return false;
+  if (method === 'POST' && routeUrl.endsWith('/mcp/:project/messages')) return true;
+  return method === 'GET' && routeUrl.endsWith('/mcp/:project') && !sessionHeader;
+};
+
+/**
+ * Response headers a cross-origin browser MCP client may read (CORS `exposedHeaders`, src/server.ts).
+ * `deprecation` is there so a browser client of the legacy SSE transport sees the ADR-0096 signal too.
+ */
+export const MCP_EXPOSED_HEADERS = ['mcp-session-id', 'mcp-protocol-version', 'deprecation'];
+
 export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
   const { config, sessions, log } = ctx;
   const legacySsePingMs = 25_000;
@@ -62,6 +78,14 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
    * A project left `open` behaves exactly as it always has.
    */
   app.addHook('onRequest', async (req, reply) => {
+    // [ADR-0096](../../.ssot/ADR.md#adr-0096): every legacy SSE response says it is deprecated — the
+    // 200 stream, the 202 of `/messages` and the 401/403/404 of this hook alike. Set on the raw
+    // response so it survives `reply.hijack()`: Node merges it into whichever `writeHead` follows,
+    // the SDK's or Fastify's. No `Sunset`: there is no date to announce, and the behaviour is unchanged.
+    if (isLegacySseRequest(req.method, req.routeOptions.url, headerValue(req.headers['mcp-session-id']))) {
+      reply.raw.setHeader('Deprecation', 'true');
+    }
+
     const origin = req.headers.origin;
     if (origin && !isOriginAllowed(origin, req.host, config.ALLOWED_ORIGINS)) {
       return reply.code(403).send(rpcError(-32000, 'Forbidden origin'));
@@ -183,6 +207,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
 
     // Legacy HTTP+SSE transport. hijack() must precede connect(): SSEServerTransport.start() writes the response head.
     const server = createProjectMcpServer(ctx, project, req.mcpTokenId);
+    recordLegacySseActivity(ctx.db, project.id);
     reply.hijack();
     const transport = new SSEServerTransport(`/mcp/${project.name}/messages`, reply.raw);
     const ping = setInterval(() => {
@@ -219,6 +244,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     const session = req.query.sessionId ? sessions.get(req.query.sessionId, 'sse') : undefined;
     if (!session || session.projectId !== project.id) return reply.code(404).send(rpcError(-32001, 'Session not found'));
     sessions.touch(session.id);
+    recordLegacySseActivity(ctx.db, project.id);
 
     reply.hijack();
     await guarded(reply, () => session.transport.handlePostMessage(req.raw, reply.raw, req.body));

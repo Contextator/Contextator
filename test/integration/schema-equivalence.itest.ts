@@ -116,9 +116,12 @@ const opened: TestDatabase[] = [];
  * OAuth credentials have been revoked, which `POST /oauth/token` compares the value an authorization
  * code carries against. The name is unqualified for `text_search_config`'s reason: it cannot turn up
  * anywhere else in the dump.
+ * `0019_project_last_legacy_sse` ([ADR-0096](../../.ssot/ADR.md#adr-0096)) is one nullable
+ * `timestamptz` column on `projects` with no default and no constraint: when a legacy HTTP+SSE client
+ * last reached the project. Matched by its name `last_legacy_sse_at` alone, for the same reason.
  */
 const POST_BASELINE_MARKERS =
-  /chunks_embedding_hnsw|index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config|^user_federated_identities|user_sessions \| \d+ \| auth_method \||user_sessions_auth_method_check|projects \| \d+ \| score_floor \||projects_score_floor_check|mcp_credentials_epoch/;
+  /chunks_embedding_hnsw|index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config|^user_federated_identities|user_sessions \| \d+ \| auth_method \||user_sessions_auth_method_check|projects \| \d+ \| score_floor \||projects_score_floor_check|mcp_credentials_epoch|last_legacy_sse_at/;
 
 afterAll(async () => {
   for (const database of opened) await dropTestDatabase(baseUrl, database);

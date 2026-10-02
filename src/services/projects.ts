@@ -1,4 +1,4 @@
-import { and, asc, eq, ne } from 'drizzle-orm';
+import { and, asc, eq, ne, sql } from 'drizzle-orm';
 import { PROJECT_NAME_RE } from '../config.js';
 import type { Db } from '../db/client.js';
 import { projects, type ProjectRow } from '../db/schema.js';
@@ -68,6 +68,31 @@ export async function setProjectScoreFloor(db: Db, id: string, floor: number | n
 export async function getProjectByName(db: Db, name: string): Promise<ProjectRow | undefined> {
   const [row] = await db.select().from(projects).where(eq(projects.name, name)).limit(1);
   return row;
+}
+
+const LEGACY_SSE_STAMP_INTERVAL_MS = 60_000;
+/** Per process, when each project's `last_legacy_sse_at` was last written; keeps throttled hits off the pool. */
+const legacySseStampedAt = new Map<string, number>();
+
+/**
+ * Notes that a legacy HTTP+SSE client just reached this project ([ADR-0096](../../.ssot/ADR.md#adr-0096)).
+ *
+ * Fire-and-forget and throttled to once a minute per project: a busy SSE client posts a message per
+ * tool call, and the dashboard needs "recently", not every hit. The throttle is checked in memory
+ * first, so a throttled hit never takes a pooled connection; the `WHERE` guard still holds the line
+ * across several instances sharing one database. A failed write is swallowed — the signal is advisory
+ * and must never cost the MCP request it rides on. Returns whether a write was issued.
+ */
+export function recordLegacySseActivity(db: Db, projectId: string, nowMs: number = Date.now()): boolean {
+  const last = legacySseStampedAt.get(projectId);
+  if (last !== undefined && nowMs - last < LEGACY_SSE_STAMP_INTERVAL_MS) return false;
+  legacySseStampedAt.set(projectId, nowMs);
+  void db
+    .update(projects)
+    .set({ lastLegacySseAt: new Date(nowMs) })
+    .where(and(eq(projects.id, projectId), sql`(${projects.lastLegacySseAt} is null or ${projects.lastLegacySseAt} < now() - interval '60 seconds')`))
+    .catch(() => undefined);
+  return true;
 }
 
 function isUniqueViolation(err: unknown): boolean {

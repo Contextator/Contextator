@@ -20,7 +20,7 @@ import { createDb, waitForDb } from './db/client.js';
 import { httpServerOptions, warnAboutProxyConfiguration } from './http.js';
 import { bootstrapDatabase, SchemaMismatchError } from './db/bootstrap.js';
 import { oauthRoutes } from './mcp/oauth-routes.js';
-import { mcpRoutes } from './mcp/router.js';
+import { MCP_EXPOSED_HEADERS, mcpRoutes } from './mcp/router.js';
 import { SessionRegistry } from './mcp/sessions.js';
 import { newChunkBudgetState, verifyChunkBudget } from './services/chunk-budget.js';
 import { createEmbeddingProvider } from './services/embeddings/index.js';
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
   // credentialed reads of /api/* would hand them the dashboard of whoever is signed in.
   await app.register(cors, {
     origin: config.ALLOWED_ORIGINS.length > 0 ? config.ALLOWED_ORIGINS : false,
-    exposedHeaders: ['mcp-session-id', 'mcp-protocol-version'],
+    exposedHeaders: MCP_EXPOSED_HEADERS,
     allowedHeaders: ['content-type', 'authorization', 'accept', 'mcp-session-id', 'mcp-protocol-version', 'last-event-id'],
   });
   await app.register(cookie); // the session cookie; registered on the root app so every plugin can read it

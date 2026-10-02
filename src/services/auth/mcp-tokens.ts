@@ -39,6 +39,11 @@ export interface McpTokenView {
   prefix: string;
   createdAt: Date;
   lastUsedAt: Date | null;
+  /**
+   * When the token stops being accepted; `null` means it never expires. An expired token stays in the
+   * list until it is revoked, so the panel can say "expired" instead of letting it vanish.
+   */
+  expiresAt: Date | null;
 }
 
 export const toMcpTokenView = (row: McpTokenRow): McpTokenView => ({
@@ -47,6 +52,7 @@ export const toMcpTokenView = (row: McpTokenRow): McpTokenView => ({
   prefix: row.prefix,
   createdAt: row.createdAt,
   lastUsedAt: row.lastUsedAt,
+  expiresAt: row.expiresAt,
 });
 
 /**
@@ -69,6 +75,7 @@ export async function createMcpToken(
   projectId: string,
   name: string,
   createdBy: string | null,
+  expiresAt: Date | null = null,
 ): Promise<{ token: string; view: McpTokenView }> {
   const token = newMcpToken('static');
   const [row] = await db
@@ -80,6 +87,7 @@ export async function createMcpToken(
       prefix: displayPrefix(token),
       createdBy,
       kind: 'static',
+      expiresAt,
     })
     .returning();
   return { token, view: toMcpTokenView(row) };

@@ -134,6 +134,13 @@
       "when": 1790333114810,
       "tag": "0018_user_mcp_credentials_epoch",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1790933181551,
+      "tag": "0019_project_last_legacy_sse",
+      "breakpoints": true
     }
   ]
 }
