@@ -23,6 +23,10 @@ export function createEmbeddingProvider(config: Config, log: Logger): EmbeddingP
     return new OpenAIEmbeddingProvider({
       apiKey: config.OPENAI_API_KEY ?? '',
       model: config.OPENAI_EMBEDDING_MODEL,
+      // Two names, kept apart: only the new one is part of `provider.id` (see `endpointIdSegment`).
+      baseURL: config.EMBEDDING_BASE_URL,
+      legacyBaseURL: config.OPENAI_BASE_URL,
+      requestDimensions: config.EMBEDDING_REQUEST_DIMENSIONS,
       dimensions: config.EMBEDDING_DIMENSIONS,
       maxInputTokens: config.EMBEDDING_MAX_INPUT_TOKENS,
       prefixes,

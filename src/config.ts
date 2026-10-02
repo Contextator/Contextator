@@ -279,6 +279,20 @@ export const OAUTH_CLIENT_UNUSED_MS = 24 * 60 * 60_000;
 export const OAUTH_REGISTER_MAX_PER_HOST = 60;
 export const OAUTH_REGISTER_WINDOW_MS = 60 * 60_000;
 
+/** Same test as `endpointIdSegment` in services/embeddings/openai.ts; an unparsable value is reported elsewhere. */
+const isOpenAIHost = (value: string): boolean => URL.canParse(value) && new URL(value).host === 'api.openai.com';
+
+/**
+ * An OpenAI-compatible embeddings endpoint. http(s) only, and no credentials in the URL: a key belongs in
+ * `OPENAI_API_KEY`, where it is sent as a header, and a URL is something that ends up in logs.
+ */
+const embeddingBaseUrl = z.url({ protocol: /^https?$/ }).refine((value) => {
+  // zod runs this even after `.url()` has rejected the value, so an unparsable string is left to that issue.
+  if (!URL.canParse(value)) return true;
+  const url = new URL(value);
+  return url.username === '' && url.password === '';
+}, 'must not contain credentials; put the key in OPENAI_API_KEY');
+
 /** Exported for the tests: the cross-field rules are the only part of this file that has behaviour. */
 export const EnvSchema = z
   .object({
@@ -829,6 +843,27 @@ export const EnvSchema = z
     OPENAI_API_KEY: z.string().optional(),
     OPENAI_EMBEDDING_MODEL: z.string().default('text-embedding-3-small'),
     /**
+     * Where `EMBEDDING_PROVIDER=openai` sends its requests: any server that speaks OpenAI's
+     * `POST /embeddings` — Ollama, vLLM, Text Embeddings Inference, LM Studio — or OpenAI itself when
+     * unset. Only this name's host enters `provider.id`, so setting it (even to a URL an installation
+     * already used) re-indexes every project once (ADR-0007) — except `api.openai.com`, which is what an
+     * unset value means anyway.
+     *
+     * `OPENAI_BASE_URL` is the name the SDK has always read on its own. It is still honoured as the
+     * request URL when `EMBEDDING_BASE_URL` is empty, but never enters the id, so an installation that
+     * relied on it keeps its index. It is validated only when it is read — `EMBEDDING_PROVIDER=openai`
+     * with `EMBEDDING_BASE_URL` empty; otherwise it may belong to an unrelated tool.
+     */
+    EMBEDDING_BASE_URL: embeddingBaseUrl.optional(),
+    OPENAI_BASE_URL: z.string().optional(),
+    /**
+     * Whether the request carries `dimensions`. `auto` sends it to the `text-embedding-3` family only —
+     * the one family OpenAI documents as accepting it — which is what this server always did. `always`
+     * is for a self-hosted server that truncates on request; `never` for one that rejects the field.
+     * The returned length is checked against `EMBEDDING_DIMENSIONS` either way.
+     */
+    EMBEDDING_REQUEST_DIMENSIONS: z.enum(['auto', 'always', 'never']).default('auto'),
+    /**
      * What the model reads usefully — the window it was trained at, not where the tokenizer cuts.
      * Deliberately optional and deliberately without a default: the window is a runtime fact the local
      * provider discovers from the loaded tokenizer, and a number guessed here from `process.env` would
@@ -1102,8 +1137,25 @@ export const EnvSchema = z
     WEBHOOK_MIN_INTERVAL_MINUTES: z.coerce.number().int().min(0).max(SYNC_MAX_INTERVAL_MINUTES).default(5),
   })
   .superRefine((c, ctx) => {
-    if (c.EMBEDDING_PROVIDER === 'openai' && !c.OPENAI_API_KEY) {
-      ctx.addIssue({ code: 'custom', path: ['OPENAI_API_KEY'], message: 'required when EMBEDDING_PROVIDER=openai' });
+    // The legacy name is only read when the new one is empty; a stale value left for another tool is
+    // not this server's business otherwise.
+    if (c.EMBEDDING_PROVIDER === 'openai' && c.EMBEDDING_BASE_URL === undefined && c.OPENAI_BASE_URL !== undefined) {
+      const legacy = embeddingBaseUrl.safeParse(c.OPENAI_BASE_URL);
+      if (!legacy.success) {
+        for (const issue of legacy.error.issues) {
+          ctx.addIssue({ code: 'custom', path: ['OPENAI_BASE_URL'], message: issue.message });
+        }
+      }
+    }
+    // A self-hosted endpoint (Ollama, TEI, LM Studio) usually takes no key at all, so the key is only
+    // required when the requests go to OpenAI itself — unset, or named explicitly.
+    const requestUrl = c.EMBEDDING_BASE_URL ?? c.OPENAI_BASE_URL;
+    if (c.EMBEDDING_PROVIDER === 'openai' && !c.OPENAI_API_KEY && (requestUrl === undefined || isOpenAIHost(requestUrl))) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['OPENAI_API_KEY'],
+        message: 'required when EMBEDDING_PROVIDER=openai, unless EMBEDDING_BASE_URL points at a server that needs no key',
+      });
     }
     if (c.CHUNK_OVERLAP_TOKENS >= c.CHUNK_MAX_TOKENS) {
       ctx.addIssue({ code: 'custom', path: ['CHUNK_OVERLAP_TOKENS'], message: 'must be smaller than CHUNK_MAX_TOKENS' });

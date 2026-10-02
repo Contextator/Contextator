@@ -12,6 +12,19 @@ ships, that stops.
 
 ### Added
 
+- **`EMBEDDING_PROVIDER=openai` talks to any OpenAI-compatible endpoint.** `EMBEDDING_BASE_URL`
+  (http or https, no credentials in the URL) points it at Ollama, vLLM, Text Embeddings Inference,
+  LM Studio or a proxy; `OPENAI_BASE_URL` is still read when it is empty, and the base URL is now
+  passed to the client explicitly instead of being picked up from the process environment by the SDK.
+  `OPENAI_BASE_URL` is validated only when it is read: `EMBEDDING_PROVIDER=openai` and
+  `EMBEDDING_BASE_URL` empty. `OPENAI_API_KEY` becomes optional when the base URL names a host other
+  than `api.openai.com` — without one, no `Authorization` header is sent. A self-hosted endpoint is
+  asked for float vectors rather than the SDK's base64.
+  `EMBEDDING_REQUEST_DIMENSIONS` (`auto` by default: only `text-embedding-3-*`, as before; `always`;
+  `never`) decides whether the request carries `dimensions`. The existing `EMBEDDING_QUERY_PREFIX` /
+  `EMBEDDING_PASSAGE_PREFIX` and `EMBEDDING_MAX_INPUT_TOKENS` apply to this provider unchanged.
+  An installation that already set `OPENAI_BASE_URL` keeps its model id and its index: the legacy
+  name never enters the id (see Changed).
 - **Every OAuth authorization response names its issuer (RFC 9207).** The redirect back to an MCP
   client now carries `iss` on a code and on an error alike, and the authorization server metadata
   announces it with `authorization_response_iss_parameter_supported: true`. A client that talks to
@@ -40,6 +53,21 @@ ships, that stops.
   default — means no cap, as before. When set, a file whose conversion needs more than that many MiB
   becomes one refused document whose reason names the heap limit, distinct from a timeout or a crash;
   the thread is replaced and the run carries on with the next file (ADR-0097).
+
+### Changed
+
+- **`EMBEDDING_BASE_URL`'s host is part of the model id** (`openai:<model>:<dims>@<host:port>…`), so
+  pointing the provider at another server re-indexes every project, because two servers answering to
+  the same model name are not guaranteed to produce the same vectors. Unset, or naming `api.openai.com`,
+  the id is exactly what it was. `OPENAI_BASE_URL` never enters the id. Moving an existing setup from
+  `OPENAI_BASE_URL` to `EMBEDDING_BASE_URL` — even with the same URL — is therefore an opt-in that
+  re-indexes once: until a project's re-index finishes, its searches are refused with `model_mismatch`.
+  A scheduled run whose content has not changed may wait up to `SYNC_MAX_SKIP_HOURS` (24 h by default;
+  with `0`, or no schedule, until "Sync now"), so start a forced re-index of each project
+  (`POST /api/projects/:id/reindex?force=true`) right after the switch.
+- **`OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` are no longer sent to a self-hosted endpoint.** The SDK
+  read them from the process environment and sent them as `OpenAI-Organization` / `OpenAI-Project`
+  headers to whatever server it was pointed at; they now reach `api.openai.com` only.
 
 ### Fixed
 
