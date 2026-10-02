@@ -17,6 +17,7 @@
     "serviceAccount",
     "env",
     "envSecret",
+    "metrics",
     "tests"
   ],
   "definitions": {
@@ -488,6 +489,57 @@
     },
     "extraVolumeMounts": {
       "$ref": "#/definitions/openArray"
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "serviceMonitor"
+      ],
+      "properties": {
+        "serviceMonitor": {
+          "description": "Optional Prometheus Operator ServiceMonitor for GET /metrics. The bearer credential comes from envSecret.METRICS_TOKEN.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "interval",
+            "scrapeTimeout"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "interval": {
+              "description": "Prometheus duration, units in descending order (y, w, d, h, m, s, ms), e.g. 30s or 1m30s. The same format the Prometheus Operator CRD accepts.",
+              "type": "string",
+              "minLength": 2,
+              "pattern": "^(([0-9]+)y)?(([0-9]+)w)?(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?(([0-9]+)ms)?$"
+            },
+            "scrapeTimeout": {
+              "description": "Prometheus duration, same format as interval, e.g. 10s. Must not exceed interval; the chart refuses to render otherwise.",
+              "type": "string",
+              "minLength": 2,
+              "pattern": "^(([0-9]+)y)?(([0-9]+)w)?(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?(([0-9]+)ms)?$"
+            },
+            "labels": {
+              "$ref": "#/definitions/stringMap"
+            },
+            "annotations": {
+              "$ref": "#/definitions/stringMap"
+            },
+            "honorLabels": {
+              "type": "boolean"
+            },
+            "relabelings": {
+              "$ref": "#/definitions/openArray"
+            },
+            "metricRelabelings": {
+              "$ref": "#/definitions/openArray"
+            }
+          }
+        }
+      }
     },
     "tests": {
       "type": "object",

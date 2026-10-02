@@ -273,6 +273,30 @@ extraVolumes: []
 extraVolumeMounts: []
 
 # -----------------------------------------------------------------------------------------------
+# Metrics — optional Prometheus Operator ServiceMonitor
+# -----------------------------------------------------------------------------------------------
+# GET /metrics (Prometheus text, OPERATIONS.md §6.3) is served on the app port and is not public
+# (ADR-0055). Enabling the ServiceMonitor needs the Prometheus Operator's CRDs in the cluster. The
+# scrape credential is taken from `envSecret.METRICS_TOKEN` — the same Secret entry that sets
+# METRICS_TOKEN in the Pod — so put the token there; without it, set `env.METRICS_PUBLIC: "1"`
+# or every scrape is answered 401. See chart README "Prometheus Operator (ServiceMonitor)".
+metrics:
+  serviceMonitor:
+    enabled: false
+    # Prometheus duration strings (units y, w, d, h, m, s, ms, largest first). scrapeTimeout must not
+    # exceed interval — the chart refuses to render it otherwise.
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels — typically what your Prometheus's serviceMonitorSelector matches on, e.g.
+    # `release: kube-prometheus-stack`.
+    labels: {}
+    annotations: {}
+    honorLabels: false
+    # Passed through as written to the endpoint's relabelings / metricRelabelings.
+    relabelings: []
+    metricRelabelings: []
+
+# -----------------------------------------------------------------------------------------------
 # Helm test
 # -----------------------------------------------------------------------------------------------
 tests:

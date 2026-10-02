@@ -62,6 +62,24 @@ and point `image.repository`/`image.tag` at it.
 After install, `helm test ctx` runs a hook Pod that calls `GET /api/health` on the Service and prints
 the response — the same check described under "No `wget`/`curl` in the image" below.
 
+## Chart version and `appVersion`
+
+**The chart's version is independent of the product's version** (decision record ADR-0092). The two
+numbers move for different reasons and do not have to match:
+
+- `version` in `Chart.yaml` is the chart's own SemVer. It changes when anything under
+  `charts/contextator/` changes, and only then — patch for a fix, minor for a new value, major for a
+  removed or renamed value or one the schema newly rejects. A product release that leaves the chart
+  alone publishes no new chart version.
+- `appVersion` is the application release the chart was last tested with. It is informational: it is
+  not an image default, and `image.tag` stays required. Chart `1.1.0` with `appVersion: "0.2.0"` and
+  an image tag of `0.2.1-slim` is a normal combination, as long as the chart's values cover what that
+  image needs.
+
+When you upgrade, pin the chart with `helm upgrade --version <chart version>` and the product with
+`image.tag`; read the chart's changes from its own version, not from the product's. See "Publishing"
+below for how and when a chart version is published.
+
 ## Replicas
 
 **Not a value you can set.** This chart always deploys exactly one Pod (`replicas: 1`, hardcoded in
@@ -167,12 +185,223 @@ want the key to survive `helm uninstall` (see "Uninstall").
   value); the first command prints the name either way.
 
   When it reports nothing left to convert, remove `SECRET_KEY_PREVIOUS` again and let the Pod restart —
-  that removal is what retires the old key. The root `README.md` (`SECRET_KEY` and
+  that removal is what retires the old key. "Rotating `SECRET_KEY`" below gives the same steps in
+  order, with the backups around them. The root `README.md` (`SECRET_KEY` and
   `SECRET_KEY_PREVIOUS`, and its security section) describes the rotation in full; the decision record
   is ADR-0075.
 - **The old key is gone.** Nothing can decrypt what it wrote. Pin a new key with `existingSecret` so
   it does not happen again, then reconnect each private source by entering its token again in the
   dashboard. Public sources and already-indexed content are not affected.
+
+## Secrets from External Secrets Operator
+
+The chart never needs a secret in its values: `database.existingSecret`, `secretKey.existingSecret`
+and `envSecret` each point at a Secret you own. With the
+[External Secrets Operator](https://external-secrets.io) (ESO), that Secret is materialised from your
+secret store, and the chart only names it. One `ExternalSecret` can carry every value the app reads
+from a Secret:
+
+```yaml
+apiVersion: external-secrets.io/v1   # v1beta1 on ESO releases older than v0.17
+kind: ExternalSecret
+metadata:
+  name: contextator
+  namespace: <namespace>              # the release's namespace
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: <your-store>                # e.g. a Vault, AWS Secrets Manager or GCP Secret Manager store
+  target:
+    name: contextator                 # the Secret ESO creates and keeps in sync
+    creationPolicy: Owner
+  data:
+    - secretKey: DATABASE_URL
+      remoteRef: { key: contextator/prod, property: database_url }
+    - secretKey: SECRET_KEY
+      remoteRef: { key: contextator/prod, property: secret_key }
+    - secretKey: METRICS_TOKEN        # only if you scrape /metrics (see "Prometheus Operator")
+      remoteRef: { key: contextator/prod, property: metrics_token }
+```
+
+```yaml
+# values file — no secret value appears in it
+database:
+  existingSecret: contextator
+  existingSecretKey: DATABASE_URL
+secretKey:
+  existingSecret: contextator
+  existingSecretKey: SECRET_KEY
+envSecret:
+  METRICS_TOKEN:
+    secretName: contextator
+    secretKey: METRICS_TOKEN
+```
+
+With `database.existingSecret` and `secretKey.existingSecret` set, this chart renders no Secret of its
+own, so a `helm template`-based GitOps sync cannot change the key either (see "GitOps and `helm
+template`" above). Create the `ExternalSecret` before the release: a Pod whose `secretKeyRef` points at
+a Secret that does not exist yet stays in `CreateContainerConfigError` until it does.
+
+Two things ESO does not do for you:
+
+- **The Pod does not reload a changed Secret.** These values reach the app as environment variables,
+  read once at start. After ESO syncs a new value, restart the Pod
+  (`kubectl -n <namespace> rollout restart deploy/<deployment-name>`), or let a reloader controller do
+  it.
+- **Changing `SECRET_KEY` in the store is a key rotation**, and done on its own it is the "key has
+  already changed" case above: stored source tokens stop decrypting at the next restart. Change it only
+  as part of the procedure in "Rotating `SECRET_KEY`" below, which adds the old key as
+  `SECRET_KEY_PREVIOUS` in the same step.
+
+## Taking a backup
+
+**The backup and restore commands, and the order they run in, live in one place: the product
+README's [Data and persistence](https://github.com/Contextator/Contextator/blob/main/README.md#data-and-persistence) section** — `npm run backup`,
+`npm run restore … --check`, `npm run restore`, and the application restart that follows a restore.
+They are not repeated here (decision record ADR-0073: a procedure that overwrites a live database has
+one transcript). This section covers only what is different on Kubernetes: where those commands can
+run, and which PostgreSQL client they need.
+
+**Not in the chart's Pod.** `npm run backup` and `npm run restore` need the PostgreSQL client programs
+(`pg_dump`, `pg_restore`), and the `*-slim` image this chart deploys has none: `kubectl exec … npm run
+backup` stops with `no_pg_tools` and writes nothing. A `pg_dump` taken by your database provider is a
+copy of the database alone — no upload trees, and not an archive `npm run restore` accepts — so it
+does not stand in for one.
+
+**In a throwaway copy of the running Pod, on the default image.** The default image
+(`contextator/contextator:<version>`, the same `<version>` as your `-slim` tag, without the suffix)
+carries the client programs. A copy of the Pod has the same `DATABASE_URL`, `SECRET_KEY` (and
+`SECRET_KEY_PREVIOUS`, if set), the rest of the environment and the same data PVC, and runs on the same
+node so it can mount that `ReadWriteOnce` volume:
+
+```sh
+NS=<namespace>
+# Only a Running Pod of this release: a finished or failed `helm test` Pod carries the same labels.
+POD=$(kubectl -n "$NS" get pod \
+  -l app.kubernetes.io/instance=<release>,app.kubernetes.io/name=contextator \
+  --field-selector=status.phase=Running \
+  -o jsonpath='{.items[0].metadata.name}')
+
+kubectl -n "$NS" debug "$POD" --copy-to=contextator-backup --same-node \
+  --set-image='contextator=contextator/contextator:<version>' \
+  --container=contextator -- sleep infinity
+kubectl -n "$NS" wait --for=condition=Ready pod/contextator-backup --timeout=5m
+```
+
+- `-- sleep infinity` replaces the image's entrypoint, so the copy starts **no** second application
+  server and no embedded PostgreSQL; it only holds the environment and the volume for `exec`.
+- `kubectl debug --copy-to` drops the Pod's labels and probes by default, so the copy is not behind
+  the Service and nothing restarts it.
+- If you mirror images into your own registry, mirror the default image of that version as well, and
+  use that reference in `--set-image`.
+- Delete the copy (`kubectl -n "$NS" delete pod contextator-backup`) as soon as the archive is off the
+  PVC, and make a new copy for every backup — a copy carries the environment of the Pod at the moment
+  it was made.
+
+**PostgreSQL 17 and later: the client must match the server's major version.** The default image
+ships the PostgreSQL **16** client, and this chart supports PostgreSQL 16 and later. `pg_dump` refuses
+a newer server (`aborting because of server version mismatch`), and `pg_restore` 16 cannot read a dump
+`pg_dump` 17 wrote (`unsupported version (1.16) in file header`). So before running anything in the
+copy, read the server's major version and, for 17 and later, install the matching client from the
+PostgreSQL apt repository the image already has configured:
+
+```sh
+# Server major version: 160004 -> 16, 170011 -> 17.
+PG_MAJOR=$(kubectl -n "$NS" exec contextator-backup -- \
+  sh -c 'psql "$DATABASE_URL" -XAtc "SHOW server_version_num"' | awk '{ print int($1 / 10000) }')
+
+if [ "$PG_MAJOR" -gt 16 ]; then
+  kubectl -n "$NS" exec contextator-backup -- sh -c \
+    "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends postgresql-client-$PG_MAJOR"
+fi
+```
+
+Then run each command the product README gives inside the copy with that client first on `PATH`:
+`kubectl -n "$NS" exec contextator-backup -- sh -c "PATH=/usr/lib/postgresql/$PG_MAJOR/bin:\$PATH <command>"`
+(for 16 that directory is the image's own client). For a restore, `PG_MAJOR` is the major version of
+the server you restore **into**.
+
+- Installing the 17+ client needs egress from the copy to `apt.postgresql.org` (and the Debian
+  mirrors), and root in the container with a writable root filesystem — the chart's defaults
+  (`podSecurityContext: {}`, no `readOnlyRootFilesystem`). If your cluster blocks either, build an
+  image `FROM contextator/contextator:<version>` that installs `postgresql-client-<major>`, push it to
+  your registry, and use it in `--set-image`; the `PATH` prefix stays the same.
+- `psql` reads `DATABASE_URL` as a libpq connection URI. If yours carries query parameters libpq does
+  not know, read the version with any client instead (`SHOW server_version_num`) and set `PG_MAJOR` by
+  hand. `pg_dump --version` in the copy must report the server's major version.
+
+**Translating the product README's commands.** They are written for Docker; on Kubernetes:
+
+| Product README | On Kubernetes |
+|---|---|
+| `docker exec contextator <command>` | `kubectl -n "$NS" exec contextator-backup -- sh -c "PATH=/usr/lib/postgresql/$PG_MAJOR/bin:\$PATH <command>"` |
+| `docker cp` to or from the container | `kubectl -n "$NS" cp` to or from `contextator-backup:<path>` |
+| `docker compose restart contextator` (after a restore) | `kubectl -n "$NS" rollout restart deployment/<deployment-name>` — the application's Deployment, not the copy |
+
+## Rotating `SECRET_KEY`
+
+The app holds two keys during a rotation (decision record ADR-0075): `SECRET_KEY` is the key every
+value is **written** with, and `SECRET_KEY_PREVIOUS` is **read-only** — it exists to open what the
+retiring key wrote. Both must be at least 32 characters, `SECRET_KEY_PREVIOUS` is refused when
+`SECRET_KEY` is unset, and it is refused when it equals `SECRET_KEY` (`src/config.ts`): the Pod exits
+at start with that message rather than running with a keyring that cannot be what you meant. The
+instance keeps serving throughout; nothing here needs a maintenance window.
+
+The steps below assume both keys live in one Secret you own — `contextator` from the ESO example
+above, or one created with `kubectl` — and that `secretKey.existingSecret` points at it. If the chart
+generated the current key, first copy its value out of `<release>-contextator-secret-key` into that
+Secret, so the chart no longer owns the key you are about to change. `B1`–`B3` are the backup steps of
+ADR-0093; leave none of them out.
+
+1. **B1 — back up under the current key**, before anything changes. Take a backup as
+   [Taking a backup](#taking-a-backup) describes, with the archive named
+   `contextator-pre-rotation-<date>.tar.gz`. It runs from a copy of the Pod, because the `-slim`
+   image cannot take one (`no_pg_tools`). Do not go on to step 2 without the archive in hand.
+2. **Make the current key the previous one, and put a new key in its place — in one change.** In the
+   Secret (or in the secret store, for ESO): `SECRET_KEY_PREVIOUS` = the value `SECRET_KEY` has now,
+   `SECRET_KEY` = a new value (`openssl rand -hex 32`). Then expose the new entry to the Pod and roll it:
+
+   ```yaml
+   envSecret:
+     SECRET_KEY_PREVIOUS:
+       secretName: contextator
+       secretKey: SECRET_KEY_PREVIOUS
+   ```
+
+   Make sure the Secret already carries both keys before this upgrade (with ESO: after it has synced),
+   or the new Pod waits in `CreateContainerConfigError`. `helm upgrade` with that value restarts the
+   Pod because the Deployment changed. If you changed only
+   the Secret, run `kubectl rollout restart` as well (see the ESO section above).
+3. **Convert what is stored.** Re-runnable, safe to interrupt, safe to run twice:
+
+   ```sh
+   kubectl -n <namespace> exec deploy/<deployment-name> -- npm run rotate-secret
+   ```
+
+   It exits `0` when nothing is left under the old key and `1` when something is; it prints counts and
+   row ids, never a token, a key or a ciphertext. A row it reports as undecryptable was written under a
+   key that is no longer in the environment: re-enter that source's credential in the dashboard, run
+   the command again, and do not go on to step 4 until it exits `0`.
+4. **B2 — back up under the new key**, only after step 3 exited `0` and before step 5. This is the
+   oldest archive the rotated instance can restore. Take it as
+   [Taking a backup](#taking-a-backup) describes, named
+   `contextator-post-rotation-<date>.tar.gz`, from a **new** copy of the Pod — one made after step 2's
+   restart, so it runs with the new `SECRET_KEY`.
+5. **Retire the old key.** Remove the `envSecret.SECRET_KEY_PREVIOUS` entry and `helm upgrade` — the
+   Pod restarts without the variable — and only then delete `SECRET_KEY_PREVIOUS` from the Secret (a
+   `secretKeyRef` to a key that is gone would keep the Pod from starting). Removing the variable is what
+   actually retires the key; until then the running instance still opens everything it wrote.
+6. **B3 — keep the retired key**, labelled and not beside the archives, until the retention of the
+   oldest pre-rotation archive has expired; only then discard it. From step 2 on, `restore` into this
+   instance refuses a pre-rotation archive that holds source credentials, because it compares the
+   archive's key check value with `SECRET_KEY` only; restoring such an archive means setting
+   `SECRET_KEY` back to the retired key — a rollback to the pre-rotation instance, not a step of the
+   rotation.
+
+The product's operations manual (`OPERATIONS.md` §5.20, in the project's `.ssot/` decision records)
+describes the same procedure for the Docker install and explains each step; decision records ADR-0075
+and ADR-0093 are the source of it.
 
 ## Ingress and reverse proxies
 
@@ -246,6 +475,58 @@ zero restarts — the Pod was never killed, only taken out of rotation and put b
 The startup probe's generous `failureThreshold` (30 × 10s ≈ 5 minutes) exists to cover a cold embedding
 model download from Hugging Face on first start; see "Resource sizing" below for the measured figure.
 
+## Prometheus Operator (ServiceMonitor)
+
+The app serves Prometheus metrics at `GET /metrics`, on the same port as everything else (the Service's
+`http` port). Set `metrics.serviceMonitor.enabled: true` to render a `ServiceMonitor`
+(`monitoring.coreos.com/v1`) that scrapes it. It is off by default because the kind exists only where
+the Prometheus Operator's CRDs are installed — enabling it on a cluster without them fails the install
+with `no matches for kind "ServiceMonitor"`.
+
+`/metrics` is **not public** (decision record ADR-0055): without a credential it answers `401`. The
+credential meant for a scraper is `METRICS_TOKEN` (16+ characters, `openssl rand -hex 32`), which reaches
+`/metrics` and nothing else. Put it in a Secret and reference it through `envSecret`; the
+ServiceMonitor reads the bearer token from **that same entry**, so the Pod and the scraper cannot
+disagree:
+
+```sh
+kubectl -n <namespace> create secret generic contextator-metrics \
+  --from-literal=METRICS_TOKEN="$(openssl rand -hex 32)"
+```
+
+```yaml
+envSecret:
+  METRICS_TOKEN:
+    secretName: contextator-metrics
+    secretKey: METRICS_TOKEN
+metrics:
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 10s
+    labels:
+      release: kube-prometheus-stack   # whatever your Prometheus's serviceMonitorSelector matches
+```
+
+The rendered endpoint carries `authorization: {type: Bearer, credentials: <that Secret key>}`. The
+Secret has to be in the release's namespace — the ServiceMonitor is created there and the Prometheus
+Operator reads the credential from the ServiceMonitor's own namespace — and your Prometheus must be
+allowed to select ServiceMonitors from that namespace (`serviceMonitorNamespaceSelector`).
+
+Without `envSecret.METRICS_TOKEN`, no `authorization` block is rendered. That only works when the app
+answers `/metrics` with no credential at all, i.e. with `env.METRICS_PUBLIC: "1"` — meant for a
+deployment where something else (a NetworkPolicy, a proxy) already decides who reaches the port.
+Otherwise every scrape gets `401` and the target shows as down. `METRICS_TOKEN` set through plain
+`env` is not picked up by the ServiceMonitor; use `envSecret`.
+
+Other settings: `annotations`, `honorLabels`, and `relabelings` / `metricRelabelings`, which are passed
+through to the endpoint as written. `interval` and `scrapeTimeout` are Prometheus durations (`30s`,
+`1m30s`). A `scrapeTimeout` longer than `interval` is refused at render time: the Prometheus Operator
+would drop that endpoint without failing the install, and the target would simply never appear in
+Prometheus. `/metrics` answers `200` even while the
+database is down — `contextator_db_up` is the series that says so — and the operations manual
+(`OPERATIONS.md` §6.3) lists what each metric means.
+
 ## Security context / running as root
 
 The container **must** start as uid 0. The image's own entrypoint checks `id -u = 0`, refuses to run
@@ -313,7 +594,8 @@ same database.
 
 See `values.yaml` itself — every setting is documented inline there, which is the chart's actual
 contract. The sections above explain the *why* behind the values that are not self-explanatory
-(`database.*`, `secretKey.*`, `resources.*`, `probes.*`, `securityContext`); everything else
+(`database.*`, `secretKey.*`, `resources.*`, `probes.*`, `securityContext`,
+`metrics.serviceMonitor.*`); everything else
 (`service`, `ingress`, `env`, `envSecret`, `extraVolumes`, …) follows ordinary Helm chart conventions.
 
 ## Strict values schema
@@ -328,8 +610,11 @@ type, so a numeric-looking string (an image tag such as `1.2`, an `env` value su
 
 Structures Kubernetes itself leaves open are bounded by their type only and accept any inner shape:
 `resources`, `affinity`, `tolerations`, `podSecurityContext`, `securityContext`, `extraVolumes`,
-`extraVolumeMounts`, and the string-to-string maps `nodeSelector`, `podAnnotations`, `podLabels` and
-every `annotations`. `env` accepts any variable name with a string value; `envSecret` accepts any name,
+`extraVolumeMounts`, `metrics.serviceMonitor.relabelings` / `metricRelabelings`, and the
+string-to-string maps `nodeSelector`, `podAnnotations`, `podLabels`, `metrics.serviceMonitor.labels` and
+every `annotations`. `metrics.serviceMonitor.interval` and `scrapeTimeout` must be Prometheus
+durations with their units in descending order (`y`, `w`, `d`, `h`, `m`, `s`, `ms` — `30s`, `1m30s`),
+the format the Prometheus Operator CRD itself accepts. `env` accepts any variable name with a string value; `envSecret` accepts any name,
 but each entry must be exactly `{secretName, secretKey}`.
 
 Two application settings have typed keys under `config` rather than going through `env`, so the schema

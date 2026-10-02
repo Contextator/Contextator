@@ -106,3 +106,16 @@ carries no PostgreSQL of its own). Mirrors docker-compose.slim.yml's
 {{- fail "contextator: set database.url (a postgres:// connection string to an external, pgvector-enabled PostgreSQL) or database.existingSecret — the slim image this chart deploys carries no database of its own (ADR-0069). See charts/contextator/README.md." -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+A Prometheus duration ("1m30s", "500ms") in milliseconds, as a string — callers `atoi` it. The format
+is already enforced by values.schema.json; this only sums the parts so two durations can be compared.
+*/}}
+{{- define "contextator.durationMs" -}}
+{{- $units := dict "ms" 1 "s" 1000 "m" 60000 "h" 3600000 "d" 86400000 "w" 604800000 "y" 31536000000 -}}
+{{- $total := 0 -}}
+{{- range regexFindAll "[0-9]+(ms|y|w|d|h|m|s)" . -1 -}}
+{{- $total = add $total (mul (regexFind "^[0-9]+" . | atoi) (get $units (regexReplaceAll "^[0-9]+" . ""))) -}}
+{{- end -}}
+{{- $total -}}
+{{- end -}}

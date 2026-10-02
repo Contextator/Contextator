@@ -1,0 +1,64 @@
+{{- /*
+Optional Prometheus Operator ServiceMonitor for GET /metrics (OPERATIONS.md §6.3, ADR-0055).
+
+Off by default: the ServiceMonitor kind exists only where the Prometheus Operator's CRDs are
+installed, and rendering it elsewhere fails the install. The scrape goes to the Service's `http`
+port — /metrics is served by the application on the same port as everything else.
+
+/metrics is not public. The bearer credential is read from the same Secret entry the Pod gets
+METRICS_TOKEN from (`envSecret.METRICS_TOKEN`), so the scraper and the app cannot disagree about
+it. Without that entry no `authorization` block is rendered, which only works when the app runs
+with METRICS_PUBLIC=1 (`env.METRICS_PUBLIC`); otherwise every scrape is answered 401. See
+charts/contextator/README.md "Prometheus Operator (ServiceMonitor)".
+*/ -}}
+{{- with .Values.metrics.serviceMonitor }}
+{{- if .enabled }}
+{{- $token := get $.Values.envSecret "METRICS_TOKEN" }}
+{{- /* The Prometheus Operator drops an endpoint whose timeout exceeds its interval: the install succeeds and the target never appears. */}}
+{{- if gt (include "contextator.durationMs" .scrapeTimeout | atoi) (include "contextator.durationMs" .interval | atoi) }}
+{{- fail (printf "contextator: metrics.serviceMonitor.scrapeTimeout (%s) is longer than metrics.serviceMonitor.interval (%s); the Prometheus Operator would drop this endpoint and the target would never appear. See charts/contextator/README.md \"Prometheus Operator (ServiceMonitor)\"." .scrapeTimeout .interval) }}
+{{- end }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "contextator.fullname" $ }}
+  labels:
+    {{- include "contextator.labels" $ | nindent 4 }}
+    {{- with .labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "contextator.selectorLabels" $ | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ $.Release.Namespace }}
+  endpoints:
+    - port: http
+      path: /metrics
+      scheme: http
+      interval: {{ .interval | quote }}
+      scrapeTimeout: {{ .scrapeTimeout | quote }}
+      honorLabels: {{ .honorLabels | default false }}
+      {{- if $token }}
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ $token.secretName }}
+          key: {{ $token.secretKey }}
+      {{- end }}
+      {{- with .relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

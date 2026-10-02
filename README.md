@@ -474,15 +474,22 @@ PostgreSQL initialised and indexed fine on a `C:/…` directory. Named volumes r
 the database on Docker Desktop; if `initdb` ever reports permission errors on a host directory, switch
 that mount back to a volume.
 
-**Everything from here to the end of this section is about the embedded PostgreSQL.** On an
-installation that set `DATABASE_URL` ([Bringing your own PostgreSQL](#bringing-your-own-postgresql))
-there is no cluster in the container to dump: the three commands below reach nothing, the `pgdata`
-volume is empty, and backing that database up — and restoring it, and watching it — is whatever
-already covers the server it runs on. The two bullets below about what a dump does *not* contain
-apply on both topologies, and so does the paragraph about `/data`.
+**On an installation that set `DATABASE_URL`** ([Bringing your own PostgreSQL](#bringing-your-own-postgresql))
+the database is a server this image does not operate. `npm run backup` and `npm run restore` still
+work: they reach that server through `DATABASE_URL`, because the upload trees in the archive are in no
+other backup — and `backup` says, in its output and in the archive's manifest, that the server's own
+backup regime is the one that matters. Run them from the default image: the `-slim` image has no
+`pg_dump` and stops with `no_pg_tools`. The default image's client is PostgreSQL **16**, so against a
+17+ server `pg_dump` stops with `server version mismatch` (and `pg_restore` 16 cannot read a 17 dump):
+install `postgresql-client-<major>` for the server's major version in the container and put
+`/usr/lib/postgresql/<major>/bin` first on `PATH` — the Helm chart's
+[Taking a backup](charts/contextator/README.md#taking-a-backup) shows how. What does **not** apply
+on that topology is everything about the embedded cluster: the three by-hand commands further down (`psql`, `pg_dump`, `pg_restore` as user
+`contextator`) reach nothing, and the `pgdata` volume is empty. The two bullets below about what a
+dump does *not* contain apply on both topologies, and so does the paragraph about `/data`.
 
-PostgreSQL listens on `127.0.0.1` inside the container only and is not published, so everything here
-goes through the container.
+The embedded PostgreSQL listens on `127.0.0.1` inside the container only and is not published, so
+everything here goes through the container.
 
 **One command takes the backup, because a `pg_dump` is not the installation:**
 
