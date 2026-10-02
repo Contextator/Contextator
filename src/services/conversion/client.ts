@@ -52,6 +52,12 @@ export interface ConversionSettings {
   /** How long a thread with nothing to do is kept before it is dropped. */
   idleMs: number;
   /**
+   * The thread's old-generation heap cap in MiB (`CONVERSION_WORKER_MAX_HEAP_MB`, ADR-0097). Unset is no
+   * cap — ADR-0071's behaviour unchanged. A thread that crosses it is the ordinary "thread died" path,
+   * with a reason that names the limit rather than a bare exit.
+   */
+  maxHeapMb?: number;
+  /**
    * The worker entry, for tests that need a thread which crashes or never answers. Production has one
    * entry and does not pass this.
    */
@@ -92,6 +98,14 @@ interface Pending {
  */
 const AFTERWARDS =
   'A file that was already indexed keeps the document it had until its bytes change or the project is rebuilt; one that was not is converted again on the next run.';
+
+/** The refusal for a file whose conversion crossed `CONVERSION_WORKER_MAX_HEAP_MB` (ADR-0097). */
+function heapLimitRefusal(maxHeapMb: number): (relativePath: string) => string {
+  return (relativePath) =>
+    `"${relativePath}" was not converted: converting it needed more memory than the conversion thread's heap limit of ` +
+    `${maxHeapMb} MiB (CONVERSION_WORKER_MAX_HEAP_MB). The thread was replaced, so the run carried on and nothing else was affected; ` +
+    `raise the limit if a file this size is genuinely a document, or remove it from the source. ${AFTERWARDS}`;
+}
 
 function seconds(ms: number): string {
   return ms % 1000 === 0 ? `${ms / 1000}s` : `${(ms / 1000).toFixed(1)}s`;
@@ -347,12 +361,25 @@ export class ConversionService {
 
   #ensureWorker(): Worker {
     if (this.#worker) return this.#worker;
-    const worker = new Worker(this.#entry, { execArgv: FROM_SOURCE ? ['--import', 'tsx'] : [] });
+    const maxHeapMb = this.#settings.maxHeapMb;
+    const worker = new Worker(this.#entry, {
+      execArgv: FROM_SOURCE ? ['--import', 'tsx'] : [],
+      // Absent unless the operator set one (ADR-0097): no cap is the default, not a number we chose.
+      ...(maxHeapMb ? { resourceLimits: { maxOldGenerationSizeMb: maxHeapMb } } : {}),
+    });
     worker.on('message', (reply: ConversionReply) => this.#settle(reply));
     // A reply that would not deserialize tells us nothing about which request it belonged to, so it is
     // handled the way a dead thread is rather than guessed at.
     worker.on('messageerror', (err) => this.#replaceWorker(`it sent a message that could not be read: ${err.message}`));
-    worker.on('error', (err) => this.#replaceWorker(`it failed: ${err.message}`));
+    worker.on('error', (err) => {
+      // Node reports a thread stopped at its `resourceLimits` with this code. It has to read differently
+      // from a crash or a timeout (ADR-0097): it is the one refusal an operator fixes with a setting.
+      if ((err as NodeJS.ErrnoException).code === 'ERR_WORKER_OUT_OF_MEMORY' && maxHeapMb) {
+        this.#replaceWorker(`it reached its heap limit of ${maxHeapMb} MiB`, heapLimitRefusal(maxHeapMb));
+        return;
+      }
+      this.#replaceWorker(`it failed: ${err.message}`);
+    });
     worker.on('exit', (code) => {
       if (this.#worker === worker) this.#replaceWorker(`it exited with code ${code}`);
     });
@@ -380,7 +407,7 @@ export class ConversionService {
    * process; now it fails the files it was holding, by name, with the reason ending up on the owning
    * source, and the dashboard and `/mcp` never noticed.
    */
-  #replaceWorker(reason: string): void {
+  #replaceWorker(reason: string, refusal?: (relativePath: string) => string): void {
     const worker = this.#worker;
     this.#worker = null;
     this.#sessions.clear();
@@ -389,19 +416,21 @@ export class ConversionService {
     // each reported by `indexer.ts` as it refuses them, and an operator reading a log full of refused
     // documents has nothing telling them the thread underneath went away.
     if (worker) this.#settings.log?.warn({ reason, files: this.#pending.size }, 'conversion thread replaced');
-    this.#failAll(reason);
+    this.#failAll(reason, refusal);
     void worker?.terminate();
   }
 
-  #failAll(reason: string): void {
+  #failAll(reason: string, refusal?: (relativePath: string) => string): void {
     const pending = [...this.#pending.values()];
     this.#pending.clear();
     for (const one of pending) {
       clearTimeout(one.timer);
       one.reject(
         new DocumentExtractionError(
-          `"${one.relativePath}" could not be converted: the conversion thread stopped before it answered — ${reason}. ` +
-            `Conversion runs off the server's own thread, so nothing else was affected. ${AFTERWARDS}`,
+          refusal
+            ? refusal(one.relativePath)
+            : `"${one.relativePath}" could not be converted: the conversion thread stopped before it answered — ${reason}. ` +
+                `Conversion runs off the server's own thread, so nothing else was affected. ${AFTERWARDS}`,
         ),
       );
     }

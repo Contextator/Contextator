@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import type { DocumentSourceRow } from '../db/schema.js';
 import type { ImportStats } from '../services/archives.js';
+import { assertDiskSpace } from '../services/disk-space.js';
 import { ConflictError, NotFoundError, ValidationError, getProjectById } from '../services/projects.js';
 import { getSource } from '../services/sources.js';
 
@@ -56,12 +57,16 @@ export const uploadRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
   app.post('/api/projects/:id/sources/:sid/uploads', async (req, reply) => {
     const { id, sid } = SourceParams.parse(req.params);
     const source = await requireUploadSource(id, sid);
+    await assertDiskSpace(config.DATA_DIR, config.DATA_DIR_MIN_FREE_BYTES);
     return reply.code(201).send({ session: await uploads.createSession(source) });
   });
 
   app.post('/api/projects/:id/sources/:sid/uploads/:session/files', async (req) => {
     const { id, sid, session } = SessionParams.parse(req.params);
     const source = await requireUploadSource(id, sid);
+    // Checked per request and not only when the session opens: a folder upload is many requests, and the
+    // disk can fill between the first and the last. Refused before a byte of this request is written.
+    await assertDiskSpace(config.DATA_DIR, config.DATA_DIR_MIN_FREE_BYTES);
     const totals: ImportStats = { files: 0, skipped: 0, bytes: 0 };
     const errors: string[] = [];
     for await (const part of req.parts()) {

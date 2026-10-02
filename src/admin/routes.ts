@@ -9,6 +9,7 @@ import { pingDb } from '../db/client.js';
 import type { ProjectRow } from '../db/schema.js';
 import { keyringOf, SecretDecryptError, SecretKeyMissingError } from '../services/crypto.js';
 import { removeProjectDir } from '../services/data-dir.js';
+import { assertRebuildDiskSpace, InsufficientDiskError, readDiskSpace } from '../services/disk-space.js';
 import { ForbiddenError, PromotionRefusedError, RateLimitedError, SearchUnavailableError, UnauthorizedError } from '../services/errors.js';
 import { PathNotAllowedError } from '../services/fs-scan.js';
 import { latestIndexRun, listIndexRuns } from '../services/index-runs.js';
@@ -137,6 +138,12 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     }
     if (err instanceof SearchUnavailableError) return reply.code(409).send({ error: err.code, message: err.message });
     if (err instanceof PromotionRefusedError) return reply.code(409).send({ error: err.code, message: err.message });
+    // `507 Insufficient Storage` rather than a `5xx` that reads as a crash: nothing broke, the request
+    // was refused before it wrote anything, and the message names the remedy.
+    if (err instanceof InsufficientDiskError) {
+      req.log.warn({ freeBytes: err.freeBytes, minFreeBytes: err.minFreeBytes }, 'refused for lack of disk space');
+      return reply.code(507).send({ error: err.code, message: err.message });
+    }
     const e = err as { statusCode?: number; message?: string };
     const status = typeof e.statusCode === 'number' ? e.statusCode : 500;
     if (status >= 500) req.log.error({ err }, 'admin api error');
@@ -186,6 +193,23 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
    * "something is wrong" into "the database is". `ok` reports the database, not the process — a
    * process that is gone answers nothing at all rather than answering `ok: false`.
    */
+  /**
+   * `DATA_DIR`'s file system next to the threshold uploads are refused below. Not the database's disk,
+   * which is where a forced re-index writes (see `assertRebuildDiskSpace`).
+   * Detail only, and it does not move `ok` or the status code: those report the database
+   * ([ADR-0032](../../.ssot/ADR.md#adr-0032)), and a full disk is a reason to refuse writes, not to have
+   * an orchestrator restart a process that is serving searches fine. `null` when statfs cannot answer.
+   */
+  const diskDetail = async () => {
+    const minFreeBytes = config.DATA_DIR_MIN_FREE_BYTES ?? 0;
+    try {
+      const { freeBytes, totalBytes } = await readDiskSpace(config.DATA_DIR);
+      return { freeBytes, totalBytes, minFreeBytes, ok: minFreeBytes <= 0 || freeBytes >= minFreeBytes };
+    } catch {
+      return null;
+    }
+  };
+
   app.get('/api/health', async (req, reply) => {
     const principal = req.principal;
     const dbUp = await pingDb(db);
@@ -239,6 +263,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         suggestedChunkMaxTokens: ctx.chunkBudget.warning?.suggestedChunkMaxTokens ?? null,
       },
       sessions: sessions.stats(),
+      disk: await diskDetail(),
       uploads: {
         maxFileBytes: config.UPLOAD_MAX_FILE_BYTES,
         maxFilesPerRequest: config.UPLOAD_MAX_FILES_PER_REQUEST,
@@ -488,7 +513,14 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     const { force } = ReindexQuery.parse(req.query);
     const project = await getProjectById(db, id);
     if (!project) throw new NotFoundError('Project not found');
-    const job = indexer.enqueue(id, { force: force === 'true' || force === '1' });
+    const forced = force === 'true' || force === '1';
+    // A forced run writes a whole second generation as database rows beside the live one (ADR-0039).
+    // With the embedded database its data directory's disk is checked here, so a nearly full disk is a
+    // refusal the dashboard shows. With an external database (DATABASE_URL) the database's disk cannot
+    // be measured from this process and no check is made: the run can still fail when that disk fills.
+    // The indexer checks again when the run starts, for the queued paths that never pass through here.
+    if (forced) await assertRebuildDiskSpace(config);
+    const job = indexer.enqueue(id, { force: forced });
     return reply.code(202).send({ job });
   });
 

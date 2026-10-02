@@ -23,6 +23,32 @@ ships, that stops.
   `com.example.app:/callback`; `web` may register `https` on a non-loopback host only and is answered
   `invalid_redirect_uri` otherwise. An unknown value is `invalid_client_metadata`. A registration that
   leaves the field out is checked exactly as before.
+- **Uploads, and forced re-indexes on the embedded database, are refused on a nearly full disk.**
+  Below `DATA_DIR_MIN_FREE_BYTES` free (default 512 MiB, `0` turns it off) the request answers `507`
+  with `error: "insufficient_disk"` and a message naming both figures and the disk. Uploads — the
+  request that opens a session and every request that adds files to it — are checked against
+  `DATA_DIR`'s file system. A forced re-index writes its new generation into the database, not into
+  `DATA_DIR`, so it is checked against the embedded PostgreSQL's data directory; a rebuild that starts
+  from the queue (a queued force, a model change) is checked again when it starts and fails the same
+  way, leaving the live index as it was and the message in the project's error. **With an external
+  database (`DATABASE_URL`) the database's disk cannot be measured from Contextator, so forced
+  re-indexes are not checked at all** — watch that disk where the database runs. The check is
+  advisory: passing it means the disk was not already below the threshold, not that the work will
+  fit. `/api/health` reports `DATA_DIR`'s `disk: { freeBytes, totalBytes, minFreeBytes, ok }` to a
+  signed-in caller; it does not change `ok` or the status code, which still report the database.
+- **`CONVERSION_WORKER_MAX_HEAP_MB` caps the conversion thread's heap (opt-in).** Unset — the
+  default — means no cap, as before. When set, a file whose conversion needs more than that many MiB
+  becomes one refused document whose reason names the heap limit, distinct from a timeout or a crash;
+  the thread is replaced and the run carries on with the next file (ADR-0097).
+
+### Fixed
+
+- **A run cut short by a restart no longer leaves its project stuck in `indexing`.** On startup every
+  project the previous process left indexing gets an `interrupted` row in its run history, leaves the
+  `indexing` state — which was blocking source edits and deletion — and an **incremental** run is
+  queued for it in the background lane, whatever the lost run was: if it was a forced re-index,
+  force it again. The dashboard's history shows the row as interrupted. A project whose recovery
+  fails is logged and does not stop the others from being recovered.
 
 ## [0.2.0] - 2026-09-25
 

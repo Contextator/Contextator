@@ -7,6 +7,7 @@ import { chunkReserveTokens } from './chunk-budget.js';
 import { chunkMarkdown, embeddingText } from './chunker.js';
 import { ConversionService } from './conversion/client.js';
 import { checkFileSize, DocumentExtractionError, readFailure } from './doc-types/index.js';
+import { assertRebuildDiskSpace, InsufficientDiskError } from './disk-space.js';
 import type { EmbeddingProvider } from './embeddings/provider.js';
 import { expandsToManyDocuments, allowedExtensionsFor, type Flavor } from './flavors.js';
 import { readAndHash, walkMarkdown } from './fs-scan.js';
@@ -79,6 +80,8 @@ export interface JobState {
   startedAt?: string;
   finishedAt?: string;
   error?: string;
+  /** Machine-readable reason next to `error`, where there is one: `insufficient_disk`. */
+  errorCode?: string;
 }
 
 /** Where a queued job stands: `position` 0 = next up; `runningProjectId` = the job it waits for, if any. */
@@ -108,7 +111,7 @@ export interface IndexerDeps {
     | 'CONVERSION_TIMEOUT_MS'
     | 'CONVERSION_IDLE_MS'
   > &
-    Partial<Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS'>> &
+    Partial<Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS' | 'DATA_DIR_MIN_FREE_BYTES' | 'CONTEXTATOR_EMBEDDED_PGDATA' | 'CONVERSION_WORKER_MAX_HEAP_MB'>> &
     WebLimits;
   log: Logger;
   locks: KeyedMutex;
@@ -191,7 +194,12 @@ export class Indexer {
   constructor(private readonly deps: IndexerDeps) {
     this.conversion =
       deps.conversion ??
-      new ConversionService({ timeoutMs: deps.config.CONVERSION_TIMEOUT_MS, idleMs: deps.config.CONVERSION_IDLE_MS, log: deps.log });
+      new ConversionService({
+        timeoutMs: deps.config.CONVERSION_TIMEOUT_MS,
+        idleMs: deps.config.CONVERSION_IDLE_MS,
+        maxHeapMb: deps.config.CONVERSION_WORKER_MAX_HEAP_MB,
+        log: deps.log,
+      });
   }
 
   /** Drop the conversion thread. The queue itself holds nothing else that needs closing. */
@@ -447,6 +455,14 @@ export class Indexer {
       log.info({ project: project.name, force: job.force, rebuild, live, generation }, 'indexing started');
 
       try {
+        // 0. A rebuild writes a whole second generation as database rows before the first is released
+        // (ADR-0039). With the embedded database its disk is checked first; with an external one it
+        // cannot be measured and is not (see `assertRebuildDiskSpace`). Checked here and not only at the
+        // route, because a rebuild also starts from a queued force or a scheduled run after a model
+        // change. Inside the `try`: a refusal is an ordinary failed run — the live index stays, the
+        // project shows the message, and the history says why.
+        if (rebuild) await assertRebuildDiskSpace(config);
+
         // 1. Sync every source and collect its files under the `<source>/` prefix.
         const sources = await listSources(db, project.id);
         job.sources = sources.map((s) => ({ id: s.id, name: s.name, type: s.type, status: 'pending' as const }));
@@ -872,6 +888,7 @@ export class Indexer {
         const message = err instanceof Error ? err.message : String(err);
         job.phase = 'error';
         job.error = message;
+        if (err instanceof InsufficientDiskError) job.errorCode = err.code;
         job.finishedAt = new Date().toISOString();
         log.error({ err, project: project.name, rebuild, generation }, 'indexing failed');
         // `live_generation` is deliberately not in this `SET`. A rebuild that failed leaves the

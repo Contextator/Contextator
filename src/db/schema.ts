@@ -518,7 +518,10 @@ export const indexRuns = pgTable(
     projectId: uuid('project_id').notNull(),
     /** `incremental` or `force`. */
     mode: text('mode').notNull(),
-    /** `done` or `error`. */
+    /**
+     * `done`, `error`, or `interrupted` — a run the process did not live to finish, recorded at the
+     * next startup (`recoverInterruptedRuns`). Free text with no check, so the third value needs no migration.
+     */
     status: text('status').notNull(),
     filesTotal: integer('files_total').notNull().default(0),
     filesSkipped: integer('files_skipped').notNull().default(0),

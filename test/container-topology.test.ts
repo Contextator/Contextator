@@ -127,6 +127,16 @@ describe('docker/entrypoint.sh', () => {
     expect(refusal).toContain('contextator/contextator, embeds its own PostgreSQL');
   });
 
+  it('tells the app its database disk only when that database is embedded', () => {
+    // A forced re-index checks the disk it writes to — the database's — and only the embedded path
+    // knows where that is. The external launch must not carry it: a stale PGDATA there would have the
+    // check measure a disk the database does not live on.
+    const launch = entrypoint.slice(entrypoint.indexOf('# ---- Contextator'));
+    const [embedded, external] = launch.split('\nelse\n');
+    expect(embedded).toMatch(/CONTEXTATOR_EMBEDDED_PGDATA="\$PGDATA"[^\n]*\\\n\s+gosu node node \/app\/dist\/server\.js/);
+    expect(external.slice(0, external.indexOf('fi'))).not.toContain('CONTEXTATOR_EMBEDDED_PGDATA');
+  });
+
   it('never prints the credential in the connection string it logs', () => {
     // The startup log names the database it chose, and a connection string carries a password.
     expect(entrypoint).toContain('redact_url');

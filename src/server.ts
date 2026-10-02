@@ -23,7 +23,6 @@ import { oauthRoutes } from './mcp/oauth-routes.js';
 import { mcpRoutes } from './mcp/router.js';
 import { SessionRegistry } from './mcp/sessions.js';
 import { newChunkBudgetState, verifyChunkBudget } from './services/chunk-budget.js';
-import { sweepOrphanDirs } from './services/data-dir.js';
 import { createEmbeddingProvider } from './services/embeddings/index.js';
 import { Indexer } from './services/indexer.js';
 import { KeyedMutex } from './services/locks.js';
@@ -39,8 +38,7 @@ import { sweepStaleOauthClients } from './services/auth/oauth.js';
 import { startSessionReaper } from './services/auth/sessions.js';
 import { SetupGate } from './services/auth/setup.js';
 import { SlidingWindow } from './services/rate-limit.js';
-import { listAllSources } from './services/sources.js';
-import { sweepGenerations } from './services/vector-store.js';
+import { runStartupMaintenance } from './services/startup-maintenance.js';
 import { UploadService } from './services/uploads.js';
 import { APP_VERSION } from './version.js';
 
@@ -206,29 +204,10 @@ async function main(): Promise<void> {
       .catch((err: unknown) => log.warn({ err }, 'query log sweep failed'));
   });
 
-  // Data directory for materialised sources; drop directories whose project/source rows are gone.
+  // Data directory for materialised sources.
   await fs.mkdir(config.DATA_DIR, { recursive: true });
-  try {
-    const [projectRows, sourceRows] = await Promise.all([listProjects(db), listAllSources(db)]);
-    const removed = await sweepOrphanDirs(config.DATA_DIR, {
-      projectIds: new Set(projectRows.map((p) => p.id)),
-      sourceIds: new Set(sourceRows.map((s) => s.id)),
-    });
-    if (removed.length) log.info({ removed }, 'removed orphan source directories');
-
-    // The same sweep, for the database. A process killed mid-rebuild leaves a generation that was
-    // never made live and that nothing will ever serve ([ADR-0039](../../.ssot/ADR.md#adr-0039)); the
-    // next run of that project would collect it, but a project nobody re-indexes would carry it for
-    // as long as the installation lives. Under each project's mutex, because the indexer's queue
-    // starts the moment a route is hit.
-    let reclaimed = 0;
-    for (const row of projectRows) {
-      reclaimed += await locks.runExclusive(row.id, () => sweepGenerations(db, row.id, row.liveGeneration));
-    }
-    if (reclaimed > 0) log.info({ reclaimed }, 'reclaimed documents of abandoned index generations');
-  } catch (err) {
-    log.warn({ err }, 'orphan sweep of DATA_DIR failed');
-  }
+  // Orphan directories, abandoned generations and runs a restart cut short (see the function).
+  await runStartupMaintenance({ db, dataDir: config.DATA_DIR, locks, indexer, log });
 
   // Model download/load can take a while on first start; don't block the dashboard on it.
   void embeddings

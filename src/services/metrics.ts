@@ -34,7 +34,7 @@ export interface LastIndexRun {
   /** Seconds since the epoch, as Prometheus states a timestamp that is a value rather than a sample. */
   finishedAtSeconds: number;
   durationSeconds: number;
-  /** `index_runs.status` is `done` or `error`; this is that, as the 1/0 a gauge can be alerted on. */
+  /** `index_runs.status` is `done`, `error` or `interrupted`; this is whether it was `done`, as the 1/0 a gauge can be alerted on. */
   ok: boolean;
 }
 

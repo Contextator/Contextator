@@ -140,6 +140,8 @@ function jobDuration(job) {
 /** "126 unchanged · 2 updated · 0 removed · 41 chunks embedded" for a stored run. */
 function runResult(run) {
   if (run.status === 'error') return `failed: ${run.error || 'unknown error'}`;
+  // Recorded at startup for a run the previous process did not live to finish; it carries no counts.
+  if (run.status === 'interrupted') return `interrupted: ${run.error || 'server restarted'}`;
   return `${fmt(run.filesSkipped)} unchanged · ${fmt(run.filesUpdated)} updated · ${fmt(run.filesRemoved)} removed · ${fmt(run.chunksWritten)} chunks embedded`;
 }
 
@@ -709,7 +711,7 @@ function renderDetail() {
           el('div', { class: 'run-grid' }, [
             el('span', { title: new Date(r.finishedAt).toLocaleString(), text: relativeTime(r.finishedAt) }),
             el('span', { text: r.mode }),
-            el('span', { class: `result${r.status === 'error' ? ' err' : ''}`, text: runResult(r) }),
+            el('span', { class: `result${r.status !== 'done' ? ' err' : ''}`, text: runResult(r) }),
             el('span', { class: 'right', text: formatDuration(r.durationMs) }),
           ]),
         ),

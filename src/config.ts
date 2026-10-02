@@ -510,6 +510,36 @@ export const EnvSchema = z
       .string()
       .default('.data')
       .transform((p) => path.resolve(p)),
+    /**
+     * Free space a disk must have before work that writes a lot to it starts; below it the work is
+     * refused up front with `insufficient_disk` and the reason. `0` turns every check off.
+     *
+     * - **Uploads** are checked against `DATA_DIR`'s file system, which is where they land;
+     *   `/api/health` shows that figure.
+     * - **A forced re-index** writes its new generation as rows in PostgreSQL (ADR-0039), so it is
+     *   checked against the database's disk — and only with the embedded database, whose data directory
+     *   the image's entrypoint passes in `CONTEXTATOR_EMBEDDED_PGDATA`. **With an external database
+     *   (`DATABASE_URL`) the database's disk cannot be measured from this process and a forced re-index
+     *   is not checked at all**; watch that disk where the database runs.
+     *
+     * The check is advisory: passing it does not mean the work will fit, only that the disk was not
+     * already below the threshold when it started.
+     *
+     * The name predates the database check and says `DATA_DIR` only; with the embedded database the
+     * same threshold also guards the database's data directory. It is kept because renaming a setting
+     * operators already have in their environment would break their configuration.
+     */
+    DATA_DIR_MIN_FREE_BYTES: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .default(512 * 1024 * 1024),
+    /**
+     * The embedded PostgreSQL's data directory, set by the image's entrypoint on the embedded path and
+     * left unset with an external database. Not an operator setting: it only tells the process which
+     * file system its database writes to, so a forced re-index can check that disk first.
+     */
+    CONTEXTATOR_EMBEDDED_PGDATA: z.string().min(1).optional(),
     /** Encrypts source secrets (git / Notion tokens) at rest. Only needed once such a source exists. */
     SECRET_KEY: z.string().min(32, 'must be at least 32 characters').optional(),
     /**
@@ -652,6 +682,17 @@ export const EnvSchema = z
       .int()
       .min(1000)
       .default(60 * 1000),
+
+    /**
+     * An optional cap, in MiB, on the conversion thread's old-generation heap ([ADR-0097](../.ssot/ADR.md#adr-0097)).
+     *
+     * **Unset means no cap**, which is ADR-0071's behaviour byte for byte: the product picks no number,
+     * because any number refuses files that index today. It exists for the operator of a
+     * memory-limited container, where an uncapped parser grows until the kernel's OOM killer takes the
+     * whole process — a file that crosses this cap is instead one refused document whose reason names
+     * the heap limit, and the run carries on with a fresh thread.
+     */
+    CONVERSION_WORKER_MAX_HEAP_MB: z.coerce.number().int().positive().optional(),
 
     // Uploads and archives
     UPLOAD_MAX_FILE_BYTES: z.coerce

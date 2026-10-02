@@ -31,10 +31,11 @@ const SPEC_LIMITS: SpecLimits = { maxSpecBytes: 8 * 1024 * 1024 };
 const services: ConversionService[] = [];
 
 /** A service whose thread is the real one, unless a test needs one that misbehaves. */
-function conversion(settings: Partial<{ timeoutMs: number; idleMs: number; entry: string }> = {}): ConversionService {
+function conversion(settings: Partial<{ timeoutMs: number; idleMs: number; entry: string; maxHeapMb: number }> = {}): ConversionService {
   const service = new ConversionService({
     timeoutMs: settings.timeoutMs ?? 30_000,
     idleMs: settings.idleMs ?? 30_000,
+    maxHeapMb: settings.maxHeapMb,
     entry: settings.entry ? new URL(`file://${path.join(WORKERS, settings.entry)}`) : undefined,
   });
   services.push(service);
@@ -513,6 +514,28 @@ describe('the thread going away is one refused file, not a dead server', () => {
     expect(err).not.toBeInstanceOf(DocumentExtractionError);
     expect((err as Error).message).toBe('the connection pool is gone');
   });
+
+  /**
+   * **ADR-0097.** With `CONVERSION_WORKER_MAX_HEAP_MB` set, a file that would exhaust memory stops at the
+   * cap instead of taking the process: one refused file whose reason names the limit — so an operator
+   * can tell it from a crash or a timeout — and the next file is served by a fresh thread.
+   */
+  it('refuses a file that crosses the heap cap by name, says the cap was the cause, and keeps converting', async () => {
+    const hungry = conversion({ entry: 'hungry-worker.ts', maxHeapMb: 64 });
+
+    const refusal = await hungry.convert('handbook/bomb.pdf', 'plain', Buffer.from('%PDF-1.4\n'), LIMITS).catch((err: unknown) => err);
+
+    expect(refusal).toBeInstanceOf(DocumentExtractionError);
+    expect((refusal as Error).message).toContain('handbook/bomb.pdf');
+    expect((refusal as Error).message).toContain('heap limit of 64 MiB');
+    expect((refusal as Error).message).toContain('CONVERSION_WORKER_MAX_HEAP_MB');
+    expect(hungry.threadHeld).toBe(false);
+
+    // The cap is a ceiling for one file, not a verdict on the service: the next file sent to the *same*
+    // service converts on the thread spawned to replace the one the cap took down.
+    await expect(hungry.convert('notes/one.md', 'plain', Buffer.from('# One\n\nhere\n'), LIMITS)).resolves.toContain('One');
+    expect(hungry.threadHeld).toBe(true);
+  }, 30_000);
 
   /** Shutdown is not a crash: a request made after `stop()` is refused rather than left hanging. */
   it('refuses work after it has been stopped', async () => {

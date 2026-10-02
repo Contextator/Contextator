@@ -144,9 +144,11 @@ fi
 # ---- Contextator -------------------------------------------------------------------------------------
 # On the embedded path the libpq PG* variables are how the app is told where its database is; on the
 # external path they are deliberately not set, so DATABASE_URL is the only answer to that question and
-# there is no second, stale one underneath it.
+# there is no second, stale one underneath it. CONTEXTATOR_EMBEDDED_PGDATA tells the app which file
+# system its database writes to, so a forced re-index can check that disk first; an external database's
+# disk is not visible from here and the variable is left unset.
 if [ "$EMBEDDED_PG" = '1' ]; then
-  PGHOST=127.0.0.1 PGPORT=5432 PGUSER="$POSTGRES_USER" PGPASSWORD="$POSTGRES_PASSWORD" PGDATABASE="$POSTGRES_DB" \
+  CONTEXTATOR_EMBEDDED_PGDATA="$PGDATA" PGHOST=127.0.0.1 PGPORT=5432 PGUSER="$POSTGRES_USER" PGPASSWORD="$POSTGRES_PASSWORD" PGDATABASE="$POSTGRES_DB" \
     gosu node node /app/dist/server.js &
 else
   gosu node node /app/dist/server.js &

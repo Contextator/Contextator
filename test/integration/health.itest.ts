@@ -1,3 +1,6 @@
+import { randomBytes } from 'node:crypto';
+import { tmpdir } from 'node:os';
+
 import cookie from '@fastify/cookie';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
@@ -14,6 +17,8 @@ import { SessionRegistry } from '../../src/mcp/sessions.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 import { MetricsRegistry } from '../../src/services/metrics.js';
 import { AuditWriter } from '../../src/services/audit.js';
+import { createProject } from '../../src/services/projects.js';
+import { createSource } from '../../src/services/sources.js';
 
 /**
  * `/api/health` is the only thing in the deployment that can report the embedded PostgreSQL
@@ -71,7 +76,8 @@ async function buildApi(db: Db, configOverrides: Record<string, unknown> = {}): 
     // What `verifyChunkBudget` would have left behind after warmup found 400 against a 128-token
     // window — the shipped defect, which this route has to be able to carry (ADR-0035).
     chunkBudget: { checked: true, warning: { suggestedChunkMaxTokens: 96 } },
-    indexer: { stats: () => ({ interactive: 0, scheduled: 0, running: 0 }) },
+    // `enqueue` answers so that a forced re-index the disk check lets through is visibly accepted (202).
+    indexer: { stats: () => ({ interactive: 0, scheduled: 0, running: 0 }), enqueue: (projectId: string) => ({ projectId, phase: 'queued' }) },
     locks: {},
     uploads: {},
     sessions: new SessionRegistry(silentLogger),
@@ -163,6 +169,88 @@ describe('while the database answers', () => {
     it('keeps the topology out of the anonymous shape, beside everything else about this machine', async () => {
       const res = await app.inject({ method: 'GET', url: '/api/health' });
       expect(res.json()).not.toHaveProperty('database');
+    });
+  });
+
+  /**
+   * `DATA_DIR`'s free space, and the threshold uploads are refused below; a forced re-index is refused
+   * below it on the embedded database's disk (`CONTEXTATOR_EMBEDDED_PGDATA`) and not checked with an
+   * external database. The disk here is whatever the test machine has, so "below the threshold" is
+   * made by raising the threshold past any real disk rather than by filling one.
+   */
+  describe('reports the data directory disk, and refuses writes below the threshold', () => {
+    const NO_DISK_IS_THIS_BIG = Number.MAX_SAFE_INTEGER;
+    const auth = { authorization: 'Bearer a-token-for-a-test' };
+
+    it('carries free and total bytes beside the threshold to a signed-in caller', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/health', cookies: { [SESSION_COOKIE]: sessionToken } });
+      const disk = res.json().disk;
+      expect(disk.totalBytes).toBeGreaterThan(0);
+      expect(disk.freeBytes).toBeGreaterThanOrEqual(0);
+      expect(disk).toMatchObject({ minFreeBytes: 0, ok: true });
+    });
+
+    it('keeps the disk out of the anonymous shape', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/health' });
+      expect(res.json()).not.toHaveProperty('disk');
+    });
+
+    it('says disk.ok: false below the threshold, without turning the probe red (ADR-0032)', async () => {
+      const full = await buildApi(appDb.db, { DATA_DIR_MIN_FREE_BYTES: NO_DISK_IS_THIS_BIG });
+      try {
+        const res = await full.inject({ method: 'GET', url: '/api/health', cookies: { [SESSION_COOKIE]: sessionToken } });
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toMatchObject({ ok: true, disk: { minFreeBytes: NO_DISK_IS_THIS_BIG, ok: false } });
+      } finally {
+        await full.close();
+      }
+    });
+
+    it('refuses a forced re-index on the embedded database, and both upload requests, with 507 before anything is queued or written', async () => {
+      // `uploads` has no `createSession` or `addFile`: reaching either would be a 500, so a 507 is also
+      // proof the check ran first.
+      const project = await createProject(database.db, { name: 'disk-full' }, []);
+      const source = await createSource(
+        database.db,
+        project.id,
+        { type: 'upload', name: 'files' },
+        { allowedRoots: [], keys: { current: '0'.repeat(64) } },
+      );
+      const full = await buildApi(appDb.db, { DATA_DIR_MIN_FREE_BYTES: NO_DISK_IS_THIS_BIG, CONTEXTATOR_EMBEDDED_PGDATA: tmpdir() });
+      try {
+        const reindex = await full.inject({ method: 'POST', url: `/api/projects/${project.id}/reindex?force=true`, headers: auth });
+        expect(reindex.statusCode).toBe(507);
+        expect(reindex.json()).toMatchObject({ error: 'insufficient_disk' });
+        expect(reindex.json().message).toContain('DATA_DIR_MIN_FREE_BYTES');
+        expect(reindex.json().message).toContain("embedded database's data directory");
+
+        const upload = await full.inject({ method: 'POST', url: `/api/projects/${project.id}/sources/${source.id}/uploads`, headers: auth });
+        expect(upload.statusCode).toBe(507);
+        expect(upload.json()).toMatchObject({ error: 'insufficient_disk' });
+
+        // Every request of a folder upload is checked, not only the one that opened the session.
+        const files = await full.inject({
+          method: 'POST',
+          url: `/api/projects/${project.id}/sources/${source.id}/uploads/${randomBytes(16).toString('hex')}/files`,
+          headers: auth,
+        });
+        expect(files.statusCode).toBe(507);
+        expect(files.json()).toMatchObject({ error: 'insufficient_disk' });
+        expect(files.json().message).toContain('the data directory');
+      } finally {
+        await full.close();
+      }
+    });
+
+    it('does not check a forced re-index with an external database, whose disk it cannot measure', async () => {
+      const project = await createProject(database.db, { name: 'external-db' }, []);
+      const external = await buildApi(appDb.db, { DATA_DIR_MIN_FREE_BYTES: NO_DISK_IS_THIS_BIG });
+      try {
+        const reindex = await external.inject({ method: 'POST', url: `/api/projects/${project.id}/reindex?force=true`, headers: auth });
+        expect(reindex.statusCode).toBe(202);
+      } finally {
+        await external.close();
+      }
     });
   });
 });
