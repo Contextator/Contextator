@@ -3,6 +3,7 @@ import type { Logger } from '../../context.js';
 import { estimateTokens } from '../chunker.js';
 import { type EmbeddingPrefixes, NO_PREFIXES, prefixIdSegment } from './prefixes.js';
 import { EmbeddingDimensionError, type EmbeddingProvider, type EmbeddingWindowSource } from './provider.js';
+import { loadNamedTokenizer, type TokenCounter } from './tokenizer.js';
 
 /**
  * `text-embedding-3-small`, `text-embedding-3-large` and `text-embedding-ada-002` all take 8191 tokens,
@@ -42,6 +43,24 @@ export function endpointIdSegment(baseURL: string): string {
   return host === OPENAI_HOST ? '' : `@${host}`;
 }
 
+/**
+ * The segment `provider.id` grows when `EMBEDDING_TOKENIZER` is set, and **nothing when it is not**
+ * (ADR-0101). The tokenizer decides where chunks end, so the text each stored vector represents depends
+ * on it: setting, changing or removing it has to trip the re-index guard of
+ * [ADR-0007](../../../.ssot/ADR.md#adr-0007) like any other change to what was embedded. An installation
+ * that never sets it keeps the id its projects are stamped with.
+ */
+export function tokenizerIdSegment(tokenizer: string | undefined): string {
+  return tokenizer === undefined ? '' : `:tokenizer=${tokenizer}`;
+}
+
+/** `EMBEDDING_TOKENIZER`, with where transformers.js keeps it — the local provider's cache (ADR-0101). */
+export interface OpenAITokenizerOptions {
+  name: string;
+  cacheDir: string;
+  offline: boolean;
+}
+
 export interface OpenAIEmbeddingOptions {
   /** Empty for an endpoint that takes no key; the request then carries no `Authorization` header. */
   apiKey: string;
@@ -65,6 +84,12 @@ export interface OpenAIEmbeddingOptions {
    * well be running an e5 behind it (ADR-0038).
    */
   prefixes?: EmbeddingPrefixes;
+  /**
+   * `EMBEDDING_TOKENIZER` (ADR-0101): a model whose tokenizer counts this provider's tokens, so that a
+   * self-hosted model the local provider could also run gets the same chunk boundaries. Absent means
+   * the characters ÷ 4 estimate, byte for byte as before.
+   */
+  tokenizer?: OpenAITokenizerOptions;
   log: Logger;
 }
 
@@ -86,6 +111,9 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   private readonly selfHosted: boolean;
   private client: OpenAI | undefined;
   private isReady = false;
+  /** Set once `loadTokenizer` resolves; `undefined` forever when `EMBEDDING_TOKENIZER` is unset. */
+  private tokenizer: TokenCounter | undefined;
+  private tokenizerPromise: Promise<void> | undefined;
 
   constructor(private readonly opts: OpenAIEmbeddingOptions) {
     this.model = opts.model;
@@ -99,7 +127,7 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
     const prefixes = opts.prefixes ?? NO_PREFIXES;
     this.queryPrefix = prefixes.query;
     this.passagePrefix = prefixes.passage;
-    this.id = `openai:${opts.model}:${opts.dimensions}${idSegment}${prefixIdSegment(prefixes)}`;
+    this.id = `openai:${opts.model}:${opts.dimensions}${idSegment}${prefixIdSegment(prefixes)}${tokenizerIdSegment(opts.tokenizer?.name)}`;
     this.maxInputTokens = opts.maxInputTokens ?? OPENAI_WINDOW_TOKENS;
     this.truncatesAtTokens = this.maxInputTokens;
     this.windowSource = opts.maxInputTokens === undefined ? 'known-model' : 'configured';
@@ -109,15 +137,47 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
     return this.isReady;
   }
 
+  /** The name `EMBEDDING_TOKENIZER` gave, or `undefined` when tokens are estimated. */
+  get tokenizerName(): string | undefined {
+    return this.opts.tokenizer?.name;
+  }
+
   /**
-   * The characters ÷ 4 estimate, and deliberately so. Counting exactly would mean `tiktoken` — the
-   * dependency [ADR-0008](../../../.ssot/ADR.md#adr-0008) rejected and ADR-0036 does not reopen, because
-   * the argument for reopening it is a window this provider never comes close to: 8191 tokens against a
-   * budget in the hundreds. The asymmetry is real and documented rather than papered over — an operator
-   * on OpenAI gets approximate chunk boundaries, and nothing they can observe depends on them.
+   * Without `EMBEDDING_TOKENIZER`, the characters ÷ 4 estimate, and deliberately so. Counting exactly
+   * for OpenAI's own models would mean `tiktoken` — the dependency [ADR-0008](../../../.ssot/ADR.md#adr-0008)
+   * rejected and ADR-0036 does not reopen, because the argument for reopening it is a window this
+   * provider never comes close to: 8191 tokens against a budget in the hundreds.
+   *
+   * With it (ADR-0101), the named model's own tokenizer, minus the special tokens it would wrap the
+   * input in — exactly what the local provider counts — so a self-hosted model the local provider could
+   * also run is chunked at the same boundaries. Before `loadTokenizer` resolves this is the estimate, as
+   * it is for the local provider before its model loads; startup and `warmup` both load it first.
    */
   countTokens(text: string): number {
-    return estimateTokens(text);
+    if (!this.tokenizer) return estimateTokens(text);
+    return this.tokenizer.encode(text, { add_special_tokens: false }).length;
+  }
+
+  /**
+   * Loads the tokenizer `EMBEDDING_TOKENIZER` names; a no-op when it is unset. Idempotent, and a failure
+   * is not cached, so a retry tries again. Rejects with `TokenizerLoadError`, which stops startup
+   * (ADR-0101 §3): there is no silent fallback to the estimate.
+   */
+  async loadTokenizer(): Promise<void> {
+    const spec = this.opts.tokenizer;
+    if (!spec || this.tokenizer) return;
+    if (!this.tokenizerPromise) {
+      this.tokenizerPromise = loadNamedTokenizer({ ...spec, log: this.opts.log }).then(
+        (tokenizer) => {
+          this.tokenizer = tokenizer;
+        },
+        (err: unknown) => {
+          this.tokenizerPromise = undefined;
+          throw err;
+        },
+      );
+    }
+    await this.tokenizerPromise;
   }
 
   private async getClient(): Promise<OpenAI> {
@@ -143,6 +203,9 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   }
 
   async warmup(): Promise<void> {
+    // Before the first request, so that nothing is ever chunked against the estimate when an exact
+    // count was configured (the indexer chunks right after `warmup`).
+    await this.loadTokenizer();
     await this.embedPassages(['warmup']);
   }
 

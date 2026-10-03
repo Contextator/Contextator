@@ -10,6 +10,15 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Added
+
+- **`EMBEDDING_TOKENIZER` counts chunk tokens with a real tokenizer for `EMBEDDING_PROVIDER=openai`.**
+  Name a Hugging Face model (e.g. `Xenova/multilingual-e5-small`); only its tokenizer is loaded, through
+  the existing transformers.js dependency, at startup — and startup stops if it cannot be. Unset, chunks
+  are sized by characters ÷ 4 exactly as before and the model id is unchanged; set, it becomes part of the
+  model id, so turning it on re-indexes every project once. A self-hosted endpoint whose model name matches
+  no prefix family is now reported once at startup.
+
 ### Fixed
 
 - **A project import is refused with `507 insufficient_disk` when the disk cannot hold it**, instead of

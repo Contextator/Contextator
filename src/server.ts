@@ -23,7 +23,7 @@ import { oauthRoutes } from './mcp/oauth-routes.js';
 import { MCP_EXPOSED_HEADERS, mcpRoutes } from './mcp/router.js';
 import { SessionRegistry } from './mcp/sessions.js';
 import { newChunkBudgetState, verifyChunkBudget } from './services/chunk-budget.js';
-import { createEmbeddingProvider } from './services/embeddings/index.js';
+import { createEmbeddingProvider, loadEmbeddingTokenizer } from './services/embeddings/index.js';
 import { Indexer } from './services/indexer.js';
 import { KeyedMutex } from './services/locks.js';
 import { MetricsRegistry } from './services/metrics.js';
@@ -61,6 +61,9 @@ async function main(): Promise<void> {
 
   const { db, pool } = createDb(config.DATABASE_URL, log);
   const embeddings = createEmbeddingProvider(config, log);
+  // `EMBEDDING_TOKENIZER` (ADR-0101): awaited, unlike the model warmup below, because a tokenizer that
+  // does not load must stop startup rather than leave the chunker counting with the estimate.
+  await loadEmbeddingTokenizer(embeddings);
   const sessions = new SessionRegistry(log);
   const locks = new KeyedMutex();
   const indexer = new Indexer({ db, embeddings, config, log, locks });

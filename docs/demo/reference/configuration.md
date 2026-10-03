@@ -33,6 +33,7 @@ All settings are environment variables read from `.env` (or the container enviro
 | `MODEL_CACHE_DIR` | `.cache/models` | Where downloaded models are stored |
 | `OPENAI_API_KEY` | empty | Required when the provider is `openai` |
 | `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI model id |
+| `EMBEDDING_TOKENIZER` | empty | `openai` provider only: Hugging Face model id whose tokenizer counts chunk tokens (e.g. `Xenova/multilingual-e5-small`). Empty counts characters ÷ 4. Loaded at startup, which stops if it fails; part of the model id, so changing it re-indexes |
 
 Changing `EMBEDDING_DIMENSIONS` after data exists requires starting once with
 `RESET_VECTORS=1`, which drops every chunk so projects can be re-indexed.

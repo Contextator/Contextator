@@ -1,8 +1,9 @@
-import { env, pipeline } from '@huggingface/transformers';
+import { pipeline } from '@huggingface/transformers';
 import type { Logger } from '../../context.js';
 import { estimateTokens } from '../chunker.js';
 import { type EmbeddingPrefixes, NO_PREFIXES, prefixIdSegment } from './prefixes.js';
 import { EmbeddingDimensionError, type EmbeddingProvider, type EmbeddingWindowSource } from './provider.js';
+import { configureModelRuntime } from './tokenizer.js';
 
 export type LocalDtype = 'fp32' | 'fp16' | 'q8';
 
@@ -105,9 +106,7 @@ let extractorPromise: Promise<LoadedPipeline> | null = null;
 
 function loadExtractor(opts: LocalEmbeddingOptions): Promise<LoadedPipeline> {
   if (!extractorPromise) {
-    env.cacheDir = opts.cacheDir;
-    env.allowLocalModels = true;
-    env.allowRemoteModels = !opts.offline;
+    configureModelRuntime(opts);
     opts.log.info({ model: opts.model, dtype: opts.dtype, cacheDir: opts.cacheDir }, 'loading embedding model');
     const started = Date.now();
     const seen = new Set<string>();

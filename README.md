@@ -872,6 +872,40 @@ endpoint's host and port become part of the model id every project is stamped wi
 server re-indexes every project. The annotated list is in [`.env.example`](.env.example); the model
 guidance is in [Embedding Models](https://contextator.com/en/docs/embedding-models/).
 
+**Instruction prefixes follow the model name.** `query: ` / `passage: ` are added only when
+`OPENAI_EMBEDDING_MODEL` names a family that needs them (`multilingual-e5-*`). A server that serves an e5
+under another name (`e5`, `embed`, a local path) gets no prefixes and quietly loses a little recall;
+Contextator says so once at startup, at `info`. Use the model's real name, or set
+`EMBEDDING_QUERY_PREFIX` / `EMBEDDING_PASSAGE_PREFIX` yourself.
+
+**Counting tokens with the model's own tokenizer.** Chunks are sized by an estimate (characters ÷ 4)
+unless `EMBEDDING_TOKENIZER` names a Hugging Face model whose `tokenizer.json` matches the served model.
+Only the tokenizer is downloaded, into `MODEL_CACHE_DIR`; startup stops if it cannot be loaded. With it,
+an endpoint cuts the same chunks the local provider cuts from the same model. It is part of the model id,
+so setting or changing it re-indexes every project once.
+
+```bash
+# multilingual-e5-small behind TEI or vLLM: these five lines, only the URL differs
+EMBEDDING_PROVIDER=openai
+EMBEDDING_BASE_URL=http://localhost:8080/v1        # TEI; vLLM: http://gpu-box:<port>/v1
+OPENAI_EMBEDDING_MODEL=intfloat/multilingual-e5-small   # the real name, so the e5 prefixes apply
+EMBEDDING_DIMENSIONS=384
+EMBEDDING_TOKENIZER=Xenova/multilingual-e5-small
+```
+
+TEI ignores the request's model name and vLLM serves the Hugging Face repository id by default, so the
+real name works on both. Ollama resolves the name to one of its local tags, so either serve the model
+under that name (`ollama cp <your-tag> intfloat/multilingual-e5-small`) or keep your tag in
+`OPENAI_EMBEDDING_MODEL` and set the prefixes yourself:
+
+```bash
+# Ollama, the model kept under its own tag: these lines replace their namesakes above, keep the rest
+EMBEDDING_BASE_URL=http://localhost:11434/v1
+OPENAI_EMBEDDING_MODEL=<your-tag>
+EMBEDDING_QUERY_PREFIX="query: "
+EMBEDDING_PASSAGE_PREFIX="passage: "
+```
+
 ### Changing the embedding model
 
 Changing `EMBEDDING_MODEL` (same dimension) triggers an automatic full re-index once you press

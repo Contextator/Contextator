@@ -903,6 +903,21 @@ export const EnvSchema = z
      */
     EMBEDDING_QUERY_PREFIX: z.string().optional(),
     EMBEDDING_PASSAGE_PREFIX: z.string().optional(),
+    /**
+     * `EMBEDDING_PROVIDER=openai` only (ADR-0101): a Hugging Face model id whose `tokenizer.json` counts
+     * tokens for the chunker instead of characters ÷ 4 — for a self-hosted model (TEI, vLLM, Ollama) the
+     * local provider could also run, so both chunk the same text at the same boundaries. Loaded at
+     * startup through transformers.js into `MODEL_CACHE_DIR`; a name that does not load stops startup.
+     * Unset, nothing changes. Set, it is part of `provider.id`, so setting or changing it re-indexes.
+     *
+     * A repository id and nothing else: `owner/name` or `name`, no path segments, no `..` — the value is
+     * handed to a loader that also accepts local directories.
+     */
+    EMBEDDING_TOKENIZER: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)?$/, 'must be a Hugging Face model id such as Xenova/multilingual-e5-small')
+      .refine((value) => !value.includes('..'), 'must be a Hugging Face model id such as Xenova/multilingual-e5-small')
+      .optional(),
 
     // Chunking (counted with the embedding model's own tokenizer — ADR-0036)
     /**
