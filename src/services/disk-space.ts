@@ -25,10 +25,10 @@ export class InsufficientDiskError extends Error {
   readonly code = 'insufficient_disk';
   readonly freeBytes: number;
   readonly minFreeBytes: number;
-  constructor(freeBytes: number, minFreeBytes: number, where = 'the data directory') {
+  constructor(freeBytes: number, minFreeBytes: number, where = 'the data directory', requirement = 'DATA_DIR_MIN_FREE_BYTES') {
     super(
       `Not enough free disk space in ${where}: ${formatBytes(freeBytes)} free, ` +
-        `${formatBytes(minFreeBytes)} required (DATA_DIR_MIN_FREE_BYTES). Free some space and try again.`,
+        `${formatBytes(minFreeBytes)} required (${requirement}). Free some space and try again.`,
     );
     this.name = 'InsufficientDiskError';
     this.freeBytes = freeBytes;
@@ -61,6 +61,7 @@ export async function assertDiskSpace(
   minFreeBytes: number | undefined,
   read: (dir: string) => Promise<DiskSpace> = readDiskSpace,
   where?: string,
+  requirement?: string,
 ): Promise<void> {
   if (!minFreeBytes || minFreeBytes <= 0) return;
   let space: DiskSpace;
@@ -69,7 +70,7 @@ export async function assertDiskSpace(
   } catch {
     return;
   }
-  if (space.freeBytes < minFreeBytes) throw new InsufficientDiskError(space.freeBytes, minFreeBytes, where);
+  if (space.freeBytes < minFreeBytes) throw new InsufficientDiskError(space.freeBytes, minFreeBytes, where, requirement);
 }
 
 /** The settings the rebuild check reads. */
@@ -90,6 +91,54 @@ export async function assertRebuildDiskSpace(
 ): Promise<void> {
   if (!settings.CONTEXTATOR_EMBEDDED_PGDATA) return;
   await assertDiskSpace(settings.CONTEXTATOR_EMBEDDED_PGDATA, settings.DATA_DIR_MIN_FREE_BYTES, read, "the embedded database's data directory");
+}
+
+/**
+ * How many bytes a project import is expected to land per byte of its `.tar.gz`.
+ *
+ * An export is NDJSON — document text, and every chunk's embedding written out as decimal floats —
+ * plus the upload trees, gzipped. Text and JSON of that shape compress about three to five times, and
+ * `4` — the middle of that range, not a bound — estimates the unpacked size. That size is written twice:
+ * first to a scratch directory under the OS temp dir (not checked here), then for good — the upload
+ * trees into `DATA_DIR`, the documents and chunks as rows (with their full-text and vector indexes)
+ * into the database. The estimate covers only that second, lasting write. Like every check in this
+ * module it is advisory; `unpackTar`'s `ARCHIVE_MAX_TOTAL_BYTES` cap is what actually limits the
+ * expansion.
+ */
+export const IMPORT_EXPANSION_FACTOR = 4;
+
+/** The settings the import check reads. */
+export interface ImportDiskSettings extends RebuildDiskSettings {
+  DATA_DIR: string;
+}
+
+/**
+ * The check before a project import: the threshold, **plus** an estimate of what the import will
+ * write — `archiveBytes × IMPORT_EXPANSION_FACTOR` — against `DATA_DIR` (where the upload trees land)
+ * and, with the embedded database, against its data directory (where the rows land). With an external
+ * database only `DATA_DIR` is checked, for the reason `assertRebuildDiskSpace` gives.
+ *
+ * `archiveBytes` of `0` (a size not known yet) reduces this to the plain threshold. A threshold of `0`
+ * turns the check off entirely, estimate included: that setting is how an operator says "never refuse
+ * for disk", and an import is not an exception to it.
+ */
+export async function assertImportDiskSpace(
+  settings: ImportDiskSettings,
+  archiveBytes: number,
+  read: (dir: string) => Promise<DiskSpace> = readDiskSpace,
+): Promise<void> {
+  const minFree = settings.DATA_DIR_MIN_FREE_BYTES;
+  if (!minFree || minFree <= 0) return;
+  const estimate = Math.max(0, Math.ceil(archiveBytes)) * IMPORT_EXPANSION_FACTOR;
+  const required = minFree + estimate;
+  const requirement =
+    estimate > 0
+      ? `DATA_DIR_MIN_FREE_BYTES plus ${IMPORT_EXPANSION_FACTOR} × the ${formatBytes(archiveBytes)} archive this import unpacks`
+      : 'DATA_DIR_MIN_FREE_BYTES';
+  await assertDiskSpace(settings.DATA_DIR, required, read, 'the data directory', requirement);
+  if (settings.CONTEXTATOR_EMBEDDED_PGDATA) {
+    await assertDiskSpace(settings.CONTEXTATOR_EMBEDDED_PGDATA, required, read, "the embedded database's data directory", requirement);
+  }
 }
 
 export function formatBytes(bytes: number): string {

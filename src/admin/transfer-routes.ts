@@ -8,6 +8,7 @@ import multipart from '@fastify/multipart';
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
+import { assertImportDiskSpace } from '../services/disk-space.js';
 import { NotFoundError, ValidationError, getProjectById } from '../services/projects.js';
 import { exportProject } from '../services/transfer/export.js';
 import { importProject } from '../services/transfer/import.js';
@@ -81,6 +82,18 @@ export const transferRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (ap
     // One archive per request, streamed to a scratch file before anything looks inside it: the
     // manifest cannot be trusted to describe the bytes, so the bytes arrive first and are bounded by
     // the multipart limit above rather than by what the archive claims.
+    //
+    // The disk is checked before the body is read, so a refusal writes not even the scratch file. The
+    // request's declared length stands in for the archive's size here (a multipart body is the archive
+    // plus a few hundred bytes of framing); without one this is the plain threshold, and
+    // `importProject` checks again against the file's real size before it unpacks anything.
+    //
+    // The estimate is capped at UPLOAD_MAX_ARCHIVE_BYTES: a body larger than that is refused by the
+    // multipart limit with a 400, and estimating from its full size would answer 507 instead — telling
+    // the operator to free disk for an archive this instance would never accept.
+    const declared = Number(req.headers['content-length']);
+    const estimate = Number.isFinite(declared) && declared > 0 ? Math.min(declared, config.UPLOAD_MAX_ARCHIVE_BYTES) : 0;
+    await assertImportDiskSpace(config, estimate);
     const scratch = path.join(os.tmpdir(), `contextator-import-${randomUUID()}.tar.gz`);
     let archive = false;
     const fields: Record<string, string> = {};

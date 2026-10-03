@@ -10,6 +10,14 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A project import is refused with `507 insufficient_disk` when the disk cannot hold it**, instead of
+  failing half-way. `POST /api/projects/import` and `importProject` check `DATA_DIR` (and, with the
+  embedded database, its data directory) for `DATA_DIR_MIN_FREE_BYTES` plus 4 × the archive's size
+  before the upload is read and again before it is unpacked — before any project row or file exists.
+  `DATA_DIR_MIN_FREE_BYTES=0` still turns the check off.
+
 ## [0.2.1] - 2026-10-02
 
 ### Added

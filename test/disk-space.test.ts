@@ -6,8 +6,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
   assertDiskSpace,
+  assertImportDiskSpace,
   assertRebuildDiskSpace,
   formatBytes,
+  IMPORT_EXPANSION_FACTOR,
   InsufficientDiskError,
   readDiskSpace,
   type DiskSpace,
@@ -103,5 +105,63 @@ describe('formatBytes', () => {
     expect(formatBytes(512)).toBe('512 B');
     expect(formatBytes(512 * 1024 * 1024)).toBe('512.0 MiB');
     expect(formatBytes(3 * GiB + GiB / 2)).toBe('3.5 GiB');
+  });
+});
+
+describe('assertImportDiskSpace', () => {
+  const MiB = 1024 * 1024;
+
+  it('requires the threshold plus the expansion estimate of the archive, in DATA_DIR', async () => {
+    const asked: string[] = [];
+    const archiveBytes = 100 * MiB;
+    const needed = GiB + archiveBytes * IMPORT_EXPANSION_FACTOR;
+    const read =
+      (freeBytes: number) =>
+      async (dir: string): Promise<DiskSpace> => {
+        asked.push(dir);
+        return { freeBytes, totalBytes: 100 * GiB };
+      };
+    const settings = { DATA_DIR: '/data', DATA_DIR_MIN_FREE_BYTES: GiB };
+
+    await expect(assertImportDiskSpace(settings, archiveBytes, read(needed))).resolves.toBeUndefined();
+    const err = await assertImportDiskSpace(settings, archiveBytes, read(needed - 1)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(InsufficientDiskError);
+    const e = err as InsufficientDiskError;
+    expect(e.code).toBe('insufficient_disk');
+    expect(e.minFreeBytes).toBe(needed);
+    expect(e.message).toContain('the data directory');
+    expect(e.message).toContain(`DATA_DIR_MIN_FREE_BYTES plus ${IMPORT_EXPANSION_FACTOR} × the 100.0 MiB archive`);
+    expect(asked).toEqual(['/data', '/data']);
+  });
+
+  it('is the plain threshold when the archive size is not known yet', async () => {
+    const err = await assertImportDiskSpace({ DATA_DIR: '/data', DATA_DIR_MIN_FREE_BYTES: GiB }, 0, fixed(GiB - 1)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(InsufficientDiskError);
+    expect((err as Error).message).toContain('required (DATA_DIR_MIN_FREE_BYTES)');
+    await expect(assertImportDiskSpace({ DATA_DIR: '/data', DATA_DIR_MIN_FREE_BYTES: GiB }, 0, fixed(GiB))).resolves.toBeUndefined();
+  });
+
+  it("checks the embedded database's data directory too, where the rows land", async () => {
+    const asked: string[] = [];
+    const read = async (dir: string): Promise<DiskSpace> => {
+      asked.push(dir);
+      return { freeBytes: dir === '/data' ? 50 * GiB : GiB / 4, totalBytes: 100 * GiB };
+    };
+    const err = await assertImportDiskSpace(
+      { DATA_DIR: '/data', DATA_DIR_MIN_FREE_BYTES: GiB, CONTEXTATOR_EMBEDDED_PGDATA: '/var/lib/postgresql/data' },
+      MiB,
+      read,
+    ).catch((e: unknown) => e);
+    expect(asked).toEqual(['/data', '/var/lib/postgresql/data']);
+    expect(err).toBeInstanceOf(InsufficientDiskError);
+    expect((err as Error).message).toContain("embedded database's data directory");
+  });
+
+  it('checks nothing when the threshold is 0, however large the archive', async () => {
+    const read = async (): Promise<DiskSpace> => {
+      throw new Error('no disk should be read');
+    };
+    await expect(assertImportDiskSpace({ DATA_DIR: '/data', DATA_DIR_MIN_FREE_BYTES: 0 }, 100 * GiB, read)).resolves.toBeUndefined();
+    await expect(assertImportDiskSpace({ DATA_DIR: '/data' }, 100 * GiB, read)).resolves.toBeUndefined();
   });
 });

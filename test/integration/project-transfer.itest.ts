@@ -25,6 +25,7 @@ import {
 } from '../../src/db/schema.js';
 import { PROJECT_VECTOR_INDEX_PREFIX } from '../../src/db/vector-indexes.js';
 import { sourceCurrentDir } from '../../src/services/data-dir.js';
+import { type DiskSpace, IMPORT_EXPANSION_FACTOR, InsufficientDiskError } from '../../src/services/disk-space.js';
 import { ConflictError } from '../../src/services/projects.js';
 import { ImportRefusedError } from '../../src/services/transfer/manifest.js';
 import { exportProject } from '../../src/services/transfer/export.js';
@@ -859,3 +860,57 @@ async function archiveWith(patch: Record<string, unknown>, rewriteDocument?: (li
   await fs.rm(stage, { recursive: true, force: true });
   return out;
 }
+
+/**
+ * **A disk that cannot hold the import is a refusal, not a project that lands half-way.**
+ *
+ * The reading is stubbed rather than the disk filled: what is under test is that the check runs
+ * before the archive is unpacked and before `createProject`, and the census proves it — not a row,
+ * not an index, not a directory under `DATA_DIR`.
+ */
+describe('the disk check before an import', () => {
+  const GiB = 1024 * 1024 * 1024;
+  const threshold = 2 * GiB;
+
+  const withDisk = (freeBytes: number, asked: string[] = []) => ({
+    db: destination.db,
+    config: { ...configFor(destinationDataDir), DATA_DIR_MIN_FREE_BYTES: threshold } as Config,
+    embeddings: { id: MODEL_ID, dimensions: DIMS },
+    readDisk: async (dir: string): Promise<DiskSpace> => {
+      asked.push(dir);
+      return { freeBytes, totalBytes: 100 * GiB };
+    },
+  });
+
+  it('refuses with insufficient_disk below the threshold, and leaves nothing behind', async () => {
+    const asked: string[] = [];
+    await expectRefusedWithoutWriting(
+      'an import onto a full disk',
+      () => importProject(withDisk(GiB, asked), archive, 'handbook-disk-full'),
+      /Not enough free disk space in the data directory/,
+      InsufficientDiskError,
+    );
+    expect(asked[0]).toBe(destinationDataDir);
+    const err = await importProject(withDisk(GiB), archive, 'handbook-disk-full').catch((e: unknown) => e);
+    expect((err as InsufficientDiskError).code).toBe('insufficient_disk');
+  });
+
+  it('counts the archive it is about to unpack, not only the threshold', async () => {
+    const { size } = await fs.stat(archive);
+    // Above the bare threshold, below the threshold plus the estimate: only the estimate refuses it.
+    const freeBytes = threshold + size * IMPORT_EXPANSION_FACTOR - 1;
+    await expectRefusedWithoutWriting(
+      'an import the threshold alone would have let through',
+      () => importProject(withDisk(freeBytes), archive, 'handbook-disk-tight'),
+      new RegExp(`DATA_DIR_MIN_FREE_BYTES plus ${IMPORT_EXPANSION_FACTOR} × the .* archive this import unpacks`),
+      InsufficientDiskError,
+    );
+  });
+
+  it('imports as before when the disk has room', async () => {
+    const report = await importProject(withDisk(50 * GiB), archive, 'handbook-disk-ok');
+    expect(report.documents).toBeGreaterThan(0);
+    const [row] = await destination.db.select({ id: projects.id }).from(projects).where(eq(projects.name, 'handbook-disk-ok'));
+    expect(row?.id).toBe(report.projectId);
+  });
+});

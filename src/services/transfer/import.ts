@@ -9,6 +9,7 @@ import type { Db } from '../../db/client.js';
 import { documentSources, projects } from '../../db/schema.js';
 import { dropProjectVectorIndex } from '../../db/vector-indexes.js';
 import { type ImportLimits, importTree, unpackTar, withScratch } from '../archives.js';
+import { assertImportDiskSpace, type DiskSpace } from '../disk-space.js';
 import { removeProjectDir, sourceCurrentDir } from '../data-dir.js';
 import { allowedExtensionsFor, FLAVORS, type Flavor } from '../flavors.js';
 import { createProject } from '../projects.js';
@@ -120,6 +121,11 @@ export interface ImportDeps {
    * whole path that nothing else would report.
    */
   log?: Logger;
+  /**
+   * How a file system's free space is read. Production leaves it unset (`statfs`); a test hands in a
+   * reading below the threshold to prove the refusal lands before anything is written.
+   */
+  readDisk?: (dir: string) => Promise<DiskSpace>;
 }
 
 /**
@@ -141,6 +147,12 @@ export async function importProject(deps: ImportDeps, archivePath: string, name?
     pathFlavor: 'plain',
     allowedExtensions: [],
   };
+
+  // Before the archive is unpacked, before a project row exists: a disk that cannot hold what this
+  // archive expands into is a refusal (`insufficient_disk`, a 507 at the route) and not an import that
+  // fails half-way through `DATA_DIR` or the database. The size is the file's own, not the manifest's.
+  const { size: archiveBytes } = await fs.stat(archivePath);
+  await assertImportDiskSpace(config, archiveBytes, deps.readDisk);
 
   return withScratch(async (scratch) => {
     await unpackTar(archivePath, scratch, limits);

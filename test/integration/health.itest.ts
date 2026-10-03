@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 import cookie from '@fastify/cookie';
@@ -9,6 +10,7 @@ import { adminRoutes } from '../../src/admin/routes.js';
 import { SESSION_COOKIE } from '../../src/auth/cookies.js';
 import type { AppContext } from '../../src/context.js';
 import { createDb, type Db } from '../../src/db/client.js';
+import { projects } from '../../src/db/schema.js';
 import { createSession } from '../../src/services/auth/sessions.js';
 import { SetupGate } from '../../src/services/auth/setup.js';
 import { createUser } from '../../src/services/auth/users.js';
@@ -17,6 +19,7 @@ import { SessionRegistry } from '../../src/mcp/sessions.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 import { MetricsRegistry } from '../../src/services/metrics.js';
 import { AuditWriter } from '../../src/services/audit.js';
+import { formatBytes, IMPORT_EXPANSION_FACTOR } from '../../src/services/disk-space.js';
 import { createProject } from '../../src/services/projects.js';
 import { createSource } from '../../src/services/sources.js';
 
@@ -237,6 +240,60 @@ describe('while the database answers', () => {
         expect(files.statusCode).toBe(507);
         expect(files.json()).toMatchObject({ error: 'insufficient_disk' });
         expect(files.json().message).toContain('the data directory');
+      } finally {
+        await full.close();
+      }
+    });
+
+    it('refuses a project import with 507 before the upload is read, and creates nothing', async () => {
+      const countProjects = async (): Promise<number> => (await database.db.select({ id: projects.id }).from(projects)).length;
+      const scratchFiles = async (): Promise<string[]> => (await readdir(tmpdir())).filter((f) => f.startsWith('contextator-import-'));
+      const before = { projects: await countProjects(), scratch: await scratchFiles() };
+      const boundary = 'contextator-disk-boundary';
+      const fileBody = 'not really an archive';
+      const payload =
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="export.tar.gz"\r\n` +
+        `Content-Type: application/gzip\r\n\r\n${fileBody}\r\n--${boundary}--\r\n`;
+      const full = await buildApi(appDb.db, { DATA_DIR_MIN_FREE_BYTES: NO_DISK_IS_THIS_BIG });
+      try {
+        const res = await full.inject({
+          method: 'POST',
+          url: '/api/projects/import',
+          headers: { ...auth, 'content-type': `multipart/form-data; boundary=${boundary}` },
+          payload,
+        });
+        expect(res.statusCode).toBe(507);
+        expect(res.json()).toMatchObject({ error: 'insufficient_disk' });
+        expect(res.json().message).toContain('the data directory');
+        // The estimate is the request's declared length, not the file part's size: only the route's
+        // check, before the body is read, sees that number. `importProject`'s own check would name the
+        // file part's size, so this fails if the route's check is removed or moved past the upload.
+        expect(res.json().message).toContain(`${IMPORT_EXPANSION_FACTOR} × the ${formatBytes(Buffer.byteLength(payload))} archive`);
+        expect(res.json().message).not.toContain(`the ${formatBytes(Buffer.byteLength(fileBody))} archive`);
+      } finally {
+        await full.close();
+      }
+      expect(await countProjects()).toBe(before.projects);
+      expect(await scratchFiles()).toEqual(before.scratch);
+    });
+
+    it('estimates a project import from no more than UPLOAD_MAX_ARCHIVE_BYTES, which the multipart limit enforces anyway', async () => {
+      const boundary = 'contextator-cap-boundary';
+      const payload =
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="export.tar.gz"\r\n` +
+        `Content-Type: application/gzip\r\n\r\n${'x'.repeat(512)}\r\n--${boundary}--\r\n`;
+      const cap = 64;
+      expect(Buffer.byteLength(payload)).toBeGreaterThan(cap);
+      const full = await buildApi(appDb.db, { DATA_DIR_MIN_FREE_BYTES: NO_DISK_IS_THIS_BIG, UPLOAD_MAX_ARCHIVE_BYTES: cap });
+      try {
+        const res = await full.inject({
+          method: 'POST',
+          url: '/api/projects/import',
+          headers: { ...auth, 'content-type': `multipart/form-data; boundary=${boundary}` },
+          payload,
+        });
+        expect(res.statusCode).toBe(507);
+        expect(res.json().message).toContain(`${IMPORT_EXPANSION_FACTOR} × the ${formatBytes(cap)} archive`);
       } finally {
         await full.close();
       }
