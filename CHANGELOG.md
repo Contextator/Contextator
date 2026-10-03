@@ -35,6 +35,16 @@ ships, that stops.
   legacy session's client changes tokens mid-session, and a revoked token is refused with `401` in both
   eras. A modern call to a tool that does not exist gets the 2026 protocol error, JSON-RPC `-32602`
   `Tool <name> not found`; a legacy client still gets the `isError: true` tool result it got before.
+- **2026-07-28 answers are structured and carry a per-project cache hint.** A modern client always gets
+  each tool's `outputSchema` and a `structuredContent` beside the text, whatever `MCP_STRUCTURED_OUTPUT`
+  says; the flag now governs legacy (2025-11-25) clients only, still off by default. Modern `tools/list`,
+  `resources/list` and `resources/read` carry `ttlMs` — a tenth of the time since the project's last
+  successful index, capped at an hour, `0` while indexing or before the first index — and
+  `cacheScope: "public"` only on an `open` project (`private` otherwise); every other modern result keeps
+  the SDK default, and `tools/call` carries none. A failed index run also gives `0`; deleting a source
+  or changing the project's MCP auth mode does not reset the hint, so a client may see the earlier
+  answer for up to an hour. None of this reaches legacy answers: they gain no `resultType`, `ttlMs` or
+  `cacheScope`.
 
 ### Changed
 

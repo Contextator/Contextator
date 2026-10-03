@@ -1,10 +1,10 @@
-import { type AuthInfo, McpServer } from '@modelcontextprotocol/server';
+import { type AuthInfo, type CacheHint, McpServer } from '@modelcontextprotocol/server';
 import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
 import { DEFAULT_DOCUMENT_FENCE } from './document-fence.js';
 import type { McpEra } from './era.js';
 import { registerResources } from './resources.js';
-import { registerTools, tokenIdOf } from './tools.js';
+import { registerTools, structuredOutputFor, tokenIdOf } from './tools.js';
 
 /**
  * The sentence about the fence is the other half of [ADR-0066](../../.ssot/ADR.md#adr-0066), and it is
@@ -12,11 +12,12 @@ import { registerTools, tokenIdOf } from './tools.js';
  * nothing — an agent that disregards it disregards it, and
  * [SECURITY.md](../../.ssot/SECURITY.md) T10 still declares prompt injection a property of the corpus.
  * It is here because it costs a few dozen tokens once per session and there is no argument for omitting
- * it. With `MCP_STRUCTURED_OUTPUT` on it names the structured content too, because a client may give
- * its model that and not the text — Claude Code does (anthropics/claude-code#55677, #79944) — and the
- * structured text fields carry the same markers (ADR-0087); off, there is no structured content to name
- * and the sentence is what it was before. A resource's contents are the document itself, unmarked, and one more
- * sentence says they are data all the same.
+ * it. When the tools answer with structured content (`structuredOutputFor`: always for a 2026-07-28
+ * client, for a legacy one only with `MCP_STRUCTURED_OUTPUT` on) it names that content too, because a
+ * client may give its model that and not the text — Claude Code does (anthropics/claude-code#55677,
+ * #79944) — and the structured text fields carry the same markers (ADR-0087); without it there is no
+ * structured content to name and the sentence is what it was before. A resource's contents are the
+ * document itself, unmarked, and one more sentence says they are data all the same.
  *
  * The sentence about querying in the documentation's language is [ADR-0068](../../.ssot/ADR.md#adr-0068):
  * cross-lingual search itself stays closed (ADR-0052), a retrieval-side limit this string does not
@@ -45,9 +46,48 @@ export function buildInstructions(project: ProjectRow, structuredOutput = false)
   ].join(' ');
 }
 
+/** The longest a modern-era client is told it may reuse a list or a read: an hour, whatever the project's age. */
+export const MAX_CACHE_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * The cache hint a 2026-07-28 client gets on `tools/list`, `resources/list` and `resources/read` for this
+ * project ([ADR-0100](../../.ssot/ADR.md#adr-0100), 0.3-03).
+ *
+ * Scope: `public` only when the project is served without credentials (`mcpAuth: 'open'`) — what any
+ * caller would get, a shared cache may hold. Under `token` or `account` the answer is behind a
+ * credential, and a shared cache must not hand it to someone who has none: `private`.
+ *
+ * Lifetime: derived from the last successful index run (`lastIndexedAt`), the one change to the
+ * documents behind these answers that the project row records. It is the heuristic freshness of
+ * RFC 9111 §4.2.2 — a tenth of the time since that run, so a project re-indexed a minute ago is cached
+ * for seconds and one left alone for a week for the full cap — floored to whole milliseconds and capped
+ * at {@link MAX_CACHE_TTL_MS}. It is `0` (do not reuse) when no lifetime can be derived: never indexed,
+ * a timestamp in the future (clock skew), an index run in progress, which is about to change the
+ * answer, or a run that failed (`status: 'error'`), which may have changed some documents without
+ * moving `lastIndexedAt`.
+ *
+ * What it does not see: a change that is not an index run. Deleting a source (its documents go with it)
+ * or moving the project from `open` to `token`/`account` touches neither `lastIndexedAt` nor `status`,
+ * so a client — and, on a `public` answer, a shared cache — may go on serving the earlier list or
+ * document for up to {@link MAX_CACHE_TTL_MS}. That hour is the worst-case staleness this hint accepts.
+ */
+export function projectCacheHint(project: Pick<ProjectRow, 'mcpAuth' | 'lastIndexedAt' | 'status'>, now: Date = new Date()): Required<CacheHint> {
+  const cacheScope = project.mcpAuth === 'open' ? 'public' : 'private';
+  const indexedAt = project.lastIndexedAt?.getTime();
+  if (indexedAt === undefined || !Number.isFinite(indexedAt) || project.status !== 'idle') return { ttlMs: 0, cacheScope };
+  const age = now.getTime() - indexedAt;
+  if (!Number.isFinite(age) || age <= 0) return { ttlMs: 0, cacheScope };
+  return { ttlMs: Math.min(MAX_CACHE_TTL_MS, Math.floor(age / 10)), cacheScope };
+}
+
 export interface ProjectMcpServerOptions {
   project: ProjectRow;
-  /** Which era the server is built for (`era.ts`). Both eras get the same tools and resources; only an unknown tool is answered differently (`registerTools`). */
+  /**
+   * Which era the server is built for (`era.ts`). Both eras get the same tools and resources. A modern
+   * server always answers with structured content and carries the project's cache hint
+   * ([ADR-0100](../../.ssot/ADR.md#adr-0100)); a legacy one follows `MCP_STRUCTURED_OUTPUT` and has no
+   * cache fields at all, and answers an unknown tool its own way (`registerTools`).
+   */
   era: McpEra;
   /**
    * The credential of the request that built the server, when there is one. It is not what a search is
@@ -70,12 +110,23 @@ export interface ProjectMcpServerOptions {
  *
  * The same server serves the project's documents as resources (`resources.ts`), behind the same auth
  * and confined to what `read_document` can reach.
+ *
+ * The cache hint is given per operation (`cacheHints`) rather than per resource: `resources.ts` serves
+ * `resources/read` with a low-level handler, and the SDK applies the per-operation hint to it as it
+ * does to its own list handlers. A modern server lives for one request, so the hint is computed from the
+ * project row the router read for that request.
  */
 export function createProjectMcpServer(ctx: AppContext, { project, era, auth }: ProjectMcpServerOptions): McpServer {
+  const structuredOutput = structuredOutputFor(era, ctx.config);
+  // Only the three results that follow the project's index get its hint; `tools/call` is not cacheable,
+  // and `server/discover` and `resources/templates/list` keep the SDK's default (`ttlMs: 0`, `private`).
+  // The legacy codec has no cache fields to fill, but a legacy server is not given a hint at all.
+  const hint = era === 'modern' ? projectCacheHint(project) : undefined;
   const server = new McpServer(
     { name: `contextator-${project.name}`, version: ctx.version },
     {
-      instructions: buildInstructions(project, ctx.config.MCP_STRUCTURED_OUTPUT),
+      instructions: buildInstructions(project, structuredOutput),
+      ...(hint ? { cacheHints: { 'tools/list': hint, 'resources/list': hint, 'resources/read': hint } } : {}),
     },
   );
   registerTools(server, ctx, project, tokenIdOf(auth), era);

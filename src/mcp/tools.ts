@@ -43,13 +43,15 @@ import {
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; structuredContent?: Record<string, unknown>; isError?: boolean };
 
 /**
- * A successful answer is the text it has always been, as its only content block, plus — when
- * `MCP_STRUCTURED_OUTPUT` is on — the same answer as `structuredContent` for a client that reads the
- * tool's `outputSchema` (see `output-schemas.ts`). Every success path hands over its structured form
- * either way: the SDK refuses a non-error result from a tool that declares an output schema and returns
- * no structured content, so a path that forgot it would fail at runtime the moment the flag is on.
- * With the flag off no tool declares a schema and the result is the plain text alone, byte for byte.
- * A failure stays text only — the spec validates structured content on success alone.
+ * A successful answer is the text it has always been, as its only content block, plus — when the tools
+ * answer with structured content (`structuredOutputFor`: always for a 2026-07-28 client, for a legacy
+ * one only with `MCP_STRUCTURED_OUTPUT` on) — the same answer as `structuredContent` for a client that
+ * reads the tool's `outputSchema` (see `output-schemas.ts`). Every success path hands over its structured
+ * form either way: the SDK refuses a non-error result from a tool that declares an output schema and
+ * returns no structured content, so a path that forgot it would fail at runtime. Without structured
+ * output no tool declares a schema and the result is the plain text alone, byte for byte — which is what
+ * a legacy client with the flag off gets. A failure stays text only — the spec validates structured
+ * content on success alone.
  */
 const answerer =
   (structured: boolean) =>
@@ -363,6 +365,17 @@ function keepLegacyUnknownToolShape(server: McpServer, registered: ReadonlySet<s
 }
 
 /**
+ * Whether the tools answer with structured content (`outputSchema` + `structuredContent`) and the
+ * instructions name it: always for a 2026-07-28 client, which has no earlier answer to keep byte for
+ * byte ([ADR-0100](../../.ssot/ADR.md#adr-0100)); for a legacy one only with `MCP_STRUCTURED_OUTPUT` on,
+ * off by default — see that setting in config.ts for why. One rule, so the instructions and the tools
+ * cannot disagree.
+ */
+export function structuredOutputFor(era: McpEra, config: Pick<ToolContext['config'], 'MCP_STRUCTURED_OUTPUT'>): boolean {
+  return era === 'modern' || config.MCP_STRUCTURED_OUTPUT;
+}
+
+/**
  * Registers the per-project tool set on a fresh McpServer instance. Handlers never throw; failures come
  * back as `isError`.
  *
@@ -373,8 +386,10 @@ function keepLegacyUnknownToolShape(server: McpServer, registered: ReadonlySet<s
  * fallback for a call with no HTTP request behind it (an in-process transport); `null` is an `open`
  * project answered without a token, which verifies nothing.
  *
- * `era` decides one thing today: what a call to a tool that does not exist gets back (see
- * `keepLegacyUnknownToolShape`).
+ * `era` decides two things: whether the tools answer with structured content — always in the modern
+ * era, and in the legacy era only with `MCP_STRUCTURED_OUTPUT` on
+ * ([ADR-0100](../../.ssot/ADR.md#adr-0100)) — and what a call to a tool that does not exist gets back
+ * (see `keepLegacyUnknownToolShape`).
  */
 export function registerTools(
   server: McpServer,
@@ -384,8 +399,7 @@ export function registerTools(
   era: McpEra = 'legacy',
 ): void {
   const { db, embeddings, config, log } = ctx;
-  /** Off by default — see `MCP_STRUCTURED_OUTPUT` in config.ts for why. */
-  const structuredOutput = config.MCP_STRUCTURED_OUTPUT;
+  const structuredOutput = structuredOutputFor(era, config);
   const ok = answerer(structuredOutput);
   // Bound per call (below), not per session: the token can change inside one legacy connection
   // (ADR-0099). `ctx.queryLog` being undefined — `SEARCH_QUERY_LOG=0` — makes the binding undefined
