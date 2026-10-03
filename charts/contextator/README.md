@@ -265,7 +265,8 @@ run, and which PostgreSQL client they need.
 
 **Not in the chart's Pod.** `npm run backup` and `npm run restore` need the PostgreSQL client programs
 (`pg_dump`, `pg_restore`), and the `*-slim` image this chart deploys has none: `kubectl exec … npm run
-backup` stops with `no_pg_tools` and writes nothing. A `pg_dump` taken by your database provider is a
+backup` stops, saying `pg_dump` is not on the container's `PATH` (refusal `no_pg_tools`), and writes
+nothing. A `pg_dump` taken by your database provider is a
 copy of the database alone — no upload trees, and not an archive `npm run restore` accepts — so it
 does not stand in for one.
 

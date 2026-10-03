@@ -501,7 +501,7 @@ the database is a server this image does not operate. `npm run backup` and `npm 
 work: they reach that server through `DATABASE_URL`, because the upload trees in the archive are in no
 other backup — and `backup` says, in its output and in the archive's manifest, that the server's own
 backup regime is the one that matters. Run them from the default image: the `-slim` image has no
-`pg_dump` and stops with `no_pg_tools`. The default image's client is PostgreSQL **16**, so against a
+`pg_dump` and stops, saying it is not on the `PATH` (refusal `no_pg_tools`). The default image's client is PostgreSQL **16**, so against a
 17+ server `pg_dump` stops with `server version mismatch` (and `pg_restore` 16 cannot read a 17 dump):
 install `postgresql-client-<major>` for the server's major version in the container and put
 `/usr/lib/postgresql/<major>/bin` first on `PATH` — the Helm chart's

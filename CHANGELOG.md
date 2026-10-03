@@ -33,6 +33,11 @@ ships, that stops.
   embedded database, its data directory) for `DATA_DIR_MIN_FREE_BYTES` plus 4 × the archive's size
   before the upload is read and again before it is unpacked — before any project row or file exists.
   `DATA_DIR_MIN_FREE_BYTES=0` still turns the check off.
+- **The README and the Helm chart 1.1.1 README describe what `npm run backup` prints in a `-slim`
+  container.** Both said the command "stops with `no_pg_tools`"; the output says `pg_dump` is not on
+  the `PATH` and never prints the refusal code, so both now give the code only in parentheses. The
+  Kubernetes backup and restore steps were run end to end on a `kind` cluster against PostgreSQL 16
+  and 17 (including the client-17 install) and otherwise stand as written. No template changed.
 
 ## [0.2.1] - 2026-10-02
 
