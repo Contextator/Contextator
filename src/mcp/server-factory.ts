@@ -3,6 +3,7 @@ import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
 import { DEFAULT_DOCUMENT_FENCE } from './document-fence.js';
 import type { McpEra } from './era.js';
+import { registerPrompts } from './prompts.js';
 import { registerResources } from './resources.js';
 import { registerTools, structuredOutputFor, tokenIdOf } from './tools.js';
 
@@ -131,5 +132,6 @@ export function createProjectMcpServer(ctx: AppContext, { project, era, auth }: 
   );
   registerTools(server, ctx, project, tokenIdOf(auth), era);
   registerResources(server, ctx, project);
+  registerPrompts(server, project);
   return server;
 }

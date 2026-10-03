@@ -55,6 +55,21 @@ ships, that stops.
   `redirect_uri` must be listed exactly. The consent page names the host that published the document and
   where the answer is sent, and warns when the client can only redirect to localhost. Dynamic client
   registration is unchanged.
+- **The 2026-07-28 standard request headers are enforced, by the SDK.** A modern request must repeat its
+  protocol version in `MCP-Protocol-Version`, its method in `Mcp-Method`, and — on `tools/call`,
+  `resources/read` and `prompts/get` — the tool name, URI or prompt name in `Mcp-Name` (a `=?base64?…?=`
+  value carries a non-ASCII one). A missing or disagreeing header gets `400` with JSON-RPC `-32020`, an
+  unsupported protocol version `400` with `-32022`, an envelope missing a field `400` with `-32602`, an
+  unknown method `404` with `-32601`. A 2025-11-25 request is not asked for any of these headers.
+- **MCP traffic on `/metrics`.** `contextator_mcp_requests_total{method,tool,era}` counts every MCP
+  message by method, by tool for `tools/call`, and by protocol era (`modern` or `legacy`), so the last
+  2025-era client's departure is visible; `contextator_mcp_tool_duration_seconds{tool}` times each tool
+  call. A method or tool name the server does not know is counted under `other`, so a client cannot add
+  series.
+- **Two MCP prompts per project, in both protocol eras.** `answer_from_docs` (argument `question`) and
+  `explore_topic` (argument `topic`) return one user message that tells the model which tools to use and
+  to cite file paths. They read nothing and change nothing; `initialize` now advertises the `prompts`
+  capability.
 
 ### Changed
 

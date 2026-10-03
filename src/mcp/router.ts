@@ -9,10 +9,29 @@ import type { ProjectRow } from '../db/schema.js';
 import { isOriginAllowed } from '../services/origin.js';
 import { getProjectByName, recordLegacySseActivity } from '../services/projects.js';
 import { mcpAccessDecision, mcpAccessMessage, mcpAccessStatus, readMcpBearer } from './access.js';
-import { detectEra } from './era.js';
+import type { McpRequestCounter } from '../services/metrics.js';
+import { detectEra, type McpEra } from './era.js';
 import { resolveMcpCredential } from './identity.js';
 import { createModernMcpHandler } from './modern-handler.js';
 import { createProjectMcpServer } from './server-factory.js';
+import { toolLabel } from './tools.js';
+
+/**
+ * Counts every JSON-RPC message in a POST body for `contextator_mcp_requests_total`, by method, tool and
+ * the era the router served it in ([ADR-0098](../../.ssot/ADR.md#adr-0098)). A batch counts each of its
+ * messages; a posted response, or a body that is not JSON-RPC at all, names no method and is not counted.
+ * The `tool` label is set on `tools/call` only and reduced to the registered tool names; the method is
+ * reduced to the known ones by the registry itself.
+ */
+export function countMcpMessages(metrics: McpRequestCounter, body: unknown, era: McpEra): void {
+  for (const message of Array.isArray(body) ? body : [body]) {
+    if (message === null || typeof message !== 'object') continue;
+    const { method, params } = message as { method?: unknown; params?: unknown };
+    if (typeof method !== 'string') continue;
+    const name = params !== null && typeof params === 'object' ? (params as { name?: unknown }).name : undefined;
+    metrics.countMcpRequest(method, method === 'tools/call' ? toolLabel(name) : '', era);
+  }
+}
 
 /**
  * MCP endpoints, one URL per project: `/mcp/:project`.
@@ -218,7 +237,13 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     if (!req.mcpProject) return unknownProject(req, reply);
     const project = requireProject(req);
 
-    if ((await detectEra(req)) === 'modern') {
+    const era = await detectEra(req);
+    // Counted once the project and the caller have been accepted and before anything can refuse the
+    // message, so a request the SDK turns away for a header that disagrees with its body is still one
+    // somebody sent.
+    countMcpMessages(ctx.metrics, req.body, era);
+
+    if (era === 'modern') {
       // Stateless: the SDK builds a server for this request alone and the registry never hears of it.
       // An `Mcp-Session-Id` the request may carry is ignored, as the 2026-07-28 revision does.
       reply.hijack();
@@ -329,6 +354,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     if (!session || session.projectId !== project.id) return reply.code(404).send(rpcError(-32001, 'Session not found'));
     sessions.touch(session.id);
     recordLegacySseActivity(ctx.db, project.id);
+    countMcpMessages(ctx.metrics, req.body, 'legacy');
 
     reply.hijack();
     await guarded(reply, () => session.transport.handlePostMessage(req.raw, reply.raw, req.body));

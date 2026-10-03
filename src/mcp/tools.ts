@@ -13,7 +13,7 @@ import {
 import type { DocumentRow, ProjectRow } from '../db/schema.js';
 import { chunksWithinBudget, joinChunks, truncateToTokens } from '../services/document-read.js';
 import { normalizeRelativePath } from '../services/fs-scan.js';
-import type { SearchCounter, SearchObserver } from '../services/metrics.js';
+import { type McpToolObserver, OTHER_LABEL, type SearchCounter, type SearchObserver, startTimer } from '../services/metrics.js';
 import { getProjectById } from '../services/projects.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { SOURCE_VERSION_MAX_LENGTH, listSources } from '../services/sources.js';
@@ -234,8 +234,21 @@ export type ToolContext = Pick<AppContext, 'db' | 'embeddings' | 'config' | 'log
    * to build a counter registry to get a tool answered. The same registry times the search phases, so
    * agent searches feed the search histograms the dashboard's do.
    */
-  metrics?: SearchCounter & SearchObserver;
+  metrics?: SearchCounter & SearchObserver & Partial<McpToolObserver>;
 };
+
+/**
+ * The tools `registerTools` registers, by name. `contextator_mcp_requests_total` takes its `tool` label
+ * from this list and nothing else (`toolLabel`); `test/mcp-metrics.test.ts` holds it equal to the names
+ * `registerTools` registers, and `test/integration/mcp-headers-metrics.itest.ts` to what `tools/list`
+ * answers, so a fourth tool cannot be added without it being counted by name.
+ */
+export const MCP_TOOL_NAMES: readonly string[] = ['search_docs', 'list_topics', 'read_document'];
+
+/** The metric label for a `tools/call` name: the name itself when the tool exists, `other` when it does not. */
+export function toolLabel(name: unknown): string {
+  return typeof name === 'string' && MCP_TOOL_NAMES.includes(name) ? name : OTHER_LABEL;
+}
 
 // The input schemas are built once, at module level, not per registration: a modern-era request builds
 // its McpServer on every call ([ADR-0098](../../.ssot/ADR.md#adr-0098)), and none of them depends on the
@@ -416,6 +429,20 @@ export function registerTools(
     registered.add(name);
     return name;
   };
+  // Every handler is timed for `contextator_mcp_tool_duration_seconds`, its failures included: a tool
+  // that answers `isError` after ten seconds took ten seconds. The `finally` is what keeps a throw that
+  // escaped a handler's own `catch` from going unobserved. The label goes through `toolLabel`, as the
+  // request counter's does, so the two families can never name a tool differently.
+  const timed =
+    <A extends unknown[], R>(name: string, handler: (...args: A) => Promise<R>) =>
+    async (...args: A): Promise<R> => {
+      const elapsed = startTimer();
+      try {
+        return await handler(...args);
+      } finally {
+        ctx.metrics?.observeToolDuration?.(toolLabel(name), elapsed());
+      }
+    };
 
   server.registerTool(
     tool('search_docs'),
@@ -433,7 +460,7 @@ export function registerTools(
       ...(structuredOutput ? { outputSchema: searchDocsOutput } : {}),
       annotations: readOnly,
     },
-    async ({ query, limit, source, path_prefix, version }, call) => {
+    timed('search_docs', async ({ query, limit, source, path_prefix, version }, call) => {
       // Every structured answer starts from this: no excerpts, nothing dropped, nothing cut.
       // `guidance` is the text answer's own sentence for every status but `results`, whose guidance is
       // the header and the truncation note `formatHits` wrote.
@@ -536,7 +563,7 @@ export function registerTools(
         log.error({ err, tool: 'search_docs', project: project.name }, 'tool failed');
         return fail(`search_docs failed: ${message(err)}`);
       }
-    },
+    }),
   );
 
   server.registerTool(
@@ -552,7 +579,7 @@ export function registerTools(
       ...(structuredOutput ? { outputSchema: listTopicsOutput } : {}),
       annotations: readOnly,
     },
-    async ({ cursor, limit }) => {
+    timed('list_topics', async ({ cursor, limit }) => {
       try {
         // Re-read for the live generation, for `searchProject`'s reason: a session outlives a
         // re-index, and the row bound to it at connect time can name a generation that has since been
@@ -657,7 +684,7 @@ export function registerTools(
         log.error({ err, tool: 'list_topics', project: project.name }, 'tool failed');
         return fail(`list_topics failed: ${message(err)}`);
       }
-    },
+    }),
   );
 
   server.registerTool(
@@ -674,7 +701,7 @@ export function registerTools(
       ...(structuredOutput ? { outputSchema: readDocumentOutput } : {}),
       annotations: readOnly,
     },
-    async ({ path: requested, heading, from, to, max_tokens }) => {
+    timed('read_document', async ({ path: requested, heading, from, to, max_tokens }) => {
       try {
         const relativePath = normalizeRelativePath(requested);
         if (!relativePath) return fail(`Invalid path "${requested}".`);
@@ -702,7 +729,7 @@ export function registerTools(
         log.error({ err, tool: 'read_document', project: project.name }, 'tool failed');
         return fail(`read_document failed: ${message(err)}`);
       }
-    },
+    }),
   );
 
   if (era === 'legacy') keepLegacyUnknownToolShape(server, registered);

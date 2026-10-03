@@ -166,6 +166,61 @@ export interface SearchCounter {
   countSearch(actor: QueryActor): void;
 }
 
+/** Which protocol generation an MCP message arrived in ([ADR-0098](../../.ssot/ADR.md#adr-0098)). */
+export type McpRequestEra = 'legacy' | 'modern';
+
+/**
+ * The MCP methods `contextator_mcp_requests_total` names by their own name. Anything else — a typo, a
+ * method from a revision this build does not know, a client inventing one — is counted as `other`: the
+ * label is peer-supplied, and a label taken verbatim from the wire is a series per attacker.
+ */
+export const KNOWN_MCP_METHODS: ReadonlySet<string> = new Set([
+  'initialize',
+  'ping',
+  'server/discover',
+  'subscriptions/listen',
+  'tools/list',
+  'tools/call',
+  'resources/list',
+  'resources/templates/list',
+  'resources/read',
+  'resources/subscribe',
+  'resources/unsubscribe',
+  'prompts/list',
+  'prompts/get',
+  'completion/complete',
+  'logging/setLevel',
+  'tasks/get',
+  'tasks/list',
+  'tasks/result',
+  'tasks/cancel',
+  'notifications/initialized',
+  'notifications/cancelled',
+  'notifications/progress',
+  'notifications/roots/list_changed',
+]);
+
+/** The label value for a method or tool name that is not on its allow-list. */
+export const OTHER_LABEL = 'other';
+
+/** Counts one inbound MCP message by method, tool and era. Callers hand in labels already reduced to their allow-lists. */
+export interface McpRequestCounter {
+  countMcpRequest(method: string, tool: string, era: McpRequestEra): void;
+}
+
+/** Times one tool call, handler start to answer. */
+export interface McpToolObserver {
+  observeToolDuration(tool: string, seconds: number): void;
+}
+
+/** One `contextator_mcp_requests_total` series. */
+export interface McpRequestSample {
+  method: string;
+  tool: string;
+  era: McpRequestEra;
+  count: number;
+}
+
 /** node-postgres's own pool gauges, named as it names them. */
 export interface PoolGauges {
   total: number;
@@ -195,6 +250,8 @@ export interface MetricsSnapshot {
   lastIndexRun: LastIndexRun | null;
   searches: Record<QueryActor, number>;
   audit: { written: number; failed: number };
+  /** MCP messages by method, tool and era. Optional so a snapshot built before it existed is still one. */
+  mcpRequests?: McpRequestSample[];
   /** Rendered after the gauges and counters, in the order given. Optional so a snapshot without any is still one. */
   histograms?: HistogramSnapshot[];
 }
@@ -206,8 +263,9 @@ export interface MetricsSnapshot {
  * read at scrape time by the route, which already has the composition root, and a registry that
  * reached for them would be a second place that knows how this application is wired.
  */
-export class MetricsRegistry implements SearchCounter, SearchObserver, IndexerObserver {
+export class MetricsRegistry implements SearchCounter, SearchObserver, IndexerObserver, McpRequestCounter, McpToolObserver {
   private readonly searches: Record<QueryActor, number> = { mcp: 0, dashboard: 0 };
+  private readonly mcpRequestCounts = new Map<string, McpRequestSample>();
   private auditWritten = 0;
   private auditFailed = 0;
   private readonly histogramFamilies = new Map<string, Histogram>();
@@ -243,6 +301,12 @@ export class MetricsRegistry implements SearchCounter, SearchObserver, IndexerOb
     'Time an index run waited in its lane before the indexer started it.',
     [1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600],
     ['lane'],
+  );
+  private readonly toolDuration = this.histogram(
+    'contextator_mcp_tool_duration_seconds',
+    'Time one MCP tool call took, from its handler starting to its answer, by tool.',
+    SECONDS_BUCKETS,
+    ['tool'],
   );
 
   constructor(private readonly pool?: { totalCount: number; idleCount: number; waitingCount: number }) {}
@@ -292,6 +356,28 @@ export class MetricsRegistry implements SearchCounter, SearchObserver, IndexerOb
 
   countSearch(actor: QueryActor): void {
     this.searches[actor]++;
+  }
+
+  /**
+   * Counts one inbound MCP message. `method` is reduced to `KNOWN_MCP_METHODS` here as well as by the
+   * caller, so that no call site can open an unbounded label by forgetting to; `tool` is the caller's to
+   * reduce, because only the MCP layer knows which tools exist.
+   */
+  countMcpRequest(method: string, tool: string, era: McpRequestEra): void {
+    const label = KNOWN_MCP_METHODS.has(method) ? method : OTHER_LABEL;
+    const key = `${label}\u0000${tool}\u0000${era}`;
+    const entry = this.mcpRequestCounts.get(key);
+    if (entry) entry.count++;
+    else this.mcpRequestCounts.set(key, { method: label, tool, era, count: 1 });
+  }
+
+  observeToolDuration(tool: string, seconds: number): void {
+    this.toolDuration.observe(seconds, { tool });
+  }
+
+  /** The `contextator_mcp_requests_total` series seen so far, in the order they first appeared. */
+  mcpRequests(): McpRequestSample[] {
+    return [...this.mcpRequestCounts.values()].map((sample) => ({ ...sample }));
   }
 
   /**
@@ -388,6 +474,21 @@ export function renderPrometheus(snapshot: MetricsSnapshot): string {
     // the one failure of this subsystem worth waking somebody for.
     ['{outcome="failed"}', snapshot.audit.failed],
   ]);
+
+  // Every MCP message by what it asked for and which protocol generation asked it: the `era` split is
+  // what says when the last 2025-era client is gone (ADR-0098). The family is stated even before the
+  // first message, for the histograms' reason below.
+  if (snapshot.mcpRequests) {
+    family(
+      'contextator_mcp_requests_total',
+      'MCP messages received, by method, tool (tools/call only) and protocol era.',
+      'counter',
+      snapshot.mcpRequests.map((sample) => [
+        `{method="${labelValue(sample.method)}",tool="${labelValue(sample.tool)}",era="${labelValue(sample.era)}"}`,
+        sample.count,
+      ]),
+    );
+  }
 
   // Histograms: `_bucket` per bound with `le` last, then `+Inf`, `_sum` and `_count` per label set. A
   // family with no observations yet still states its HELP and TYPE, so a dashboard built on it finds
