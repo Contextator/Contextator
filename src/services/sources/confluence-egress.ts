@@ -47,7 +47,26 @@ export interface EgressOptions {
   timeoutMs?: number;
   /** How long a kept-alive connection waits in the pool for its next request before it is closed. */
   idleMs?: number;
+  /**
+   * Who is being reached, as errors name it. `Confluence` by default; another caller of the same rule
+   * (the client ID metadata document fetch, [ADR-0088](../../../.ssot/ADR.md#adr-0088)) names itself.
+   */
+  label?: string;
+  /**
+   * The setting a private-address refusal points at, or `null` when there is none to point at.
+   * `CONFLUENCE_ALLOWED_HOSTS` by default.
+   */
+  allowListName?: string | null;
+  /** Refuse plain `http`, on the first request and on every redirect. Off by default. */
+  httpsOnly?: boolean;
 }
+
+/**
+ * The egress as a {@link FetchLike} that also takes a `signal`: aborting it destroys whatever is open
+ * — the request in flight or the response being read — so a caller's deadline closes the socket rather
+ * than only giving up on the promise. Assignable wherever a `FetchLike` is expected.
+ */
+export type EgressFetch = (url: string, init: { method: string; headers: Record<string, string>; signal?: AbortSignal }) => Promise<Response>;
 
 /** A refusal: the request was not sent, so no credential left. */
 export class EgressRefusedError extends Error {
@@ -160,10 +179,10 @@ const ARTICLE: Record<RefusedRule, string> = {
  * message says which rule the answer fell under and stops there: what an internal name resolves to is
  * not something an editor learns from this product.
  */
-function refusal(host: string, rule: RefusedRule, literal: boolean, redirected: boolean): string {
+function refusal(host: string, rule: RefusedRule, literal: boolean, redirected: boolean, allowListName: string | null): string {
   const verdict = literal ? `is ${rule}` : `resolves to ${ARTICLE[rule]} address`;
   const what = redirected ? `the server redirected to \`${host}\`, which ${verdict}` : `\`${host}\` ${verdict}`;
-  const hint = rule === 'private' ? `; list \`${host}\` in CONFLUENCE_ALLOWED_HOSTS to allow it` : '';
+  const hint = rule === 'private' && allowListName ? `; list \`${host}\` in ${allowListName} to allow it` : '';
   return `refused: ${what}${hint}`;
 }
 
@@ -178,11 +197,13 @@ const systemResolver: Resolver = (hostname) => dns.promises.lookup(hostname, { a
  * is always one this module's `lookup` opened, and closed after `idleMs` without a request, so an
  * instance nobody calls again lets go of its sockets and is collected.
  */
-export function confluenceEgress(options: EgressOptions): FetchLike {
+export function confluenceEgress(options: EgressOptions): EgressFetch {
   const allowed = new Set(options.allowedHosts.map(normalizeHost));
   const resolve = options.resolve ?? systemResolver;
   const route = options.route ?? ((address: string) => address);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const label = options.label ?? 'Confluence';
+  const allowListName = options.allowListName === undefined ? 'CONFLUENCE_ALLOWED_HOSTS' : options.allowListName;
   // The agent's `timeout` is what a socket gets while it waits in the pool; a request in flight
   // runs on its own `timeout` below, which Node sets on the socket when it hands it to the request.
   const pool = { keepAlive: true, timeout: options.idleMs ?? DEFAULT_IDLE_MS };
@@ -193,15 +214,24 @@ export function confluenceEgress(options: EgressOptions): FetchLike {
     return rule === 'private' && allowed.has(host) ? null : rule;
   };
 
-  const send = (url: URL, headers: Record<string, string>, redirected: boolean): Promise<http.IncomingMessage> => {
+  const send = (
+    url: URL,
+    headers: Record<string, string>,
+    redirected: boolean,
+    opened: (req: http.ClientRequest) => void,
+  ): Promise<http.IncomingMessage> => {
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
       const where = redirected ? 'the server redirected to' : 'the base URL is';
       return Promise.reject(new EgressRefusedError(`refused: ${where} a \`${url.protocol}\` address; only http and https are allowed`, 'scheme'));
     }
+    if (options.httpsOnly && url.protocol !== 'https:') {
+      const where = redirected ? 'the server redirected to' : 'the URL is';
+      return Promise.reject(new EgressRefusedError(`refused: ${where} a \`${url.protocol}\` address; only https is allowed`, 'scheme'));
+    }
     const host = normalizeHost(url.hostname);
     if (net.isIP(host)) {
       const rule = judge(host, host);
-      if (rule) return Promise.reject(new EgressRefusedError(refusal(host, rule, true, redirected), rule));
+      if (rule) return Promise.reject(new EgressRefusedError(refusal(host, rule, true, redirected, allowListName), rule));
     }
 
     const lookup: net.LookupFunction = (hostname, lookupOptions, callback) => {
@@ -216,7 +246,7 @@ export function confluenceEgress(options: EgressOptions): FetchLike {
           for (const answer of answers) {
             const rule = judge(host, answer.address);
             if (rule) {
-              callback(new EgressRefusedError(refusal(host, rule, false, redirected), rule), '', 0);
+              callback(new EgressRefusedError(refusal(host, rule, false, redirected, allowListName), rule), '', 0);
               return;
             }
           }
@@ -251,46 +281,76 @@ export function confluenceEgress(options: EgressOptions): FetchLike {
         lookup,
         timeout: timeoutMs,
       });
-      req.on('timeout', () => req.destroy(new Error(`Confluence at \`${host}\` did not answer within ${timeoutMs / 1000} s`)));
+      req.on('timeout', () => req.destroy(new Error(`${label} at \`${host}\` did not answer within ${timeoutMs / 1000} s`)));
       req.on('error', (err: NodeJS.ErrnoException) => {
         // A system error's own message names the address it dialled ("connect ECONNREFUSED 10.1.2.3:8090");
         // the code alone says what went wrong without saying where the name led.
         reject(
-          err.code && !(err instanceof EgressRefusedError)
-            ? new Error(`Could not reach Confluence at \`${host}\`: ${err.code}`, { cause: err })
-            : err,
+          err.code && !(err instanceof EgressRefusedError) ? new Error(`Could not reach ${label} at \`${host}\`: ${err.code}`, { cause: err }) : err,
         );
       });
       req.on('response', resolveResponse);
+      opened(req);
       req.end();
     });
   };
 
   return async (input, init) => {
-    if (init.method !== 'GET') throw new Error(`The Confluence egress sends GET only, not ${init.method}`);
-    let url = new URL(input);
-    let headers = { ...init.headers };
-    for (let hop = 0; ; hop++) {
-      const res = await send(url, headers, hop > 0);
-      const location = res.headers.location;
-      if (!REDIRECT_STATUSES.has(res.statusCode ?? 0) || !location) return toResponse(res);
-      res.resume();
-      if (hop >= MAX_REDIRECTS) throw new Error(`Confluence redirected more than ${MAX_REDIRECTS} times`);
-      const next = new URL(location, url);
-      if (next.origin !== url.origin) {
-        headers = Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== 'authorization'));
+    if (init.method !== 'GET') throw new Error(`The ${label} egress sends GET only, not ${init.method}`);
+    const { signal } = init;
+    signal?.throwIfAborted();
+    // Whatever is open right now — the request until it answers, then its response — is what an abort
+    // destroys, together with its socket, so nothing outlives the caller's deadline.
+    let open: { destroy(error?: Error): unknown } | undefined;
+    const onAbort = () => open?.destroy(abortReason(signal));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const release = () => signal?.removeEventListener('abort', onAbort);
+    try {
+      let url = new URL(input);
+      let headers = { ...init.headers };
+      for (let hop = 0; ; hop++) {
+        const res = await send(url, headers, hop > 0, (req) => {
+          open = req;
+        });
+        open = res;
+        signal?.throwIfAborted();
+        const location = res.headers.location;
+        if (!REDIRECT_STATUSES.has(res.statusCode ?? 0) || !location) {
+          const response = toResponse(res, label);
+          if (signal) {
+            if (res.closed) release();
+            else res.once('close', release);
+          }
+          return response;
+        }
+        res.resume();
+        if (hop >= MAX_REDIRECTS) throw new Error(`${label} redirected more than ${MAX_REDIRECTS} times`);
+        const next = new URL(location, url);
+        if (next.origin !== url.origin) {
+          headers = Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== 'authorization'));
+        }
+        url = next;
       }
-      url = next;
+    } catch (err) {
+      release();
+      open?.destroy();
+      throw err;
     }
   };
 }
 
+/** Why `signal` was aborted, as an `Error` a rejected request carries. */
+function abortReason(signal: AbortSignal | undefined): Error {
+  const reason: unknown = signal?.reason;
+  return reason instanceof Error ? reason : new Error('The request was aborted');
+}
+
 /** The Node response as the `Response` the client reads, decompressed if it was gzipped. */
-function toResponse(res: http.IncomingMessage): Response {
+function toResponse(res: http.IncomingMessage, label: string): Response {
   const status = res.statusCode ?? 0;
   if (status < 200 || status > 599) {
     res.destroy();
-    throw new Error(`Confluence answered with an invalid status ${status}`);
+    throw new Error(`${label} answered with an invalid status ${status}`);
   }
   const headers = new Headers();
   for (const [name, value] of Object.entries(res.headers)) {

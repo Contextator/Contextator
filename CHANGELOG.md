@@ -45,6 +45,16 @@ ships, that stops.
   or changing the project's MCP auth mode does not reset the hint, so a client may see the earlier
   answer for up to an hour. None of this reaches legacy answers: they gain no `resultType`, `ttlMs` or
   `cacheScope`.
+- **OAuth clients can identify themselves by a Client ID Metadata Document URL.** The authorization
+  server metadata now says `client_id_metadata_document_supported: true`; a client that sends an
+  `https://` URL with a path as its `client_id` needs no `/oauth/register` call. The document is fetched
+  through the same egress guard as Confluence (no loopback, link-local, private or unspecified address,
+  checked after DNS and on every redirect, https only), limited to 5 KiB and 5 s, and cached as its
+  `Cache-Control`/`Expires` headers allow (5 minutes without them, a day at most). Its `client_id` must
+  equal the URL, `client_name` and `redirect_uris` are required, no secret is accepted, and the requested
+  `redirect_uri` must be listed exactly. The consent page names the host that published the document and
+  where the answer is sent, and warns when the client can only redirect to localhost. Dynamic client
+  registration is unchanged.
 
 ### Changed
 

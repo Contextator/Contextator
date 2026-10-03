@@ -8,6 +8,7 @@ import type { AppContext } from '../../../src/context.js';
 import type { Db } from '../../../src/db/client.js';
 import { documentSources, projects, type ProjectRow } from '../../../src/db/schema.js';
 import { adminRoutes } from '../../../src/admin/routes.js';
+import type { ClientMetadataResolver } from '../../../src/mcp/cimd.js';
 import { oauthRoutes } from '../../../src/mcp/oauth-routes.js';
 import { mcpRoutes } from '../../../src/mcp/router.js';
 import { SessionRegistry } from '../../../src/mcp/sessions.js';
@@ -133,7 +134,13 @@ export interface LiveInstance {
  */
 export async function startMcpInstance(
   database: TestDatabase,
-  opts: { dataDir: string; docRoot: string; env?: Record<string, string> },
+  opts: {
+    dataDir: string;
+    docRoot: string;
+    env?: Record<string, string>;
+    clientMetadata?: ClientMetadataResolver;
+    clientMetadataFetchLimit?: number;
+  },
 ): Promise<LiveInstance> {
   const config = loadConfig({
     DATABASE_URL: database.url,
@@ -213,7 +220,7 @@ export async function startMcpInstance(
   // route calls. Registering it touches neither the indexer nor the embedding model; only a request
   // to one of those routes would, and no suite here sends one.
   await app.register(adminRoutes, { ctx });
-  await app.register(oauthRoutes, { ctx });
+  await app.register(oauthRoutes, { ctx, clientMetadata: opts.clientMetadata, clientMetadataFetchLimit: opts.clientMetadataFetchLimit });
   await app.register(mcpRoutes, { ctx });
   await app.listen({ port: 0, host: '127.0.0.1' });
 

@@ -38,6 +38,17 @@ import {
   registerOauthClient,
   touchOauthClient,
 } from '../services/auth/oauth.js';
+import {
+  CIMD_FETCH_MAX_PER_HOST,
+  CIMD_FETCH_WINDOW_MS,
+  type ClientMetadata,
+  ClientMetadataError,
+  ClientMetadataResolver,
+  isClientIdUrl,
+  metadataRedirectAllowed,
+  redirectsOnlyToLoopback,
+  upsertMetadataClient,
+} from './cimd.js';
 
 /**
  * Contextator as an OAuth 2.1 authorization server for its own MCP endpoints
@@ -83,7 +94,8 @@ const REDIRECT_RULE: Record<ApplicationType | 'default', string> = {
 
 const AuthorizeQuery = z.object({
   response_type: z.string(),
-  client_id: z.string().min(1).max(200),
+  // 2048 rather than a registration id's length: a client ID metadata document's URL is a client_id.
+  client_id: z.string().min(1).max(2048),
   redirect_uri: z.string().min(1).max(2048),
   code_challenge: z.string().min(43).max(128),
   code_challenge_method: z.string(),
@@ -117,7 +129,7 @@ const DecisionBody = AuthorizeQuery.extend({ decision: z.enum(['approve', 'deny'
 
 const TokenBody = z.object({
   grant_type: z.string(),
-  client_id: z.string().max(200).optional(),
+  client_id: z.string().max(2048).optional(),
   code: z.string().max(2048).optional(),
   code_verifier: z.string().max(256).optional(),
   redirect_uri: z.string().max(2048).optional(),
@@ -156,7 +168,15 @@ async function accountMayReadProject(on: Db, account: { id: string; username: st
   return satisfies(await resolveProjectAccess(on, principal, projectId), MCP_READ_ACCESS);
 }
 
-export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
+export interface OauthRoutesOptions {
+  ctx: AppContext;
+  /** Fetches client ID metadata documents. Tests pass one whose fetch reaches a local fixture. */
+  clientMetadata?: ClientMetadataResolver;
+  /** New metadata documents one address may have fetched per window; {@link CIMD_FETCH_MAX_PER_HOST} by default. */
+  clientMetadataFetchLimit?: number;
+}
+
+export const oauthRoutes: FastifyPluginAsync<OauthRoutesOptions> = async (app, { ctx, clientMetadata, clientMetadataFetchLimit }) => {
   const { config, db, log } = ctx;
   // The audit log's hooks, on this instance too ([ADR-0055](../../.ssot/ADR.md#adr-0055)). Approving a
   // connector is a person granting a client lasting read access to one project — the
@@ -188,6 +208,14 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
   const registerLimiter = new SlidingWindow(OAUTH_REGISTER_MAX_PER_HOST, OAUTH_REGISTER_WINDOW_MS);
   /** Live buckets this limiter may hold. Each is at most `OAUTH_REGISTER_MAX_PER_HOST` timestamps. */
   const REGISTER_LIMITER_MAX_KEYS = 5_000;
+
+  /**
+   * Client ID metadata documents. A URL `client_id` makes this server fetch it, from a request
+   * anybody can send, so the fetches a host can cause are budgeted the way registrations are — only
+   * fetches, not requests answered from the cache — on a limiter of their own with the same bound.
+   */
+  const metadataDocuments = clientMetadata ?? new ClientMetadataResolver();
+  const metadataFetchLimiter = new SlidingWindow(clientMetadataFetchLimit ?? CIMD_FETCH_MAX_PER_HOST, CIMD_FETCH_WINDOW_MS);
 
   const shell = await fs.readFile(new URL('_auth-shell.html', PAGES_DIR), 'utf8');
   const consentBody = await fs.readFile(new URL('authorize.html', PAGES_DIR), 'utf8');
@@ -272,6 +300,9 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       // RFC 9207: every redirect back to the client carries `iss`, so a client talking to more than one
       // authorization server can tell which one answered — the mix-up attack's whole premise.
       authorization_response_iss_parameter_supported: true,
+      // draft-ietf-oauth-client-id-metadata-document: an https URL serving the client's metadata may
+      // be its client_id, with no registration. Dynamic registration stays beside it.
+      client_id_metadata_document_supported: true,
       service_documentation: `${base}/about`,
     };
   });
@@ -419,14 +450,21 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     req: FastifyRequest,
     reply: FastifyReply,
     params: z.infer<typeof AuthorizeQuery>,
-  ): Promise<{ ok: true; project: ProjectRow; clientName: string } | { ok: false }> {
+  ): Promise<{ ok: true; project: ProjectRow; clientName: string; metadata: ClientMetadata | null } | { ok: false }> {
     const refused = { ok: false as const };
-    const client = await getOauthClient(db, params.client_id);
-    if (!client) {
+    // A URL client_id is read from its metadata document, never looked up as a registration — even
+    // once an approval has written a row under that URL, the document says which URIs are the client's.
+    const metadata = isClientIdUrl(params.client_id) ? await resolveMetadata(req, reply, params.client_id) : null;
+    if (metadata === undefined) return refused;
+    const client = metadata ? null : await getOauthClient(db, params.client_id);
+    if (!metadata && !client) {
       await refuseInPlace(reply, 400, 'Unknown client', 'No client is registered here under that client_id.');
       return refused;
     }
-    if (!redirectUriRegistered(client, params.redirect_uri)) {
+    const redirectKnown = metadata
+      ? metadataRedirectAllowed(metadata, params.redirect_uri)
+      : !!client && redirectUriRegistered(client, params.redirect_uri);
+    if (!redirectKnown) {
       await refuseInPlace(
         reply,
         400,
@@ -472,8 +510,65 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       });
       return refused;
     }
-    touchOauthClient(db, client.clientId);
-    return { ok: true, project, clientName: client.name || params.client_id };
+    if (client) touchOauthClient(db, client.clientId);
+    const clientName = (metadata ? metadata.clientName : client?.name) || params.client_id;
+    return { ok: true, project, clientName, metadata };
+  }
+
+  /**
+   * The client ID metadata document behind a URL `client_id`, or `undefined` with the refusal already
+   * shown in place — never at the redirect URI, which is not known good until the document is.
+   */
+  async function resolveMetadata(req: FastifyRequest, reply: FastifyReply, clientId: string): Promise<ClientMetadata | undefined> {
+    if (!metadataDocuments.isCached(clientId)) {
+      if (metadataFetchLimiter.size >= REGISTER_LIMITER_MAX_KEYS) metadataFetchLimiter.sweep();
+      const retryAfter = metadataFetchLimiter.size >= REGISTER_LIMITER_MAX_KEYS ? 3600 : metadataFetchLimiter.hit(req.ip || 'unknown');
+      if (retryAfter > 0) {
+        log.warn({ ip: req.ip }, 'rate limited a client metadata document fetch');
+        reply.header('retry-after', String(retryAfter));
+        await refuseInPlace(
+          reply,
+          429,
+          'Too many new clients',
+          `Too many unknown clients were looked up from this host; try again in ${retryAfter} s.`,
+        );
+        return undefined;
+      }
+    }
+    try {
+      return await metadataDocuments.resolve(clientId);
+    } catch (err) {
+      if (!(err instanceof ClientMetadataError)) throw err;
+      log.warn({ clientId, reason: err.message }, 'refused a client id metadata document');
+      await refuseInPlace(reply, 400, 'Client metadata refused', err.message);
+      return undefined;
+    }
+  }
+
+  /**
+   * What the consent page says about where the answer goes — only for a metadata-document client,
+   * whose redirect URIs nobody on this instance has seen before. The hostname is what a person can
+   * recognise; a client that can only send them back to this computer gets a warning on top, since
+   * the document's author is then whoever runs software here.
+   */
+  function redirectNotice(metadata: ClientMetadata | null, redirectUri: string): string {
+    if (!metadata) return '';
+    const target = new URL(redirectUri);
+    const published = new URL(metadata.clientId).hostname;
+    // A native app's private-use scheme (`com.example.app:/callback`) has no host to name; the scheme
+    // is what says which app on this device receives the answer.
+    const destination = target.hostname
+      ? `<strong>${escapeHtml(target.hostname)}</strong>`
+      : `the app on this device that opens <strong>${escapeHtml(target.protocol)}</strong> links`;
+    let notice =
+      `<p class="field-hint">This client is described by <strong>${escapeHtml(published)}</strong>. ` +
+      `After you answer, you will be sent to ${destination}.</p>`;
+    if (redirectsOnlyToLoopback(metadata)) {
+      notice +=
+        '\n  <p class="field-hint"><strong>Warning:</strong> this client can only send you back to this computer (localhost). ' +
+        'Allow it only if you started it yourself, just now.</p>';
+    }
+    return notice;
   }
 
   app.get('/oauth/authorize', async (req, reply) => {
@@ -501,6 +596,7 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       client: escapeHtml(checked.clientName),
       project: escapeHtml(checked.project.name),
       account: escapeHtml(session.username),
+      redirect: redirectNotice(checked.metadata, params.redirect_uri),
       // Round-tripped through the form so the POST re-derives everything rather than trusting a
       // server-side scratchpad keyed on a browser. Each one is re-validated there.
       fields: Object.entries({
@@ -591,6 +687,10 @@ export const oauthRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       log.info({ project: checked.project.name, user: session.username }, 'an oauth authorization was refused by the person');
       return backToClient(req, reply, params.redirect_uri, { error: 'access_denied', state: params.state });
     }
+
+    // Issued credentials reference their client by foreign key, and a metadata-document client has no
+    // registration row until a person approves it — this is that approval.
+    if (checked.metadata) await upsertMetadataClient(db, checked.metadata);
 
     const code = codes.issue({
       clientId: params.client_id,
