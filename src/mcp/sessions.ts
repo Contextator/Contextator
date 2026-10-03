@@ -1,6 +1,6 @@
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import type { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
+import type { McpServer } from '@modelcontextprotocol/server';
+import type { SSEServerTransport } from '@modelcontextprotocol/server-legacy/sse';
 import type { Logger } from '../context.js';
 
 export type SessionKind = 'streamable' | 'sse';
@@ -16,7 +16,7 @@ interface SessionBase {
 
 export interface StreamableSession extends SessionBase {
   kind: 'streamable';
-  transport: StreamableHTTPServerTransport;
+  transport: NodeStreamableHTTPServerTransport;
 }
 
 export interface SseSession extends SessionBase {

@@ -1,13 +1,11 @@
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
-  ErrorCode,
-  ListResourceTemplatesRequestSchema,
-  ListResourcesRequestSchema,
-  McpError,
-  ReadResourceRequestSchema,
+  type McpServer,
+  ProtocolError,
+  ProtocolErrorCode,
   type ReadResourceResult,
   type Resource,
-} from '@modelcontextprotocol/sdk/types.js';
+  ResourceNotFoundError,
+} from '@modelcontextprotocol/server';
 import { LIST_TOPICS_DEFAULT_LIMIT } from '../config.js';
 import type { ProjectRow } from '../db/schema.js';
 import { normalizeRelativePath } from '../services/fs-scan.js';
@@ -45,9 +43,6 @@ import { type ToolContext, decodeCursor, encodeCursor } from './tools.js';
  */
 
 export const RESOURCE_SCHEME = 'contextator:';
-
-/** The spec's code for a resource that does not exist; the SDK has no name for it. */
-export const RESOURCE_NOT_FOUND = -32002;
 
 /** One `resources/list` page; `list_topics`' default page, for the same reason it has that default. */
 export const RESOURCE_LIST_PAGE_SIZE = LIST_TOPICS_DEFAULT_LIMIT;
@@ -103,7 +98,11 @@ export function parseDocumentUri(uri: string): { project: string; relativePath: 
   return normalizeRelativePath(relativePath) === relativePath ? { project, relativePath } : null;
 }
 
-const notFound = (uri: string): McpError => new McpError(RESOURCE_NOT_FOUND, `Resource not found: ${uri}`, { uri });
+/**
+ * A resource that does not exist. The 2026-07-28 revision answers it with `-32602` and `data: { uri }`,
+ * and SDK v2 does so in both eras ([ADR-0098](../../.ssot/ADR.md#adr-0098)); before 0.3.0 this was `-32002`.
+ */
+const notFound = (uri: string): ResourceNotFoundError => new ResourceNotFoundError(uri, `Resource not found: ${uri}`);
 
 /**
  * Registers the three resource handlers on the session's server. Low-level handlers rather than
@@ -122,21 +121,21 @@ export function registerResources(
   const pageSize = opts.pageSize ?? RESOURCE_LIST_PAGE_SIZE;
   server.server.registerCapabilities({ resources: { listChanged: false } });
 
-  const unexpected = (err: unknown, method: string): McpError => {
-    if (err instanceof McpError) return err;
+  const unexpected = (err: unknown, method: string): ProtocolError => {
+    if (err instanceof ProtocolError) return err;
     log.error({ err, method, project: project.name }, 'resource handler failed');
-    return new McpError(ErrorCode.InternalError, `${method} failed`);
+    return new ProtocolError(ProtocolErrorCode.InternalError, `${method} failed`);
   };
 
-  server.server.setRequestHandler(ListResourcesRequestSchema, async (request) => {
+  server.server.setRequestHandler('resources/list', async (request) => {
     try {
       const cursor = request.params?.cursor;
       const after = cursor === undefined ? undefined : decodeCursor(cursor);
-      if (after === null) throw new McpError(ErrorCode.InvalidParams, 'That cursor is not one this server issued.');
+      if (after === null) throw new ProtocolError(ProtocolErrorCode.InvalidParams, 'That cursor is not one this server issued.');
 
       // Re-read for the live generation, as list_topics does: a session outlives a re-index (ADR-0039).
       const live = await getProjectById(db, project.id);
-      if (!live) throw new McpError(RESOURCE_NOT_FOUND, `Project "${project.name}" no longer exists.`);
+      if (!live) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Project "${project.name}" no longer exists.`);
 
       const rows = await listDocumentsForProject(db, project.id, live.liveGeneration, { limit: pageSize + 1, after });
       const docs = rows.slice(0, pageSize);
@@ -152,7 +151,7 @@ export function registerResources(
     }
   });
 
-  server.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+  server.server.setRequestHandler('resources/templates/list', async () => ({
     resourceTemplates: [
       {
         uriTemplate: `${RESOURCE_SCHEME}//${project.name}/{+path}`,
@@ -164,7 +163,7 @@ export function registerResources(
     ],
   }));
 
-  server.server.setRequestHandler(ReadResourceRequestSchema, async (request): Promise<ReadResourceResult> => {
+  server.server.setRequestHandler('resources/read', async (request): Promise<ReadResourceResult> => {
     const { uri } = request.params;
     try {
       const target = parseDocumentUri(uri);
@@ -179,10 +178,9 @@ export function registerResources(
       if (doc.content === null) {
         // read_document's legacy row: indexed before the text was stored. There is nothing to serve,
         // and serving the file instead is what ADR-0051 removed.
-        throw new McpError(
-          RESOURCE_NOT_FOUND,
+        throw new ResourceNotFoundError(
+          uri,
           `"${doc.relativePath}" was indexed before this server stored document text; re-index the project to make it readable.`,
-          { uri },
         );
       }
       return {

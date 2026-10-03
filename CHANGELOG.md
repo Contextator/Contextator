@@ -25,6 +25,38 @@ ships, that stops.
   `contextator_embedding_batch_size` and `contextator_index_run_wait_seconds{lane}` cover the indexer.
   No label carries a project, document or query. The README's *Scaling signals* section says which
   thresholds mean one process is no longer enough.
+- **MCP protocol 2026-07-28 on the same `/mcp/:project` URL, beside 2025-11-25.** A request whose body
+  carries the 2026 `_meta` envelope is served statelessly — no `initialize`, no `Mcp-Session-Id`, nothing
+  added to the session registry — and `server/discover` is answered; every other request (an
+  `initialize`, a request on a session, a body without the envelope) takes the session path exactly as
+  before. GET, HEAD and DELETE on `/mcp/:project` and the HTTP+SSE routes stay 2025-era only. A modern
+  request for a project that does not exist gets `404` with JSON-RPC `-32602`. Each tool call now reads
+  its token from its own request, so a search is attributed to the token that made it even when a
+  legacy session's client changes tokens mid-session, and a revoked token is refused with `401` in both
+  eras. A modern call to a tool that does not exist gets the 2026 protocol error, JSON-RPC `-32602`
+  `Tool <name> not found`; a legacy client still gets the `isError: true` tool result it got before.
+
+### Changed
+
+- **The MCP server is built on the MCP TypeScript SDK 2.x** (`@modelcontextprotocol/server`,
+  `@modelcontextprotocol/server-legacy`, `@modelcontextprotocol/node`, pinned with `~`). The 1.x
+  `@modelcontextprotocol/sdk` package remains a development dependency only, as the client the legacy
+  tests drive.
+- **Breaking:** legacy (2025-11-25) clients now get `-32602` (Invalid params) for a resource that is not
+  found, and for `resources/list` on a project that no longer exists, where they previously got
+  `-32002`; the error's `message` and `data` are unchanged. A client that matched on `-32002` has to
+  match on `-32602`. The SDK applies the same code in both protocol eras, and no compatibility shim is
+  provided.
+- **Breaking:** the input schemas `tools/list` returns to legacy (2025-11-25) clients declare JSON Schema
+  draft 2020-12 (`"$schema": "https://json-schema.org/draft/2020-12/schema"`, previously draft-07), and
+  the tools no longer carry `execution.taskSupport`. The properties, types and constraints of each
+  schema are unchanged. A client that validated against draft-07 or read `execution.taskSupport` has to
+  be updated.
+- **Breaking:** the text of a tool's input-validation error changed. It no longer starts with
+  `MCP error -32602:` and lists each problem as `<field>: <message>`, comma-separated — for example
+  `Input validation error: Invalid arguments for tool search_docs: query: Too small: expected string to
+  have >=1 characters, limit: Too small: expected number to be >=1`. The result is still a tool result
+  with `isError: true`; only a client that parsed the text is affected.
 
 ### Fixed
 

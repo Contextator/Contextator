@@ -1,4 +1,5 @@
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
+import type { AuthInfo, CallToolResult, JSONRPCRequest, Result, ServerContext } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import {
@@ -29,6 +30,7 @@ import {
   type SearchHit,
 } from '../services/vector-store.js';
 import { type DocumentFence, documentFence, wrapDocumentText } from './document-fence.js';
+import type { McpEra } from './era.js';
 import {
   type ListTopicsOutput,
   type ReadDocumentOutput,
@@ -233,26 +235,176 @@ export type ToolContext = Pick<AppContext, 'db' | 'embeddings' | 'config' | 'log
   metrics?: SearchCounter & SearchObserver;
 };
 
+// The input schemas are built once, at module level, not per registration: a modern-era request builds
+// its McpServer on every call ([ADR-0098](../../.ssot/ADR.md#adr-0098)), and none of them depends on the
+// project or the configuration. They stay raw shapes, which SDK v2 still accepts and wraps exactly as v1
+// did, and `scripts/build-product-facts.ts` reads each parameter off the shape.
+
+/** `search_docs` arguments. */
+const searchDocsInput = {
+  query: z.string().min(1).max(2000).describe('Natural-language question or keywords'),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_SEARCH_LIMIT)
+    .default(DEFAULT_SEARCH_LIMIT)
+    .describe(`Maximum number of excerpts to return (1-${MAX_SEARCH_LIMIT}, default ${DEFAULT_SEARCH_LIMIT})`),
+  // Both optional and both absent by default, which is what keeps every already-configured
+  // client searching exactly what it searched before (API.md §1).
+  source: z
+    .string()
+    .max(64)
+    .optional()
+    .describe('Search only this source — the first segment of the paths list_topics shows. Omit to search every source.'),
+  path_prefix: z
+    .string()
+    .max(512)
+    .optional()
+    .describe('Search only documents whose path starts with this, e.g. "handbook/operations". Omit to search the whole project.'),
+  // The third, and the one whose *description* is load-bearing: an agent that believed this
+  // accepted "latest" would be told the version does not exist, which is the honest answer but
+  // a wasted call. It says what it takes, and an unknown value is answered with the list
+  // ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
+  version: z
+    .string()
+    .min(1)
+    .max(SOURCE_VERSION_MAX_LENGTH)
+    .optional()
+    .describe(
+      'Search only documents of this release, e.g. "v3". An exact label as the project set it — there is no ordering and no ' +
+        '"latest"; an unknown value is answered with the versions this project does have. Omit to search every version, which is ' +
+        'what most projects have exactly one of.',
+    ),
+};
+
+/** `list_topics` arguments. */
+const listTopicsInput = {
+  // Both optional, and both defaulting to the first page of the same listing this tool always
+  // returned — API.md §1's rule about a new argument (ADR-0043).
+  cursor: z
+    .string()
+    .max(2048)
+    .optional()
+    .describe('Continue a previous listing: pass the next_cursor value it ended with. Omit to start at the beginning.'),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(LIST_TOPICS_MAX_LIMIT)
+    .default(LIST_TOPICS_DEFAULT_LIMIT)
+    .describe(`Documents per page (1-${LIST_TOPICS_MAX_LIMIT}, default ${LIST_TOPICS_DEFAULT_LIMIT})`),
+};
+
+/** `read_document` arguments. */
+const readDocumentInput = {
+  path: z.string().min(1).max(1024).describe('Relative file path as listed by search_docs / list_topics'),
+  // The three that narrow, all optional: absent, this tool returns the document, which is what
+  // it returned before they existed (API.md §1).
+  heading: z
+    .string()
+    .max(512)
+    .optional()
+    .describe('Read only this section: a heading breadcrumb as search_docs shows it, e.g. "Guide > Install > Docker". Subsections included.'),
+  from: z.number().int().min(0).optional().describe('First chunk index to read (0-based, as the chunk counts in list_topics are numbered)'),
+  to: z.number().int().min(0).optional().describe('Last chunk index to read, inclusive'),
+  max_tokens: z
+    .number()
+    .int()
+    .min(READ_DOCUMENT_MIN_MAX_TOKENS)
+    .max(READ_DOCUMENT_MAX_MAX_TOKENS)
+    .default(READ_DOCUMENT_DEFAULT_MAX_TOKENS)
+    .describe(
+      `Token budget for the text returned (${READ_DOCUMENT_MIN_MAX_TOKENS}-${READ_DOCUMENT_MAX_MAX_TOKENS}, default ${READ_DOCUMENT_DEFAULT_MAX_TOKENS})`,
+    ),
+};
+
+/** The token id the router put in `AuthInfo.extra` (`router.ts`), or NULL for a request that presented none. */
+export function tokenIdOf(auth: AuthInfo | undefined): string | null {
+  const tokenId = auth?.extra?.tokenId;
+  return typeof tokenId === 'string' ? tokenId : null;
+}
+
+/**
+ * The text an unknown tool's `isError` result carries in the legacy era: what SDK 1.x put there, an
+ * `McpError`'s message, which prefixes the JSON-RPC code.
+ */
+export const legacyUnknownToolMessage = (name: string) => `MCP error -32602: Tool ${name} not found`;
+
+type ToolsCallHandler = (request: JSONRPCRequest, ctx: ServerContext) => Promise<Result>;
+
+/**
+ * [ADR-0098](../../.ssot/ADR.md#adr-0098), Consequences: SDK v2 answers a call to an unknown tool with
+ * a JSON-RPC protocol error (`-32602`), where SDK 1.x answered with a tool result carrying
+ * `isError: true`. A 2025-era client keeps the shape it has always seen, so in the legacy era the
+ * `tools/call` handler McpServer installed is wrapped: an unknown name is answered here, in the 1.x shape,
+ * and every other call goes to the SDK's handler untouched — argument validation, execution and result
+ * projection included. A name is unknown when it is not in `registered`, the names `registerTools`
+ * itself handed to `registerTool`. The modern era is not wrapped and gets the 2026 protocol error.
+ *
+ * The SDK's handler is read through `Protocol._getRequestHandler`, a protected accessor; the SDK is
+ * pinned with `~`, and the guard below fails server construction loudly rather than silently serving
+ * the v2 shape should that accessor ever disappear. A server with no low-level server behind it answers
+ * no calls at all — `scripts/build-product-facts.ts` hands in a recorder that only collects the
+ * registrations — so there is nothing to wrap.
+ */
+function keepLegacyUnknownToolShape(server: McpServer, registered: ReadonlySet<string>): void {
+  if (!(server as { server?: unknown }).server) return;
+  const lowLevel = server.server as unknown as { _getRequestHandler?: (method: string) => ToolsCallHandler | undefined };
+  const sdkToolsCall = lowLevel._getRequestHandler?.('tools/call');
+  if (!sdkToolsCall) throw new Error('SDK tools/call handler not found; the legacy unknown-tool shape cannot be kept');
+  server.server.setRequestHandler('tools/call', async (request, ctx) => {
+    const name = request.params.name;
+    if (!registered.has(name)) {
+      return { content: [{ type: 'text', text: legacyUnknownToolMessage(name) }], isError: true };
+    }
+    return sdkToolsCall(request as unknown as JSONRPCRequest, ctx) as Promise<CallToolResult>;
+  });
+}
+
 /**
  * Registers the per-project tool set on a fresh McpServer instance. Handlers never throw; failures come
  * back as `isError`.
  *
- * `mcpTokenId` is the credential the session opened with, recorded beside whatever it searches for
- * ([ADR-0047](../../.ssot/ADR.md#adr-0047)). It is `null` for an `open` project, which verifies nothing.
+ * Which MCP token a search is recorded against ([ADR-0047](../../.ssot/ADR.md#adr-0047)) is read from
+ * each call's own credential — `ctx.http.authInfo`, which the router fills on every HTTP request —
+ * not from the one the session opened with ([ADR-0099](../../.ssot/ADR.md#adr-0099)): a legacy client
+ * that swaps tokens mid-session has its next search attributed to the new token. `mcpTokenId` is the
+ * fallback for a call with no HTTP request behind it (an in-process transport); `null` is an `open`
+ * project answered without a token, which verifies nothing.
+ *
+ * `era` decides one thing today: what a call to a tool that does not exist gets back (see
+ * `keepLegacyUnknownToolShape`).
  */
-export function registerTools(server: McpServer, ctx: ToolContext, project: ProjectRow, mcpTokenId: string | null = null): void {
+export function registerTools(
+  server: McpServer,
+  ctx: ToolContext,
+  project: ProjectRow,
+  mcpTokenId: string | null = null,
+  era: McpEra = 'legacy',
+): void {
   const { db, embeddings, config, log } = ctx;
   /** Off by default — see `MCP_STRUCTURED_OUTPUT` in config.ts for why. */
   const structuredOutput = config.MCP_STRUCTURED_OUTPUT;
   const ok = answerer(structuredOutput);
-  // Bound once per session rather than per call: the actor and the token do not change inside one
-  // connection, and `ctx.queryLog` being undefined — `SEARCH_QUERY_LOG=0` — makes this undefined too,
-  // which is how the instance-wide switch reaches the search path (`SearchDeps.queryLog`, unset = off).
-  const queryLog = ctx.queryLog?.for('mcp', mcpTokenId);
+  // Bound per call (below), not per session: the token can change inside one legacy connection
+  // (ADR-0099). `ctx.queryLog` being undefined — `SEARCH_QUERY_LOG=0` — makes the binding undefined
+  // too, which is how the instance-wide switch reaches the search path (`SearchDeps.queryLog`, unset = off).
+  const queryLogFor = (call: ServerContext) => {
+    const auth = call.http?.authInfo;
+    return ctx.queryLog?.for('mcp', auth ? tokenIdOf(auth) : mcpTokenId);
+  };
   const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+  // Every name passes through here on its way to `registerTool`, so the legacy wrapper's notion of a
+  // known tool is the registrations themselves and cannot drift from them.
+  const registered = new Set<string>();
+  const tool = (name: string): string => {
+    registered.add(name);
+    return name;
+  };
 
   server.registerTool(
-    'search_docs',
+    tool('search_docs'),
     {
       title: 'Search documentation',
       description:
@@ -263,46 +415,11 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
         'and with version when this project holds more than one release of the same documentation. ' +
         'When nothing is a good match it says so rather than returning the least bad thing it found. ' +
         'Use read_document with a returned file path to read the whole file, or its heading breadcrumb to read just that section.',
-      inputSchema: {
-        query: z.string().min(1).max(2000).describe('Natural-language question or keywords'),
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(MAX_SEARCH_LIMIT)
-          .default(DEFAULT_SEARCH_LIMIT)
-          .describe(`Maximum number of excerpts to return (1-${MAX_SEARCH_LIMIT}, default ${DEFAULT_SEARCH_LIMIT})`),
-        // Both optional and both absent by default, which is what keeps every already-configured
-        // client searching exactly what it searched before (API.md §1).
-        source: z
-          .string()
-          .max(64)
-          .optional()
-          .describe('Search only this source — the first segment of the paths list_topics shows. Omit to search every source.'),
-        path_prefix: z
-          .string()
-          .max(512)
-          .optional()
-          .describe('Search only documents whose path starts with this, e.g. "handbook/operations". Omit to search the whole project.'),
-        // The third, and the one whose *description* is load-bearing: an agent that believed this
-        // accepted "latest" would be told the version does not exist, which is the honest answer but
-        // a wasted call. It says what it takes, and an unknown value is answered with the list
-        // ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
-        version: z
-          .string()
-          .min(1)
-          .max(SOURCE_VERSION_MAX_LENGTH)
-          .optional()
-          .describe(
-            'Search only documents of this release, e.g. "v3". An exact label as the project set it — there is no ordering and no ' +
-              '"latest"; an unknown value is answered with the versions this project does have. Omit to search every version, which is ' +
-              'what most projects have exactly one of.',
-          ),
-      },
+      inputSchema: searchDocsInput,
       ...(structuredOutput ? { outputSchema: searchDocsOutput } : {}),
       annotations: readOnly,
     },
-    async ({ query, limit, source, path_prefix, version }) => {
+    async ({ query, limit, source, path_prefix, version }, call) => {
       // Every structured answer starts from this: no excerpts, nothing dropped, nothing cut.
       // `guidance` is the text answer's own sentence for every status but `results`, whose guidance is
       // the header and the truncation note `formatHits` wrote.
@@ -332,7 +449,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
             scan: scanFrom(config),
             selection: selectionFrom(config),
             scoreFloor: config.SEARCH_SCORE_FLOOR,
-            queryLog,
+            queryLog: queryLogFor(call),
             metrics: ctx.metrics,
           },
           { projectId: project.id, query, limit, source, pathPrefix: path_prefix, version },
@@ -409,7 +526,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
   );
 
   server.registerTool(
-    'list_topics',
+    tool('list_topics'),
     {
       title: 'List documentation topics',
       description:
@@ -417,22 +534,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
         'with titles and chunk counts. Use it to discover what documentation exists before searching or reading. ' +
         `One call returns ${LIST_TOPICS_DEFAULT_LIMIT} documents unless limit says otherwise (at most ${LIST_TOPICS_MAX_LIMIT}); when more ` +
         'remain the answer ends with a next_cursor value to pass back as cursor for the following page.',
-      inputSchema: {
-        // Both optional, and both defaulting to the first page of the same listing this tool always
-        // returned — API.md §1's rule about a new argument (ADR-0043).
-        cursor: z
-          .string()
-          .max(2048)
-          .optional()
-          .describe('Continue a previous listing: pass the next_cursor value it ended with. Omit to start at the beginning.'),
-        limit: z
-          .number()
-          .int()
-          .min(1)
-          .max(LIST_TOPICS_MAX_LIMIT)
-          .default(LIST_TOPICS_DEFAULT_LIMIT)
-          .describe(`Documents per page (1-${LIST_TOPICS_MAX_LIMIT}, default ${LIST_TOPICS_DEFAULT_LIMIT})`),
-      },
+      inputSchema: listTopicsInput,
       ...(structuredOutput ? { outputSchema: listTopicsOutput } : {}),
       annotations: readOnly,
     },
@@ -545,7 +647,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
   );
 
   server.registerTool(
-    'read_document',
+    tool('read_document'),
     {
       title: 'Read a documentation file',
       description:
@@ -554,27 +656,7 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
         'Pass heading with a breadcrumb from a search result to read only that section and the subsections under it, or from/to to read a ' +
         `range of chunks — either is far cheaper than a whole page. Output is capped at max_tokens (default ${READ_DOCUMENT_DEFAULT_MAX_TOKENS}) ` +
         'and says where it cut and how to ask for the rest.',
-      inputSchema: {
-        path: z.string().min(1).max(1024).describe('Relative file path as listed by search_docs / list_topics'),
-        // The three that narrow, all optional: absent, this tool returns the document, which is what
-        // it returned before they existed (API.md §1).
-        heading: z
-          .string()
-          .max(512)
-          .optional()
-          .describe('Read only this section: a heading breadcrumb as search_docs shows it, e.g. "Guide > Install > Docker". Subsections included.'),
-        from: z.number().int().min(0).optional().describe('First chunk index to read (0-based, as the chunk counts in list_topics are numbered)'),
-        to: z.number().int().min(0).optional().describe('Last chunk index to read, inclusive'),
-        max_tokens: z
-          .number()
-          .int()
-          .min(READ_DOCUMENT_MIN_MAX_TOKENS)
-          .max(READ_DOCUMENT_MAX_MAX_TOKENS)
-          .default(READ_DOCUMENT_DEFAULT_MAX_TOKENS)
-          .describe(
-            `Token budget for the text returned (${READ_DOCUMENT_MIN_MAX_TOKENS}-${READ_DOCUMENT_MAX_MAX_TOKENS}, default ${READ_DOCUMENT_DEFAULT_MAX_TOKENS})`,
-          ),
-      },
+      inputSchema: readDocumentInput,
       ...(structuredOutput ? { outputSchema: readDocumentOutput } : {}),
       annotations: readOnly,
     },
@@ -608,6 +690,8 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
       }
     },
   );
+
+  if (era === 'legacy') keepLegacyUnknownToolShape(server, registered);
 
   /**
    * A header an agent can cite from, then the text. The first two lines have not changed since 0.1.0.

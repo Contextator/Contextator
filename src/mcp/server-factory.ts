@@ -1,9 +1,10 @@
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { type AuthInfo, McpServer } from '@modelcontextprotocol/server';
 import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
 import { DEFAULT_DOCUMENT_FENCE } from './document-fence.js';
+import type { McpEra } from './era.js';
 import { registerResources } from './resources.js';
-import { registerTools } from './tools.js';
+import { registerTools, tokenIdOf } from './tools.js';
 
 /**
  * The sentence about the fence is the other half of [ADR-0066](../../.ssot/ADR.md#adr-0066), and it is
@@ -44,23 +45,40 @@ export function buildInstructions(project: ProjectRow, structuredOutput = false)
   ].join(' ');
 }
 
+export interface ProjectMcpServerOptions {
+  project: ProjectRow;
+  /** Which era the server is built for (`era.ts`). Both eras get the same tools and resources; only an unknown tool is answered differently (`registerTools`). */
+  era: McpEra;
+  /**
+   * The credential of the request that built the server, when there is one. It is not what a search is
+   * attributed to — that is read from each tool call's own `authInfo`
+   * ([ADR-0099](../../.ssot/ADR.md#adr-0099)) — but the fallback for a caller with no HTTP request
+   * behind it (an in-process transport), where `tokenId` is all there is.
+   */
+  auth?: AuthInfo;
+}
+
 /**
- * One McpServer per client session, bound to exactly one project — and, since
- * [ADR-0047](../../.ssot/ADR.md#adr-0047), to the MCP token the session presented when it opened, so
- * that what this client searches for can be attributed to a credential rather than to nobody.
- * `null` for an `open` project, which verifies nothing and so has nothing to attribute.
+ * One McpServer per legacy client session, and one per request in the modern era
+ * ([ADR-0098](../../.ssot/ADR.md#adr-0098)) — bound to exactly one project either way. Which MCP token a
+ * search is attributed to ([ADR-0047](../../.ssot/ADR.md#adr-0047)) is decided per tool call from that
+ * call's own credential ([ADR-0099](../../.ssot/ADR.md#adr-0099)), so a legacy session whose client
+ * swaps tokens mid-session attributes each search to the token that made it.
  *
- * The same session serves the project's documents as resources (`resources.ts`), behind the same auth
+ * The modern era calls this on every request, so it only builds: tool schemas live at module level
+ * (`tools.ts`), and what is left is an `McpServer` and its registrations.
+ *
+ * The same server serves the project's documents as resources (`resources.ts`), behind the same auth
  * and confined to what `read_document` can reach.
  */
-export function createProjectMcpServer(ctx: AppContext, project: ProjectRow, mcpTokenId: string | null = null): McpServer {
+export function createProjectMcpServer(ctx: AppContext, { project, era, auth }: ProjectMcpServerOptions): McpServer {
   const server = new McpServer(
     { name: `contextator-${project.name}`, version: ctx.version },
     {
       instructions: buildInstructions(project, ctx.config.MCP_STRUCTURED_OUTPUT),
     },
   );
-  registerTools(server, ctx, project, mcpTokenId);
+  registerTools(server, ctx, project, tokenIdOf(auth), era);
   registerResources(server, ctx, project);
   return server;
 }

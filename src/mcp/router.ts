@@ -1,21 +1,27 @@
 import { randomUUID } from 'node:crypto';
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import type { IncomingMessage } from 'node:http';
+import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
+import { type AuthInfo, isInitializeRequest } from '@modelcontextprotocol/server';
+import { SSEServerTransport } from '@modelcontextprotocol/server-legacy/sse';
+import type { FastifyError, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
 import { isOriginAllowed } from '../services/origin.js';
 import { getProjectByName, recordLegacySseActivity } from '../services/projects.js';
 import { mcpAccessDecision, mcpAccessMessage, mcpAccessStatus, readMcpBearer } from './access.js';
+import { detectEra } from './era.js';
 import { resolveMcpCredential } from './identity.js';
+import { createModernMcpHandler } from './modern-handler.js';
 import { createProjectMcpServer } from './server-factory.js';
 
 /**
  * MCP endpoints, one URL per project: `/mcp/:project`.
  *
- * Both transports share the URL following the MCP backwards-compatibility rules:
- *   POST   /mcp/:project            Streamable HTTP (initialize → new session; `mcp-session-id` → existing session)
+ * Two protocol eras share the URL ([ADR-0098](../../.ssot/ADR.md#adr-0098)). A POST whose body carries
+ * the 2026-07-28 `_meta` envelope is modern and is served statelessly by `modern-handler.ts`; every other
+ * request is legacy and is served by the transports below, following the MCP backwards-compatibility rules:
+ *   POST   /mcp/:project            modern: stateless, one McpServer per request, no session
+ *                                   legacy: Streamable HTTP (initialize → new session; `mcp-session-id` → existing session)
  *   GET    /mcp/:project            with `mcp-session-id` → Streamable HTTP server stream
  *                                   without it            → legacy HTTP+SSE stream (protocol 2024-11-05)
  *   POST   /mcp/:project/messages   legacy SSE inbound channel (`?sessionId=`)
@@ -36,14 +42,19 @@ declare module 'fastify' {
     mcpProject: ProjectRow | null;
     /**
      * Which of the project's MCP tokens this request presented, when it presented a live one. NULL for
-     * an `open` project answered without one. Bound into the session's tool set at initialize
-     * ([ADR-0047](../../.ssot/ADR.md#adr-0047)).
+     * an `open` project answered without one. It reaches the tools as `AuthInfo.extra.tokenId` on every
+     * request, so each search is attributed to the token that made it
+     * ([ADR-0047](../../.ssot/ADR.md#adr-0047), [ADR-0099](../../.ssot/ADR.md#adr-0099)).
      */
     mcpTokenId: string | null;
   }
 }
 
-const rpcError = (code: number, message: string) => ({ jsonrpc: '2.0' as const, error: { code, message }, id: null });
+const rpcError = (code: number, message: string, id: string | number | null = null) => ({
+  jsonrpc: '2.0' as const,
+  error: { code, message },
+  id,
+});
 const headerValue = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
 
 /**
@@ -58,6 +69,18 @@ export const isLegacySseRequest = (method: string, routeUrl: string | undefined,
 };
 
 /**
+ * The one request whose project-not-found answer depends on its era (`unknownProject` in the plugin):
+ * a POST to the project URL itself. `/messages` is legacy by construction.
+ */
+const isEraBearingPost = (req: FastifyRequest): boolean => req.method === 'POST' && (req.routeOptions.url?.endsWith('/mcp/:project') ?? false);
+
+/** A JSON-RPC request's id, to echo on an error; `null` when the body is not a request with one. */
+const requestIdOf = (body: unknown): string | number | null => {
+  const id = (body as { id?: unknown } | null | undefined)?.id;
+  return typeof id === 'string' || typeof id === 'number' ? id : null;
+};
+
+/**
  * Response headers a cross-origin browser MCP client may read (CORS `exposedHeaders`, src/server.ts).
  * `deprecation` is there so a browser client of the legacy SSE transport sees the ADR-0096 signal too.
  */
@@ -66,6 +89,8 @@ export const MCP_EXPOSED_HEADERS = ['mcp-session-id', 'mcp-protocol-version', 'd
 export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
   const { config, sessions, log } = ctx;
   const legacySsePingMs = 25_000;
+  const modern = createModernMcpHandler(ctx);
+  app.addHook('onClose', () => modern.close());
 
   // Primitive defaults: an object default would be shared between requests.
   app.decorateRequest('mcpProject', null);
@@ -94,7 +119,12 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
 
     const name = (req.params as { project?: string }).project ?? '';
     const project = await getProjectByName(ctx.db, name);
-    if (!project) return reply.code(404).send(rpcError(-32001, `Unknown project "${name}"`));
+    if (!project) {
+      // The one answer that depends on the era, and a POST's era is in its body, which is not parsed
+      // yet: the POST handler answers it (`unknownProject`). There is no project, so nothing to authorize.
+      if (isEraBearingPost(req)) return;
+      return reply.code(404).send(rpcError(-32001, `Unknown project "${name}"`));
+    }
     req.mcpProject = project;
 
     const bearer = readMcpBearer(req.headers.authorization);
@@ -106,7 +136,20 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     const { credential, tokenId } = await resolveMcpCredential(ctx.db, project.id, bearer);
     req.mcpTokenId = tokenId;
     const verdict = mcpAccessDecision(project.mcpAuth, credential);
-    if (verdict === 'ok') return;
+    if (verdict === 'ok') {
+      // The credential as the SDK carries it ([ADR-0099](../../.ssot/ADR.md#adr-0099)): every transport,
+      // both eras', hands `req.auth` to each tool call as `ctx.http.authInfo`, so a search is attributed
+      // to the token of the request that made it, not to the one its session opened with. Set on every
+      // request, an open project's anonymous one included, so an absent `tokenId` means "none" rather
+      // than "look elsewhere".
+      (req.raw as IncomingMessage & { auth?: AuthInfo }).auth = {
+        token: bearer,
+        clientId: tokenId ?? 'anonymous',
+        scopes: [],
+        extra: { tokenId },
+      };
+      return;
+    }
 
     if (verdict === 'token_invalid') log.warn({ project: project.name }, 'mcp request with an unknown, expired or revoked credential');
     if (verdict === 'not_a_member') log.warn({ project: project.name }, 'mcp request by an account with no membership of this project');
@@ -124,8 +167,20 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
       .send(rpcError(-32000, mcpAccessMessage(verdict, project.mcpAuth)));
   });
 
-  /** The hook has already resolved it and answered 404 if it does not exist. */
+  /** The hook has already resolved it and answered 404 if it does not exist (the POST route aside). */
   const requireProject = (req: FastifyRequest<McpRoute>): ProjectRow => req.mcpProject!;
+
+  /**
+   * A POST to `/mcp/:project` for a project that does not exist. Legacy clients get what they always
+   * got: 404 with `-32001`. A modern client gets 404 with `-32602`, because in the 2026-07-28 numbering
+   * `-32001` was HeaderMismatch's code and would read as a header problem. The request id is echoed so
+   * a modern client can match the answer to its request.
+   */
+  async function unknownProject(req: FastifyRequest<McpRoute>, reply: FastifyReply) {
+    const message = `Unknown project "${req.params.project}"`;
+    if ((await detectEra(req)) === 'legacy') return reply.code(404).send(rpcError(-32001, message));
+    return reply.code(404).send(rpcError(-32602, message, requestIdOf(req.body)));
+  }
 
   /** After `reply.hijack()` Fastify no longer answers for us, so transport failures are written by hand. */
   async function guarded(reply: FastifyReply, fn: () => Promise<void>): Promise<void> {
@@ -143,12 +198,36 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     }
   }
 
+  /**
+   * A POST for a project that does not exist whose body Fastify could not take — a content type it does
+   * not parse, malformed JSON, an empty or oversized body. Before the era split the hook answered such a
+   * request 404 with `-32001` before the body was read; the hook now leaves an unknown project's POST to
+   * the handler, so body parsing comes first. A body that cannot be read cannot carry the 2026
+   * envelope, so by `detectEra`'s own rule it is legacy, and it gets the legacy answer it always got.
+   * Every other error goes on to Fastify's handler unchanged, a known project's included.
+   */
+  function unknownProjectBodyError(err: FastifyError, req: FastifyRequest<McpRoute>, reply: FastifyReply) {
+    if (!req.mcpProject && err.code?.startsWith('FST_ERR_CTP_')) {
+      return reply.code(404).send(rpcError(-32001, `Unknown project "${req.params.project}"`));
+    }
+    throw err;
+  }
+
   // ---- Streamable HTTP: client → server messages ----
-  app.post<McpRoute>('/mcp/:project', async (req, reply) => {
+  app.post<McpRoute>('/mcp/:project', { errorHandler: unknownProjectBodyError }, async (req, reply) => {
+    if (!req.mcpProject) return unknownProject(req, reply);
     const project = requireProject(req);
 
+    if ((await detectEra(req)) === 'modern') {
+      // Stateless: the SDK builds a server for this request alone and the registry never hears of it.
+      // An `Mcp-Session-Id` the request may carry is ignored, as the 2026-07-28 revision does.
+      reply.hijack();
+      await guarded(reply, () => modern.handle(project, req.raw, reply.raw, req.body));
+      return;
+    }
+
     const sessionId = headerValue(req.headers['mcp-session-id']);
-    let transport: StreamableHTTPServerTransport;
+    let transport: NodeStreamableHTTPServerTransport;
 
     if (sessionId) {
       const session = sessions.get(sessionId, 'streamable');
@@ -157,10 +236,9 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
       sessions.touch(sessionId);
       transport = session.transport;
     } else if (isInitializeRequest(req.body)) {
-      // The token of the request that *opened* the session, not of each later one: an MCP session is a
-      // credential's connection, and the SDK builds the tool set once per session.
-      const server = createProjectMcpServer(ctx, project, req.mcpTokenId);
-      const fresh = new StreamableHTTPServerTransport({
+      // One server per session; which token each search is attributed to is read per call (ADR-0099).
+      const server = createProjectMcpServer(ctx, { project, era: 'legacy', auth: (req.raw as { auth?: AuthInfo }).auth });
+      const fresh = new NodeStreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => {
           sessions.add({
@@ -212,7 +290,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     if (req.method === 'HEAD') return reply.code(200).header('content-type', 'text/event-stream').send();
 
     // Legacy HTTP+SSE transport. hijack() must precede connect(): SSEServerTransport.start() writes the response head.
-    const server = createProjectMcpServer(ctx, project, req.mcpTokenId);
+    const server = createProjectMcpServer(ctx, { project, era: 'legacy', auth: (req.raw as { auth?: AuthInfo }).auth });
     recordLegacySseActivity(ctx.db, project.id);
     reply.hijack();
     const transport = new SSEServerTransport(`/mcp/${project.name}/messages`, reply.raw);

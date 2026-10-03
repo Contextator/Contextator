@@ -6,8 +6,8 @@
         "title": "Search documentation",
         "description": "Hybrid search over the \"handbook-project\" documentation: meaning and exact wording at once, so an identifier — an environment variable, a header, an error code — finds its page as readily as a question does. Returns the most relevant excerpts with their file path, heading breadcrumb and similarity score, each shown with the passage before and after it for context. Narrow it with source or path_prefix when you already know where the answer lives, and with version when this project holds more than one release of the same documentation. When nothing is a good match it says so rather than returning the least bad thing it found. Use read_document with a returned file path to read the whole file, or its heading breadcrumb to read just that section.",
         "inputSchema": {
-          "$schema": "http://json-schema.org/draft-07/schema#",
           "type": "object",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "query": {
               "type": "string",
@@ -48,9 +48,6 @@
           "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false
-        },
-        "execution": {
-          "taskSupport": "forbidden"
         }
       },
       {
@@ -58,8 +55,8 @@
         "title": "List documentation topics",
         "description": "Lists the indexed documents of the \"handbook-project\" project grouped by source and directory (paths are \"<source>/<path>\"), with titles and chunk counts. Use it to discover what documentation exists before searching or reading. One call returns 200 documents unless limit says otherwise (at most 1000); when more remain the answer ends with a next_cursor value to pass back as cursor for the following page.",
         "inputSchema": {
-          "$schema": "http://json-schema.org/draft-07/schema#",
           "type": "object",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "cursor": {
               "description": "Continue a previous listing: pass the next_cursor value it ended with. Omit to start at the beginning.",
@@ -80,9 +77,6 @@
           "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false
-        },
-        "execution": {
-          "taskSupport": "forbidden"
         }
       },
       {
@@ -90,8 +84,8 @@
         "title": "Read a documentation file",
         "description": "Returns the Markdown of one indexed file of the \"handbook-project\" project. Pass the path exactly as shown by search_docs or list_topics (e.g. \"docs/guides/install.md\"; the first segment is the source). Pass heading with a breadcrumb from a search result to read only that section and the subsections under it, or from/to to read a range of chunks — either is far cheaper than a whole page. Output is capped at max_tokens (default 4000) and says where it cut and how to ask for the rest.",
         "inputSchema": {
-          "$schema": "http://json-schema.org/draft-07/schema#",
           "type": "object",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "path": {
               "type": "string",
@@ -133,9 +127,6 @@
           "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false
-        },
-        "execution": {
-          "taskSupport": "forbidden"
         }
       }
     ]

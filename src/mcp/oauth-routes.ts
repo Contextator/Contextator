@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { OAuthClientMetadataSchema } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { OAuthClientMetadataSchema } from '@modelcontextprotocol/core';
 import { footerNav, renderPage } from '../admin/pages.js';
 import { readSessionCookie } from '../auth/cookies.js';
 import { isSameSiteRequest } from '../auth/csrf.js';

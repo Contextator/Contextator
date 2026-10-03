@@ -4,14 +4,14 @@ import path from 'node:path';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { InMemoryTransport } from '@modelcontextprotocol/server';
+import { McpServer } from '@modelcontextprotocol/server';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { documentSources, projects, type ProjectRow } from '../../src/db/schema.js';
-import { RESOURCE_LIST_PAGE_SIZE, RESOURCE_NOT_FOUND, documentUri, parseDocumentUri, registerResources } from '../../src/mcp/resources.js';
+import { RESOURCE_LIST_PAGE_SIZE, documentUri, parseDocumentUri, registerResources } from '../../src/mcp/resources.js';
 import { getDocument, listDocumentsForProject, replaceDocument } from '../../src/services/vector-store.js';
 import { seedDocument, seedProject, startMcpInstance, stubVector, type LiveInstance } from './support/mcp-instance.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, type TestDatabase } from './support/postgres.js';
@@ -367,7 +367,7 @@ describe('resources/read — what it refuses', () => {
     const client = await connect(alpha, PAGE);
     try {
       const refused = await refusal(client, uri());
-      expect(refused.code).toBe(RESOURCE_NOT_FOUND);
+      expect(refused.code).toBe(ErrorCode.InvalidParams);
       // The same answer a path that never existed gets, and nothing of what is behind it.
       expect(refused.message).toContain('Resource not found');
       for (const marker of ['ON-DISK-SECRET-MARKER', 'NEXT-GENERATION-MARKER', 'BETA-ONLY-MARKER']) expect(refused.message).not.toContain(marker);
@@ -391,7 +391,7 @@ describe('resources/read — what it refuses', () => {
     const client = await connect(alpha, PAGE);
     try {
       const refused = await refusal(client, documentUri('alpha', 'handbook/legacy.md'));
-      expect(refused.code).toBe(RESOURCE_NOT_FOUND);
+      expect(refused.code).toBe(ErrorCode.InvalidParams);
       expect(refused.message).toContain('re-index');
     } finally {
       await client.close();
@@ -404,11 +404,11 @@ describe('resources/read — what it refuses', () => {
       const oldUri = documentUri('generations', 'handbook/old.md');
       const newUri = documentUri('generations', 'handbook/new.md');
       expect(await textOf(client, oldUri)).toContain('OLD-GENERATION-MARKER');
-      expect((await refusal(client, newUri)).code).toBe(RESOURCE_NOT_FOUND);
+      expect((await refusal(client, newUri)).code).toBe(ErrorCode.InvalidParams);
 
       await database.db.update(projects).set({ liveGeneration: 1 }).where(eq(projects.id, generations.id));
       expect(await textOf(client, newUri)).toContain('NEW-GENERATION-MARKER');
-      expect((await refusal(client, oldUri)).code).toBe(RESOURCE_NOT_FOUND);
+      expect((await refusal(client, oldUri)).code).toBe(ErrorCode.InvalidParams);
       expect((await listAll(client)).uris).toEqual([newUri]);
     } finally {
       await client.close();
@@ -458,8 +458,8 @@ describe.each([
       expect(first.nextCursor).toBeTypeOf('string');
 
       expect(await textOf(client, documentUri('alpha', 'handbook/guide.md'))).toBe(GUIDE);
-      expect((await refusal(client, documentUri('beta', 'handbook/guide.md'))).code).toBe(RESOURCE_NOT_FOUND);
-      expect((await refusal(client, documentUri('alpha', 'disk/secret.md'))).code).toBe(RESOURCE_NOT_FOUND);
+      expect((await refusal(client, documentUri('beta', 'handbook/guide.md'))).code).toBe(ErrorCode.InvalidParams);
+      expect((await refusal(client, documentUri('alpha', 'disk/secret.md'))).code).toBe(ErrorCode.InvalidParams);
     } finally {
       await client.close();
     }
@@ -469,7 +469,7 @@ describe.each([
     const client = await httpClient(beta);
     try {
       expect(await textOf(client, documentUri('beta', 'handbook/guide.md'))).toBe(OTHER_GUIDE);
-      expect((await refusal(client, documentUri('alpha', 'handbook/guide.md'))).code).toBe(RESOURCE_NOT_FOUND);
+      expect((await refusal(client, documentUri('alpha', 'handbook/guide.md'))).code).toBe(ErrorCode.InvalidParams);
     } finally {
       await client.close();
     }

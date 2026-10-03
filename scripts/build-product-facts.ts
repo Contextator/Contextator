@@ -28,7 +28,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PgDialect, getTableConfig } from 'drizzle-orm/pg-core';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { EnvSchema } from '../src/config.js';
 import { type ProjectRow, projects } from '../src/db/schema.js';
