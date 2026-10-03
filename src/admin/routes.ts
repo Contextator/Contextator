@@ -334,6 +334,8 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         : null,
       searches: gauges.searches,
       audit: gauges.audit,
+      // Search phases, embedding batches and queue waits (`services/metrics.ts`), observed in the process.
+      histograms: ctx.metrics.histograms(),
     };
     // The content type the exposition format names. A scraper reads it either way; a person opening
     // the URL in a browser gets text rather than a download, which is the reason to be exact.
@@ -392,6 +394,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         selection: selectionFrom(config),
         scoreFloor: config.SEARCH_SCORE_FLOOR,
         queryLog: ctx.queryLog?.for('dashboard'),
+        metrics: ctx.metrics,
       },
       { projectId: id, query: q, limit, source, pathPrefix: path_prefix, version },
     );

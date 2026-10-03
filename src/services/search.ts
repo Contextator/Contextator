@@ -3,6 +3,7 @@ import type { ProjectRow } from '../db/schema.js';
 import type { EmbeddingProvider } from './embeddings/provider.js';
 import { normalizeRelativePath } from './fs-scan.js';
 import { getProjectById } from './projects.js';
+import { type SearchObserver, startTimer } from './metrics.js';
 import type { QueryLogSink } from './query-log.js';
 import { belowRelevanceFloor, effectiveScoreFloor } from './relevance.js';
 import { getSourceByName, listSources } from './sources.js';
@@ -69,6 +70,13 @@ export interface SearchDeps {
    * defaults to `off`, so the server passes nothing unless an operator asked for it.
    */
   rerank?: Reranker;
+  /**
+   * Where the phase timings of an answered search go (`/metrics`). Optional, and **unset it is off**,
+   * like the sinks above — the harness passes none, so `npm run eval` measures nothing it reports.
+   * Only the `ok` path is observed, for the reason only the `ok` path is logged: the other outcomes
+   * never reached the index, and their milliseconds would be the guards' rather than the search's.
+   */
+  metrics?: SearchObserver;
 }
 
 export interface SearchInput {
@@ -139,10 +147,11 @@ export type SearchOutcome =
   | { status: 'model_mismatch'; project: ProjectRow; indexedWith: string; serverUses: string };
 
 export async function searchProject(
-  { db, embeddings, scan, selection, scoreFloor, queryLog, rerank }: SearchDeps,
+  { db, embeddings, scan, selection, scoreFloor, queryLog, rerank, metrics }: SearchDeps,
   input: SearchInput,
 ): Promise<SearchOutcome> {
   const startedAt = Date.now();
+  const sinceStart = startTimer();
   // Re-read rather than trust the row the caller is holding: an MCP session can outlive a
   // re-index, a delete, or a change of embedding model, and each of the three guards below is
   // about a project that is no longer what it was when the caller picked it up.
@@ -199,7 +208,9 @@ export async function searchProject(
 
   // `embedQuery`, never `embedPassages`: on an asymmetric model these are different encodings of the
   // same string, and the wrong one here costs recall without failing (ADR-0038).
+  const embedTimer = startTimer();
   const vector = await embeddings.embedQuery(input.query);
+  const embedSeconds = embedTimer();
   // The live generation off the row that was just re-read, passed as a value (ADR-0039). A rebuild
   // may be filling `liveGeneration + 1` at this very moment; this query cannot see it, and the moment
   // the swap commits the next call reads the new number here instead. There is no gap between the two.
@@ -207,6 +218,11 @@ export async function searchProject(
   // `input.query` goes to the lexical half **unprefixed**, beside the vector the provider prefixed for
   // the dense one (ADR-0038, ADR-0041): they are two encodings of one question, and the prefix belongs
   // to exactly one of them.
+  // The reranker runs inside `searchChunks`, between the candidate statement and the page fetch, so
+  // its time is taken around the call it makes and subtracted from the whole to leave `retrieve`.
+  // Wrapping the function changes nothing about what it is given or what it returns.
+  let rerankSeconds: number | undefined;
+  const retrieveTimer = startTimer();
   const hits = await searchChunks(db, {
     projectId: project.id,
     generation: project.liveGeneration,
@@ -220,8 +236,18 @@ export async function searchProject(
     selection,
     // `rerank.score` and not the reranker: `searchChunks` takes a function of strings for the reason
     // it takes a vector rather than a provider, and binding it here is what keeps the model out of it.
-    rerank: rerank ? (query, passages) => rerank.score(query, passages) : undefined,
+    rerank: rerank
+      ? async (query, passages) => {
+          const rerankTimer = startTimer();
+          try {
+            return await rerank.score(query, passages);
+          } finally {
+            rerankSeconds = (rerankSeconds ?? 0) + rerankTimer();
+          }
+        }
+      : undefined,
   });
+  const searchSeconds = retrieveTimer();
   // The project's own floor wins over the instance's, and only while the instance's floor is on:
   // `scoreFloor` unset or `0` is "off" for every project, so a column cannot turn on a refusal the
   // operator switched off. `project` is the row re-read at the top, so the override costs no query.
@@ -269,6 +295,13 @@ export async function searchProject(
       liveGeneration: project.liveGeneration,
     });
   }
+
+  metrics?.observeSearch({
+    embed: embedSeconds,
+    retrieve: Math.max(0, searchSeconds - (rerankSeconds ?? 0)),
+    rerank: rerankSeconds,
+    total: sinceStart(),
+  });
 
   return { status: 'ok', project, hits, belowFloor, scoreFloor: effectiveFloor, scoreFloorOverridden };
 }

@@ -927,6 +927,17 @@ query parameters) and the audit log's guarantees and limits — what it records,
 does not (refused requests, actions that fail after committing), its performance at 200,004 rows,
 and that it is not tamper-evident: [Admin API](https://contextator.com/en/docs/admin-api/).
 
+### Scaling signals: when one process is no longer enough
+
+Contextator runs one process with one indexer queue on purpose. `/metrics` carries the histograms
+that say when that stops being true — `contextator_search_request_duration_seconds{indexing}` and
+`contextator_search_duration_seconds{phase=embed|retrieve|rerank}` for every MCP and dashboard
+search, `contextator_embedding_batch_*` for indexing, and `contextator_index_run_wait_seconds{lane}`
+for the queue. Revisit the single-process design when, sustained over a week, the search p95 while
+indexing is above 1 s and twice the idle p95, the interactive queue wait p95 is above 5 minutes, or
+the interactive backlog stays non-zero for 15 minutes at a time. The operations guide
+(`.ssot/OPERATIONS.md`, §7 *Capacity notes*) carries the PromQL, the reasoning behind each threshold, and what to check before adding a second instance.
+
 ## Contributing to Contextator
 
 Running it without Docker, the checks a change has to pass, the full file-by-file project layout, how

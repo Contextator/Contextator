@@ -18,6 +18,13 @@ ships, that stops.
   are sized by characters ÷ 4 exactly as before and the model id is unchanged; set, it becomes part of the
   model id, so turning it on re-indexes every project once. A self-hosted endpoint whose model name matches
   no prefix family is now reported once at startup.
+- **Search and indexer histograms on `/metrics`.** Every answered search, from MCP and from the dashboard,
+  is timed: `contextator_search_duration_seconds{phase,indexing}` times query embedding, retrieval (the hybrid statement) and reranking separately;
+  `contextator_search_request_duration_seconds{indexing}` gives the search p95 while an index run is in
+  progress and while it is not. `contextator_embedding_batch_duration_seconds`,
+  `contextator_embedding_batch_size` and `contextator_index_run_wait_seconds{lane}` cover the indexer.
+  No label carries a project, document or query. The README's *Scaling signals* section says which
+  thresholds mean one process is no longer enough.
 
 ### Fixed
 

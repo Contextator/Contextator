@@ -66,7 +66,11 @@ async function main(): Promise<void> {
   await loadEmbeddingTokenizer(embeddings);
   const sessions = new SessionRegistry(log);
   const locks = new KeyedMutex();
-  const indexer = new Indexer({ db, embeddings, config, log, locks });
+  // The pool is handed over rather than the numbers: `/metrics` reports node-postgres's own gauges at
+  // scrape time, so there is nothing to keep up to date and nothing that can drift from the pool.
+  const metrics = new MetricsRegistry(pool);
+  // The indexer registers its "run in progress" probe with the registry itself (`indexing` label).
+  const indexer = new Indexer({ db, embeddings, config, log, locks, metrics });
   const uploads = new UploadService(config);
   const setup = new SetupGate();
   const loginLimiter = new SlidingWindow(config.AUTH_LOGIN_MAX_ATTEMPTS, config.AUTH_LOGIN_WINDOW_MIN * 60_000);
@@ -74,9 +78,6 @@ async function main(): Promise<void> {
   // the MCP tool or the search route to hand `searchProject`, so `SEARCH_QUERY_LOG=0` is not a flag the
   // search path has to remember to check — it is the absence of the thing that would have written.
   const queryLog = config.SEARCH_QUERY_LOG ? new QueryLog(db, log) : undefined;
-  // The pool is handed over rather than the numbers: `/metrics` reports node-postgres's own gauges at
-  // scrape time, so there is nothing to keep up to date and nothing that can drift from the pool.
-  const metrics = new MetricsRegistry(pool);
   const audit = new AuditWriter(db, log, (outcome) => metrics.countAudit(outcome));
   const ctx: AppContext = {
     config,

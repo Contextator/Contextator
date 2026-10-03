@@ -175,6 +175,9 @@ describe('the route in front of it', () => {
     expect(res.statusCode).toBe(200);
     expect(res.headers['content-type']).toBe('text/plain; version=0.0.4; charset=utf-8');
     expect(res.body).toContain('# TYPE contextator_db_up gauge');
+    // The histograms the registry declares are part of the scrape before anything has been observed.
+    expect(res.body).toContain('# TYPE contextator_search_duration_seconds histogram');
+    expect(res.body).toContain('# TYPE contextator_index_run_wait_seconds histogram');
   });
 
   /**

@@ -13,6 +13,7 @@ import { expandsToManyDocuments, allowedExtensionsFor, type Flavor } from './fla
 import { readAndHash, walkMarkdown } from './fs-scan.js';
 import { recordIndexRun } from './index-runs.js';
 import type { KeyedMutex } from './locks.js';
+import { type IndexerObserver, startTimer } from './metrics.js';
 import { checkSpecSize, type DerivedDocument } from './openapi.js';
 import { getProjectById } from './projects.js';
 import { driverFor } from './sources/driver.js';
@@ -133,6 +134,11 @@ export interface IndexerDeps {
    * this queue does when the thread it depends on goes away.
    */
   conversion?: ConversionService;
+  /**
+   * Where batch sizes, batch timings and queue waits go (`/metrics`). Optional, and unset it measures
+   * nothing — the tests and the CLI build an indexer without one.
+   */
+  metrics?: IndexerObserver;
 }
 
 const ACTIVE_PHASES: ReadonlySet<JobPhase> = new Set(['queued', 'syncing', 'scanning', 'embedding', 'finalizing']);
@@ -194,6 +200,12 @@ export class Indexer {
   private running = false;
   /** Project whose job is being processed right now. */
   private current: string | null = null;
+  /**
+   * The monotonic clock each queued job started on, for the queue-wait histogram. Kept beside the job
+   * rather than on it: `JobState` is what the admin API returns, and `queuedAt` is wall-clock time,
+   * which an NTP step can move backwards and turn into a negative wait.
+   */
+  private readonly queuedTimers = new WeakMap<JobState, () => number>();
 
   /**
    * The conversion thread, built once for the queue rather than once per run: a run is hundreds of
@@ -210,6 +222,8 @@ export class Indexer {
         maxHeapMb: deps.config.CONVERSION_WORKER_MAX_HEAP_MB,
         log: deps.log,
       });
+    // Read once per observed search, so the search histograms can be split by "was a run in progress".
+    deps.metrics?.watchIndexing(() => this.current !== null);
   }
 
   /** Drop the conversion thread. The queue itself holds nothing else that needs closing. */
@@ -252,6 +266,7 @@ export class Indexer {
       queuedAt: new Date().toISOString(),
     };
     this.jobs.set(projectId, job);
+    this.queuedTimers.set(job, startTimer());
     this.laneFor(trigger).push(projectId);
     void this.runLoop();
     return job;
@@ -421,6 +436,12 @@ export class Indexer {
     const log = this.deps.log.child({ projectId: job.projectId });
     job.phase = 'syncing';
     job.startedAt = new Date().toISOString();
+    // `trigger` is the lane the job left from: a promotion rewrites it when it moves the job (`enqueue`).
+    const waited = this.queuedTimers.get(job);
+    if (waited) {
+      this.queuedTimers.delete(job);
+      this.deps.metrics?.observeIndexRunWait(job.trigger === 'scheduled' ? 'scheduled' : 'interactive', waited());
+    }
 
     const project = await getProjectById(db, job.projectId);
     if (!project) {
@@ -745,7 +766,11 @@ export class Indexer {
               const rows: NewChunk[] = [];
               for (let i = 0; i < chunks.length; i += config.EMBEDDING_BATCH_SIZE) {
                 const batch = chunks.slice(i, i + config.EMBEDDING_BATCH_SIZE);
+                // Timed here, at the call, rather than inside the provider: the number is what indexing
+                // waited for, whichever provider answered.
+                const elapsed = startTimer();
                 const vectors = await embeddings.embedPassages(batch.map(embeddingText));
+                this.deps.metrics?.observeEmbeddingBatch(batch.length, elapsed());
                 batch.forEach((c, j) => {
                   rows.push({ chunkIndex: c.index, headingPath: c.headingPath, content: c.content, tokenCount: c.tokenCount, embedding: vectors[j] });
                 });

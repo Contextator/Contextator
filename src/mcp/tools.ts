@@ -12,7 +12,7 @@ import {
 import type { DocumentRow, ProjectRow } from '../db/schema.js';
 import { chunksWithinBudget, joinChunks, truncateToTokens } from '../services/document-read.js';
 import { normalizeRelativePath } from '../services/fs-scan.js';
-import type { SearchCounter } from '../services/metrics.js';
+import type { SearchCounter, SearchObserver } from '../services/metrics.js';
 import { getProjectById } from '../services/projects.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { SOURCE_VERSION_MAX_LENGTH, listSources } from '../services/sources.js';
@@ -227,9 +227,10 @@ export type ToolContext = Pick<AppContext, 'db' | 'embeddings' | 'config' | 'log
   /**
    * Where a search is counted for `/metrics` ([ADR-0055](../../.ssot/ADR.md#adr-0055)). Optional for
    * `queryLog`'s reason: a test that hands this function four fields and a stub provider must not have
-   * to build a counter registry to get a tool answered.
+   * to build a counter registry to get a tool answered. The same registry times the search phases, so
+   * agent searches feed the search histograms the dashboard's do.
    */
-  metrics?: SearchCounter;
+  metrics?: SearchCounter & SearchObserver;
 };
 
 /**
@@ -325,7 +326,15 @@ export function registerTools(server: McpServer, ctx: ToolContext, project: Proj
         // The guards, the query embedding and the top-k query are services/search.ts; what is left
         // here is the wording, which is prompt-visible and belongs to the tool.
         const outcome = await searchProject(
-          { db, embeddings, scan: scanFrom(config), selection: selectionFrom(config), scoreFloor: config.SEARCH_SCORE_FLOOR, queryLog },
+          {
+            db,
+            embeddings,
+            scan: scanFrom(config),
+            selection: selectionFrom(config),
+            scoreFloor: config.SEARCH_SCORE_FLOOR,
+            queryLog,
+            metrics: ctx.metrics,
+          },
           { projectId: project.id, query, limit, source, pathPrefix: path_prefix, version },
         );
         if (outcome.status === 'project_gone') return fail(`Project "${project.name}" no longer exists.`);
