@@ -15,7 +15,7 @@ http://localhost:3444/mcp/<project-name>
 ```
 
 AI coding agents such as Cursor, Claude Code and Claude Desktop connect to that URL and get
-three tools: `search_docs`, `list_topics` and `read_document`.
+three tools: `search_docs`, `list_topics` and `read_document`, plus two read-only prompts.
 
 ## Why one endpoint per project?
 

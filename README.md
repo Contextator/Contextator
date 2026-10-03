@@ -25,7 +25,8 @@ http://localhost:3444/mcp/<project-name>
   retrieval model covering 100 languages incl. Turkish). Switch to OpenAI embeddings with two env vars.
 - **One URL, Streamable HTTP first.** Streamable HTTP is the way to connect. The legacy HTTP+SSE transport is
   **deprecated** (ADR-0096): it still answers on the same URL and keeps working, no removal date is set, and its
-  responses carry a `Deprecation: true` header.
+  responses carry a `Deprecation: true` header. The same URL also speaks the stateless MCP **2026-07-28** protocol
+  beside 2025-11-25 — see [Connecting AI clients](#connecting-ai-clients).
 - **Admin dashboard** at `http://localhost:3444/` to manage projects and their sources — add a repository, drop a folder or an archive on the page, test a connection, trigger re-indexing and watch progress.
 - **Accounts and roles.** People sign in with their own account. `root` and `admin` manage everything and everyone; a
   `member` sees only the projects it is assigned to, as a read-only `viewer` or an `editor` that adds sources, uploads
@@ -39,7 +40,7 @@ http://localhost:3444/mcp/<project-name>
 - **More than Markdown.** `.html`, `.docx`, `.csv` and `.pdf` are converted to Markdown as they are indexed, so an agent
   reads a Word file or a PDF the way it reads a page of documentation. See [File types](#file-types).
 
-Stack: TypeScript · Node.js 22+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/sdk` · `@huggingface/transformers` · `unpdf` / `mammoth` / `turndown`.
+Stack: TypeScript · Node.js 22+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/server` (MCP TypeScript SDK 2.x) · `@huggingface/transformers` · `unpdf` / `mammoth` / `turndown`.
 Ships as **one Docker container**, published as `contextator/contextator`, that holds both the database and the app.
 Free software under the **AGPL-3.0-or-later** ([why](#license)), with a commercial license available.
 
@@ -433,6 +434,17 @@ and what the MCP authorization specification defines for remote servers. You do 
 connector at `http://host:3444/mcp/<project>`, and it discovers this server's authorization endpoints, registers
 itself, and sends you to a page here to sign in and approve it. What it gets back acts as *your* account.
 
+A connector can identify itself in one of two ways. It can register through `/oauth/register` (dynamic client
+registration), or it can send an `https://` URL with a path as its `client_id`, a **Client ID Metadata Document
+(CIMD)**, and skip the registration call; the authorization server metadata announces the second with
+`client_id_metadata_document_supported: true`. The server fetches that document through the same egress guard
+Confluence uses — https only, no loopback, link-local, private or unspecified address, checked after DNS and on
+every redirect — limited to 5 KiB and 5 seconds, and caches it as its `Cache-Control` / `Expires` headers allow
+(5 minutes without them, a day at most). The document's `client_id` must equal the URL, `client_name` and
+`redirect_uris` are required, no secret is accepted, and the `redirect_uri` the client then asks for must be
+listed in it exactly. The consent page names the host that published the document and where the answer is
+sent, and warns when the client can only redirect to localhost.
+
 Its credential renews itself quietly and expires if the connector goes unused for a month
 (`MCP_OAUTH_ACCESS_TTL_MIN`, `MCP_OAUTH_REFRESH_TTL_DAYS`). **Changing your password disconnects every connector acting
 as you**, the same way it signs out your other browsers, and a connector that says *disconnect* gives up its whole
@@ -772,6 +784,28 @@ requires one. Three read-only tools are exposed: `search_docs` (hybrid search, r
 `list_topics` (the indexed document list) and `read_document` (one file's Markdown, by path or heading
 range). See [MCP access](#mcp-access) for the auth modes.
 
+Beside the tools, each project publishes its documents as MCP resources and two read-only **prompts**,
+`answer_from_docs` (argument `question`) and `explore_topic` (argument `topic`). A prompt reads nothing and
+changes nothing: it returns one user message telling the model which tools to call and to cite file paths.
+
+**Two protocol eras on one URL.** `/mcp/<project>` serves MCP 2025-11-25 and 2026-07-28 side by side. A request
+whose body carries the 2026 `_meta` envelope is answered statelessly — no `initialize`, no `Mcp-Session-Id`,
+nothing held in the session registry — and a 2026 client can ask `server/discover` for the protocol versions and
+capabilities the server offers before it calls `tools/call search_docs`. Every other request, an `initialize`
+included, takes the session path as before, so a 1.x SDK client and a legacy SSE client keep working; 0.3.0 does change three things they can see (see the `CHANGELOG.md` **Breaking** entries): a missing resource is `-32602` where it was `-32002`, each tool's input schema is JSON Schema draft 2020-12 where it was draft-07 and no longer carries `execution.taskSupport`, and an input-validation error reads `Input validation error: Invalid arguments for tool search_docs: query: …`.
+A 2026 request must repeat the protocol version in `MCP-Protocol-Version`, the method in `Mcp-Method` and, on
+`tools/call`, `resources/read` and `prompts/get`, the tool name, URI or prompt name in `Mcp-Name`; the SDK
+refuses one that does not. A 2025-11-25 request is asked for none of these.
+
+**What differs for a 2026-07-28 client.** Its answers always carry each tool's `outputSchema` and
+`structuredContent` beside the text, whatever `MCP_STRUCTURED_OUTPUT` says; that flag now governs 2025-11-25
+clients only and is still off by default, so with it off a legacy answer gains no `outputSchema` or `structuredContent`. Its `tools/list`,
+`resources/list` and `resources/read` carry a per-project cache hint: `ttlMs` is a tenth of the time since the
+project's last successful index, capped at an hour and `0` while the project is indexing, before its first
+index or after a failed index run, and `cacheScope` is `public` only for an `open` project and `private` otherwise. Deleting a source or
+changing a project's MCP access does not reset the hint, so a client can see the earlier answer for up to an
+hour. A legacy answer gains none of this.
+
 Ready-to-paste config for every client, structured output, MCP resources and the relevance floor:
 [Connecting AI Clients](https://contextator.com/en/docs/connecting-ai-clients/) and
 [MCP Tools](https://contextator.com/en/docs/mcp-tools/).
@@ -893,10 +927,10 @@ EMBEDDING_DIMENSIONS=384
 EMBEDDING_TOKENIZER=Xenova/multilingual-e5-small
 ```
 
-TEI ignores the request's model name and vLLM serves the Hugging Face repository id by default, so the
-real name works on both. Ollama resolves the name to one of its local tags, so either serve the model
-under that name (`ollama cp <your-tag> intfloat/multilingual-e5-small`) or keep your tag in
-`OPENAI_EMBEDDING_MODEL` and set the prefixes yourself:
+If your server serves the model under another name (a local alias, a path), the name matches no family: the model
+runs without prefixes and recall quietly drops. The server says so once at startup, at `info` level, unless you have
+set either prefix variable. Either put the model's real name in `OPENAI_EMBEDDING_MODEL`, or keep your own name and
+set the prefixes yourself; either change re-indexes every project once:
 
 ```bash
 # Ollama, the model kept under its own tag: these lines replace their namesakes above, keep the rest
@@ -922,6 +956,13 @@ accounts and API tokens, project membership, and an audit log that is written by
 itself — no handler can add a route without being covered. `GET /metrics` exposes Prometheus text
 separately, gated by a signed-in account, `ADMIN_TOKEN`, `METRICS_TOKEN`, or `METRICS_PUBLIC=1`.
 
+A project can be moved between instances: `GET /api/projects/:id/export` writes one `.tar.gz`, and
+`POST /api/projects/import` (an instance `admin`'s) creates a project from it. The import is refused with
+`507 insufficient_disk` when `DATA_DIR` — and, with the embedded database, its data directory — cannot hold
+`DATA_DIR_MIN_FREE_BYTES` plus four times the archive's size. The check runs before the upload is read and
+again before it is unpacked, so a refusal leaves no project row or file behind; `DATA_DIR_MIN_FREE_BYTES=0`
+turns it off. It is advisory, and with an external database (`DATABASE_URL`) only `DATA_DIR` is measured.
+
 Full endpoint tables (projects, sources, uploads, webhooks, MCP tokens, accounts, tokens, audit
 query parameters) and the audit log's guarantees and limits — what it records, what it deliberately
 does not (refused requests, actions that fail after committing), its performance at 200,004 rows,
@@ -931,12 +972,15 @@ and that it is not tamper-evident: [Admin API](https://contextator.com/en/docs/a
 
 Contextator runs one process with one indexer queue on purpose. `/metrics` carries the histograms
 that say when that stops being true — `contextator_search_request_duration_seconds{indexing}` and
-`contextator_search_duration_seconds{phase=embed|retrieve|rerank}` for every MCP and dashboard
+`contextator_search_duration_seconds{phase=embed|retrieve|rerank,indexing}` for every MCP and dashboard
 search, `contextator_embedding_batch_*` for indexing, and `contextator_index_run_wait_seconds{lane}`
-for the queue. Revisit the single-process design when, sustained over a week, the search p95 while
-indexing is above 1 s and twice the idle p95, the interactive queue wait p95 is above 5 minutes, or
-the interactive backlog stays non-zero for 15 minutes at a time. The operations guide
-(`.ssot/OPERATIONS.md`, §7 *Capacity notes*) carries the PromQL, the reasoning behind each threshold, and what to check before adding a second instance.
+for the queue. `contextator_mcp_requests_total{method,tool,era}` counts MCP messages by protocol era, so you can
+see when the last 2025-era client has gone, and `contextator_mcp_tool_duration_seconds{tool}` times each tool
+call; no label carries a project, a document or a query. Revisit the single-process design when, sustained over a
+week, the search p95 while indexing is above 1 s and twice the idle p95, the interactive queue wait p95 is
+above 5 minutes, or the interactive backlog stays non-zero for 15 minutes at a time. The operations guide
+(`.ssot/OPERATIONS.md`, §7 *Capacity notes*) carries the PromQL, the reasoning behind each threshold, and what
+to check before adding a second instance.
 
 ## Contributing to Contextator
 

@@ -5,7 +5,7 @@ title: MCP tools reference
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-export const toc = [{ value: 'search_docs' }, { value: 'list_topics' }, { value: 'read_document' }];
+export const toc = [{ value: 'search_docs' }, { value: 'list_topics' }, { value: 'read_document' }, { value: 'Prompts' }];
 
 # MCP tools
 
@@ -47,3 +47,10 @@ Paths that were not indexed for the project are rejected, so an agent can never 
 arbitrary files from the server.
 
 {/* Files larger than 512 KB are truncated. */}
+
+## Prompts
+
+Besides the tools, every project offers two read-only prompts: `answer_from_docs`
+(argument `question`) and `explore_topic` (argument `topic`). A prompt reads nothing and
+changes nothing; it returns one user message that names the project and tells the model
+which tools to call, citing file paths.
