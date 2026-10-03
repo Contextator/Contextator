@@ -134,9 +134,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Locking a pull request conversation goes through the issues API, and `pull-requests: write`
-      # alone does not reach it.
+      # Locking a pull request conversation goes through the issues API, and neither scope alone reaches
+      # it: with `issues: write` only, `PUT /issues/{n}/lock` on a pull request number is refused 403
+      # ("Resource not accessible by integration"), which is how every merge from this job's introduction
+      # to 0.3.0 ended red.
       issues: write
+      pull-requests: write
     steps:
       # No checkout and no install: `gh` is on the runner. The two values interpolated are GitHub's own
       # — this repository's full name and an integer — and neither is text a contributor writes.
