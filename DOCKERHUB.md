@@ -74,11 +74,11 @@ start's log will not work.
 | Tag | Meaning |
 |-----|---------|
 | `latest` | The most recent stable release. Never points at a pre-release (`-rc.*`, `-beta.*`, …). |
-| `0.2` | The latest patch release inside the `0.2.x` minor line. Moves as `0.2.x` releases ship. |
-| `0.2.1` | One exact release. Immutable — always the same image. |
-| `…-slim` | The same release **without the embedded PostgreSQL** — `latest-slim`, `0.2-slim`, `0.2.1-slim`. Every tag from `0.2.0` on has one. |
+| `0.3` | The latest patch release inside the `0.3.x` minor line. Moves as `0.3.x` releases ship. |
+| `0.3.0` | One exact release. Immutable — always the same image. |
+| `…-slim` | The same release **without the embedded PostgreSQL** — `latest-slim`, `0.3-slim`, `0.3.0-slim`. Every tag from `0.2.0` on has one. |
 
-Pin `0.2.1`-style tags for anything you upgrade deliberately; use `latest` only where an unattended
+Pin `0.3.0`-style tags for anything you upgrade deliberately; use `latest` only where an unattended
 minor/patch bump is acceptable.
 
 ## Bringing your own PostgreSQL

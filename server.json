@@ -3,7 +3,7 @@
   "name": "io.github.Contextator/contextator",
   "title": "Contextator",
   "description": "Self-hosted documentation server: each project's indexed docs as its own MCP endpoint.",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "websiteUrl": "https://contextator.com",
   "repository": {
     "url": "https://github.com/Contextator/Contextator",
