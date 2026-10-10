@@ -4,8 +4,7 @@ services:
   backup:
     image: contextator/contextator:${CONTEXTATOR_TAG:-latest}
     restart: "on-failure:3"
-    user: node
-    stop_grace_period: 30s
+    user: "1000:1000"
     depends_on:
       contextator:
         condition: service_healthy
@@ -17,6 +16,7 @@ services:
         required: false
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env — backups require an external database}
+      HOME: /tmp
       DATA_DIR: /data
       BACKUP_STAGING_DIR: /data/.scheduled-backup-staging
       CONTEXTATOR_EMBEDDED_POSTGRES: "0"

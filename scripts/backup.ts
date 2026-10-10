@@ -315,6 +315,7 @@ async function main(): Promise<void> {
   await fs.mkdir(config.DATA_DIR, { recursive: true });
   // The scheduled sidecar owns a separate scratch root, so it can clean up after SIGKILL
   // without deleting a manual backup's staging directory on the shared data volume.
+  // BACKUP_STAGING_DIR is an internal sidecar knob, not a supported user setting.
   const stagingRoot = process.env.BACKUP_STAGING_DIR || config.DATA_DIR;
   await fs.mkdir(stagingRoot, { recursive: true });
   const staging = await fs.mkdtemp(path.join(stagingRoot, `${STAGING}-`));

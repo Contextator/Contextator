@@ -538,14 +538,14 @@ every existing archive and are retried after the interval. Invalid settings stop
 container restarts; correct `.env` and run `up -d backup` to start again.
 
 It uses the **default, non-slim image** for its PostgreSQL tools, overrides that image's entrypoint,
-runs as `node`, and mounts only the same `data` volume at `/data`. It never starts an embedded PostgreSQL or mounts
+runs as UID/GID `1000:1000` to match the slim app (with `HOME=/tmp` for npm), and mounts only the same `data` volume at `/data`. It never starts an embedded PostgreSQL or mounts
 `pgdata`. Its `.env` is the app's `.env`, including `DATABASE_URL` and `SECRET_KEY`, so the archive
 records the same key fingerprint as an app-container backup. The PostgreSQL client major version
 must be at least the server's major version.
 
 Archives are in `/data/backups/`, written as `.partial` files and renamed only after a successful
 backup, so interrupted writes do not count toward retention. On stop, the sidecar terminates the
-backup process group and removes its partial archive and private staging files. After a forced kill,
+backup process group with TERM followed by KILL after one second and removes its partial archive and private staging files. After a forced kill,
 the next iteration removes stale scheduled `.partial` archives and staging files under
 `/data/.scheduled-backup-staging`; manual backups use their usual staging directory. Run only one
 backup sidecar per data volume. Retention applies only to the default

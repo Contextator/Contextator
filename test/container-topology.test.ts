@@ -83,7 +83,8 @@ describe('docker-compose.backup.yml', () => {
   });
 
   it('shares the app user and waits for healthy startup before taking the first backup', () => {
-    expect(composeBackup).toMatch(/^\s+user: node$/m);
+    expect(composeBackup).toContain('user: "1000:1000"');
+    expect(composeBackup).toContain('HOME: /tmp');
     expect(composeBackup).toMatch(/depends_on:\s+contextator:\s+condition: service_healthy/);
     expect(composeBackup).toContain('restart: "on-failure:3"');
     expect(composeBackup).toContain('BACKUP_STAGING_DIR: /data/.scheduled-backup-staging');
