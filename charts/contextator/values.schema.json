@@ -406,6 +406,11 @@
             ]
           }
         },
+        "gitMaxPackBytes": {
+          "description": "GIT_MAX_PACK_BYTES: the most bytes one response from a git remote (ref advertisement or packfile) may carry; isomorphic-git holds a packfile in memory and copies it twice, so memory peaks at about twice this value; raise it together with resources.limits.memory. At least 1048576 (1 MiB). Null or unset leaves the application default, 268435456 (256 MiB).",
+          "type": ["integer", "null"],
+          "minimum": 1048576
+        },
         "mcpStructuredOutput": {
           "description": "MCP_STRUCTURED_OUTPUT: true adds structuredContent beside every MCP tool's text answer. Off by default; false leaves the variable unset.",
           "type": "boolean"

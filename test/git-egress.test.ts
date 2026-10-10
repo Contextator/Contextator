@@ -5,11 +5,12 @@ import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { EnvSchema, WEB_LIMIT_DEFAULTS } from '../src/config.js';
+import { EnvSchema, GIT_MAX_PACK_BYTES_DEFAULT, WEB_LIMIT_DEFAULTS } from '../src/config.js';
 import type { DocumentSourceRow } from '../src/db/schema.js';
 import { encryptSecret } from '../src/services/crypto.js';
 import { confluenceEgress, EgressRefusedError, gitEgress, webEgress } from '../src/services/sources/confluence-egress.js';
 import { GitDriver } from '../src/services/sources/git.js';
+import { GitResponseTooLargeError, guardedGitHttp } from '../src/services/sources/git-http.js';
 import { fakeResolver, PUBLIC_FIXTURE_ADDRESS, publicFixture, renamed, routeToLoopback } from './support/egress-seams.js';
 
 /**
@@ -67,7 +68,14 @@ const ROW = {
 
 function driver(
   url: string,
-  options: { allowed?: string[]; egress?: ConstructorParameters<typeof GitDriver>[2]; dataDir?: string; secret?: boolean; lastCommit?: string } = {},
+  options: {
+    allowed?: string[];
+    maxPackBytes?: number;
+    egress?: ConstructorParameters<typeof GitDriver>[2];
+    dataDir?: string;
+    secret?: boolean;
+    lastCommit?: string;
+  } = {},
 ): GitDriver {
   return new GitDriver(
     {
@@ -85,6 +93,7 @@ function driver(
         ALLOWED_DOC_ROOTS: [],
         IGNORE_GLOBS: [],
         GIT_ALLOWED_HOSTS: options.allowed ?? [],
+        ...(options.maxPackBytes === undefined ? {} : { GIT_MAX_PACK_BYTES: options.maxPackBytes }),
       },
     },
     options.egress,
@@ -400,6 +409,207 @@ describe('a real clone through the guard', () => {
     const refused = driver('http://169.254.169.254/remote.git', { dataDir, lastCommit: String(cloned.configPatch?.lastCommit) });
     expect(await rejection(refused.sync())).toBeInstanceOf(EgressRefusedError);
     expect(fs.existsSync(path.join(root, 'guide.md'))).toBe(true);
+  });
+
+  it('stops a clone whose pack is over GIT_MAX_PACK_BYTES, and the error names the setting', async () => {
+    const dataDir = path.join(work, 'data-capped');
+    const packsBefore = packRequests;
+    // The pack deflates to roughly 9 kB while the ref advertisement is a few hundred bytes, so a 4 kB ceiling
+    // lets the advertisement through and cuts the pack. (The limit is set directly; the schema's floor is 1 MiB.)
+    const err = await rejection(
+      driver(`${renamed(remote.base, HOST)}/remote.git`, { egress: publicFixture(HOST), dataDir, maxPackBytes: 4000 }).sync(),
+    );
+    expect(err).toBeInstanceOf(GitResponseTooLargeError);
+    expect(err.message).toContain('GIT_MAX_PACK_BYTES');
+    expect(err.message).toContain('4000');
+    // The pack request was made, so it is the pack that was cut and not the advertisement before it.
+    expect(packRequests).toBeGreaterThan(packsBefore);
+  });
+
+  it('keeps the checkout it has when the remote answers over GIT_MAX_PACK_BYTES, rather than re-cloning over it', async () => {
+    const dataDir = path.join(work, 'data-kept-capped');
+    const url = `${renamed(remote.base, HOST)}/remote.git`;
+    const checkout = driver(url, { egress: publicFixture(HOST), dataDir });
+    const cloned = await checkout.sync();
+    const root = await checkout.docRoot();
+    expect(fs.existsSync(path.join(root, 'guide.md'))).toBe(true);
+
+    // The same source id and commit, now under a ceiling the remote's very first answer passes. A fetch
+    // that fails this way must not fall back to a clone, which would delete the copy and hit the same wall.
+    const small = driver(url, {
+      egress: publicFixture(HOST),
+      dataDir,
+      maxPackBytes: 100,
+      lastCommit: String(cloned.configPatch?.lastCommit),
+    });
+    const err = await rejection(small.sync());
+    expect(err).toBeInstanceOf(GitResponseTooLargeError);
+    expect(err.message).toContain('GIT_MAX_PACK_BYTES');
+    expect(fs.readFileSync(path.join(root, 'guide.md'), 'utf8')).toBe('# Guide\n');
+  });
+
+  it('clones when the pack is under GIT_MAX_PACK_BYTES', async () => {
+    const dataDir = path.join(work, 'data-roomy');
+    const result = await driver(`${renamed(remote.base, HOST)}/remote.git`, {
+      egress: publicFixture(HOST),
+      dataDir,
+      maxPackBytes: 10_000_000,
+    }).sync();
+    expect(result.note).toMatch(/^cloned at /);
+  });
+});
+
+describe('GIT_MAX_PACK_BYTES', () => {
+  const ok = (body: ReadableStream<Uint8Array> | null, headers: Record<string, string> = {}) =>
+    ({ url: 'http://git.fixture.example/x', status: 200, statusText: 'OK', headers: new Headers(headers), body }) as unknown as Response;
+
+  /** A body of `chunks` chunks of `size` bytes that records whether the reader cancelled it. */
+  function stream(chunks: number, size: number) {
+    const state = { pulled: 0, cancelled: false };
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          if (state.pulled >= chunks) return controller.close();
+          state.pulled += 1;
+          controller.enqueue(new Uint8Array(size));
+        },
+        cancel() {
+          state.cancelled = true;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return { body, state };
+  }
+
+  async function drain(it: AsyncIterableIterator<Uint8Array>): Promise<number> {
+    let total = 0;
+    for await (const part of it) total += part.byteLength;
+    return total;
+  }
+
+  it('cuts a body that crosses the limit, cancels the reader and names the setting and the value', async () => {
+    const { body, state } = stream(50, 1000);
+    const client = guardedGitHttp(async () => ok(body), 10_000);
+    const res = await client.request({ url: 'http://git.fixture.example/x' });
+    const err = await rejection(drain(res.body!));
+    expect(err).toBeInstanceOf(GitResponseTooLargeError);
+    expect(err.message).toContain('GIT_MAX_PACK_BYTES');
+    expect(err.message).toContain('10000');
+    expect(state.cancelled).toBe(true);
+    expect(state.pulled).toBeLessThan(50);
+  });
+
+  it('lets a body of exactly the limit through', async () => {
+    const { body } = stream(10, 1000);
+    const res = await guardedGitHttp(async () => ok(body), 10_000).request({ url: 'http://git.fixture.example/x' });
+    expect(await drain(res.body!)).toBe(10_000);
+  });
+
+  it('refuses a Content-Length over the limit without reading the body', async () => {
+    const { body, state } = stream(50, 1000);
+    const client = guardedGitHttp(async () => ok(body, { 'content-length': '50000' }), 10_000);
+    const err = await rejection(client.request({ url: 'http://git.fixture.example/x' }));
+    expect(err).toBeInstanceOf(GitResponseTooLargeError);
+    expect(err.message).toContain('GIT_MAX_PACK_BYTES');
+    expect(state.pulled).toBe(0);
+    expect(state.cancelled).toBe(true);
+  });
+
+  it('does not trust a Content-Length that is under the limit', async () => {
+    const { body, state } = stream(50, 1000);
+    const res = await guardedGitHttp(async () => ok(body, { 'content-length': '10' }), 10_000).request({ url: 'http://git.fixture.example/x' });
+    expect(await rejection(drain(res.body!))).toBeInstanceOf(GitResponseTooLargeError);
+    expect(state.cancelled).toBe(true);
+  });
+
+  it('refuses a real response whose Content-Length is over the limit, through the driver', async () => {
+    const big = await listen((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/x-git-upload-pack-advertisement', 'Content-Length': '2000000' });
+      res.write(Buffer.alloc(1000));
+    });
+    try {
+      const err = await rejection(
+        driver(`${renamed(big.base, HOST)}/group/docs.git`, { egress: publicFixture(HOST), maxPackBytes: 1_048_576 }).test(),
+      );
+      expect(err.message).toContain('GIT_MAX_PACK_BYTES');
+    } finally {
+      big.server.closeAllConnections();
+      await close(big);
+    }
+  });
+
+  describe('when the ref advertisement itself is over the limit', () => {
+    // isomorphic-git's pkt-line reader swallows a failed body read and treats it as the end of the stream, and
+    // the advertisement parsers never look at the error it stored. No Content-Length is sent (the response is
+    // chunked), so the cut happens mid-read: the guard has to report it itself.
+    const LIMIT = 4000;
+    const refs = Array.from({ length: 400 }, (_, i) => pkt(`${OID} refs/heads/topic-${i}\n`)).join('');
+    // `main` comes first, so a parser fed only the first LIMIT bytes sees the branch it wants and would succeed.
+    const HUGE = `${pkt('# service=git-upload-pack\n')}0000${pkt(`${OID} refs/heads/main\0side-band-64k\n`)}${refs}0000`;
+    let big: Stub;
+
+    beforeEach(async () => {
+      big = await listen((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/x-git-upload-pack-advertisement' });
+        res.write(HUGE.slice(0, 2000));
+        setTimeout(() => res.end(HUGE.slice(2000)), 10);
+      });
+    });
+
+    afterEach(async () => {
+      big.server.closeAllConnections();
+      await close(big);
+    });
+
+    const capped = (dataDir?: string) =>
+      driver(`${renamed(big.base, HOST)}/group/docs.git`, { egress: publicFixture(HOST), maxPackBytes: LIMIT, ...(dataDir ? { dataDir } : {}) });
+
+    it('fails Test with an error that names the setting, not "branch not found"', async () => {
+      expect(HUGE.length).toBeGreaterThan(LIMIT);
+      const err = await rejection(capped().test());
+      expect(err).toBeInstanceOf(GitResponseTooLargeError);
+      expect(err.message).toContain('GIT_MAX_PACK_BYTES');
+      expect(err.message).toContain(String(LIMIT));
+    });
+
+    it('fails probe() the same way instead of answering null', async () => {
+      const err = await rejection(capped().probe());
+      expect(err).toBeInstanceOf(GitResponseTooLargeError);
+      expect(err.message).toContain('GIT_MAX_PACK_BYTES');
+    });
+
+    it('fails a sync with an error that names the setting', async () => {
+      const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-egress-advert-'));
+      try {
+        const err = await rejection(capped(dataDir).sync());
+        expect(err).toBeInstanceOf(GitResponseTooLargeError);
+        expect(err.message).toContain('GIT_MAX_PACK_BYTES');
+        expect(err.message).toContain(String(LIMIT));
+      } finally {
+        fs.rmSync(dataDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('as configuration', () => {
+    const parse = (value?: string) =>
+      EnvSchema.safeParse({ DATABASE_URL: 'postgres://unused/unused', ...(value === undefined ? {} : { GIT_MAX_PACK_BYTES: value }) });
+
+    it('is 256 MiB when unset', () => {
+      const result = parse();
+      expect(result.success && result.data.GIT_MAX_PACK_BYTES).toBe(268_435_456);
+      expect(GIT_MAX_PACK_BYTES_DEFAULT).toBe(268_435_456);
+    });
+
+    it('takes a number of bytes, 1 MiB at the least', () => {
+      const result = parse('1048576');
+      expect(result.success && result.data.GIT_MAX_PACK_BYTES).toBe(1_048_576);
+      expect(parse('1048575').success).toBe(false);
+      expect(parse('0').success).toBe(false);
+      expect(parse('lots').success).toBe(false);
+      expect(parse('1500000.5').success).toBe(false);
+    });
   });
 });
 

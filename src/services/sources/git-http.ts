@@ -52,15 +52,46 @@ async function collect(body: GitHttpRequest['body']): Promise<Uint8Array | undef
 }
 
 /**
+ * What a response over `GIT_MAX_PACK_BYTES` fails with. isomorphic-git collects a packfile in memory
+ * (twice, so a pack of *n* bytes peaks near 2 × *n*), so the limit is the only thing between a remote that
+ * never stops sending and the process's heap. The message names the setting and its value because it ends
+ * up verbatim in the source's last error.
+ */
+export class GitResponseTooLargeError extends Error {
+  constructor(readonly limit: number) {
+    super(
+      `git remote response is larger than GIT_MAX_PACK_BYTES (${limit} bytes); raise GIT_MAX_PACK_BYTES or point the source at a smaller repository`,
+    );
+    this.name = 'GitResponseTooLargeError';
+  }
+}
+
+/**
  * A response body as the iterator isomorphic-git reads. `return()` cancels the reader, which destroys
  * the socket, so a reader that stops early (an error status, an abort) does not leave a download open.
+ * Bytes are counted as they are read; the chunk that carries the total past `maxBytes` is not handed
+ * on, the reader is cancelled and the read fails with `GitResponseTooLargeError`, which is also handed to
+ * `onExceeded` because the read's caller may swallow it (see `GuardedGitHttp.exceeded`).
  */
-function iterate(stream: ReadableStream<Uint8Array>): AsyncIterableIterator<Uint8Array> {
+function iterate(
+  stream: ReadableStream<Uint8Array>,
+  maxBytes: number,
+  onExceeded: (err: GitResponseTooLargeError) => void,
+): AsyncIterableIterator<Uint8Array> {
   const reader = stream.getReader();
+  let read = 0;
   const iterator: AsyncIterableIterator<Uint8Array> = {
     async next() {
       const chunk = await reader.read();
-      return chunk.done ? { done: true, value: undefined } : { done: false, value: chunk.value };
+      if (chunk.done) return { done: true, value: undefined };
+      read += chunk.value.byteLength;
+      if (read > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        const err = new GitResponseTooLargeError(maxBytes);
+        onExceeded(err);
+        throw err;
+      }
+      return { done: false, value: chunk.value };
     },
     async return() {
       await reader.cancel().catch(() => undefined);
@@ -73,11 +104,49 @@ function iterate(stream: ReadableStream<Uint8Array>): AsyncIterableIterator<Uint
   return iterator;
 }
 
-export function guardedGitHttp(egress: EgressFetch): GitHttpClient {
+/** The declared length of a response, or `undefined` when there is none or it is not a plain number. */
+function declaredLength(headers: Headers): number | undefined {
+  const raw = headers.get('content-length');
+  if (raw === null || !/^\d+$/.test(raw.trim())) return undefined;
+  return Number(raw.trim());
+}
+
+/**
+ * A client that remembers it cut a response off. isomorphic-git's pkt-line reader catches whatever a body
+ * read throws and treats it as the end of the stream; the pack path looks at the stored error afterwards,
+ * but the ref advertisement and `ls-refs` parsers never do, so they return a truncated list — or an
+ * "empty response" error — as if nothing were wrong. The caller therefore asks `exceeded` after each
+ * `clone` / `fetch` / `listServerRefs` and raises it itself, whatever the call returned.
+ */
+export interface GuardedGitHttp extends GitHttpClient {
+  /** The first `GitResponseTooLargeError` this client raised, or `undefined` while none has been. */
+  readonly exceeded: GitResponseTooLargeError | undefined;
+}
+
+/**
+ * @param maxBytes `GIT_MAX_PACK_BYTES`: the most bytes any one response may carry. A response that
+ *   declares more in `Content-Length` is refused without reading its body; one that does not declare it,
+ *   or lies, is cut off when the bytes read pass the limit.
+ */
+export function guardedGitHttp(egress: EgressFetch, maxBytes: number): GuardedGitHttp {
+  let exceeded: GitResponseTooLargeError | undefined;
+  const exceed = (err: GitResponseTooLargeError): void => {
+    exceeded ??= err;
+  };
   return {
+    get exceeded() {
+      return exceeded;
+    },
     async request({ url, method = 'GET', headers = {}, body, signal }) {
       const bytes = await collect(body);
       const response = await egress(url, { method, headers, ...(bytes ? { body: bytes } : {}), ...(signal ? { signal } : {}) });
+      const declared = declaredLength(response.headers);
+      if (declared !== undefined && declared > maxBytes) {
+        await response.body?.cancel().catch(() => undefined);
+        const err = new GitResponseTooLargeError(maxBytes);
+        exceed(err);
+        throw err;
+      }
       return {
         url: response.url || url,
         method,
@@ -85,7 +154,7 @@ export function guardedGitHttp(egress: EgressFetch): GitHttpClient {
         headers: Object.fromEntries(response.headers.entries()),
         statusCode: response.status,
         statusMessage: response.statusText,
-        ...(response.body ? { body: iterate(response.body) } : {}),
+        ...(response.body ? { body: iterate(response.body, maxBytes, exceed) } : {}),
       };
     },
   };

@@ -15,11 +15,17 @@ export interface DriverContext {
    * carry it; absent reads as the empty list, which is the strictest the Confluence egress can be.
    * `WEB_ALLOWED_HOSTS` and `GIT_ALLOWED_HOSTS` are optional and read the same way for the web and git
    * sources' egress.
+   * `GIT_MAX_PACK_BYTES` is optional for the same reason; absent reads as `GIT_MAX_PACK_BYTES_DEFAULT`.
    * `CONFLUENCE_MAX_PAGES` and `NOTION_MAX_PAGES` are optional for the same reason; absent reads as
    * `SOURCE_PAGE_LIMIT_DEFAULTS`.
    */
   config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS'> &
-    Partial<Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS' | 'WEB_ALLOWED_HOSTS' | 'GIT_ALLOWED_HOSTS' | 'CONFLUENCE_MAX_PAGES' | 'NOTION_MAX_PAGES'>> &
+    Partial<
+      Pick<
+        Config,
+        'CONFLUENCE_ALLOWED_HOSTS' | 'WEB_ALLOWED_HOSTS' | 'GIT_ALLOWED_HOSTS' | 'GIT_MAX_PACK_BYTES' | 'CONFLUENCE_MAX_PAGES' | 'NOTION_MAX_PAGES'
+      >
+    > &
     WebLimits;
 }
 

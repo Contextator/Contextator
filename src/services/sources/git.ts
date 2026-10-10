@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import git from 'isomorphic-git';
+import { GIT_MAX_PACK_BYTES_DEFAULT } from '../../config.js';
 import type { DocumentSourceRow } from '../../db/schema.js';
 import { decryptSecret, keyringOf } from '../crypto.js';
 import { sourceRepoDir } from '../data-dir.js';
@@ -10,7 +11,7 @@ import { PROBE_TOKEN_KEY, parseSourceConfig, type GitConfig } from '../sources.j
 import { registerDriver, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
 import { EgressRefusedError, gitEgress, type EgressOptions } from './confluence-egress.js';
 import { credentialsFor, detectProvider, sanitizeGitUrl } from './git-auth.js';
-import { guardedGitHttp, type GitHttpClient } from './git-http.js';
+import { GitResponseTooLargeError, guardedGitHttp, type GitHttpClient } from './git-http.js';
 
 /**
  * Git repositories via isomorphic-git (the container image has no git binary). Shallow, single-branch
@@ -19,8 +20,6 @@ import { guardedGitHttp, type GitHttpClient } from './git-http.js';
  */
 export class GitDriver implements SourceDriver {
   private readonly cfg: GitConfig;
-
-  private built?: GitHttpClient;
 
   constructor(
     private readonly source: DocumentSourceRow,
@@ -40,10 +39,25 @@ export class GitDriver implements SourceDriver {
    * `clone`, `fetch` and `listServerRefs` all take it from here, so every request — the ref
    * advertisement, the pack request, each redirect hop — is judged by address after DNS. There is no
    * other `http` in this file.
+   *
+   * One client per call, because it remembers a response it cut off ([ADR-0109](../../../.ssot/ADR.md#adr-0109)):
+   * isomorphic-git swallows that error when it reads a ref advertisement, so the call can come back
+   * having succeeded on a truncated list. Whatever the call returned, a cut-off response is what it is
+   * reported as, with the setting's name in the message.
    */
-  private get http(): GitHttpClient {
-    this.built ??= guardedGitHttp(gitEgress({ allowedHosts: this.ctx.config.GIT_ALLOWED_HOSTS ?? [], ...this.egress }));
-    return this.built;
+  private async withHttp<T>(call: (http: GitHttpClient) => Promise<T>): Promise<T> {
+    const client = guardedGitHttp(
+      gitEgress({ allowedHosts: this.ctx.config.GIT_ALLOWED_HOSTS ?? [], ...this.egress }),
+      this.ctx.config.GIT_MAX_PACK_BYTES ?? GIT_MAX_PACK_BYTES_DEFAULT,
+    );
+    let result: T;
+    try {
+      result = await call(client);
+    } catch (err) {
+      throw client.exceeded ?? err;
+    }
+    if (client.exceeded) throw client.exceeded;
+    return result;
   }
 
   private get dir(): string {
@@ -73,18 +87,20 @@ export class GitDriver implements SourceDriver {
     const { url, onAuth, onAuthFailure } = this.authOptions();
     await fs.rm(this.dir, { recursive: true, force: true, maxRetries: 5 });
     await fs.mkdir(this.dir, { recursive: true });
-    await git.clone({
-      fs,
-      http: this.http,
-      dir: this.dir,
-      url,
-      ref: this.cfg.branch,
-      singleBranch: true,
-      depth: 1,
-      noTags: true,
-      onAuth,
-      onAuthFailure,
-    });
+    await this.withHttp((http) =>
+      git.clone({
+        fs,
+        http,
+        dir: this.dir,
+        url,
+        ref: this.cfg.branch,
+        singleBranch: true,
+        depth: 1,
+        noTags: true,
+        onAuth,
+        onAuthFailure,
+      }),
+    );
     const head = await this.currentHead();
     if (!head) throw new Error('Clone succeeded but HEAD could not be resolved');
     return head;
@@ -94,19 +110,21 @@ export class GitDriver implements SourceDriver {
   private async update(): Promise<{ head: string; changed: boolean }> {
     const { url, onAuth, onAuthFailure } = this.authOptions();
     const before = await this.currentHead();
-    const { fetchHead } = await git.fetch({
-      fs,
-      http: this.http,
-      dir: this.dir,
-      url,
-      ref: this.cfg.branch,
-      remoteRef: this.cfg.branch,
-      singleBranch: true,
-      depth: 1,
-      tags: false,
-      onAuth,
-      onAuthFailure,
-    });
+    const { fetchHead } = await this.withHttp((http) =>
+      git.fetch({
+        fs,
+        http,
+        dir: this.dir,
+        url,
+        ref: this.cfg.branch,
+        remoteRef: this.cfg.branch,
+        singleBranch: true,
+        depth: 1,
+        tags: false,
+        onAuth,
+        onAuthFailure,
+      }),
+    );
     if (!fetchHead) throw new Error(`Branch "${this.cfg.branch}" not found on the remote`);
     if (fetchHead === before) return { head: fetchHead, changed: false };
     await git.writeRef({ fs, dir: this.dir, ref: `refs/heads/${this.cfg.branch}`, value: fetchHead, force: true });
@@ -128,6 +146,9 @@ export class GitDriver implements SourceDriver {
         // A refusal sent no request, so the checkout is not at fault and a fresh clone would be refused
         // the same way after deleting it. Say what happened and keep the copy that is there.
         if (err instanceof EgressRefusedError) throw err;
+        // Likewise a response over GIT_MAX_PACK_BYTES: the clone would read the same pack and stop at the
+        // same byte, after deleting a checkout that was fine.
+        if (err instanceof GitResponseTooLargeError) throw err;
         log.warn({ err }, 'git fetch failed; re-cloning');
         head = await this.clone();
         note = `re-cloned at ${head.slice(0, 7)}`;
@@ -155,7 +176,7 @@ export class GitDriver implements SourceDriver {
    */
   async probe(): Promise<string | null> {
     const { url, onAuth, onAuthFailure } = this.authOptions();
-    const refs = await git.listServerRefs({ http: this.http, url, prefix: `refs/heads/${this.cfg.branch}`, onAuth, onAuthFailure });
+    const refs = await this.withHttp((http) => git.listServerRefs({ http, url, prefix: `refs/heads/${this.cfg.branch}`, onAuth, onAuthFailure }));
     return refs.find((r) => r.ref === `refs/heads/${this.cfg.branch}`)?.oid ?? null;
   }
 
@@ -173,7 +194,7 @@ export class GitDriver implements SourceDriver {
 
   async test(): Promise<string> {
     const { url, onAuth, onAuthFailure } = this.authOptions();
-    const refs = await git.listServerRefs({ http: this.http, url, prefix: `refs/heads/${this.cfg.branch}`, onAuth, onAuthFailure });
+    const refs = await this.withHttp((http) => git.listServerRefs({ http, url, prefix: `refs/heads/${this.cfg.branch}`, onAuth, onAuthFailure }));
     const match = refs.find((r) => r.ref === `refs/heads/${this.cfg.branch}`);
     if (!match) throw new Error(`Connected, but branch "${this.cfg.branch}" was not found on the remote`);
     return `Connected: ${this.cfg.branch} is at ${match.oid.slice(0, 7)}`;

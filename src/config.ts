@@ -74,6 +74,16 @@ export const SOURCE_PAGE_LIMIT_DEFAULTS = {
 } as const;
 
 /**
+ * The default of `GIT_MAX_PACK_BYTES`: 256 MiB. isomorphic-git gathers a packfile in memory — and copies it
+ * twice (`collect()`, then `Buffer.from`) — so a pack of *n* bytes peaks near 2 × *n*; at this default that is
+ * about 512 MiB, which fits the chart's 2Gi memory limit. The limit caps one response a git source reads
+ * (`sources/git-http.ts`); it does not cap the peak, which is twice that. Kept beside the schema that uses it
+ * so the git driver falls back to the same number a context built without the setting would otherwise have to
+ * repeat.
+ */
+export const GIT_MAX_PACK_BYTES_DEFAULT = 268_435_456;
+
+/**
  * The three subnet names `proxy-addr` — the library behind Fastify's `trustProxy` — understands, and
  * the only entries in `TRUST_PROXY` that are not a literal address. `loopback` is the one a
  * single-container deployment with a proxy on the host actually wants.
@@ -876,6 +886,16 @@ export const EnvSchema = z
      * independent of the other two lists.
      */
     GIT_ALLOWED_HOSTS: allowedHostsSetting(),
+
+    /**
+     * The most bytes one response from a git remote may carry: the ref advertisement and the pack alike.
+     * isomorphic-git collects a packfile in memory, so a remote that streams without end would otherwise
+     * exhaust the process. A response whose `Content-Length` is over the limit is refused unread, and a
+     * stream that crosses it is cancelled and the sync fails naming this setting. Default 256 MiB; at
+     * least 1 MiB, because a smaller limit would refuse a repository of ordinary size. Memory peaks near
+     * twice the limit (isomorphic-git copies the pack twice), so raise it together with the memory limit.
+     */
+    GIT_MAX_PACK_BYTES: z.coerce.number().int().min(1_048_576).default(GIT_MAX_PACK_BYTES_DEFAULT),
 
     // Embeddings
     EMBEDDING_PROVIDER: z.enum(['local', 'openai']).default('local'),

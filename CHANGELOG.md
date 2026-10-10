@@ -10,6 +10,30 @@ ships, that stops.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-10
+
+### Security
+
+- **Every HTTP response body a git source reads is now size-limited.** A malicious remote could stream
+  an unbounded packfile (or ref advertisement) and exhaust the server's memory, because isomorphic-git
+  collects a response in memory. A response whose `Content-Length` is over the limit is refused before its
+  body is read, and a body that grows past it is cancelled; either way the sync fails with an error that
+  names `GIT_MAX_PACK_BYTES`. This covers the ref advertisement, `ls-refs` and `git-upload-pack`
+  responses, including the ref requests where isomorphic-git would otherwise swallow the error
+  (ADR-0109).
+
+### Added
+
+- **`GIT_MAX_PACK_BYTES`.** The most bytes one response from a git remote may carry. Default 256 MiB
+  (`268435456`), at least 1 MiB. Helm chart 1.3.0 exposes it as `config.gitMaxPackBytes`. `.env.example`
+  now also documents `GIT_ALLOWED_HOSTS` and `WEB_ALLOWED_HOSTS`.
+
+### Upgrade notes
+
+- A git source whose repository has a packfile larger than 256 MiB fails its sync after this upgrade
+  until `GIT_MAX_PACK_BYTES` (Helm: `config.gitMaxPackBytes`) is raised. Memory peaks near twice the
+  limit, because isomorphic-git copies the pack once more, so raise the memory limit together with it.
+
 ## [0.3.1] - 2026-10-10
 
 ### Security
@@ -541,7 +565,8 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/Contextator/Contextator/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Contextator/Contextator/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Contextator/Contextator/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/Contextator/Contextator/compare/v0.2.0...v0.2.1
