@@ -540,21 +540,36 @@ container restarts; correct `.env` and run `up -d backup` to start again.
 It uses the **default, non-slim image** for its PostgreSQL tools, overrides that image's entrypoint,
 runs as UID/GID `1000:1000` to match the slim app (with `HOME=/tmp` for npm), and mounts only the same `data` volume at `/data`. It never starts an embedded PostgreSQL or mounts
 `pgdata`. Its `.env` is the app's `.env`, including `DATABASE_URL` and `SECRET_KEY`, so the archive
-records the same key fingerprint as an app-container backup. The PostgreSQL client major version
-must be at least the server's major version.
+records the fingerprint of the app's `SECRET_KEY` and a restore with that key passes the key check.
+The PostgreSQL client major version must be at least the server's major version.
 
 Archives are in `/data/backups/`, written as `.partial` files and renamed only after a successful
 backup, so interrupted writes do not count toward retention. On stop, the sidecar terminates the
 backup process group with TERM followed by KILL after one second and removes its partial archive and private staging files. After a forced kill,
 the next iteration removes stale scheduled `.partial` archives and staging files under
-`/data/.scheduled-backup-staging`; manual backups use their usual staging directory. Run only one
+`/data/.scheduled-backup-staging`. Run only one
 backup sidecar per data volume. Retention applies only to the default
 timestamped
 `contextator-backup-<timestamp>.tar.gz` filenames; custom-named archives are left alone. Copy backups
 off the host too: sharing the app's data volume does not protect against losing that volume.
+
+An on-demand backup also runs from the default image, because the slim app container has no
+`pg_dump`. Reuse the `backup` service definition, but replace its loop and clear
+`BACKUP_STAGING_DIR`, so the backup stages under `/data/.backup-*`, which the sidecar's cleanup
+never touches. Give the archive a name of your own, so retention does not count it:
+
+```bash
+docker compose -f docker-compose.slim.yml -f docker-compose.backup.yml run --rm --no-deps \
+  -e BACKUP_STAGING_DIR= --entrypoint npm backup \
+  run backup -- /data/backups/contextator-manual-$(date +%F).tar.gz
+```
+
 To restore an archive into a fresh installation, use the `npm run restore -- <file> --check` and
-`npm run restore -- <file>` procedure below. Stop the backup sidecar while restoring so it does not
-take an archive of the restore in progress:
+`npm run restore -- <file>` procedure below, but run both commands the same way as the on-demand
+backup above (`run --rm --no-deps -e BACKUP_STAGING_DIR= --entrypoint npm backup run restore -- …`),
+not with `docker exec` in the slim app container, and restart the app with
+`docker compose -f docker-compose.slim.yml restart contextator`. Stop the backup sidecar while
+restoring so it does not take an archive of the restore in progress:
 
 ```bash
 docker compose -f docker-compose.slim.yml -f docker-compose.backup.yml stop backup
