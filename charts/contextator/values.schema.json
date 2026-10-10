@@ -340,6 +340,7 @@
         "trustProxy",
         "confluenceAllowedHosts",
         "webAllowedHosts",
+        "gitAllowedHosts",
         "mcpStructuredOutput"
       ],
       "properties": {
@@ -371,6 +372,24 @@
         },
         "webAllowedHosts": {
           "description": "WEB_ALLOWED_HOSTS: host names or IP addresses (not URLs: no scheme, port or path) a web source may reach on a private address (ADR-0107). Mirrors the application's startup check (src/config.ts): a DNS-style name (letters, digits, '_' and inner '-', optional trailing dot) or an IP address, IPv6 optionally in brackets. Empty leaves it unset.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "anyOf": [
+              {
+                "description": "A host name or an IPv4 address, e.g. wiki.corp.example or 10.0.4.12.",
+                "pattern": "^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?(\\.[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?)*\\.?$"
+              },
+              {
+                "description": "An IPv6 address (at least two colons), bare or in brackets, e.g. fd00::12 or [fd00::12]. A port after the brackets, or an IPv4 address with a port, is rejected.",
+                "pattern": "^(\\[[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*\\]|[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*)$"
+              }
+            ]
+          }
+        },
+        "gitAllowedHosts": {
+          "description": "GIT_ALLOWED_HOSTS: host names or IP addresses (not URLs: no scheme, port or path) a git source may reach on a private address (ADR-0107). Mirrors the application's startup check (src/config.ts): a DNS-style name (letters, digits, '_' and inner '-', optional trailing dot) or an IP address, IPv6 optionally in brackets. Empty leaves it unset.",
           "type": "array",
           "uniqueItems": true,
           "items": {

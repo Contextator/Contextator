@@ -5,13 +5,18 @@ import { WEB_LIMIT_DEFAULTS } from '../src/config.js';
 import type { DocumentSourceRow } from '../src/db/schema.js';
 import { encryptSecret } from '../src/services/crypto.js';
 import { GitDriver } from '../src/services/sources/git.js';
+import { publicFixture, renamed } from './support/egress-seams.js';
 
 /**
  * The HTTPS path ADR-0086 documents instead of SSH, end to end through the driver: a stored token and a
  * typed username reach the remote as HTTP Basic credentials. The remote is a smart-HTTP stub on
  * 127.0.0.1 that answers the ref advertisement only to the credentials it expects, the way GitLab
- * answers only to a deploy token's generated username. **No request leaves the loopback interface.**
+ * answers only to a deploy token's generated username. The request goes through the egress guard
+ * (ADR-0107) and **never leaves the loopback interface**.
  */
+
+/** The stub is reached as a made-up public host: the guard judges that name, `route` lands on the stub. */
+const HOST = 'git.fixture.example';
 
 const log = { warn: () => undefined, info: () => undefined, debug: () => undefined, error: () => undefined, child: () => log } as never;
 const KEY = 'k'.repeat(64);
@@ -61,7 +66,7 @@ describe('git over HTTPS with a deploy token', () => {
         projectId: '00000000-0000-4000-8000-000000000030',
         type: 'git',
         name: 'docs',
-        config: { url: `${base}/group/docs.git`, branch: 'main', provider: 'gitlab', username },
+        config: { url: `${renamed(base, HOST)}/group/docs.git`, branch: 'main', provider: 'gitlab', username },
         secretEnc: encryptSecret(TOKEN, { current: KEY }),
       } as unknown as DocumentSourceRow,
       {
@@ -69,6 +74,7 @@ describe('git over HTTPS with a deploy token', () => {
         log,
         config: { ...WEB_LIMIT_DEFAULTS, DATA_DIR: '/nonexistent', SECRET_KEY: KEY, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
       },
+      publicFixture(HOST),
     );
 
   it('sends the typed deploy-token username with the stored token', async () => {

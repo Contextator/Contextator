@@ -618,12 +618,14 @@ durations with their units in descending order (`y`, `w`, `d`, `h`, `m`, `s`, `m
 the format the Prometheus Operator CRD itself accepts. `env` accepts any variable name with a string value; `envSecret` accepts any name,
 but each entry must be exactly `{secretName, secretKey}`.
 
-Three application settings have typed keys under `config` rather than going through `env`, so the schema
+Four application settings have typed keys under `config` rather than going through `env`, so the schema
 checks them:
 
 - `config.confluenceAllowedHosts` — a list of host names (not URLs), joined into
   `CONFLUENCE_ALLOWED_HOSTS`. Empty leaves the variable unset.
 - `config.webAllowedHosts` — the same for a web source, joined into `WEB_ALLOWED_HOSTS`. Empty leaves the
+  variable unset.
+- `config.gitAllowedHosts` — the same for a git source, joined into `GIT_ALLOWED_HOSTS`. Empty leaves the
   variable unset.
 - `config.mcpStructuredOutput` — `true` sets `MCP_STRUCTURED_OUTPUT=1`. `false` (the default) leaves it
   unset.

@@ -127,6 +127,11 @@ config:
   # refused whatever is listed. Empty leaves the variable unset.
   webAllowedHosts: []
   #   - docs.corp.example
+  # GIT_ALLOWED_HOSTS (ADR-0107): the same for a git source (ref advertisement, pack requests,
+  # redirects). Independent of the other two lists. Loopback, link-local and the reserved 240.0.0.0/4
+  # range stay refused whatever is listed. Empty leaves the variable unset.
+  gitAllowedHosts: []
+  #   - git.corp.example
   # MCP_STRUCTURED_OUTPUT: true makes every MCP tool also return its answer as structured JSON
   # (`structuredContent`) beside the unchanged text answer. Off by default: Claude Code hands its
   # model the structured part alone when both are present, so the guidance each answer carries

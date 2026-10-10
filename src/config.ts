@@ -13,7 +13,7 @@ const csv = (value: string): string[] =>
 
 /**
  * A comma-separated list of host names for an egress allowlist (`CONFLUENCE_ALLOWED_HOSTS`,
- * `WEB_ALLOWED_HOSTS`): lower-cased, brackets and a trailing dot dropped, and refused at startup when
+ * `WEB_ALLOWED_HOSTS`, `GIT_ALLOWED_HOSTS`): lower-cased, brackets and a trailing dot dropped, and refused at startup when
  * an entry is not a name or an address (a scheme, port or path would never match the host a request is
  * made to, so it would silently allow nothing).
  */
@@ -865,6 +865,17 @@ export const EnvSchema = z
      * is no switch that turns the check off. Same shape as `CONFLUENCE_ALLOWED_HOSTS`: names, not URLs.
      */
     WEB_ALLOWED_HOSTS: allowedHostsSetting(),
+
+    /**
+     * Host names a git source's remote may reach **on a private address**, the same private ranges as
+     * `WEB_ALLOWED_HOSTS` ([ADR-0107](../../.ssot/ADR.md#adr-0107)). A git server inside the network is
+     * listed here; nothing else is. Every request isomorphic-git makes for a git source — the ref
+     * advertisement, the pack request and every redirect hop — goes through the same check as the web
+     * source's. Loopback, link-local, unspecified, multicast and the reserved 240.0.0.0/4 stay refused
+     * whatever the list says, and there is no switch that turns the check off. Names, not URLs, and
+     * independent of the other two lists.
+     */
+    GIT_ALLOWED_HOSTS: allowedHostsSetting(),
 
     // Embeddings
     EMBEDDING_PROVIDER: z.enum(['local', 'openai']).default('local'),

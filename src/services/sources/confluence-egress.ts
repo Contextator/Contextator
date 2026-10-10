@@ -34,7 +34,7 @@ export type Resolver = (hostname: string) => Promise<Array<{ address: string; fa
 
 export interface EgressOptions {
   /**
-   * `CONFLUENCE_ALLOWED_HOSTS` or `WEB_ALLOWED_HOSTS`: host names allowed to resolve to a **private**
+   * `CONFLUENCE_ALLOWED_HOSTS`, `WEB_ALLOWED_HOSTS` or `GIT_ALLOWED_HOSTS`: host names allowed to resolve to a **private**
    * address. It never lifts loopback, link-local, unspecified, multicast or reserved.
    */
   allowedHosts: readonly string[];
@@ -69,6 +69,12 @@ export interface EgressOptions {
   subject?: string;
   /** Refuse plain `http`, on the first request and on every redirect. Off by default. */
   httpsOnly?: boolean;
+  /**
+   * Methods this egress sends. `['GET']` unless stated: Confluence and the web source only read. The git
+   * source adds `POST`, which smart HTTP uses for `git-upload-pack`
+   * ([ADR-0107](../../../.ssot/ADR.md#adr-0107)).
+   */
+  methods?: readonly ('GET' | 'POST')[];
 }
 
 /**
@@ -76,7 +82,16 @@ export interface EgressOptions {
  * — the request in flight or the response being read — so a caller's deadline closes the socket rather
  * than only giving up on the promise. Assignable wherever a `FetchLike` is expected.
  */
-export type EgressFetch = (url: string, init: { method: string; headers: Record<string, string>; signal?: AbortSignal }) => Promise<Response>;
+export type EgressFetch = (
+  url: string,
+  init: {
+    method: string;
+    headers: Record<string, string>;
+    /** Only with `POST`, and only when {@link EgressOptions.methods} lists it. Held whole so a 307/308 can send it again. */
+    body?: Uint8Array;
+    signal?: AbortSignal;
+  },
+) => Promise<Response>;
 
 /** A refusal: the request was not sent, so no credential left. */
 export class EgressRefusedError extends Error {
@@ -223,9 +238,24 @@ export function webEgress(options: EgressOptions): EgressFetch {
 }
 
 /**
+ * A `fetch` for a git source that connects only to addresses ADR-0088 and ADR-0107 allow: every
+ * request isomorphic-git makes (`info/refs`, `git-upload-pack`, each redirect hop) goes through it.
+ * A refusal names `GIT_ALLOWED_HOSTS`. Smart HTTP posts its `want`/`have` lines, so `POST` is on.
+ */
+export function gitEgress(options: EgressOptions): EgressFetch {
+  return egressFetch({
+    label: 'the git remote',
+    allowListName: 'GIT_ALLOWED_HOSTS',
+    subject: 'the remote URL',
+    methods: ['GET', 'POST'],
+    ...options,
+  });
+}
+
+/**
  * A `fetch` that connects only to addresses ADR-0088 allows.
  *
- * GET only, which is all its callers send. Redirects are followed here rather than by the
+ * GET only unless {@link EgressOptions.methods} says otherwise, which is all Confluence and the web source send. Redirects are followed here rather than by the
  * platform, up to five, each hop checked again; the credential is dropped on a hop to another origin,
  * as `fetch` does. The `Response` it returns carries the URL it finally came from in `url` and
  * `redirected`, which the platform's own `Response` would hold but one built by hand does not.
@@ -251,8 +281,12 @@ export function egressFetch(options: EgressOptions): EgressFetch {
     return rule === 'private' && allowed.has(host) ? null : rule;
   };
 
+  const methods = new Set<string>(options.methods ?? ['GET']);
+
   const send = (
     url: URL,
+    method: string,
+    body: Uint8Array | undefined,
     headers: Record<string, string>,
     redirected: boolean,
     opened: (req: http.ClientRequest) => void,
@@ -312,8 +346,8 @@ export function egressFetch(options: EgressOptions): EgressFetch {
         hostname: host,
         port: url.port || undefined,
         path: `${url.pathname}${url.search}`,
-        method: 'GET',
-        headers: { ...headers, 'accept-encoding': 'gzip' },
+        method,
+        headers: { ...headers, 'accept-encoding': 'gzip', ...(body ? { 'content-length': String(body.byteLength) } : {}) },
         agent: secure ? agents.https : agents.http,
         lookup,
         timeout: timeoutMs,
@@ -328,12 +362,14 @@ export function egressFetch(options: EgressOptions): EgressFetch {
       });
       req.on('response', resolveResponse);
       opened(req);
-      req.end();
+      req.end(body);
     });
   };
 
   return async (input, init) => {
-    if (init.method !== 'GET') throw new Error(`The ${label.replace(/^the /, '')} egress sends GET only, not ${init.method}`);
+    if (!methods.has(init.method)) {
+      throw new Error(`The ${label.replace(/^the /, '')} egress sends ${[...methods].join(' and ')} only, not ${init.method}`);
+    }
     const { signal } = init;
     signal?.throwIfAborted();
     // Whatever is open right now — the request until it answers, then its response — is what an abort
@@ -345,8 +381,10 @@ export function egressFetch(options: EgressOptions): EgressFetch {
     try {
       let url = new URL(input);
       let headers = { ...init.headers };
+      let method = init.method;
+      let body = method === 'POST' ? init.body : undefined;
       for (let hop = 0; ; hop++) {
-        const res = await send(url, headers, hop > 0, (req) => {
+        const res = await send(url, method, body, headers, hop > 0, (req) => {
           open = req;
         });
         open = res;
@@ -369,6 +407,12 @@ export function egressFetch(options: EgressOptions): EgressFetch {
         const next = new URL(location, url);
         if (next.origin !== url.origin) {
           headers = Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== 'authorization'));
+        }
+        // As `fetch` does: 301/302/303 turn a POST into a GET without its body; 307/308 send it again.
+        if (method === 'POST' && ![307, 308].includes(res.statusCode ?? 0)) {
+          method = 'GET';
+          body = undefined;
+          headers = Object.fromEntries(Object.entries(headers).filter(([name]) => !['content-type', 'content-length'].includes(name.toLowerCase())));
         }
         url = next;
       }

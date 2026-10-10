@@ -117,6 +117,7 @@ export interface IndexerDeps {
         Config,
         | 'CONFLUENCE_ALLOWED_HOSTS'
         | 'WEB_ALLOWED_HOSTS'
+        | 'GIT_ALLOWED_HOSTS'
         | 'CONFLUENCE_MAX_PAGES'
         | 'NOTION_MAX_PAGES'
         | 'DATA_DIR_MIN_FREE_BYTES'
