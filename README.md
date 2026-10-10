@@ -123,10 +123,10 @@ Building the image from source instead of pulling it:
 [wiki/Installation#build-the-image-yourself](https://github.com/Contextator/Contextator/wiki/Installation#build-the-image-yourself).
 
 **Tags.** `latest` is the newest stable release; `0.3` tracks the latest patch inside the `0.3.x`
-line; `0.3.0` is one exact, immutable release. Pin a versioned tag for anything you upgrade
-deliberately by setting `CONTEXTATOR_TAG` in `.env` (e.g. `CONTEXTATOR_TAG=0.3.0`) and running
+line; `0.3.1` is one exact, immutable release. Pin a versioned tag for anything you upgrade
+deliberately by setting `CONTEXTATOR_TAG` in `.env` (e.g. `CONTEXTATOR_TAG=0.3.1`) and running
 `docker compose up -d` — this reads at every start, not only the first. Every one of those tags from
-`0.2.0` on has a `-slim` twin — `latest-slim`, `0.3-slim`, `0.3.0-slim` — which is the section below.
+`0.2.0` on has a `-slim` twin — `latest-slim`, `0.3-slim`, `0.3.1-slim` — which is the section below.
 
 ### Bringing your own PostgreSQL
 
