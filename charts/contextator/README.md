@@ -618,7 +618,7 @@ durations with their units in descending order (`y`, `w`, `d`, `h`, `m`, `s`, `m
 the format the Prometheus Operator CRD itself accepts. `env` accepts any variable name with a string value; `envSecret` accepts any name,
 but each entry must be exactly `{secretName, secretKey}`.
 
-Four application settings have typed keys under `config` rather than going through `env`, so the schema
+Five application settings have typed keys under `config` rather than going through `env`, so the schema
 checks them:
 
 - `config.confluenceAllowedHosts` — a list of host names (not URLs), joined into
@@ -627,6 +627,14 @@ checks them:
   variable unset.
 - `config.gitAllowedHosts` — the same for a git source, joined into `GIT_ALLOWED_HOSTS`. Empty leaves the
   variable unset.
+- `config.gitMaxPackBytes` — an integer, at least `1048576` (1 MiB), set as `GIT_MAX_PACK_BYTES`: the most
+  bytes one response from a git remote may carry; a larger one fails the sync with an error that names
+  `GIT_MAX_PACK_BYTES`. `null` (the default) leaves the variable unset, so the application default of
+  256 MiB (`268435456`) applies. This is not a cap on memory: isomorphic-git holds a packfile in memory
+  and copies it twice, so a sync's peak is about **2 × this value** (about 512 MiB at the default),
+  on top of what the process already uses. For repositories whose pack is larger, raise
+  `config.gitMaxPackBytes` together with `resources.limits.memory` and keep the memory limit well above
+  twice the new value.
 - `config.mcpStructuredOutput` — `true` sets `MCP_STRUCTURED_OUTPUT=1`. `false` (the default) leaves it
   unset.
 

@@ -132,6 +132,14 @@ config:
   # range stay refused whatever is listed. Empty leaves the variable unset.
   gitAllowedHosts: []
   #   - git.corp.example
+  # GIT_MAX_PACK_BYTES: the most bytes one response from a git remote (ref advertisement or packfile) may
+  # carry; a larger one fails the sync with an error that names this setting. isomorphic-git holds a
+  # packfile in memory and copies it twice, so memory peaks at about 2 x this value (512 MiB at the
+  # default), not at the value itself. For repositories whose pack is bigger, raise this together with
+  # `resources.limits.memory`, keeping the limit above twice the new value plus the process's own ~800MiB
+  # baseline (see `resources` below). At least 1048576 (1 MiB). Unset or null leaves the application default,
+  # 256 MiB (268435456).
+  gitMaxPackBytes: null
   # MCP_STRUCTURED_OUTPUT: true makes every MCP tool also return its answer as structured JSON
   # (`structuredContent`) beside the unchanged text answer. Off by default: Claude Code hands its
   # model the structured part alone when both are present, so the guidance each answer carries

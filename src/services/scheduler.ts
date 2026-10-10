@@ -46,7 +46,12 @@ export interface SchedulerDeps {
     Config,
     'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS' | 'SYNC_PROBES_PER_TICK' | 'SYNC_MAX_SKIP_HOURS'
   > &
-    Partial<Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS' | 'WEB_ALLOWED_HOSTS' | 'GIT_ALLOWED_HOSTS' | 'CONFLUENCE_MAX_PAGES' | 'NOTION_MAX_PAGES'>> &
+    Partial<
+      Pick<
+        Config,
+        'CONFLUENCE_ALLOWED_HOSTS' | 'WEB_ALLOWED_HOSTS' | 'GIT_ALLOWED_HOSTS' | 'GIT_MAX_PACK_BYTES' | 'CONFLUENCE_MAX_PAGES' | 'NOTION_MAX_PAGES'
+      >
+    > &
     WebLimits;
 }
 
