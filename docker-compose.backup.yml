@@ -1,0 +1,91 @@
+# Overlay for docker-compose.slim.yml only: the database must be external.
+# The full image supplies pg_dump, but its embedded-database entrypoint never runs.
+services:
+  backup:
+    image: contextator/contextator:${CONTEXTATOR_TAG:-latest}
+    restart: "on-failure:3"
+    user: "1000:1000"
+    depends_on:
+      contextator:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    init: true
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env — backups require an external database}
+      HOME: /tmp
+      DATA_DIR: /data
+      BACKUP_STAGING_DIR: /data/.scheduled-backup-staging
+      CONTEXTATOR_EMBEDDED_POSTGRES: "0"
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_KEEP: ${BACKUP_KEEP:-7}
+    volumes:
+      - ${CONTEXTATOR_DATA_PATH:-data}:/data
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        node -e '
+          for (const key of ["BACKUP_INTERVAL_SECONDS", "BACKUP_KEEP"]) {
+            const value = process.env[key] || "";
+            if (!/^[1-9][0-9]*$$/.test(value) || !Number.isSafeInteger(Number(value))) {
+              console.error(key + " must be a positive integer");
+              process.exit(1);
+            }
+          }
+        '
+        child=""
+        archive=""
+        mkdir -p "$$BACKUP_STAGING_DIR"
+        cleanup_staging() {
+          find "$$BACKUP_STAGING_DIR" -mindepth 1 -maxdepth 1 -type d -name '.backup-*' -exec rm -rf {} +
+        }
+        stop() {
+          trap '' TERM INT
+          if [ -n "$$child" ]; then
+            # setsid isolates npm, tsx and pg_dump from this shell and the app.
+            kill -TERM "-$$child" 2>/dev/null || kill -TERM "$$child" 2>/dev/null || true
+            sleep 1
+            kill -KILL "-$$child" 2>/dev/null || kill -KILL "$$child" 2>/dev/null || true
+            wait "$$child" 2>/dev/null || true
+          fi
+          if [ -n "$$archive" ]; then rm -f "$$archive.partial"; fi
+          cleanup_staging
+          exit 0
+        }
+        trap stop TERM INT
+        while :; do
+          cleanup_staging
+          mkdir -p "$$DATA_DIR/backups"
+          find "$$DATA_DIR/backups" -maxdepth 1 -type f -name 'contextator-backup-*.tar.gz.partial' -delete
+          archive="$$DATA_DIR/backups/contextator-backup-$$(date -u +%Y-%m-%dT%H-%M-%SZ).tar.gz"
+          setsid npm run backup -- "$$archive.partial" &
+          child=$$!
+          if wait "$$child"; then
+            child=""
+            mv "$$archive.partial" "$$archive"
+            node -e '
+              const fs = require("node:fs");
+              const path = require("node:path");
+              const directory = path.join(process.env.DATA_DIR, "backups");
+              const archives = fs.readdirSync(directory, { withFileTypes: true })
+                .filter(entry => entry.isFile() && /^contextator-backup-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z\.tar\.gz$$/.test(entry.name))
+                .map(entry => entry.name).sort().reverse();
+              for (const name of archives.slice(Number(process.env.BACKUP_KEEP))) {
+                fs.unlinkSync(path.join(directory, name));
+                console.log("removed old backup: " + name);
+              }
+            '
+          else
+            child=""
+            rm -f "$$archive.partial"
+            echo 'Backup failed; keeping existing archives and retrying after the interval.' >&2
+          fi
+          cleanup_staging
+          sleep "$$BACKUP_INTERVAL_SECONDS" &
+          child=$$!
+          wait "$$child"
+          child=""
+        done
