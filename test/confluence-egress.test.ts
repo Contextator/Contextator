@@ -84,6 +84,21 @@ describe('refusedRule', () => {
     ['fc00::1', 'private'],
     ['fd12:3456::1', 'private'],
     ['fec0::1', 'private'],
+    // Shared address space (carrier-grade NAT) and the benchmarking range are internal networks too.
+    ['100.64.0.1', 'private'],
+    ['100.127.255.254', 'private'],
+    ['198.18.0.1', 'private'],
+    ['198.19.255.254', 'private'],
+    // 240.0.0.0/4 is reserved: always refused, and the allowlist cannot open it.
+    ['240.0.0.1', 'reserved'],
+    ['250.1.2.3', 'reserved'],
+    ['255.255.255.254', 'reserved'],
+    ['255.255.255.255', 'reserved'],
+    ['::ffff:240.0.0.1', 'reserved'],
+    ['::ffff:100.64.0.1', 'private'],
+    ['::ffff:198.18.0.1', 'private'],
+    ['64:ff9b::240.0.0.1', 'reserved'],
+    ['64:ff9b::100.64.0.1', 'private'],
     // IPv6 that carries an IPv4 address is judged as that IPv4 address.
     ['::ffff:127.0.0.1', 'loopback'],
     ['::ffff:7f00:1', 'loopback'],
@@ -101,6 +116,10 @@ describe('refusedRule', () => {
     '8.8.8.8',
     '203.0.113.7',
     '172.15.255.255',
+    '100.63.255.255',
+    '100.128.0.1',
+    '198.17.255.255',
+    '198.20.0.1',
     '172.32.0.1',
     '192.169.0.1',
     '169.253.0.1',
@@ -237,13 +256,42 @@ describe('confluenceEgress', () => {
       expect(res.status).toBe(200);
     });
 
-    it('never lifts loopback, link-local, unspecified or multicast', async () => {
-      for (const address of ['127.0.0.1', '169.254.169.254', '0.0.0.0', '224.0.0.1']) {
+    it('never lifts loopback, link-local, unspecified, multicast or reserved', async () => {
+      for (const address of ['127.0.0.1', '169.254.169.254', '0.0.0.0', '224.0.0.1', '240.0.0.1']) {
         const fetch = guarded({ allowedHosts: ['wiki.corp'], resolve: fakeResolver({ 'wiki.corp': address }), route: () => '127.0.0.1' });
         const err = await refusal(fetch(`http://wiki.corp:${fixture.port}/`, GET));
         expect(err.rule).not.toBe('private');
       }
       expect(fixture.hits).toEqual([]);
+    });
+
+    it.each(['100.64.0.1', '198.18.0.1'])('refuses %s as private until the host is listed, then lets it through', async (address) => {
+      const resolve = fakeResolver({ 'wiki.corp': address });
+      const unlisted = guarded({ resolve, route: () => '127.0.0.1' });
+      const err = await refusal(unlisted(`http://wiki.corp:${fixture.port}/`, GET));
+      expect(err.rule).toBe('private');
+      expect(err.message).toContain('CONFLUENCE_ALLOWED_HOSTS');
+      expect(fixture.hits).toEqual([]);
+
+      const listed = guarded({ allowedHosts: ['wiki.corp'], resolve, route: () => '127.0.0.1' });
+      expect((await listed(`http://wiki.corp:${fixture.port}/`, GET)).status).toBe(200);
+    });
+
+    it.each(['240.0.0.1', '255.255.255.254', '::ffff:240.0.0.1', '64:ff9b::240.0.0.1'])('refuses %s as reserved, listed or not', async (address) => {
+      const resolve = fakeResolver({ 'wiki.corp': address });
+      for (const allowedHosts of [[], ['wiki.corp']]) {
+        const err = await refusal(guarded({ allowedHosts, resolve, route: () => '127.0.0.1' })(`http://wiki.corp:${fixture.port}/`, GET));
+        expect(err.rule).toBe('reserved');
+        expect(err.message).toContain('a reserved address');
+        expect(err.message).not.toContain('to allow it');
+      }
+      expect(fixture.hits).toEqual([]);
+    });
+
+    it('refuses a reserved address written into the URL, listed or not', async () => {
+      const err = await refusal(guarded({ allowedHosts: ['240.0.0.1'] })('http://240.0.0.1/', GET));
+      expect(err.rule).toBe('reserved');
+      expect(err.message).toBe('refused: `240.0.0.1` is reserved');
     });
 
     it('allows a listed name, not every name that resolves to the same address', async () => {

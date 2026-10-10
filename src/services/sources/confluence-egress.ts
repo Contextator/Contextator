@@ -8,11 +8,14 @@ import zlib from 'node:zlib';
 import type { FetchLike } from './confluence-client.js';
 
 /**
- * The only way a Confluence request leaves this process ([ADR-0088](../../../.ssot/ADR.md#adr-0088)).
+ * The only way a Confluence or web-source request leaves this process
+ * ([ADR-0088](../../../.ssot/ADR.md#adr-0088), [ADR-0107](../../../.ssot/ADR.md#adr-0107)).
  *
- * A Confluence base URL is typed by an editor and the server connects to it with the source's
- * credential, so without a bound it is a way to read the instance's loopback services, the cloud
- * metadata address or the internal network through a source's status and Test message.
+ * A Confluence base URL or a web source's entry URL is typed by an editor and the server connects to
+ * it, so without a bound it is a way to read the instance's loopback services, the cloud metadata
+ * address or the internal network through a source's status and Test message. {@link egressFetch} is
+ * the rule itself; {@link confluenceEgress} is it with Confluence's wording and `webEgress` with the
+ * web source's, and each names its own allowlist (`CONFLUENCE_ALLOWED_HOSTS`, `WEB_ALLOWED_HOSTS`).
  *
  * **The check runs on the address the socket is opened to.** Node's `lookup` option is the hook: the
  * connection asks it for the address, it resolves, judges every address it got, and hands back only
@@ -24,15 +27,15 @@ import type { FetchLike } from './confluence-client.js';
  */
 
 /** The rule a refused address falls under, named as it is in the refusal. */
-export type RefusedRule = 'loopback' | 'link-local' | 'unspecified' | 'multicast' | 'private';
+export type RefusedRule = 'loopback' | 'link-local' | 'unspecified' | 'multicast' | 'private' | 'reserved';
 
 /** DNS as this module needs it. Production uses `dns.lookup`, so `/etc/hosts` and the system resolver apply. */
 export type Resolver = (hostname: string) => Promise<Array<{ address: string; family: number }>>;
 
 export interface EgressOptions {
   /**
-   * `CONFLUENCE_ALLOWED_HOSTS`: host names allowed to resolve to a **private** address. It never lifts
-   * loopback, link-local, unspecified or multicast.
+   * `CONFLUENCE_ALLOWED_HOSTS` or `WEB_ALLOWED_HOSTS`: host names allowed to resolve to a **private**
+   * address. It never lifts loopback, link-local, unspecified, multicast or reserved.
    */
   allowedHosts: readonly string[];
   /** Replaces DNS. Tests use it to make a name answer an address; production leaves it unset. */
@@ -48,15 +51,22 @@ export interface EgressOptions {
   /** How long a kept-alive connection waits in the pool for its next request before it is closed. */
   idleMs?: number;
   /**
-   * Who is being reached, as errors name it. `Confluence` by default; another caller of the same rule
-   * (the client ID metadata document fetch, [ADR-0088](../../../.ssot/ADR.md#adr-0088)) names itself.
+   * Who is being reached, as errors name it. `Confluence` through {@link confluenceEgress}; another
+   * caller of the same rule (the client ID metadata document fetch,
+   * [ADR-0088](../../../.ssot/ADR.md#adr-0088); the web source) names itself.
    */
   label?: string;
   /**
    * The setting a private-address refusal points at, or `null` when there is none to point at.
-   * `CONFLUENCE_ALLOWED_HOSTS` by default.
+   * `CONFLUENCE_ALLOWED_HOSTS` through {@link confluenceEgress}.
    */
   allowListName?: string | null;
+  /**
+   * What the first URL is called in a scheme refusal: "refused: <subject> a `ftp:` address". The
+   * Confluence source types a base URL; a web source types an entry URL, and a redirect says
+   * "the server redirected to" either way.
+   */
+  subject?: string;
   /** Refuse plain `http`, on the first request and on every redirect. Off by default. */
   httpsOnly?: boolean;
 }
@@ -97,7 +107,14 @@ function ipv4Rule(octets: readonly number[]): RefusedRule | null {
   if (a === 127) return 'loopback';
   if (a === 169 && b === 254) return 'link-local';
   if (a >= 224 && a <= 239) return 'multicast';
+  // 240.0.0.0/4 — the former class E and the limited broadcast address (255.255.255.255) — is
+  // reserved: nothing public answers there, and the allowlist cannot open it ([ADR-0107](../../../.ssot/ADR.md#adr-0107)).
+  if (a >= 240) return 'reserved';
   if (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) return 'private';
+  // Shared address space for carrier-grade NAT (100.64.0.0/10) and the benchmarking range (198.18.0.0/15)
+  // are internal networks in practice, so they fall under the same rule as RFC 1918.
+  if (a === 100 && b >= 64 && b <= 127) return 'private';
+  if (a === 198 && (b === 18 || b === 19)) return 'private';
   return null;
 }
 
@@ -171,6 +188,7 @@ const ARTICLE: Record<RefusedRule, string> = {
   unspecified: 'an unspecified',
   multicast: 'a multicast',
   private: 'a private',
+  reserved: 'a reserved',
 };
 
 /**
@@ -189,20 +207,39 @@ function refusal(host: string, rule: RefusedRule, literal: boolean, redirected: 
 const systemResolver: Resolver = (hostname) => dns.promises.lookup(hostname, { all: true, verbatim: true });
 
 /**
- * A `fetch` for Confluence that connects only to addresses ADR-0088 allows.
- *
- * GET only, which is all the Confluence client sends. Redirects are followed here rather than by the
- * platform, up to five, each hop checked again; the credential is dropped on a hop to another origin,
- * as `fetch` does. Connections are kept alive on an agent of this instance's own, so a pooled socket
- * is always one this module's `lookup` opened, and closed after `idleMs` without a request, so an
- * instance nobody calls again lets go of its sockets and is collected.
+ * A `fetch` for Confluence that connects only to addresses ADR-0088 allows: {@link egressFetch} with
+ * Confluence's name, its allowlist (`CONFLUENCE_ALLOWED_HOSTS`) and its "base URL" wording.
  */
 export function confluenceEgress(options: EgressOptions): EgressFetch {
+  return egressFetch({ label: 'Confluence', allowListName: 'CONFLUENCE_ALLOWED_HOSTS', subject: 'the base URL', ...options });
+}
+
+/**
+ * A `fetch` for a web source that connects only to addresses ADR-0088 and ADR-0107 allow: the pages,
+ * `robots.txt`, the sitemap and `llms.txt` all go through it. A refusal names `WEB_ALLOWED_HOSTS`.
+ */
+export function webEgress(options: EgressOptions): EgressFetch {
+  return egressFetch({ label: 'the site', allowListName: 'WEB_ALLOWED_HOSTS', subject: 'the URL', ...options });
+}
+
+/**
+ * A `fetch` that connects only to addresses ADR-0088 allows.
+ *
+ * GET only, which is all its callers send. Redirects are followed here rather than by the
+ * platform, up to five, each hop checked again; the credential is dropped on a hop to another origin,
+ * as `fetch` does. The `Response` it returns carries the URL it finally came from in `url` and
+ * `redirected`, which the platform's own `Response` would hold but one built by hand does not.
+ * Connections are kept alive on an agent of this instance's own, so a pooled socket is always one this
+ * module's `lookup` opened, and closed after `idleMs` without a request, so an instance nobody calls
+ * again lets go of its sockets and is collected.
+ */
+export function egressFetch(options: EgressOptions): EgressFetch {
   const allowed = new Set(options.allowedHosts.map(normalizeHost));
   const resolve = options.resolve ?? systemResolver;
   const route = options.route ?? ((address: string) => address);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const label = options.label ?? 'Confluence';
+  const subject = options.subject ?? 'the base URL';
   const allowListName = options.allowListName === undefined ? 'CONFLUENCE_ALLOWED_HOSTS' : options.allowListName;
   // The agent's `timeout` is what a socket gets while it waits in the pool; a request in flight
   // runs on its own `timeout` below, which Node sets on the socket when it hands it to the request.
@@ -221,7 +258,7 @@ export function confluenceEgress(options: EgressOptions): EgressFetch {
     opened: (req: http.ClientRequest) => void,
   ): Promise<http.IncomingMessage> => {
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      const where = redirected ? 'the server redirected to' : 'the base URL is';
+      const where = redirected ? 'the server redirected to' : `${subject} is`;
       return Promise.reject(new EgressRefusedError(`refused: ${where} a \`${url.protocol}\` address; only http and https are allowed`, 'scheme'));
     }
     if (options.httpsOnly && url.protocol !== 'https:') {
@@ -281,7 +318,7 @@ export function confluenceEgress(options: EgressOptions): EgressFetch {
         lookup,
         timeout: timeoutMs,
       });
-      req.on('timeout', () => req.destroy(new Error(`${label} at \`${host}\` did not answer within ${timeoutMs / 1000} s`)));
+      req.on('timeout', () => req.destroy(new Error(`${capitalised(label)} at \`${host}\` did not answer within ${timeoutMs / 1000} s`)));
       req.on('error', (err: NodeJS.ErrnoException) => {
         // A system error's own message names the address it dialled ("connect ECONNREFUSED 10.1.2.3:8090");
         // the code alone says what went wrong without saying where the name led.
@@ -296,7 +333,7 @@ export function confluenceEgress(options: EgressOptions): EgressFetch {
   };
 
   return async (input, init) => {
-    if (init.method !== 'GET') throw new Error(`The ${label} egress sends GET only, not ${init.method}`);
+    if (init.method !== 'GET') throw new Error(`The ${label.replace(/^the /, '')} egress sends GET only, not ${init.method}`);
     const { signal } = init;
     signal?.throwIfAborted();
     // Whatever is open right now — the request until it answers, then its response — is what an abort
@@ -317,6 +354,10 @@ export function confluenceEgress(options: EgressOptions): EgressFetch {
         const location = res.headers.location;
         if (!REDIRECT_STATUSES.has(res.statusCode ?? 0) || !location) {
           const response = toResponse(res, label);
+          // A `Response` built by hand has an empty `url` and is never `redirected`; the client reads
+          // both to resolve relative links against where the page really came from.
+          Object.defineProperty(response, 'url', { value: url.href, configurable: true });
+          if (hop > 0) Object.defineProperty(response, 'redirected', { value: true, configurable: true });
           if (signal) {
             if (res.closed) release();
             else res.once('close', release);
@@ -324,7 +365,7 @@ export function confluenceEgress(options: EgressOptions): EgressFetch {
           return response;
         }
         res.resume();
-        if (hop >= MAX_REDIRECTS) throw new Error(`${label} redirected more than ${MAX_REDIRECTS} times`);
+        if (hop >= MAX_REDIRECTS) throw new Error(`${capitalised(label)} redirected more than ${MAX_REDIRECTS} times`);
         const next = new URL(location, url);
         if (next.origin !== url.origin) {
           headers = Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== 'authorization'));
@@ -345,12 +386,17 @@ function abortReason(signal: AbortSignal | undefined): Error {
   return reason instanceof Error ? reason : new Error('The request was aborted');
 }
 
+/** A label that starts a sentence: "the site" -> "The site"; "Confluence" is unchanged. */
+function capitalised(label: string): string {
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
 /** The Node response as the `Response` the client reads, decompressed if it was gzipped. */
 function toResponse(res: http.IncomingMessage, label: string): Response {
   const status = res.statusCode ?? 0;
   if (status < 200 || status > 599) {
     res.destroy();
-    throw new Error(`${label} answered with an invalid status ${status}`);
+    throw new Error(`${capitalised(label)} answered with an invalid status ${status}`);
   }
   const headers = new Headers();
   for (const [name, value] of Object.entries(res.headers)) {
@@ -367,6 +413,11 @@ function toResponse(res: http.IncomingMessage, label: string): Response {
     body = pipeline(res, zlib.createGunzip(), () => undefined);
     headers.delete('content-encoding');
     headers.delete('content-length');
+  } else if (encoding !== '' && encoding !== 'identity') {
+    // Only gzip was asked for, so anything else is a server ignoring `Accept-Encoding`. Passing the bytes
+    // on with the header in place would index compressed noise as text; say what happened instead.
+    res.destroy();
+    throw new Error(`${capitalised(label)} answered with content-encoding \`${encoding}\`, which this instance does not decode`);
   }
   return new Response(Readable.toWeb(body) as unknown as ReadableStream<Uint8Array>, { status, statusText: res.statusMessage, headers });
 }

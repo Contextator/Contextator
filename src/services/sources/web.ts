@@ -5,6 +5,7 @@ import { sourceCurrentDir, sourceDir } from '../data-dir.js';
 import { ValidationError } from '../projects.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig, type WebConfig } from '../sources.js';
 import { registerDriver, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
+import { EgressRefusedError, webEgress, type EgressOptions } from './confluence-egress.js';
 import { HttpWebClient, WebBudgetExhaustedError, type WebClient, type WebResponse } from './web-client.js';
 import {
   allowEverything,
@@ -54,6 +55,12 @@ export class WebDriver implements SourceDriver {
     private readonly ctx: DriverContext,
     /** Stands in for the network in tests; in production one is built from the instance's ceilings. */
     private readonly injectedClient?: WebClient,
+    /**
+     * Test seams for the egress guard: which address a name resolves to, and where an address that has
+     * passed the check is dialled. Production passes neither, so the system resolver decides and the
+     * connection goes to the address that was judged.
+     */
+    private readonly egress?: Pick<EgressOptions, 'resolve' | 'route'>,
   ) {
     this.cfg = parseSourceConfig('web', source.config);
   }
@@ -78,7 +85,9 @@ export class WebDriver implements SourceDriver {
     if (this.injectedClient) return this.injectedClient;
     this.built ??= new HttpWebClient(
       { delayMs: this.ctx.config.WEB_REQUEST_DELAY_MS, budgetMs: this.ctx.config.WEB_CRAWL_BUDGET_MS },
-      undefined,
+      // Every request this driver makes — pages, robots.txt, the sitemap, llms.txt, each redirect hop —
+      // leaves through this one function (ADR-0107); there is no other `fetch` in the driver.
+      webEgress({ allowedHosts: this.ctx.config.WEB_ALLOWED_HOSTS ?? [], ...this.egress }),
       this.ctx.log.child({ source: this.source.name, type: 'web' }),
     );
     return this.built;
@@ -136,6 +145,9 @@ export class WebDriver implements SourceDriver {
       response = await client.get(url);
     } catch (err) {
       if (err instanceof WebBudgetExhaustedError) throw err;
+      // The guard's own refusal says what rule fired and which setting lifts it. "Set WEB_RESPECT_ROBOTS=0"
+      // would be the wrong advice here: it would only move the refusal to the entry point.
+      if (err instanceof Error && err.cause instanceof EgressRefusedError) throw new ValidationError(err.message);
       throw new ValidationError(
         `${url} could not be read, so this source cannot know what the site allows: ${err instanceof Error ? err.message : String(err)}. ` +
           'Fix the site, or set WEB_RESPECT_ROBOTS=0 on this instance if the site is yours.',

@@ -20,7 +20,9 @@ import { KeyedMutex } from '../../src/services/locks.js';
 import { getProjectById } from '../../src/services/projects.js';
 import { runSyncTick, type SchedulerIndexer, type SyncTickResult } from '../../src/services/scheduler.js';
 import { storedProbeToken } from '../../src/services/sources.js';
+import { registerDriver } from '../../src/services/sources/driver.js';
 import { WebDriver } from '../../src/services/sources/web.js';
+import { publicFixture } from '../support/egress-seams.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 
 /**
@@ -160,6 +162,16 @@ function negotiatingSite(pathname: string, accept: string, res: http.ServerRespo
 
 const ROBOTS = 'User-agent: *\nCrawl-delay: 0\nDisallow: /internal/\n';
 
+/**
+ * The site is reached as a made-up host that resolves to a public-looking address, and only after the
+ * egress guard has judged that address does the connection land on loopback
+ * ([ADR-0107](../../.ssot/ADR.md#adr-0107)): the guard refuses `127.0.0.1`, so the fixture cannot be
+ * named by its own address, and every request here goes through the check rather than around it.
+ */
+const SITE_HOST = 'docs.fixture.test';
+const seams = publicFixture(SITE_HOST);
+registerDriver('web', (source, driverCtx) => new WebDriver(source, driverCtx, undefined, seams));
+
 let server: http.Server;
 let origin: string;
 /** Every path the site was asked for, in order. Cleared by a case that is about what was requested. */
@@ -259,7 +271,7 @@ beforeAll(async () => {
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', etag }).end(body);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  origin = `http://${SITE_HOST}:${(server.address() as AddressInfo).port}`;
 
   database = await createTestDatabase(baseUrl, 'web_source');
   await applySchema(database, DIMS);
@@ -445,11 +457,16 @@ describe('the page ceiling, against a site that has more pages than it', () => {
       })
       .returning();
 
-    const tight = new WebDriver(narrow, {
-      db: database.db,
-      log: silentLogger,
-      config: { ...config, WEB_MAX_PAGES: 1, WEB_REQUEST_DELAY_MS: 0 },
-    });
+    const tight = new WebDriver(
+      narrow,
+      {
+        db: database.db,
+        log: silentLogger,
+        config: { ...config, WEB_MAX_PAGES: 1, WEB_REQUEST_DELAY_MS: 0 },
+      },
+      undefined,
+      seams,
+    );
 
     requested = [];
     const result = await tight.sync();
@@ -478,11 +495,16 @@ describe('the page ceiling, against a site that has more pages than it', () => {
       .returning();
 
     requested = [];
-    const result = await new WebDriver(shell, {
-      db: database.db,
-      log: silentLogger,
-      config: { ...config, WEB_MAX_PAGES: 2, WEB_REQUEST_DELAY_MS: 0 },
-    }).sync();
+    const result = await new WebDriver(
+      shell,
+      {
+        db: database.db,
+        log: silentLogger,
+        config: { ...config, WEB_MAX_PAGES: 2, WEB_REQUEST_DELAY_MS: 0 },
+      },
+      undefined,
+      seams,
+    ).sync();
 
     expect(requested.filter((p) => p.startsWith('/guide/') || p.startsWith('/internal/'))).toHaveLength(2);
     expect(result.note).toContain('STOPPED AT THE 2-PAGE CEILING (WEB_MAX_PAGES)');
@@ -535,7 +557,8 @@ describe('a site that negotiates, asked for Markdown first', () => {
         config: { entryUrl: `${origin}/md/docs/`, entryKind, extensions: ['html', 'md', 'txt'] },
       })
       .returning();
-    const run = () => new WebDriver(row, { db: database.db, log: silentLogger, config: { ...config, WEB_REQUEST_DELAY_MS: 0 } }).sync();
+    const run = () =>
+      new WebDriver(row, { db: database.db, log: silentLogger, config: { ...config, WEB_REQUEST_DELAY_MS: 0 } }, undefined, seams).sync();
 
     const first = await run();
     expect(first.note).toContain('crawl: 3 page(s) fetched, 3 written, 0 unchanged, 0 removed');
