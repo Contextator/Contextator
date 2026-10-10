@@ -207,7 +207,7 @@
             </label>
             <div id="notion-webhook-box" class="webhook-box" hidden>
               <span class="field-label">Notion webhook <span class="muted">— optional</span></span>
-              <span class="field-hint">Edits, deletions and moves start a sync without waiting for the interval — within the minimum webhook interval, since a burst of deliveries is collapsed into one run. It does not notice a page <em>unshared</em> from the integration — Notion sends no event for that, and the interval's change check does not see it either. Keep the interval switched on: the first scheduled check after a day without a sync drops it by default. Or press <strong>Sync</strong> on the source to drop it now. The endpoint has to be reachable from the internet over HTTPS.</span>
+              <span class="field-hint">Edits, deletions and moves start a sync without waiting for the interval — within the minimum webhook interval, since a burst of deliveries is collapsed into one run. A page <em>unshared</em> from the integration sends no event of its own: the next full sync drops it, whether a webhook triggered it, you pressed <strong>Sync</strong> or the interval did. If nothing else arrives, the interval's check is the guarantee, at its first scheduled run after <code>SYNC_MAX_SKIP_HOURS</code> (24 hours by default) without a sync — so keep the interval switched on. The endpoint has to be reachable from the internet over HTTPS.</span>
               <div class="webhook-row">
                 <code id="notion-webhook-url"></code>
                 <button type="button" class="ghost small" id="notion-webhook-copy-url">Copy URL</button>
@@ -365,7 +365,7 @@
                 <option value="1440">Day</option>
                 <option value="10080">Week</option>
               </select>
-              <span class="field-hint" id="src-sync-hint">The server checks whether the source changed and indexes only if it did. A source not synced for a day is indexed at its next check by default, even if it looks unchanged, because some changes slip past the check, such as a page no longer shared. Spread with a random offset, so sources added together do not all wake at once.</span>
+              <span class="field-hint" id="src-sync-hint">The server checks whether the source changed and indexes only if it did. A source not synced for <code>SYNC_MAX_SKIP_HOURS</code> (24 hours by default) is indexed at its next check even if it looks unchanged, because some changes slip past the check. A Notion page unshared from the integration is the case: Notion sends no event for it, so if nothing else triggers a sync, this check is what drops it. Spread with a random offset, so sources added together do not all wake at once.</span>
             </label>
             <div class="field">
               <span class="field-label">Next check</span>
