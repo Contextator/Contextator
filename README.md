@@ -522,6 +522,41 @@ on that topology is everything about the embedded cluster: the three by-hand com
 `contextator`) reach nothing, and the `pgdata` volume is empty. The two bullets below about what a
 dump does *not* contain apply on both topologies, and so does the paragraph about `/data`.
 
+**Scheduled backups for the external database.** Add the optional sidecar to the slim stack:
+
+```bash
+docker compose -f docker-compose.slim.yml -f docker-compose.backup.yml up -d
+docker compose -f docker-compose.slim.yml -f docker-compose.backup.yml logs -f backup
+```
+
+The sidecar runs `npm run backup` immediately, then waits `BACKUP_INTERVAL_SECONDS` (default
+`86400`, one day) after each attempt. A sleep loop keeps this optional recipe independent of a cron
+daemon; it measures intervals after a run finishes, rather than promising a wall-clock execution time.
+Set `BACKUP_INTERVAL_SECONDS` and `BACKUP_KEEP` in `.env` to change the interval and retention; both
+must be positive integers. The default retention is **7** completed archives. Failed backups retain
+every existing archive and are retried after the interval.
+
+It uses the **default, non-slim image** for its PostgreSQL tools, overrides that image's entrypoint,
+and mounts only the same `data` volume at `/data`. It never starts an embedded PostgreSQL or mounts
+`pgdata`. Its `.env` is the app's `.env`, including `DATABASE_URL` and `SECRET_KEY`, so the archive
+records the same key fingerprint as an app-container backup. The
+[PostgreSQL client version caveat above](#data-and-persistence) still applies.
+
+Archives are in `/data/backups/`, written as `.partial` files and renamed only after a successful
+backup, so interrupted writes do not count toward retention. Retention applies only to the default
+timestamped
+`contextator-backup-<timestamp>.tar.gz` filenames; custom-named archives are left alone. Copy backups
+off the host too: sharing the app's data volume does not protect against losing that volume.
+To restore an archive into a fresh installation, use the `npm run restore -- <file> --check` and
+`npm run restore -- <file>` procedure below. Stop the backup sidecar while restoring so it does not
+take an archive of the restore in progress:
+
+```bash
+docker compose -f docker-compose.slim.yml -f docker-compose.backup.yml stop backup
+```
+
+Start it again with `up -d backup` after the restore is complete.
+
 The embedded PostgreSQL listens on `127.0.0.1` inside the container only and is not published, so
 everything here goes through the container.
 
