@@ -10,6 +10,16 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Added
+
+- **Scheduled backups for the slim stack.** `docker-compose.backup.yml` is an optional overlay for
+  `docker-compose.slim.yml` that runs `npm run backup` against the external database once at start and
+  then every `BACKUP_INTERVAL_SECONDS` (default one day), keeping the newest `BACKUP_KEEP` (default 7)
+  timestamped archives in `/data/backups`. It uses the default image for its PostgreSQL tools, runs as
+  UID/GID `1000:1000` like the slim app and shares its data volume and `.env`. The README also shows
+  how to take an on-demand backup and run a restore on the slim stack, which have to run from the
+  default image because the slim image has no `pg_dump` (FR-648, ADR-0110).
+
 ## [0.3.2] - 2026-10-10
 
 ### Security
