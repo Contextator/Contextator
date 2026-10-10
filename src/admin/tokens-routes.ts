@@ -18,18 +18,31 @@ const ScopeEntry = z
   .max(200)
   .regex(/^[A-Z]+ \/\S+$/, 'must look like "METHOD /route"');
 
-const CreateBody = z.object({
-  name: z.string().max(100).default(''),
-  scope: z.array(ScopeEntry).min(1).max(50),
-  // A single project this token may reach, or `null` for every project its owner already reaches.
-  // Not checked against the owner's memberships here: a project id the account cannot reach only
-  // ever narrows the token to nothing — the request-time membership check
-  // ([ADR-0076](../../.ssot/ADR.md#adr-0076)) is what actually decides, on every request, off the
-  // owner's live role rather than a snapshot taken at mint time. An id no project has at all is
-  // refused with a 400 by `createApiToken`, from the foreign key, rather than stored.
-  projectId: z.uuid().nullable().default(null),
-  expiresAt: z.coerce.date().nullable().default(null),
-});
+/**
+ * The body of `POST /api/tokens`, built around a clock so a test can pin "now". A deadline already
+ * behind that clock is refused here, as an issue on `expiresAt`, so it leaves through the same
+ * `validation_failed` handler as every other field error instead of a body of its own.
+ */
+export function buildCreateBody(now: () => number) {
+  return z.object({
+    name: z.string().max(100).default(''),
+    scope: z.array(ScopeEntry).min(1).max(50),
+    // A single project this token may reach, or `null` for every project its owner already reaches.
+    // Not checked against the owner's memberships here: a project id the account cannot reach only
+    // ever narrows the token to nothing — the request-time membership check
+    // ([ADR-0076](../../.ssot/ADR.md#adr-0076)) is what actually decides, on every request, off the
+    // owner's live role rather than a snapshot taken at mint time. An id no project has at all is
+    // refused with a 400 by `createApiToken`, from the foreign key, rather than stored.
+    projectId: z.uuid().nullable().default(null),
+    expiresAt: z.coerce
+      .date()
+      .refine((date) => date.getTime() > now(), { message: 'must be in the future' })
+      .nullable()
+      .default(null),
+  });
+}
+
+const CreateBody = buildCreateBody(Date.now);
 
 /**
  * `/api/tokens/*` — an account's own bearer credentials for the admin API
@@ -50,9 +63,6 @@ export const tokensRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
   app.post('/api/tokens', async (req, reply) => {
     const principal = requireSession(req);
     const body = CreateBody.parse(req.body ?? {});
-    if (body.expiresAt && body.expiresAt.getTime() <= Date.now()) {
-      return reply.code(400).send({ error: 'expiresAt must be in the future' });
-    }
     /**
      * Minted inside `withUserRowLock` ([T7-MAJOR-1], tur 8 fix of [ADR-0077](../../.ssot/ADR.md#adr-0077)):
      * `DELETE /api/auth/oidc/link` revokes this account's sessions and tokens together, under the same
