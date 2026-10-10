@@ -529,21 +529,26 @@ docker compose -f docker-compose.slim.yml -f docker-compose.backup.yml up -d
 docker compose -f docker-compose.slim.yml -f docker-compose.backup.yml logs -f backup
 ```
 
-The sidecar runs `npm run backup` immediately, then waits `BACKUP_INTERVAL_SECONDS` (default
+The sidecar waits for the app to be healthy, runs `npm run backup`, then waits `BACKUP_INTERVAL_SECONDS` (default
 `86400`, one day) after each attempt. A sleep loop keeps this optional recipe independent of a cron
 daemon; it measures intervals after a run finishes, rather than promising a wall-clock execution time.
 Set `BACKUP_INTERVAL_SECONDS` and `BACKUP_KEEP` in `.env` to change the interval and retention; both
 must be positive integers. The default retention is **7** completed archives. Failed backups retain
-every existing archive and are retried after the interval.
+every existing archive and are retried after the interval. Invalid settings stop after at most three
+container restarts; correct `.env` and run `up -d backup` to start again.
 
 It uses the **default, non-slim image** for its PostgreSQL tools, overrides that image's entrypoint,
-and mounts only the same `data` volume at `/data`. It never starts an embedded PostgreSQL or mounts
+runs as `node`, and mounts only the same `data` volume at `/data`. It never starts an embedded PostgreSQL or mounts
 `pgdata`. Its `.env` is the app's `.env`, including `DATABASE_URL` and `SECRET_KEY`, so the archive
-records the same key fingerprint as an app-container backup. The
-[PostgreSQL client version caveat above](#data-and-persistence) still applies.
+records the same key fingerprint as an app-container backup. The PostgreSQL client major version
+must be at least the server's major version.
 
 Archives are in `/data/backups/`, written as `.partial` files and renamed only after a successful
-backup, so interrupted writes do not count toward retention. Retention applies only to the default
+backup, so interrupted writes do not count toward retention. On stop, the sidecar terminates the
+backup process group and removes its partial archive and private staging files. After a forced kill,
+the next iteration removes stale scheduled `.partial` archives and staging files under
+`/data/.scheduled-backup-staging`; manual backups use their usual staging directory. Run only one
+backup sidecar per data volume. Retention applies only to the default
 timestamped
 `contextator-backup-<timestamp>.tar.gz` filenames; custom-named archives are left alone. Copy backups
 off the host too: sharing the app's data volume does not protect against losing that volume.

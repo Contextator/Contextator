@@ -21,6 +21,7 @@ const read = (...parts: string[]) => readFileSync(path.join(root, ...parts), 'ut
 const dockerfile = read('Dockerfile');
 const compose = read('docker-compose.yml');
 const composeSlim = read('docker-compose.slim.yml');
+const composeBackup = read('docker-compose.backup.yml');
 const entrypoint = read('docker', 'entrypoint.sh');
 const envExample = read('.env.example');
 
@@ -70,6 +71,22 @@ describe('docker-compose.slim.yml', () => {
   it('mounts no pgdata volume, because there is no cluster in that image', () => {
     expect(composeSlim).not.toContain('/var/lib/postgresql/data');
     expect(composeSlim).not.toContain('CONTEXTATOR_PGDATA');
+  });
+});
+
+describe('docker-compose.backup.yml', () => {
+  it('uses the full image tools but requires an external database and never mounts its cluster', () => {
+    expect(composeBackup).toMatch(/image: contextator\/contextator:\$\{CONTEXTATOR_TAG:-latest\}\s*$/m);
+    expect(composeBackup).toMatch(/DATABASE_URL:\s*\$\{DATABASE_URL:\?/);
+    expect(composeBackup).not.toContain('/var/lib/postgresql/data');
+    expect(composeBackup).not.toContain('pgdata');
+  });
+
+  it('shares the app user and waits for healthy startup before taking the first backup', () => {
+    expect(composeBackup).toMatch(/^\s+user: node$/m);
+    expect(composeBackup).toMatch(/depends_on:\s+contextator:\s+condition: service_healthy/);
+    expect(composeBackup).toContain('restart: "on-failure:3"');
+    expect(composeBackup).toContain('BACKUP_STAGING_DIR: /data/.scheduled-backup-staging');
   });
 });
 

@@ -3,7 +3,14 @@
 services:
   backup:
     image: contextator/contextator:${CONTEXTATOR_TAG:-latest}
-    restart: unless-stopped
+    restart: "on-failure:3"
+    user: node
+    stop_grace_period: 30s
+    depends_on:
+      contextator:
+        condition: service_healthy
+    healthcheck:
+      disable: true
     init: true
     env_file:
       - path: .env
@@ -11,6 +18,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env — backups require an external database}
       DATA_DIR: /data
+      BACKUP_STAGING_DIR: /data/.scheduled-backup-staging
       CONTEXTATOR_EMBEDDED_POSTGRES: "0"
       BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
       BACKUP_KEEP: ${BACKUP_KEEP:-7}
@@ -28,10 +36,35 @@ services:
             }
           }
         '
-        trap 'exit 0' TERM INT
+        child=""
+        archive=""
+        mkdir -p "$$BACKUP_STAGING_DIR"
+        cleanup_staging() {
+          find "$$BACKUP_STAGING_DIR" -mindepth 1 -maxdepth 1 -type d -name '.backup-*' -exec rm -rf {} +
+        }
+        stop() {
+          trap '' TERM INT
+          if [ -n "$$child" ]; then
+            # setsid isolates npm, tsx and pg_dump from this shell and the app.
+            kill -TERM "-$$child" 2>/dev/null || kill -TERM "$$child" 2>/dev/null || true
+            sleep 1
+            kill -KILL "-$$child" 2>/dev/null || kill -KILL "$$child" 2>/dev/null || true
+            wait "$$child" 2>/dev/null || true
+          fi
+          if [ -n "$$archive" ]; then rm -f "$$archive.partial"; fi
+          cleanup_staging
+          exit 0
+        }
+        trap stop TERM INT
         while :; do
+          cleanup_staging
+          mkdir -p "$$DATA_DIR/backups"
+          find "$$DATA_DIR/backups" -maxdepth 1 -type f -name 'contextator-backup-*.tar.gz.partial' -delete
           archive="$$DATA_DIR/backups/contextator-backup-$$(date -u +%Y-%m-%dT%H-%M-%SZ).tar.gz"
-          if npm run backup -- "$$archive.partial"; then
+          setsid npm run backup -- "$$archive.partial" &
+          child=$$!
+          if wait "$$child"; then
+            child=""
             mv "$$archive.partial" "$$archive"
             node -e '
               const fs = require("node:fs");
@@ -46,9 +79,13 @@ services:
               }
             '
           else
+            child=""
             rm -f "$$archive.partial"
             echo 'Backup failed; keeping existing archives and retrying after the interval.' >&2
           fi
+          cleanup_staging
           sleep "$$BACKUP_INTERVAL_SECONDS" &
-          wait $$!
+          child=$$!
+          wait "$$child"
+          child=""
         done

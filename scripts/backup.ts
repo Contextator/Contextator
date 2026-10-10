@@ -313,7 +313,11 @@ async function main(): Promise<void> {
   const out = archiveDestination(requested, config);
   const { db, pool } = createDb(config.DATABASE_URL);
   await fs.mkdir(config.DATA_DIR, { recursive: true });
-  const staging = await fs.mkdtemp(path.join(config.DATA_DIR, `${STAGING}-`));
+  // The scheduled sidecar owns a separate scratch root, so it can clean up after SIGKILL
+  // without deleting a manual backup's staging directory on the shared data volume.
+  const stagingRoot = process.env.BACKUP_STAGING_DIR || config.DATA_DIR;
+  await fs.mkdir(stagingRoot, { recursive: true });
+  const staging = await fs.mkdtemp(path.join(stagingRoot, `${STAGING}-`));
   try {
     await runBackup(
       {
