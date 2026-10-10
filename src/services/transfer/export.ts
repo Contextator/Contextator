@@ -19,7 +19,7 @@ import {
   type ProjectRow,
 } from '../../db/schema.js';
 import { sourceCurrentDir } from '../data-dir.js';
-import { PROBE_TOKEN_KEY, type SourceType } from '../sources.js';
+import { PROBE_TOKEN_KEY, type SourceType, withoutUrlCredentials } from '../sources.js';
 import {
   DATA_PREFIX,
   DOCUMENTS_ENTRY,
@@ -109,6 +109,10 @@ export async function schemaFacts(db: Db): Promise<{ version: string; migrations
  * function names the fields it emits; a column added to `document_sources` tomorrow does not
  * silently join the export, which is the opposite of the `{ ...row }` that would have been shorter.
  *
+ * **A git URL leaves without the credential an older row may still hold** (before the URL was stripped on
+ * write, `https://user:token@host/…` was stored as typed — [ADR-0075](../../../.ssot/ADR.md#adr-0075)).
+ * An archive is passed around, so it is cleaned here as `toSourceView` cleans the API's answer.
+ *
  * Three more are dropped for reasons that are not secrecy:
  *
  * - `syncProbeToken` and git's `lastCommit` are a driver's statement that *the tree on this disk* is at
@@ -122,6 +126,7 @@ export function exportedSource(row: DocumentSourceRow): Record<string, unknown> 
   const config = { ...row.config };
   delete config[PROBE_TOKEN_KEY];
   delete config.lastCommit;
+  if (row.type === 'git' && typeof config.url === 'string') config.url = withoutUrlCredentials(config.url);
   return {
     type: row.type,
     name: row.name,

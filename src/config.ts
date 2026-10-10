@@ -11,6 +11,28 @@ const csv = (value: string): string[] =>
     .map((s) => s.trim())
     .filter(Boolean);
 
+/**
+ * A comma-separated list of host names for an egress allowlist (`CONFLUENCE_ALLOWED_HOSTS`,
+ * `WEB_ALLOWED_HOSTS`, `GIT_ALLOWED_HOSTS`): lower-cased, brackets and a trailing dot dropped, and refused at startup when
+ * an entry is not a name or an address (a scheme, port or path would never match the host a request is
+ * made to, so it would silently allow nothing).
+ */
+const allowedHostsSetting = () =>
+  z
+    .string()
+    .default('')
+    .transform((value) =>
+      csv(value).map((h) =>
+        h
+          .toLowerCase()
+          .replace(/^\[(.*)\]$/, '$1')
+          .replace(/\.$/, ''),
+      ),
+    )
+    .refine((hosts) => hosts.every((h) => net.isIP(h) !== 0 || /^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?)*$/.test(h)), {
+      message: 'must be a comma-separated list of host names, without scheme, port or path (for example "wiki.corp.example,10.0.4.12")',
+    });
+
 const flag = (value: string): boolean => value === '1' || value.toLowerCase() === 'true';
 
 /**
@@ -518,20 +540,7 @@ export const EnvSchema = z
      * Names, not URLs: a scheme, port or path here would never match the host a request is made to, so
      * it is rejected at startup instead of silently allowing nothing.
      */
-    CONFLUENCE_ALLOWED_HOSTS: z
-      .string()
-      .default('')
-      .transform((value) =>
-        csv(value).map((h) =>
-          h
-            .toLowerCase()
-            .replace(/^\[(.*)\]$/, '$1')
-            .replace(/\.$/, ''),
-        ),
-      )
-      .refine((hosts) => hosts.every((h) => net.isIP(h) !== 0 || /^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?)*$/.test(h)), {
-        message: 'must be a comma-separated list of host names, without scheme, port or path (for example "wiki.corp.example,10.0.4.12")',
-      }),
+    CONFLUENCE_ALLOWED_HOSTS: allowedHostsSetting(),
     /**
      * Pages one Confluence sync indexes at most. A space past it is indexed up to the ceiling, the run
      * logs a warning and its note says in capitals that the rest was not indexed — a partial index that
@@ -845,6 +854,28 @@ export const EnvSchema = z
       .string()
       .default(WEB_LIMIT_DEFAULTS.WEB_RESPECT_ROBOTS ? '1' : '0')
       .transform(flag),
+
+    /**
+     * Host names a web source may reach **on a private address** (RFC 1918, `fc00::/7`, and the
+     * carrier-grade NAT and benchmarking ranges 100.64.0.0/10 and 198.18.0.0/15)
+     * ([ADR-0107](../../.ssot/ADR.md#adr-0107)). A documentation site inside the network is listed here;
+     * nothing else is. Every request a web source makes — pages, `robots.txt`, the sitemap, `llms.txt`
+     * and every redirect hop — goes through the same check as Confluence's. Loopback, link-local,
+     * unspecified, multicast and the reserved 240.0.0.0/4 stay refused whatever the list says, and there
+     * is no switch that turns the check off. Same shape as `CONFLUENCE_ALLOWED_HOSTS`: names, not URLs.
+     */
+    WEB_ALLOWED_HOSTS: allowedHostsSetting(),
+
+    /**
+     * Host names a git source's remote may reach **on a private address**, the same private ranges as
+     * `WEB_ALLOWED_HOSTS` ([ADR-0107](../../.ssot/ADR.md#adr-0107)). A git server inside the network is
+     * listed here; nothing else is. Every request isomorphic-git makes for a git source — the ref
+     * advertisement, the pack request and every redirect hop — goes through the same check as the web
+     * source's. Loopback, link-local, unspecified, multicast and the reserved 240.0.0.0/4 stay refused
+     * whatever the list says, and there is no switch that turns the check off. Names, not URLs, and
+     * independent of the other two lists.
+     */
+    GIT_ALLOWED_HOSTS: allowedHostsSetting(),
 
     // Embeddings
     EMBEDDING_PROVIDER: z.enum(['local', 'openai']).default('local'),

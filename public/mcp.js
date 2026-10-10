@@ -56,6 +56,15 @@ const MODES = {
   },
 };
 
+/**
+ * What `account` mode means for access, in the one wording both panels use: this one explains the mode,
+ * the Members panel's caveat (members.js) must not say anything different.
+ */
+export const ACCOUNT_MODE_NOTE = {
+  lead: 'Membership is the access.',
+  body: 'Only accounts listed in Members — and administrators — can reach this endpoint.',
+};
+
 const modeOf = (project) => (MODES[project.mcpAuth] ? project.mcpAuth : 'open');
 
 /** The project's MCP access mode as a neutral pill — the project list, the detail header, this panel. */
@@ -146,8 +155,8 @@ export function renderMcpAccess(project) {
     // The same mistake one mode along, and a different remedy: tokens do not help here.
     mode === 'account'
       ? el('p', { class: 'members-note' }, [
-          el('strong', { text: 'Membership is the access. ' }),
-          'Only accounts listed in Members — and administrators — can reach this endpoint. The tokens below do not open it.',
+          el('strong', { text: ACCOUNT_MODE_NOTE.lead }),
+          ` ${ACCOUNT_MODE_NOTE.body} The tokens below do not open it.`,
         ])
       : null,
 

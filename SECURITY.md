@@ -7,13 +7,14 @@ release is not patched — upgrading is the fix.
 
 | Version | Supported |
 |---------|-----------|
-| `0.3.0` (tagged `v0.3.0`) | Yes — it is the latest release |
-| `0.2.1` (tagged `v0.2.1`) | No — upgrade to `0.3.0` |
-| `0.2.0` (tagged `v0.2.0`) | No — upgrade to `0.3.0` |
-| `0.1.0` (tagged `v0.1.0`) | No — upgrade to `0.3.0` |
+| `0.3.1` (tagged `v0.3.1`) | Yes — it is the latest release |
+| `0.3.0` (tagged `v0.3.0`) | No — upgrade to `0.3.1` |
+| `0.2.1` (tagged `v0.2.1`) | No — upgrade to `0.3.1` |
+| `0.2.0` (tagged `v0.2.0`) | No — upgrade to `0.3.1` |
+| `0.1.0` (tagged `v0.1.0`) | No — upgrade to `0.3.1` |
 
 Fixes land on `main` first and stay there until the next release is tagged — check `main` if you are
-reproducing a report against a fix that is not in `v0.3.0` yet.
+reproducing a report against a fix that is not in `v0.3.1` yet.
 
 ## Response
 
@@ -26,19 +27,12 @@ possible rather than on a promised date.
 **Please do not open a public issue for a security problem.** An issue is readable by everybody the moment
 it is filed, including by whoever would use it.
 
-The intended route is GitHub's **private vulnerability reporting** on this repository: the **Security** tab
-→ *Report a vulnerability*. It opens a private thread between you and the maintainer, it is free, and it
-needs no e-mail address from either side.
+There are two ways to report, and the first is the one to use.
 
-> **It is not switched on yet.** As of 2026-09-18 private vulnerability reporting is disabled in this
-> repository's settings and only the repository owner can enable it (Settings → Security → Private
-> vulnerability reporting). Until the Security tab offers *Report a vulnerability*, **contact the
-> repository owner privately instead** — through [tunedness.com](https://tunedness.com), or any private
-> channel you already have with them.
->
-> <!-- OWNER: once private vulnerability reporting is enabled, delete this block. If you would rather
->      publish a security contact address, put it here instead — no address is published anywhere in
->      this project today, so none was invented for this file. -->
+1. **GitHub private vulnerability reporting** on this repository: the **Security** tab → *Report a
+   vulnerability*. It opens a private thread between you and the maintainer, it is free, and it needs no
+   e-mail address from either side.
+2. **`security@contextator.com`**, if you cannot use GitHub or prefer e-mail.
 
 Whichever route you use, the useful report says: what an attacker can do, the smallest sequence of steps
 that shows it, the version or commit you tested, and how the instance was deployed. A patch is welcome and

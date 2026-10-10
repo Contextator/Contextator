@@ -10,6 +10,73 @@ ships, that stops.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-10
+
+### Security
+
+- **Web and git sources now go through the egress guard.** In `0.3.0` and earlier a web source's
+  requests (pages, `robots.txt`, sitemaps, `llms.txt`) and a git source's (`clone`, `fetch` and the
+  ref listing behind Test and the change check) were made with no address check, so an editor could make
+  the server request the cloud metadata address, its own loopback services or a host on the internal
+  network. Every request now goes through the guard Confluence already uses
+  (ADR-0088): the check runs after DNS, on the address the connection is opened
+  to, and again on every redirect hop, with at most 5 redirects followed. A git source's credential does
+  not follow a redirect to another host. Notion and OIDC fetches stay outside the guard: their hosts are
+  not an editor's to choose.
+- **The guard's private ranges now include `100.64.0.0/10` (carrier-grade NAT; the range Tailscale
+  assigns from) and `198.18.0.0/15` (benchmarking), and `240.0.0.0/4` is refused under a new `reserved`
+  rule that no allowlist lifts.** `255.255.255.255` is included; IPv4-mapped and NAT64 addresses are
+  judged as the IPv4 address they carry. This applies to every path that uses the guard: Confluence,
+  web sources, git sources and OAuth client metadata documents (which have no allowlist, so the two
+  new private ranges are always refused there).
+- **A credential pasted into a git source's URL (`https://user:token@host/...`) is no longer stored or
+  returned.** It is stripped on create, update and project import, from the source view as well, and
+  migration `0020` removes it from rows already stored; authentication still uses the encrypted token
+  alone.
+
+### Added
+
+- **`WEB_ALLOWED_HOSTS` and `GIT_ALLOWED_HOSTS`.** Comma-separated host names (no scheme, port or path)
+  that a web source, respectively a git source, may reach on a `private` address — the same format and
+  meaning as `CONFLUENCE_ALLOWED_HOSTS`. The three lists are separate: a host listed for one source type
+  is not admitted for another. A refusal names the rule and, for a private address, the list that would
+  admit it. Helm chart 1.2.0 exposes them as `config.webAllowedHosts` and `config.gitAllowedHosts`.
+
+### Changed
+
+- **Breaking:** a web source that reads a host on the internal network stops working until that host is
+  listed in `WEB_ALLOWED_HOSTS`, and a git source whose remote is on the internal network stops working
+  until it is listed in `GIT_ALLOWED_HOSTS`. This includes hosts that resolve to `100.64.0.0/10` or
+  `198.18.0.0/15`. The source's status and Test message name the rule and the setting. A host that
+  resolves to loopback, link-local, `240.0.0.0/4` or another always-refused address cannot be listed.
+- **Breaking:** `POST /api/tokens` answers a past `expiresAt` with `validation_failed` and an `issues`
+  entry on `expiresAt` (`must be in the future`), as it does for every other field error, instead of
+  `{ "error": "expiresAt must be in the future" }`. A client that matched on that body has to read
+  `issues`.
+
+### Fixed
+
+- **SECURITY.md lists GitHub private vulnerability reporting and `security@contextator.com`** as the two ways to report a vulnerability, replacing the note that the former was not switched on yet.
+- **In `account` mode, the Members screen now describes the MCP endpoint correctly.** Its note used the
+  "open" wording, saying membership does not govern the MCP endpoint; it now says membership is the
+  access, in the same words as the MCP access panel.
+- **The Notion sync hints no longer promise what the check does not do.** They now say that a page
+  unshared from the integration sends no event and is dropped by the next full sync, and, if nothing
+  else triggers one, by the interval's check after `SYNC_MAX_SKIP_HOURS` (24 hours by default).
+
+### Upgrade notes
+
+- **List your internal hosts before upgrading.** For every web source whose site, and every git source
+  whose remote, is on a private address — RFC 1918, `fc00::/7`, or now `100.64.0.0/10` and
+  `198.18.0.0/15` — set `WEB_ALLOWED_HOSTS` or `GIT_ALLOWED_HOSTS` to its host name
+  (for example `WEB_ALLOWED_HOSTS=docs.corp.example`, `GIT_ALLOWED_HOSTS=git.corp.example`), or with the
+  Helm chart (1.2.0 or later; earlier versions reject these keys) set `config.webAllowedHosts` and
+  `config.gitAllowedHosts`. Until then those sources fail
+  their next sync and Test with a message naming the setting. Sources on public hosts are unaffected.
+  A Confluence host that resolves to one of the two new ranges needs `CONFLUENCE_ALLOWED_HOSTS` too.
+- **Migration `0020` runs at startup** and strips credentials from stored git source URLs; it changes no
+  other row.
+
 ## [0.3.0] - 2026-10-03
 
 ### Added
@@ -474,7 +541,8 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Contextator/Contextator/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Contextator/Contextator/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/Contextator/Contextator/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Contextator/Contextator/compare/v0.1.0...v0.2.0

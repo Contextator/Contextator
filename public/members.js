@@ -3,6 +3,7 @@
 
 import { $, api, ApiError, closeDialog, el, emit, openDialog, relativeTime, state, toast } from './core.js';
 import { canManageMembers } from './auth.js';
+import { ACCOUNT_MODE_NOTE } from './mcp.js';
 
 export async function loadMembers(force = false) {
   const project = state.projects.find((p) => p.id === state.selectedId);
@@ -21,6 +22,34 @@ export async function loadMembers(force = false) {
   } catch (err) {
     if (!(err instanceof ApiError && err.status === 401)) toast(err.message);
   }
+}
+
+/**
+ * The honest caveat under the member list: whether membership reaches the MCP endpoint at all depends on
+ * the project's `mcpAuth` mode, so the note follows it. Only `account` ties the endpoint to membership;
+ * `token` hangs it on tokens and `open` on nothing.
+ */
+function mcpAccessNote(project) {
+  if (project.mcpAuth === 'account') {
+    return el('p', { class: 'members-note ok' }, [
+      el('strong', { text: ACCOUNT_MODE_NOTE.lead }),
+      ` ${ACCOUNT_MODE_NOTE.body} See MCP access below.`,
+    ]);
+  }
+  if (project.mcpAuth === 'token') {
+    return el('p', { class: 'members-note ok' }, [
+      el('strong', { text: 'The MCP endpoint is behind a token. ' }),
+      'Membership governs the dashboard; ',
+      el('code', { text: project.mcpUrl }),
+      ' answers only to a client holding one of this project’s tokens — see MCP access below.',
+    ]);
+  }
+  return el('p', { class: 'members-note' }, [
+    el('strong', { text: 'Membership governs the dashboard, not the MCP endpoint. ' }),
+    'Anyone who can reach ',
+    el('code', { text: project.mcpUrl }),
+    ' can read this project’s indexed documents, whatever their role here. Require a token under MCP access to change that.',
+  ]);
 }
 
 export function renderMembers(project) {
@@ -64,20 +93,7 @@ export function renderMembers(project) {
     rows.length
       ? el('div', {}, rows)
       : el('p', { class: 'sources-empty', text: 'No members yet. Only root and admin accounts can see this project.' }),
-    // The honest caveat, and it changes the moment the endpoint stops being public.
-    project.mcpAuth === 'token'
-      ? el('p', { class: 'members-note ok' }, [
-          el('strong', { text: 'The MCP endpoint is behind a token. ' }),
-          'Membership governs the dashboard; ',
-          el('code', { text: project.mcpUrl }),
-          ' answers only to a client holding one of this project’s tokens — see MCP access below.',
-        ])
-      : el('p', { class: 'members-note' }, [
-          el('strong', { text: 'Membership governs the dashboard, not the MCP endpoint. ' }),
-          'Anyone who can reach ',
-          el('code', { text: project.mcpUrl }),
-          ' can read this project’s indexed documents, whatever their role here. Require a token under MCP access to change that.',
-        ]),
+    mcpAccessNote(project),
   ]);
 }
 

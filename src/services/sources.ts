@@ -8,6 +8,7 @@ import { isCredentialSourceType } from './encrypted-fields.js';
 import { allowedExtensionsFor, FLAVOR_ONLY_EXTENSIONS, FLAVORS, type Flavor } from './flavors.js';
 import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './fs-scan.js';
 import { ConflictError, NotFoundError, ValidationError } from './projects.js';
+import { sanitizeGitUrl } from './sources/git-auth.js';
 import { TEXT_SEARCH_CONFIGS } from './text-search.js';
 
 export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion', 'confluence', 'web'] as const;
@@ -362,7 +363,9 @@ export function toSourceView(row: DocumentSourceRow, opts: SourceViewOptions): S
     name: row.name,
     label: row.label,
     flavor: row.flavor as Flavor,
-    config: row.config,
+    // Defence in depth: a row stored before the URL was sanitised on write must not leak through here
+    // even if the cleanup migration has not run against it.
+    config: row.type === 'git' && typeof row.config.url === 'string' ? { ...row.config, url: withoutUrlCredentials(row.config.url) } : row.config,
     hasSecret: Boolean(row.secretEnc),
     webhookSecret: reveal && HAS_WEBHOOK.has(row.type) ? webhookSecretView(row, opts.keys) : null,
     hasWebhookSecret: HAS_WEBHOOK.has(row.type) && Boolean(row.webhookSecret),
@@ -379,11 +382,41 @@ export function toSourceView(row: DocumentSourceRow, opts: SourceViewOptions): S
   };
 }
 
-/** Parses (and fills defaults of) a source's config for its type. Throws ValidationError on bad input. */
+/**
+ * Removes `user:token@` from a repository URL, and leaves a URL that carries none exactly as it was.
+ *
+ * `sanitizeGitUrl` re-serialises through `URL`, which can change bytes that were never a credential
+ * (a bare host gains a `/`), so it is only called when there is something to remove. Authentication
+ * reads `secret_enc` alone ([ADR-0075](../../.ssot/ADR.md#adr-0075)), so nothing is lost by dropping it.
+ */
+export function withoutUrlCredentials(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.username && !parsed.password) return url;
+  } catch {
+    return url;
+  }
+  return sanitizeGitUrl(url);
+}
+
+/**
+ * Parses (and fills defaults of) a source's config for its type. Throws ValidationError on bad input.
+ *
+ * **A git URL leaves here without credentials.** Every writer that takes `config` from a client —
+ * create, update and project import — parses through this function, so one place keeps a token pasted
+ * into the URL out of a column the admin API returns. Writers that carry the stored value forward (the
+ * flavor-only update, a driver's `configPatch`, `setSourceStatus`) do not pass through here; they never
+ * receive a new URL, and `toSourceView` and `exportedSource` strip what an older row may still hold.
+ */
 export function parseSourceConfig<T extends SourceType>(type: T, raw: unknown): z.infer<(typeof SourceConfigByType)[T]> {
   const result = SourceConfigByType[type].safeParse(raw ?? {});
   if (!result.success) throw new ValidationError(`Invalid ${type} source settings: ${z.prettifyError(result.error)}`);
-  return result.data as z.infer<(typeof SourceConfigByType)[T]>;
+  const data = result.data as z.infer<(typeof SourceConfigByType)[T]>;
+  if (type === 'git') {
+    const git = data as GitConfig;
+    git.url = withoutUrlCredentials(git.url);
+  }
+  return data;
 }
 
 /**

@@ -12,10 +12,12 @@
  * **This is the only file in the product that reaches a host the operator named.** Every other
  * outbound call goes to a service with an account behind it — a git remote, Notion, Confluence, an
  * embedding API. What that costs, and what it does not protect against, is written down in
- * `README.md`'s security notes rather than left to be inferred from here.
+ * `README.md`'s security notes rather than left to be inferred from here. Every request it makes goes
+ * through the egress guard (`confluence-egress.ts`, ADR-0088 and ADR-0107), the redirect hops included.
  */
 
 import type { Logger } from '../../context.js';
+import { EgressRefusedError } from './confluence-egress.js';
 import { USER_AGENT } from './web-entry.js';
 
 /** One answer, already read. `body` is absent exactly when the server said 304. */
@@ -139,11 +141,15 @@ export const ACCEPT_MARKDOWN =
  */
 export const MAX_PAGE_BYTES = 8 * 1024 * 1024;
 
-/** Just enough of `fetch` to be replaceable without any of it reaching a network. */
-export type FetchLike = (
-  url: string,
-  init: { method: string; headers: Record<string, string>; signal: AbortSignal; redirect: 'follow' },
-) => Promise<Response>;
+/**
+ * Just enough of `fetch` to be replaceable without any of it reaching a network.
+ *
+ * **There is no `redirect` option, and there is no default `fetch`.** Following redirects is the
+ * egress guard's job ([ADR-0107](../../../.ssot/ADR.md#adr-0107)): it does it hop by hop and judges
+ * each one, which the platform's own automatic redirect handling cannot. A client built without a guard would
+ * be the unguarded request this file used to make, so the constructor takes one and has no default.
+ */
+export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; signal: AbortSignal }) => Promise<Response>;
 
 export interface HttpWebClientOptions {
   /** `WEB_REQUEST_DELAY_MS`, possibly raised by the site's own `Crawl-delay`. */
@@ -168,7 +174,7 @@ export class HttpWebClient implements WebClient {
 
   constructor(
     private readonly options: HttpWebClientOptions,
-    private readonly fetchImpl: FetchLike = fetch as unknown as FetchLike,
+    private readonly fetchImpl: FetchLike,
     private readonly log?: Logger,
   ) {
     this.delayMs = options.delayMs;
@@ -211,7 +217,9 @@ export class HttpWebClient implements WebClient {
 
     const headers: Record<string, string> = {
       accept: options.preferMarkdown ? ACCEPT_MARKDOWN : ACCEPT,
-      'accept-encoding': 'gzip, deflate',
+      // The egress decodes gzip and nothing else, and says so on the wire whatever is asked here; asking
+      // for the same thing keeps what this header claims true.
+      'accept-encoding': 'gzip',
       'user-agent': `${USER_AGENT}/1.0 (+https://github.com/contextator)`,
     };
     if (validators.etag) headers['if-none-match'] = validators.etag;
@@ -222,12 +230,15 @@ export class HttpWebClient implements WebClient {
 
     let response: Response;
     try {
-      response = await this.fetchImpl(url, { method: 'GET', headers, signal: AbortSignal.timeout(timeout), redirect: 'follow' });
+      response = await this.fetchImpl(url, { method: 'GET', headers, signal: AbortSignal.timeout(timeout) });
     } catch (err) {
       // An abort is the timeout above, and saying which one it was is the difference between "the site
       // is slow" and "this run ran out of time" — two different things for an operator to do.
       const aborted = (err as { name?: string })?.name === 'TimeoutError' || (err as { name?: string })?.name === 'AbortError';
       if (aborted && this.remainingMs() <= 0) this.assertBudget();
+      // A refusal is the instance's own rule rather than a network failure, and it already says which
+      // rule and which setting lifts it; "could not be reached" in front of it would read as an outage.
+      if (err instanceof EgressRefusedError) throw new Error(`${url} was not requested: ${err.message}`, { cause: err });
       throw new Error(aborted ? `${url} did not answer within ${Math.round(timeout / 1000)}s` : `${url} could not be reached: ${message(err)}`);
     }
 
