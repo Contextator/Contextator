@@ -10,6 +10,10 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Security
+
+- **A credential pasted into a git source's URL (`https://user:token@host/...`) is no longer stored or returned.** It is stripped on create, update and project import, from the source view as well, and migration `0020` removes it from rows already stored; authentication still uses the encrypted token alone.
+
 ## [0.3.0] - 2026-10-03
 
 ### Added
