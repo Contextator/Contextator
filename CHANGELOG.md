@@ -20,6 +20,12 @@ ships, that stops.
   how to take an on-demand backup and run a restore on the slim stack, which have to run from the
   default image because the slim image has no `pg_dump` (FR-648, ADR-0110).
 
+### Changed
+
+- **README restructured.** The README now follows the standard section order. The long reference sections
+  (document sources, accounts, MCP access, admin API, file types, troubleshooting) moved to `docs/`. The
+  backup and PostgreSQL major-upgrade procedures stay in the README.
+
 ## [0.3.2] - 2026-10-10
 
 ### Security
