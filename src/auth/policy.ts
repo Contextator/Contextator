@@ -84,10 +84,10 @@ const PROJECT_ROUTE_OVERRIDES: ReadonlyArray<{ method: string; url: string; need
   // one says whether the project's content is readable by anything that can reach a URL, the other
   // whether the project's *users* are recorded at all. Neither is a day-to-day editorial change.
   //
-  // **These two routes do not exist yet**, and the rows are here anyway. The table is the decision and
-  // the route is its application; a rule written when the column was added is a rule argued on its
-  // merits, where one written the day somebody needs the endpoint is a rule chosen to unblock them.
-  // `requiredProjectAccess` is a lookup — a row matching no route costs nothing and refuses nothing.
+  // **These rows were written before the two routes existed**, and that order was deliberate. The table is
+  // the decision and the route is its application; a rule written when the column was added is a rule
+  // argued on its merits, where one written the day somebody needs the endpoint is a rule chosen to
+  // unblock them. Both routes now exist in `admin/queries-routes.ts`.
   { method: 'PATCH', url: '/api/projects/:id/query-log', need: 'manager' },
   { method: 'DELETE', url: '/api/projects/:id/query-log', need: 'manager' },
   // A project's own relevance floor. What an agent is told "no good match" instead of an answer is the
