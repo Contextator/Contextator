@@ -6,3 +6,10 @@ dist/
 .DS_Store
 .data
 integration-report.json
+
+# Repository standard (STANDARD.md §13)
+/.ssot/
+.env.*
+!.env.example
+.idea/
+.vscode/

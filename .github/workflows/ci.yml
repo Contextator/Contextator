@@ -20,23 +20,19 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    name: Lint, typecheck and test
+  lint:
+    name: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
-      # Mirrors the Dockerfile. onnxruntime-node's postinstall fetches optional GPU binaries that
-      # nothing here uses; without this the install pulls a CUDA runtime to run unit tests. The CPU
-      # binaries ship in the package, which is what lets the step below load a model at all.
+      # See the `test` job: the install is the same, and skipping the GPU binaries keeps it fast.
       ONNXRUNTIME_NODE_INSTALL: skip
-      # Pinned to the defaults in `src/config.ts` rather than left implicit, for the same reason the
-      # `eval` job pins them: they are what the cache key below is derived from, so a changed model or
-      # a faster dtype is a different download and must not be a cache hit.
-      EMBEDDING_MODEL: Xenova/multilingual-e5-small
-      EMBEDDING_DTYPE: fp32
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # The image runs node:22-bookworm-slim, and since ADR-0056 so does the engines floor.
           node-version: 22
@@ -58,6 +54,33 @@ jobs:
       # Both tsconfigs: the one that builds dist/, and the one that covers test/ and scripts/.
       - run: npm run typecheck
 
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Mirrors the Dockerfile. onnxruntime-node's postinstall fetches optional GPU binaries that
+      # nothing here uses; without this the install pulls a CUDA runtime to run unit tests. The CPU
+      # binaries ship in the package, which is what lets the step below load a model at all.
+      ONNXRUNTIME_NODE_INSTALL: skip
+      # Pinned to the defaults in `src/config.ts` rather than left implicit, for the same reason the
+      # `eval` job pins them: they are what the cache key below is derived from, so a changed model or
+      # a faster dtype is a different download and must not be a cache hit.
+      EMBEDDING_MODEL: Xenova/multilingual-e5-small
+      EMBEDDING_DTYPE: fp32
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # The image runs node:22-bookworm-slim, and since ADR-0056 so does the engines floor.
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
       # Three tests in the unit suite load the real model: the tokenizer against Turkish text
       # (`test/chunker.test.ts`) and both sides of one sentence through the prefixes of ADR-0038
       # (`test/embedding-prefixes.test.ts`). They were gated on this directory and this job never had
@@ -72,7 +95,7 @@ jobs:
       # paid on the first run after either moves and not otherwise.
       - name: Cache the embedding model
         id: models
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .cache/models
           key: "models-${{ env.EMBEDDING_MODEL }}-${{ env.EMBEDDING_DTYPE }}"
@@ -99,9 +122,11 @@ jobs:
     name: Changelog reminder
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Warn when src/ changed and [Unreleased] is empty
@@ -126,14 +151,17 @@ jobs:
   integration:
     name: Integration tests against PostgreSQL
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       # Same reason as above: nothing in this suite embeds anything, and the vectors it searches with
       # are written by hand (ADR-0031), so there is no model and no GPU runtime to fetch.
       ONNXRUNTIME_NODE_INSTALL: skip
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -177,7 +205,7 @@ jobs:
       # makes it comparable.
       - name: Keep the failing suite's output
         if: failure() && steps.integration.outcome == 'failure'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: integration-failure-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           path: |
@@ -191,16 +219,19 @@ jobs:
   image:
     name: Build the image
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       # type=gha writes to the Actions cache, which needs more than the read-only default above.
       actions: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           # Built and thrown away. There are no registry credentials here on purpose: publishing is
@@ -285,7 +316,7 @@ jobs:
       # release tag (ADR-0069). A stage that is only ever built when a version is being cut is a
       # stage that breaks in between and is discovered by the release — and `slim` shares the `build`
       # stage with the image above, so the marginal cost here is one runtime layer set, not a build.
-      - uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           target: slim
@@ -325,6 +356,7 @@ jobs:
   eval:
     name: Retrieval evaluation
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       # Same reason as the jobs above, and the same evidence: the Dockerfile installs with this set and
       # the image it produces embeds locally on the CPU. The postinstall fetches GPU binaries; the CPU
@@ -355,8 +387,9 @@ jobs:
       MIN_RECALL5: "0.675"
       MIN_HEADING5: "0.650"
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # The filter below diffs against the pull request's base commit, which the default shallow
           # checkout does not have.
           fetch-depth: 0
@@ -381,7 +414,7 @@ jobs:
             echo 'No retrieval evaluation: this change touches neither `src/services/**`, `eval/**` nor `scripts/eval.ts`.' >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: steps.relevant.outputs.run == 'true'
         with:
           node-version: 22
@@ -392,7 +425,7 @@ jobs:
       # several-hundred-megabyte download on every dependency bump.
       - name: Cache the embedding model
         if: steps.relevant.outputs.run == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .cache/models
           key: "models-${{ env.EMBEDDING_MODEL }}-${{ env.EMBEDDING_DTYPE }}"
@@ -444,7 +477,7 @@ jobs:
 
       # `always()` and not the step condition alone: the report is most worth having on the run where
       # the gate failed. Still inside the path filter, so a skipped job uploads nothing.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always() && steps.relevant.outputs.run == 'true'
         with:
           name: eval-report

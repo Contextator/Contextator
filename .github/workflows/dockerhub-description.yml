@@ -28,8 +28,11 @@ jobs:
   update:
     name: Push DOCKERHUB.md to Docker Hub
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # This is the one place `peter-evans/dockerhub-description` runs, and the one place
       # `DOCKERHUB_TOKEN` needs more than the read/write a plain image push would: overwriting a

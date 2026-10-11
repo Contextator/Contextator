@@ -1,0 +1,74 @@
+name: Bug report
+description: Something does not work the way it says it does.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Not a bug report: a security problem. Do not file one here — an issue is public the moment it is filed. [SECURITY.md](https://github.com/Contextator/Contextator/blob/main/SECURITY.md) says where it goes.
+  - type: checkboxes
+    id: existing-issues
+    attributes:
+      label: Existing issues
+      options:
+        - label: I have searched the existing issues and this bug has not been reported yet.
+          required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened
+      description: What went wrong, in a sentence or two.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce it
+      description: The smallest sequence of steps you can get it down to.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: What you actually saw — the response, the error, the state it was left in.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The tag or commit, or the `version` from `GET /api/health`.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: How it is deployed
+      description: |
+        One of:
+        - the published image (`docker compose up -d`, pulling `contextator/contextator` from Docker Hub) — say which tag or digest: `docker image inspect --format '{{index .RepoDigests 0}}' contextator/contextator`
+        - built from source (`docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`, or a plain `docker build`)
+        - `npm run dev` against `docker-compose.dev.yml`
+        - something else — say what
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: The relevant log lines
+      description: |
+        `docker compose logs contextator`, or the terminal running `npm run dev`. Paste the lines around the failure rather than the whole file, and check them for tokens before you do.
+      render: text
+    validations:
+      required: false
