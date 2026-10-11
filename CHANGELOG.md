@@ -12,6 +12,7 @@ ships, that stops.
 
 ### Added
 
+- **README restructured.** The README now follows the standard section order; the long reference sections (document sources, accounts, MCP access, admin API, file types, troubleshooting) moved unchanged to `docs/`. The backup and PostgreSQL major-upgrade procedures stay in the README.
 - **Scheduled backups for the slim stack.** `docker-compose.backup.yml` is an optional overlay for
   `docker-compose.slim.yml` that runs `npm run backup` against the external database once at start and
   then every `BACKUP_INTERVAL_SECONDS` (default one day), keeping the newest `BACKUP_KEEP` (default 7)

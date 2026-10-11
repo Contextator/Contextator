@@ -1,52 +1,52 @@
 # Contextator
 
-[![Designed & Maintained with Tan](https://www.muhammetsafak.com.tr/badges/designed-maintained-with-tan.svg)](https://www.muhammetsafak.com.tr/en/tan/)
+[![Designed & Maintained with Tan](https://muhammetsafak.com/badges/designed-maintained-with-tan.svg)](https://muhammetsafak.com/tan/)
 
-**Self-hosted, multi-tenant MCP documentation server.** Give a project its document sources — mounted
-folders, git repositories, uploaded archives, a Notion workspace, a Confluence Cloud site or Data Center instance, a published
-documentation site — and it
-becomes its own [Model Context Protocol](https://modelcontextprotocol.io) endpoint that AI agents
-(Cursor, Claude Code, Claude Desktop, …) can search semantically:
+Self-hosted MCP server that turns your documentation into one semantically searchable endpoint per project.
 
-```
+Give a project its document sources — mounted folders, git repositories, uploaded archives, a Notion
+workspace, a Confluence Cloud site or Data Center instance, a published documentation site — and it becomes
+its own [Model Context Protocol](https://modelcontextprotocol.io) endpoint that AI agents (Cursor, Claude Code,
+Claude Desktop, …) can search:
+
+```text
 http://localhost:3444/mcp/<project-name>
 ```
 
-- **One URL per project, fully isolated.** Each project has its own document collection and
-  vector embeddings in PostgreSQL + [pgvector](https://github.com/pgvector/pgvector). A client
-  connected to `/mcp/billing` never sees `/mcp/mobile`.
-- **Many sources per project.** A local directory, a git repository (or one subdirectory of it), an
-  upload of files/folders/`.zip`/`.tar.gz`/`.rar`, a Notion workspace, a Confluence Cloud site or Data Center instance, or a
-  published documentation site read from its `sitemap.xml` —
-  combined into one searchable endpoint. Every source is mounted under its own name, so documents read
-  as `handbook/install.md`.
+It ships as **one Docker container**, published as `contextator/contextator`, that holds both the database and
+the app, and is free software under the **AGPL-3.0-or-later** with a commercial license available
+([License](#license)).
+
+## Features
+
+- **One URL per project, fully isolated.** Each project has its own document collection and vector embeddings
+  in PostgreSQL + [pgvector](https://github.com/pgvector/pgvector). A client connected to `/mcp/billing` never
+  sees `/mcp/mobile`.
+- **Many sources per project.** A local directory, a git repository (or one subdirectory of it), an upload of
+  files/folders/`.zip`/`.tar.gz`/`.rar`, a Notion workspace, a Confluence Cloud site or Data Center instance,
+  or a published documentation site read from its `sitemap.xml`, combined into one searchable endpoint. See
+  [Document sources](docs/document-sources.md).
 - **100 % local by default.** Embeddings are generated on the CPU with
-  [transformers.js](https://huggingface.co/docs/transformers.js) (`Xenova/multilingual-e5-small`, a
-  retrieval model covering 100 languages incl. Turkish). Switch to OpenAI embeddings with two env vars.
-- **One URL, Streamable HTTP first.** Streamable HTTP is the way to connect. The legacy HTTP+SSE transport is
-  **deprecated** (ADR-0096): it still answers on the same URL and keeps working, no removal date is set, and its
-  responses carry a `Deprecation: true` header. The same URL also speaks the stateless MCP **2026-07-28** protocol
-  beside 2025-11-25 — see [Connecting AI clients](#connecting-ai-clients).
-- **Admin dashboard** at `http://localhost:3444/` to manage projects and their sources — add a repository, drop a folder or an archive on the page, test a connection, trigger re-indexing and watch progress.
-- **Accounts and roles.** People sign in with their own account. `root` and `admin` manage everything and everyone; a
-  `member` sees only the projects it is assigned to, as a read-only `viewer` or an `editor` that adds sources, uploads
-  files and re-indexes. Any account can mint its own named, scoped, revocable **API token** for a script or CI job;
-  `ADMIN_TOKEN` still works too. See [Accounts and permissions](#accounts-and-permissions).
-- **A door on each MCP endpoint, with three settings.** A new project requires a **bearer token** that your client
-  sends as an ordinary header, and is handed its first one as it is created, shown once. Make it **open** if its documents should be readable by anyone who can reach the
-  URL, or require an **account** and its access becomes the memberships you already manage. Browser-based connectors
-  sign in through OAuth 2.1. See [MCP access](#mcp-access).
+  [transformers.js](https://huggingface.co/docs/transformers.js) (`Xenova/multilingual-e5-small`, a retrieval
+  model covering 100 languages incl. Turkish). Switch to OpenAI embeddings with two env vars.
+- **Admin dashboard** at `http://localhost:3444/` to manage projects and their sources — add a repository,
+  drop a folder or an archive on the page, test a connection, trigger re-indexing and watch progress.
+- **Accounts and roles.** People sign in with their own account. `root` and `admin` manage everything and
+  everyone; a `member` sees only the projects it is assigned to, as a read-only `viewer` or an `editor` that
+  adds sources, uploads files and re-indexes. Any account can mint its own named, scoped, revocable **API
+  token** for a script or CI job; `ADMIN_TOKEN` still works too. See
+  [Accounts and permissions](docs/accounts-and-permissions.md).
+- **A door on each MCP endpoint, with three settings.** A new project requires a **bearer token** that your
+  client sends as an ordinary header, and is handed its first one as it is created, shown once. Make it
+  **open** if its documents should be readable by anyone who can reach the URL, or require an **account** and
+  its access becomes the memberships you already manage. Browser-based connectors sign in through OAuth 2.1.
+  See [MCP access](docs/mcp-access.md).
 - **Incremental indexing.** Files are hashed; only changed files are re-embedded, removed files are deleted.
-- **More than Markdown.** `.html`, `.docx`, `.csv` and `.pdf` are converted to Markdown as they are indexed, so an agent
-  reads a Word file or a PDF the way it reads a page of documentation. See [File types](#file-types).
+- **More than Markdown.** `.html`, `.docx`, `.csv` and `.pdf` are converted to Markdown as they are indexed, so
+  an agent reads a Word file or a PDF the way it reads a page of documentation. See
+  [File types](docs/file-types.md).
 
-Stack: TypeScript · Node.js 22+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/server` (MCP TypeScript SDK 2.x) · `@huggingface/transformers` · `unpdf` / `mammoth` / `turndown`.
-Ships as **one Docker container**, published as `contextator/contextator`, that holds both the database and the app.
-Free software under the **AGPL-3.0-or-later** ([why](#license)), with a commercial license available.
-
----
-
-## Quick start (Docker)
+## Quick Start
 
 Everything runs in a single container named `contextator`: PostgreSQL 16 + pgvector and the Node.js
 app, started and stopped together by a small entrypoint script. Data lives in Docker volumes and
@@ -70,7 +70,7 @@ docker compose logs -f            # wait for "embedding model ready"
 machine and nowhere else, so a container started on a laptop or an office server does not appear on
 the network it is plugged into. To publish it on the network deliberately, set `CONTEXTATOR_BIND=0.0.0.0`
 in `.env` and put a TLS-terminating reverse proxy or a VPN in front of it — see
-[Running behind a reverse proxy](#running-behind-a-reverse-proxy).
+[Running behind a reverse proxy](docs/configuration.md#running-behind-a-reverse-proxy).
 
 1. **Create the first account.** Open **http://localhost:3444/setup**, enter the `SETUP_CODE` you chose, and create
    the `root` account. The code exists so that nobody who reaches the server before you can claim it; it stops working
@@ -79,7 +79,7 @@ in `.env` and put a TLS-terminating reverse proxy or a VPN in front of it — se
    Left `SETUP_CODE` empty? The server generates one and prints it at every start until an account exists — it is in
    the log you are already tailing:
 
-   ```
+   ```text
    ┌─ Contextator first-run setup ───────────────────────────────────────────┐
    │ No user accounts exist yet; the dashboard is waiting for its first one. │
    │                                                                         │
@@ -126,365 +126,100 @@ Building the image from source instead of pulling it:
 line; `0.3.2` is one exact, immutable release. Pin a versioned tag for anything you upgrade
 deliberately by setting `CONTEXTATOR_TAG` in `.env` (e.g. `CONTEXTATOR_TAG=0.3.2`) and running
 `docker compose up -d` — this reads at every start, not only the first. Every one of those tags from
-`0.2.0` on has a `-slim` twin — `latest-slim`, `0.3-slim`, `0.3.2-slim` — which is the section below.
+`0.2.0` on has a `-slim` twin — `latest-slim`, `0.3-slim`, `0.3.2-slim` — which is described in [Bringing your own PostgreSQL](docs/deployment.md#bringing-your-own-postgresql).
 
-### Bringing your own PostgreSQL
+## Usage
 
-The single container above is the default and most installations should stay on it: there is nothing
-to provision, nothing to connect, and one thing to back up. Some installations already have a
-PostgreSQL, though — a managed service, an HA pair, a server whose backups and monitoring somebody
-else operates — and for those, **one line of `.env` moves the database out of the container**:
-
-```bash
-DATABASE_URL=postgres://user:password@db.example.com:5432/contextator
-docker compose up -d
-```
-
-The container then starts no PostgreSQL of its own. It connects to that server, creates and migrates
-its schema there at startup, and the `contextator-pgdata` volume stays empty. Nothing else changes —
-same image, same command, same everything above.
-
-For the application *without* a PostgreSQL inside the image at all, use the `-slim` tag with the
-compose file that comes with it. It carries no database, so `DATABASE_URL` is required rather than
-optional; started without one it exits and says so:
-
-```bash
-curl -fsSLO https://raw.githubusercontent.com/Contextator/Contextator/main/docker-compose.slim.yml
-docker compose -f docker-compose.slim.yml up -d
-```
-
-What that server has to be, either way: **PostgreSQL 16 or newer**, with **pgvector installed or
-installable by the role in the URL** — the first start runs `CREATE EXTENSION IF NOT EXISTS vector`,
-which on a managed service usually means a role such as `rds_superuser` or `cloudsqlsuperuser`, or
-enabling the extension on the instance beforehand — and **a database of its own**, which may be
-empty.
-
-And what changes hands with it: **backups are yours.** `docker exec contextator pg_dump …` dumps the
-*embedded* database and reaches nothing else, so on this topology everything the database holds —
-projects, documents, embeddings, accounts, MCP tokens, the audit and query logs — is covered by
-whatever covers that server, and by nothing this image ships. The `contextator-data` volume needs
-backing up on both topologies: an uploaded source's content is not in the database at all.
-
-### Running on Kubernetes
-
-For operators who already run Kubernetes rather than a single Docker host, `charts/contextator/` is a
-Helm chart for the same `-slim` + external-database topology above — one Pod by design (ADR-0078),
-strict value validation (ADR-0092), and no default `image.tag` (it must name a `slim` image):
-
-```bash
-helm repo add contextator https://contextator.github.io/Contextator
-helm repo update
-helm install ctx contextator/contextator \
-  --set database.url="postgres://user:password@db.example.com:5432/contextator" \
-  --set-string image.tag="<version>-slim"
-```
-
-Full install guide — `SECRET_KEY` handling, Ingress and reverse-proxy interplay, persistence, probes,
-security context, resource sizing, uninstalling — on
-[Running on Kubernetes](https://contextator.com/en/docs/kubernetes/), and in `charts/contextator/README.md`.
-
-## Document sources
-
-A project is a set of **sources**. Each one is added in the dashboard (**Add source**), carries a
-URL-safe `name`, and that name becomes the prefix of every document it contributes: a file
-`install.md` in a source named `handbook` is indexed, searched and read as `handbook/install.md`.
-The name is the mount point, so it cannot change after creation; everything else can.
-
-| Type | What it is | Synced by |
-|------|-----------|-----------|
-| **Local directory** | A folder mounted on the server, scanned in place. Must live inside `ALLOWED_DOC_ROOTS`; nothing is copied. | Reading it at index time |
-| **Git repository** | A shallow, single-branch checkout under `DATA_DIR`. Any HTTPS git server: GitHub, GitLab, Bitbucket, Gitea/Forgejo/Codeberg. Optionally only a **subdirectory** of the repository (`docs/`). | `git fetch` of the branch tip at the start of every index run, a push webhook, or the sync interval below |
-| **Upload** | Files, whole folders (structure preserved) and archives — `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.rar` — unpacked on the server. Add to the existing files or replace them all. | Nothing to sync; the files live under `DATA_DIR` |
-| **Notion** | Every page shared with an internal integration (or the configured root pages/databases and their descendants), rendered to Markdown, nested by parent page. | The Notion API, re-rendering only pages whose `last_edited_time` changed |
-| **Confluence** | **Cloud, or Data Center 7.9 and later** (see below). Every page in the chosen spaces — or in every space the account can read — rendered from Confluence's storage format to Markdown, nested the way it is in the wiki: `<name>/<space>/<parent page>/<page>.md`. | The Confluence REST API, re-rendering only pages whose version number changed; a signed webhook on Data Center, or the sync interval below |
-| **Documentation site** | **Public pages only** (see below). A published site, found through its `sitemap.xml`, its `llms.txt` or a crawl from one start URL, written under the site's own paths: `<name>/guide/install.html`, converted to Markdown by the same transform `.html` files use. | Conditional GETs against the site (`ETag`/`Last-Modified`), inside the five crawl ceilings below |
-
-Sources are synced at the start of every index run, one after another; a source that fails to sync is
-reported on its own row and the others still index. **Sync** on a row and **Re-index** in the header
-both queue the same run.
-
-### Versions: two releases of one product in one project
-
-A source can carry a **version** — the *Version* field in its dialog — and every document it indexes is
-stamped with it. An agent then narrows a search to one release:
-
-```
-search_docs(query: "rotate the signing key", version: "v3")
-```
-
-Omit it and the search reaches every version, which is what it did before the field existed and what a
-project with one release wants. The point is the project that has two: index v2 and v3 of a product side
-by side and an agent asked about "the timeout setting" will otherwise answer confidently out of
-whichever page ranked higher.
-
-**It is a free-text label, matched exactly, and there is no "latest".** `v3`, `2024.1`, `next` and
-`legacy` are all things a documentation team writes, and a product that claimed to order them would be
-confidently wrong about at least one — which is the failure this feature exists to stop. An agent that
-asks for a version this project does not have is told so, with the versions it *does* have, and picks
-one.
-
-**Several sources may share a version**, which is the reason this is not the `source` filter under
-another name: `api-v3` and `sdk-v3` are two mount points of one release, and `version: "v3"` searches
-both. Changing a source's version re-indexes it, the way changing its content type does.
-
-### Confluence: Cloud or Data Center
-
-Cloud (API token) and Data Center (personal access token) authenticate differently, so **Deployment** is
-picked by hand, not detected. Data Center connections to a private address are refused unless the host is
-listed in `CONFLUENCE_ALLOWED_HOSTS` (ADR-0088), one source indexes at most 5 000 pages, and a named
-space that stops answering fails the sync rather than deleting its documents. On Data Center a signed
-webhook can start a sync as soon as a page changes.
-
-Full setup for both deployments, the SSRF boundary, space scoping and the webhook: [Confluence](https://contextator.com/en/docs/confluence/).
-
-### Documentation sites: public pages, and five ceilings
-
-A **Documentation site** source reads a public site's own `sitemap.xml` or `llms.txt`, or crawls it from
-one start URL — no login, no credential stored, no headless browser. Five instance-wide ceilings
-(`WEB_MAX_PAGES`, `WEB_MAX_DEPTH`, `WEB_REQUEST_DELAY_MS`, `WEB_CRAWL_BUDGET_MS`, `WEB_RESPECT_ROBOTS`)
-bound a crawl and stop it by name rather than failing the run; only a `sitemap.xml` source gets a cheap
-freshness check, `llms.txt` and crawl sources re-fetch in full on every scheduled run.
-
-Field-by-field setup, the five ceilings table, `robots.txt` handling and common problems: [Documentation Site Source](https://contextator.com/en/docs/documentation-site-source/).
-
-### Keeping a source fresh on its own
-
-A source can carry a **sync interval** — the *Sync every* field in its dialog — and the server checks it
-on that schedule instead of waiting for somebody to press a button.
-
-**It does not re-read the files to decide.** Each source type answers one cheap question first, and the
-index run only happens when the answer moved since the last successful sync:
-
-| Type | What is asked | Instead of |
-|------|---------------|-----------|
-| Git | `git ls-remote` on the tracked branch — one ref advertisement, no objects | A fetch |
-| Notion | One `search`, newest edit first, one result | A page read per page, 350 ms apart |
-| Confluence | One CQL search over the same spaces the run indexes: how many pages there are, and when the newest was touched | A listing plus a body read per page |
-| Documentation site | Two requests — `robots.txt`, then the `sitemap.xml`: how many URLs it lists, and the newest `<lastmod>` among them | A conditional GET per page |
-| Local, Upload | The file count and the newest modification time | Reading and hashing every file |
-
-A check that cannot answer — a directory that has gone, a rate-limited API, a network that is down —
-counts as *changed*, so the run happens and reports the real error. The check is an optimisation; it is
-never a reason a source silently stops syncing.
-
-**An unchanged answer can only skip so long.** Some changes move nothing the check looks at — a Notion
-page *unshared* from the integration keeps its edit time, a local file rewritten with its old
-modification time keeps the count and the maximum. So a due source whose last successful sync is older
-than `SYNC_MAX_SKIP_HOURS` (24 by default; `0` switches this off) is synced anyway, and that run removes
-whatever is no longer there. An unshared page therefore leaves search within about a day plus one
-interval — or at once, with *Sync now*. The log says `scheduled sync queued a run (max skip age)` when
-this is why a run happened.
-
-Two things about the timing are deliberate. A source that is switched on is given a **random** first
-due time inside its first interval, so a hundred sources added by one script do not all wake in the
-same minute — and keep not waking together afterwards. And scheduled runs queue **behind** anything a
-person or a webhook asked for, so pressing *Re-index* never means waiting for the timer's backlog.
-
-**Upgrading an existing installation switches nothing on.** Every source that already existed stays at
-*Never*; only sources created afterwards take `SYNC_DEFAULT_INTERVAL_MINUTES` (an hour by default, and
-`0` means new sources are unscheduled too). If this server should never make an outbound call nobody
-asked for, it does not have to be turned off — it was never on.
-
-### Content types (flavors)
-
-A source can declare what its files really are, which applies a small transform before chunking: plain
-Markdown/text (no transform), Obsidian vault (see below), Notion export (strips the page id Notion
-appends to names and links), or OpenAPI/Swagger (see below — the one content type that turns a
-specification into **one document per endpoint**). Changing a source's content type drops its stored
-file hashes and queues a full re-index, because the transform runs after the hash that decides what to
-re-embed.
-
-Full comparison table and the Notion-export id-stripping example: [Content Types](https://contextator.com/en/docs/content-types/).
-
-### OpenAPI and Swagger
-
-An API specification is the most useful single thing you can give an agent about an API, and the least
-useful shape to give it in: one `openapi.yaml` is one document that contains the answer to three hundred
-different questions, so it matches every query and answers none of them.
-
-With the **OpenAPI / Swagger** content type a specification is indexed as **one document per
-operation** — path, method, summary, parameters, request and response schemas and examples, each under
-its own heading so a hit carries a breadcrumb like `GET /pets/{petId} > Responses > 200`. `search_docs`
-returns the endpoint, not the file. Both OpenAPI 3 and Swagger 2.0 are read, a specification is measured
-against `MAX_SPEC_FILE_BYTES` (8 MiB, roughly 400 MB of parsed heap at the default) before it is read, and
-one rendered document is capped at 2 000 lines, one specification at 5 000 operations.
-
-Full behaviour — path derivation, `$ref` resolution depth, malformed-file handling, versioning per
-specification: [Content Types](https://contextator.com/en/docs/content-types/#openapi--swagger).
-
-### Obsidian vaults
-
-A vault — mounted on the server as a **Local directory** with content type *Obsidian vault*, or uploaded
-as a folder or zip through the **Obsidian vault** tab — has its own syntax flattened so an agent reads
-plain Markdown: `[[wikilinks]]`, block references, image embeds, callouts and `%% comments %%` are all
-converted; `.obsidian/` and other dot-directories are skipped.
-
-Full conversion table and frontmatter handling: [Obsidian Vaults](https://contextator.com/en/docs/obsidian-vaults/).
-
-### Notion
-
-An **internal integration** (token from `notion.so/profile/integrations`, shared with the pages or
-databases you want indexed) turns each page into one Markdown file, nested by parent page, re-rendered
-only when its `last_edited_time` moves. A rejected token or an unreadable root fails the source with that
-message rather than reporting an empty workspace — which would otherwise delete every page already
-imported.
-
-Full setup steps, the rendered-block list and rate limiting: [Notion](https://contextator.com/en/docs/notion/).
-
-### Private repositories and tokens
-
-An access token pasted into a git source's **Access token** field is encrypted with `SECRET_KEY`
-(AES-256-GCM), never returned by the API or shown again. The username sent with it is detected from the
-provider (`x-access-token` for GitHub, `oauth2` for GitLab, `x-token-auth` for Bitbucket Cloud) unless you
-type one in the **Username** field. **Git is read over HTTPS only** — SSH remotes are not supported and no
-SSH key can be stored (ADR-0086); a repository reachable only over SSH is mirrored yourself and added as a
-**Local directory** source instead.
-
-Provider-by-provider token scopes and usernames, the SSH-mirror workaround, common `Test connection`
-errors: [Git Repository Source](https://contextator.com/en/docs/git-repository-source/).
-
-### Push webhooks
-
-Every git source gets a webhook URL and a shared secret (shown while editing the source):
-
-```
-POST http://<your-host>/api/webhooks/git/<source-id>
-```
-
-Add it as a **push** webhook in the repository settings with that secret; GitHub, GitLab, Gitea/Forgejo
-and Bitbucket are all recognised and signature-verified before anything is queued. A Confluence Data
-Center source has its own webhook, off by default (ADR-0085) and turned on from the source's edit dialog.
-
-Full provider-by-provider field screenshots, the Confluence webhook walkthrough and troubleshooting:
-[Push Webhooks](https://contextator.com/en/docs/push-webhooks/).
-
-## Accounts and permissions
-
-The dashboard and the admin API are behind a personal account, created at `/setup` with a one-time
-`SETUP_CODE` you set, or the code the server logs itself when none is set. Three instance roles
-(`root`, `admin`, `member`) plus a per-project `editor`/`viewer` membership govern everything from
-re-indexing to managing other accounts; the last active root account can never be deleted, demoted or
-disabled, and an admin can never touch a root account. `ADMIN_TOKEN` still works with root permissions
-for scripts and CI; a per-account **API token**, scoped to one project and a set of routes, is the
-recommended credential for anything new.
-
-Setting `OIDC_ISSUER_URL` adds federated sign-in beside the password form — matched to an account by the
-provider's `sub` claim, never its e-mail, and `root` can never be reached through it: linking,
-auto-provisioning and promotion are all blocked from ever producing an SSO-reachable root account. See
-[Configuration](#configuration) for the full variable list.
-
-Full role matrix, the temporary-password flow, `ADMIN_TOKEN` and API-token mechanics: [Accounts and Permissions](https://contextator.com/en/docs/accounts-and-permissions/). Full SSO setup, linking and unlinking, and every guardrail around `root`: [Single Sign-On](https://contextator.com/en/docs/sso/).
-
-Accounts govern the dashboard and the admin API. The MCP endpoints have their own door — see
-[MCP access](#mcp-access) below.
-
-## MCP access
-
-A new project's MCP endpoint **requires a token**. Creating a project mints its first one and shows it once — that
-string is what a client is configured with, and the server keeps only its hash. A project is therefore closed from its
-first second, and the operator leaves the creation dialog holding the one thing that opens it.
-
-**Upgrading changes nothing about a project that already exists.** A project configured **open** stays open, because
-the agents configured against it were configured against that answer; the new default is the state a *new* project is
-born in and nothing else.
-
-Per project, you decide. **MCP access** on the project page offers three modes, and they narrow in this order:
-
-| Mode | Who gets an answer | What it is for |
-|------|--------------------|----------------|
-| **open** | Anyone who can reach the URL | Documents nobody has to be anybody to read: a public handbook, or an instance already behind a VPN. Chosen deliberately — and what every project created before the default moved still is. |
-| **token required** | A client presenting one of that project's tokens | One credential per agent, revocable one at a time. The token names nobody: whoever holds it reads everything indexed in that project. |
-| **account required** | A client acting as an account that is a **member** of the project | The memberships on the project page, reaching the endpoint. An administrator reaches it because an administrator reaches every project. |
-
-Switching to **token required** means a client has to present one of that project's tokens:
+Point Claude Code, Cursor, Claude Desktop or any other MCP client at `http://localhost:3444/mcp/<project>` —
+the dashboard's **Connect** panel prints the exact snippet, token header included when the project requires
+one. For a project that requires a token:
 
 ```bash
 claude mcp add --transport http demo-docs http://localhost:3444/mcp/demo   --header "Authorization: Bearer ctxm_9f3a…"
 ```
 
-```json
-{ "mcpServers": { "demo-docs": { "url": "http://localhost:3444/mcp/demo",
-  "headers": { "Authorization": "Bearer ctxm_9f3a…" } } } }
-```
+Three read-only tools are exposed: `search_docs` (hybrid search, ranked excerpts), `list_topics` (the indexed
+document list) and `read_document` (one file's Markdown, by path or heading range). Beside the tools, each
+project publishes its documents as MCP resources and two read-only **prompts**, `answer_from_docs` (argument
+`question`) and `explore_topic` (argument `topic`).
 
-Tokens are per project, named so you can tell them apart, and shown exactly once — the server keeps only a hash, the
-same as it does for passwords and sessions. Revoking one closes that project's open MCP sessions immediately rather
-than waiting for the client's next request. Turning the requirement on does the same, so a session opened while the
-endpoint was public does not outlive the moment it stopped being.
+**One URL, Streamable HTTP first.** Streamable HTTP is the way to connect. The legacy HTTP+SSE transport is
+**deprecated**: it still answers on the same URL and keeps working, no removal date is set, and its responses
+carry a `Deprecation: true` header. The same URL also speaks the stateless MCP **2026-07-28** protocol beside
+2025-11-25.
 
-| | root | admin | editor | viewer |
-|---|:--:|:--:|:--:|:--:|
-| See a project's tokens (names, prefixes, last use) | ✓ | ✓ | ✓ | ✓ |
-| Mint and revoke a token | ✓ | ✓ | ✓ | – |
-| Require a token, or make the endpoint open again | ✓ | ✓ | – | – |
+A project is a set of **sources** — a local directory, a git repository, an upload, a Notion workspace, a
+Confluence site or a documentation site — each added in the dashboard under its own name, so a file
+`install.md` in a source named `handbook` is searched and read as `handbook/install.md`. An agent can narrow
+a search to one release with `search_docs(query: "rotate the signing key", version: "v3")`.
 
-Deciding whether a project's documents are readable by anything that can reach the URL is the same class of decision
-as creating the project in the first place, which is why it sits with `admin` rather than `editor`.
+Everything else — the protocol eras, the source types, access modes and file types — is in
+[Connecting AI clients](docs/connecting-ai-clients.md), [Document sources](docs/document-sources.md),
+[MCP access](docs/mcp-access.md) and [File types](docs/file-types.md).
 
-### Account required, and connecting a browser-based client
+## How It Works
 
-**account required** is the mode where this dashboard's memberships reach `/mcp/*`. A client has to act as somebody,
-and it then reads the project only while that account is a member of it — checked on **every request**, so removing a
-membership, disabling an account or resetting its password cuts the connection off on its next call rather than at some
-expiry. A static `ctxm_…` token names nobody, so it is refused here; that is the point of the mode rather than a
-side effect.
+Stack: TypeScript · Node.js 22+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/server` (MCP TypeScript SDK 2.x) · `@huggingface/transformers` · `unpdf` / `mammoth` / `turndown`.
 
-A client gets an account-backed credential through OAuth 2.1, which is what browser-based MCP connectors already speak
-and what the MCP authorization specification defines for remote servers. You do not configure anything: point the
-connector at `http://host:3444/mcp/<project>`, and it discovers this server's authorization endpoints, registers
-itself, and sends you to a page here to sign in and approve it. What it gets back acts as *your* account.
 
-A connector can identify itself in one of two ways. It can register through `/oauth/register` (dynamic client
-registration), or it can send an `https://` URL with a path as its `client_id`, a **Client ID Metadata Document
-(CIMD)**, and skip the registration call; the authorization server metadata announces the second with
-`client_id_metadata_document_supported: true`. The server fetches that document through the same egress guard
-Confluence uses — https only, no loopback, link-local, private or unspecified address, checked after DNS and on
-every redirect — limited to 5 KiB and 5 seconds, and caches it as its `Cache-Control` / `Expires` headers allow
-(5 minutes without them, a day at most). The document's `client_id` must equal the URL, `client_name` and
-`redirect_uris` are required, no secret is accepted, and the `redirect_uri` the client then asks for must be
-listed in it exactly. The consent page names the host that published the document and where the answer is
-sent, and warns when the client can only redirect to localhost.
+Each run syncs every source, hashes files to skip what has not changed, converts and chunks what has
+(frontmatter-aware, split at headings, a breadcrumb kept per chunk), then embeds each chunk and writes it
+beside a keyword index — search is **hybrid**, meaning and exact wording fused by rank, which is why an
+environment variable name finds its page as readily as a question does. A **force** re-index rebuilds
+everything beside the live index rather than replacing it first, so the project keeps answering while it
+runs. `CHUNK_MAX_TOKENS` defaults to a measured **96**, not the model's much larger window — filling the
+window measures worse.
 
-Its credential renews itself quietly and expires if the connector goes unused for a month
-(`MCP_OAUTH_ACCESS_TTL_MIN`, `MCP_OAUTH_REFRESH_TTL_DAYS`). **Changing your password disconnects every connector acting
-as you**, the same way it signs out your other browsers, and a connector that says *disconnect* gives up its whole
-grant rather than the one token it happened to hand back. `MCP_OAUTH=0` removes the whole flow, and then only static
-tokens open a closed project — which also means browser-based connectors cannot connect at all.
+Full run mechanics, the chunk-budget measurement, hybrid search and rank fusion, and the cross-lingual
+search limit (measured, not fixed, with what to do instead): [Indexing](https://contextator.com/en/docs/indexing/)
+and [Embedding Models](https://contextator.com/en/docs/embedding-models/#how-search-actually-works).
 
-**What this does not do.** A static token is a bearer credential for the endpoint, not an account: it carries no
-identity, no per-document rules and no audit trail beyond "this token was last used at". A holder reads everything
-indexed in that project — which is exactly what **account required** is for, and why it exists beside `token` rather
-than instead of it: every CLI client configured with a pasted header keeps working. An account-backed credential is
-narrowed by membership and by nothing finer: a `viewer` of a project reads every document in it, as they do in the
-dashboard. And a closed project answers `401` where an unknown project answers `404`, so the existence of a project
-name is still discoverable by anyone who can reach the server — hiding that would mean answering `404` to a client
-with a wrong token, which is worse to debug than it is worth.
+Full run mechanics, the chunk-budget measurement, hybrid search and rank fusion, and the cross-lingual
+search limit (measured, not fixed, with what to do instead): [Indexing](https://contextator.com/en/docs/indexing/)
+and [Embedding Models](https://contextator.com/en/docs/embedding-models/#how-search-actually-works).
 
-Clients that cannot set an `Authorization` header — a browser `EventSource` on the legacy (deprecated) SSE transport, for one —
-cannot reach a token-protected project at all. Leave those projects open, or put the whole instance behind an
-authenticating proxy.
 
-## Where your data goes
+## Configuration
 
-Three things leave the machine, or stay on it, in ways worth knowing before a security review. Everything
-else in this README happens inside your own deployment.
+Everything is an environment variable; see [`.env.example`](.env.example) for the full annotated list.
+The variables that most installs touch:
 
-1. **The default embedding model is downloaded once, on first start.** `Xenova/multilingual-e5-small` is
-   fetched into the `contextator-models` volume from the Hugging Face Hub, the transformers.js default.
-   After that, embedding runs on the CPU of your own host and document text is not sent anywhere for it. On a
-   host with no route out, fill the volume beforehand and set `EMBEDDING_OFFLINE=1`; see
-   [Embedding Models](https://contextator.com/en/docs/embedding-models/).
-2. **Remote sources make outbound requests; local ones do not.** A git, Notion, Confluence or Documentation
-   site source contacts its host, from this server, when it syncs: on demand, on a source's schedule, and
-   when a push webhook arrives. A local directory and an upload source contact nobody. And if you set
-   `EMBEDDING_PROVIDER=openai`, document text and search queries go to the endpoint named by
-   `EMBEDDING_BASE_URL`, which is OpenAI unless you point it at a server of your own.
-3. **The `-slim` image and the Helm chart bring no database.** They use an external PostgreSQL that you
-   provision (`DATABASE_URL` is required), so where that server runs, who runs it and what backs it up decide
-   where projects, documents, embeddings, accounts and logs live. See
-   [Bringing your own PostgreSQL](#bringing-your-own-postgresql).
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `PORT` / `HOST` | `3444` / `0.0.0.0` | |
+| `DATABASE_URL` | – | Empty uses the embedded PostgreSQL; set it to bring your own — see [Bringing your own PostgreSQL](docs/deployment.md#bringing-your-own-postgresql) |
+| `ALLOWED_DOC_ROOTS` | `/docs` | Comma-separated. Project directories **must** live inside one of these |
+| `SECRET_KEY` | – | At least 32 characters. Encrypts git/Notion/Confluence tokens and webhook secrets at rest |
+| `ADMIN_TOKEN` | – | Machine access to `/api/*` with root permissions |
+| `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` | `local` / `Xenova/multilingual-e5-small` | See [Changing the embedding model](docs/configuration.md#changing-the-embedding-model) |
+| `PUBLIC_BASE_URL` / `TRUST_PROXY` | – / `0` | Required together behind a reverse proxy — see [Running behind a reverse proxy](docs/configuration.md#running-behind-a-reverse-proxy) |
+| `OIDC_ISSUER_URL` | – | On/off switch for federated sign-in — see [Single Sign-On](https://contextator.com/en/docs/sso/) |
 
-## Data and persistence
+The full table — every storage, upload, chunking, search-ranking, sync, auth and observability variable,
+each with its reasoning — is on [Configuration](https://contextator.com/en/docs/configuration/).
+
+## Deployment
+
+The single container from the [Quick Start](#quick-start) is the default, and most installations should stay
+on it. Two other topologies exist:
+
+- **Your own PostgreSQL.** One line of `.env` moves the database out of the container:
+
+  ```bash
+  DATABASE_URL=postgres://user:password@db.example.com:5432/contextator
+  ```
+
+  It needs **PostgreSQL 16 or newer** with pgvector, and backups become yours. The `-slim` image carries no
+  database at all. See [Bringing your own PostgreSQL](docs/deployment.md#bringing-your-own-postgresql).
+- **Kubernetes.** `charts/contextator/` is a Helm chart for the `-slim` + external-database topology. See
+  [Running on Kubernetes](docs/deployment.md#running-on-kubernetes).
+
+Behind a reverse proxy, three settings have to move together:
+[Running behind a reverse proxy](docs/configuration.md#running-behind-a-reverse-proxy). Where your data goes,
+and what leaves the machine, is on [Where your data goes](docs/where-your-data-goes.md).
+
+
+### Data and persistence
 
 | What | Path in the container | Default volume | Override (`.env`) |
 |------|-----------------------|----------------|-------------------|
@@ -508,7 +243,7 @@ PostgreSQL initialised and indexed fine on a `C:/…` directory. Named volumes r
 the database on Docker Desktop; if `initdb` ever reports permission errors on a host directory, switch
 that mount back to a volume.
 
-**On an installation that set `DATABASE_URL`** ([Bringing your own PostgreSQL](#bringing-your-own-postgresql))
+**On an installation that set `DATABASE_URL`** ([Bringing your own PostgreSQL](docs/deployment.md#bringing-your-own-postgresql))
 the database is a server this image does not operate. `npm run backup` and `npm run restore` still
 work: they reach that server through `DATABASE_URL`, because the upload trees in the archive are in no
 other backup — and `backup` says, in its output and in the archive's manifest, that the server's own
@@ -604,8 +339,8 @@ docker compose restart contextator
 Run `npm run backup` with no path at all and it writes `<DATA_DIR>/backups/contextator-backup-<timestamp>.tar.gz`
 — on the data volume, never in the container's working directory, which is an image layer.
 
-**These two blocks are the only copy of this procedure.** The wiki, the documentation site and
-`.ssot/OPERATIONS.md` carry no commands for it and point here. `restore` overwrites a live database,
+**These two blocks are the only copy of this procedure.** The wiki and the documentation site
+carry no commands for it and point here. `restore` overwrites a live database,
 so a command is changed **here** and nowhere else. `test/readme-mirrors.test.ts` fails if a copy that
 declares itself a mirror (a `MIRRORED-IN` / `MIRRORED-FROM` marker) appears; it cannot see an unmarked
 copy in another repository, and review is what catches that.
@@ -626,8 +361,7 @@ counted is judged on the rows of its own dump, still before the target is touche
 such secrets — which nothing ever read — are set to empty and their number is printed. Keep the key
 where the archive is not.
 
-That key is rotatable — a four-step runbook (`npm run rotate-secret` is step 3, ADR-0075 is the record
-of why) — which gives the paragraph above a second edge: **retiring the old key — removing
+That key is rotatable — a four-step runbook (`npm run rotate-secret` is step 3) — which gives the paragraph above a second edge: **retiring the old key — removing
 `SECRET_KEY_PREVIOUS` — and then discarding it invalidates every archive taken before the rotation
 that carries a source's sync credential — a private git, Notion or Confluence token — encrypted under
 it.** The old archive's fingerprint names a key the environment no longer holds, and for that archive
@@ -689,6 +423,11 @@ projects are not held. Schedule the backup away from the hours projects are crea
 `POSTGRES_PASSWORD` is applied when the cluster is created. To change it later run
 `ALTER USER contextator PASSWORD '...'` via `psql` and update `.env` before the next start.
 
+## Upgrading
+
+An ordinary image upgrade is a `docker compose pull`; it moves the application and not the cluster. The one
+upgrade that needs a procedure is a PostgreSQL major-version change.
+
 ### Upgrading PostgreSQL across a major version
 
 **An ordinary image upgrade never does this.** `docker compose pull` moves the application; it does not
@@ -698,7 +437,7 @@ read it. The day a release moves from PostgreSQL 16 to 17 is the day this applie
 
 What happens if you just pull:
 
-```
+```text
 PostgreSQL Database directory appears to contain a database; Skipping initialization
 FATAL:  database files are incompatible with server
 DETAIL:  The data directory was initialized by PostgreSQL version 16, which is not compatible with
@@ -829,276 +568,44 @@ re-indexed.
 **This section is the only copy of this procedure.** It is written here, beside the code that
 implements `backup` and `restore` and versioned with it, because a procedure that deletes a cluster has
 to have exactly one copy that decides what it says. The wiki and the documentation site point here and
-do not repeat the commands. See ADR-0073 as amended by ADR-0074.
+do not repeat the commands.
 
-## Connecting AI clients
+## Documentation
 
-Point Claude Code, Cursor, Claude Desktop or any other MCP client at `http://localhost:3444/mcp/<project>`
-— the dashboard's **Connect** panel prints the exact snippet, token header included when the project
-requires one. Three read-only tools are exposed: `search_docs` (hybrid search, ranked excerpts),
-`list_topics` (the indexed document list) and `read_document` (one file's Markdown, by path or heading
-range). See [MCP access](#mcp-access) for the auth modes.
+- [Document sources](docs/document-sources.md) — source types, versions, sync, webhooks
+- [Accounts and permissions](docs/accounts-and-permissions.md)
+- [MCP access](docs/mcp-access.md) — open, token required, account required; OAuth for browser clients
+- [Connecting AI clients](docs/connecting-ai-clients.md)
+- [File types](docs/file-types.md)
+- [Configuration](docs/configuration.md) — reverse proxy, embedding with a server of your own, changing the model
+- [Deployment topologies](docs/deployment.md) — external PostgreSQL, Kubernetes
+- [Admin API](docs/admin-api.md) and scaling signals
+- [Where your data goes](docs/where-your-data-goes.md), [Security notes](docs/security-notes.md), [Troubleshooting](docs/troubleshooting.md), [License](docs/license.md)
+- The full guides are on [contextator.com](https://contextator.com/en/docs/), and installing from source is on the [wiki](https://github.com/Contextator/Contextator/wiki/Installation#build-the-image-yourself).
 
-Beside the tools, each project publishes its documents as MCP resources and two read-only **prompts**,
-`answer_from_docs` (argument `question`) and `explore_topic` (argument `topic`). A prompt reads nothing and
-changes nothing: it returns one user message telling the model which tools to call and to cite file paths.
+## Project Status
 
-**Two protocol eras on one URL.** `/mcp/<project>` serves MCP 2025-11-25 and 2026-07-28 side by side. A request
-whose body carries the 2026 `_meta` envelope is answered statelessly — no `initialize`, no `Mcp-Session-Id`,
-nothing held in the session registry — and a 2026 client can ask `server/discover` for the protocol versions and
-capabilities the server offers before it calls `tools/call search_docs`. Every other request, an `initialize`
-included, takes the session path as before, so a 1.x SDK client and a legacy SSE client keep working; 0.3.0 does change three things they can see (see the `CHANGELOG.md` **Breaking** entries): a missing resource is `-32602` where it was `-32002`, each tool's input schema is JSON Schema draft 2020-12 where it was draft-07 and no longer carries `execution.taskSupport`, and an input-validation error reads `Input validation error: Invalid arguments for tool search_docs: query: …`.
-A 2026 request must repeat the protocol version in `MCP-Protocol-Version`, the method in `Mcp-Method` and, on
-`tools/call`, `resources/read` and `prompts/get`, the tool name, URI or prompt name in `Mcp-Name`; the SDK
-refuses one that does not. A 2025-11-25 request is asked for none of these.
+**Beta.** Contextator is at `0.3.x`; it is not yet stable. Before `1.0.0` a minor version may change a public
+contract — the HTTP and MCP APIs, the MCP tool names and their parameters, environment variable names — without
+a major bump. Breaking changes are listed in [`CHANGELOG.md`](CHANGELOG.md).
 
-**What differs for a 2026-07-28 client.** Its answers always carry each tool's `outputSchema` and
-`structuredContent` beside the text, whatever `MCP_STRUCTURED_OUTPUT` says; that flag now governs 2025-11-25
-clients only and is still off by default, so with it off a legacy answer gains no `outputSchema` or `structuredContent`. Its `tools/list`,
-`resources/list` and `resources/read` carry a per-project cache hint: `ttlMs` is a tenth of the time since the
-project's last successful index, capped at an hour and `0` while the project is indexing, before its first
-index or after a failed index run, and `cacheScope` is `public` only for an `open` project and `private` otherwise. Deleting a source or
-changing a project's MCP access does not reset the hint, so a client can see the earlier answer for up to an
-hour. A legacy answer gains none of this.
+## Contributing
 
-Ready-to-paste config for every client, structured output, MCP resources and the relevance floor:
-[Connecting AI Clients](https://contextator.com/en/docs/connecting-ai-clients/) and
-[MCP Tools](https://contextator.com/en/docs/mcp-tools/).
+Contributions are welcome. [`CONTRIBUTING.md`](CONTRIBUTING.md) is the whole of how this project is worked on:
+getting it running, the four checks a change has to pass and the commit register. It also explains the licence
+grant an outside contribution is asked for ([`CLA.md`](CLA.md), signed on the pull request). The
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) applies here.
 
-## File types
+## Security
 
-A source indexes `.md`/`.mdx` by default and can be told to take `.txt`, `.html`/`.htm`, `.csv`, `.docx`
-and `.pdf` as well; `.yaml`/`.yml`/`.json` are readable only through the
-[OpenAPI / Swagger](#openapi-and-swagger) content type. **Everything becomes Markdown on the way in**,
-once, at the edge, so the chunker, the embedder and `read_document` see one format. A file that cannot be
-converted — a scanned or encrypted PDF, a Word file that is all images — is refused by name rather than
-indexed blank, and the refusal never fails the source or the project.
-
-Full per-type conversion table (what each format keeps and loses), the size and page caps that bound a
-single file while it converts, and the PDF-length benchmark against `MAX_STORED_DOCUMENT_BYTES`:
-[Document Sources](https://contextator.com/en/docs/document-sources/#what-gets-indexed).
-
-## How indexing works
-
-Each run syncs every source, hashes files to skip what has not changed, converts and chunks what has
-(frontmatter-aware, split at headings, a breadcrumb kept per chunk), then embeds each chunk and writes it
-beside a keyword index — search is **hybrid**, meaning and exact wording fused by rank, which is why an
-environment variable name finds its page as readily as a question does. A **force** re-index rebuilds
-everything beside the live index rather than replacing it first, so the project keeps answering while it
-runs. `CHUNK_MAX_TOKENS` defaults to a measured **96**, not the model's much larger window — filling the
-window measures worse.
-
-Full run mechanics, the chunk-budget measurement, hybrid search and rank fusion, and the cross-lingual
-search limit (measured, not fixed, with what to do instead): [Indexing](https://contextator.com/en/docs/indexing/)
-and [Embedding Models](https://contextator.com/en/docs/embedding-models/#how-search-actually-works).
-
-## Configuration
-
-Everything is an environment variable; see [`.env.example`](.env.example) for the full annotated list.
-The variables that most installs touch:
-
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `PORT` / `HOST` | `3444` / `0.0.0.0` | |
-| `DATABASE_URL` | – | Empty uses the embedded PostgreSQL; set it to bring your own — see [Bringing your own PostgreSQL](#bringing-your-own-postgresql) |
-| `ALLOWED_DOC_ROOTS` | `/docs` | Comma-separated. Project directories **must** live inside one of these |
-| `SECRET_KEY` | – | At least 32 characters. Encrypts git/Notion/Confluence tokens and webhook secrets at rest |
-| `ADMIN_TOKEN` | – | Machine access to `/api/*` with root permissions |
-| `EMBEDDING_PROVIDER` / `EMBEDDING_MODEL` | `local` / `Xenova/multilingual-e5-small` | See *Changing the embedding model* below |
-| `PUBLIC_BASE_URL` / `TRUST_PROXY` | – / `0` | Required together behind a reverse proxy — see below |
-| `OIDC_ISSUER_URL` | – | On/off switch for federated sign-in — see [Single Sign-On](https://contextator.com/en/docs/sso/) |
-
-The full table — every storage, upload, chunking, search-ranking, sync, auth and observability variable,
-each with its reasoning — is on [Configuration](https://contextator.com/en/docs/configuration/).
-
-### Running behind a reverse proxy
-
-Nothing is in front of this by default. Put nginx, Caddy, Traefik or a cloud load balancer in front and
-**three settings have to move together**, or sign-in rate limiting, MCP OAuth and the session cookie each
-break in a way that does not announce itself:
-
-```bash
-TRUST_PROXY=172.18.0.0/16        # the proxy's address or CIDR, or `loopback` if it is on the host
-PUBLIC_BASE_URL=https://docs.example.com
-AUTH_COOKIE_SECURE=1
-```
-
-Full reasoning for each of the three, what breaks without them, and the "name the proxy, not the
-network your clients are on" rule for `TRUST_PROXY`: [Configuration](https://contextator.com/en/docs/configuration/#running-behind-a-reverse-proxy).
-
-### Embedding with a server of your own
-
-`EMBEDDING_PROVIDER=openai` speaks to any server that offers an OpenAI-compatible `/embeddings` endpoint.
-Point `EMBEDDING_BASE_URL` at it, with the path, and name the model that server serves in
-`OPENAI_EMBEDDING_MODEL`. `OPENAI_API_KEY` is optional with a base URL; when set it is sent as a bearer
-token. `EMBEDDING_DIMENSIONS` must match the model's vector size.
-
-```bash
-# Ollama
-EMBEDDING_PROVIDER=openai
-EMBEDDING_BASE_URL=http://localhost:11434/v1
-OPENAI_EMBEDDING_MODEL=nomic-embed-text
-EMBEDDING_DIMENSIONS=768
-
-# LM Studio: its local server
-EMBEDDING_BASE_URL=http://localhost:1234/v1
-
-# Text Embeddings Inference, started with -p 8080:80
-EMBEDDING_BASE_URL=http://localhost:8080/v1
-
-# vLLM: the host and port you started `vllm serve` on
-EMBEDDING_BASE_URL=http://gpu-box:<port>/v1
-EMBEDDING_REQUEST_DIMENSIONS=always   # only for a model that shortens its vectors on request
-```
-
-Inside the Contextator container, `localhost` is the container, not your machine: use an address the
-container can reach the server on, such as `host.docker.internal` where your Docker provides it, or the
-server's service name on a shared network. Set the model name and `EMBEDDING_DIMENSIONS` to the model you
-loaded in every case; the lines above show only what differs. `RESET_VECTORS=1` is needed only when the database already records a vector dimension and the new one differs from it, as moving a 384-dimension install to a 768-dimension model does; a first install needs none.
-It is set for one start only; see [Changing the embedding model](#changing-the-embedding-model). `EMBEDDING_REQUEST_DIMENSIONS` is `auto` by default and sends `dimensions` only for
-`text-embedding-3-*`; use `always` for a model that accepts it and `never` for a server that rejects it. The
-endpoint's host and port become part of the model id every project is stamped with, so pointing at another
-server re-indexes every project. The annotated list is in [`.env.example`](.env.example); the model
-guidance is in [Embedding Models](https://contextator.com/en/docs/embedding-models/).
-
-**Instruction prefixes follow the model name.** `query: ` / `passage: ` are added only when
-`OPENAI_EMBEDDING_MODEL` names a family that needs them (`multilingual-e5-*`). A server that serves an e5
-under another name (`e5`, `embed`, a local path) gets no prefixes and quietly loses a little recall;
-Contextator says so once at startup, at `info`. Use the model's real name, or set
-`EMBEDDING_QUERY_PREFIX` / `EMBEDDING_PASSAGE_PREFIX` yourself.
-
-**Counting tokens with the model's own tokenizer.** Chunks are sized by an estimate (characters ÷ 4)
-unless `EMBEDDING_TOKENIZER` names a Hugging Face model whose `tokenizer.json` matches the served model.
-Only the tokenizer is downloaded, into `MODEL_CACHE_DIR`; startup stops if it cannot be loaded. With it,
-an endpoint cuts the same chunks the local provider cuts from the same model. It is part of the model id,
-so setting or changing it re-indexes every project once.
-
-```bash
-# multilingual-e5-small behind TEI or vLLM: these five lines, only the URL differs
-EMBEDDING_PROVIDER=openai
-EMBEDDING_BASE_URL=http://localhost:8080/v1        # TEI; vLLM: http://gpu-box:<port>/v1
-OPENAI_EMBEDDING_MODEL=intfloat/multilingual-e5-small   # the real name, so the e5 prefixes apply
-EMBEDDING_DIMENSIONS=384
-EMBEDDING_TOKENIZER=Xenova/multilingual-e5-small
-```
-
-If your server serves the model under another name (a local alias, a path), the name matches no family: the model
-runs without prefixes and recall quietly drops. The server says so once at startup, at `info` level, unless you have
-set either prefix variable. Either put the model's real name in `OPENAI_EMBEDDING_MODEL`, or keep your own name and
-set the prefixes yourself; either change re-indexes every project once:
-
-```bash
-# Ollama, the model kept under its own tag: these lines replace their namesakes above, keep the rest
-EMBEDDING_BASE_URL=http://localhost:11434/v1
-OPENAI_EMBEDDING_MODEL=<your-tag>
-EMBEDDING_QUERY_PREFIX="query: "
-EMBEDDING_PASSAGE_PREFIX="passage: "
-```
-
-### Changing the embedding model
-
-Changing `EMBEDDING_MODEL` (same dimension) triggers an automatic full re-index once you press
-`Re-index now` on each project; a different-dimension model (e.g. OpenAI's `text-embedding-3-small`)
-needs `RESET_VECTORS=1` on one restart first. Full procedure for both cases, plus upgrading across a
-default-model change: [Embedding Models](https://contextator.com/en/docs/embedding-models/#changing-the-model).
-
-## Admin API
-
-Every endpoint under `/api/*` returns JSON and is authenticated by the dashboard's session cookie,
-by `Authorization: Bearer <ADMIN_TOKEN>` (machine access, root permissions), or by an account's own
-scoped API token. It covers projects and their live indexing jobs, sources of every type, MCP tokens,
-accounts and API tokens, project membership, and an audit log that is written by the policy layer
-itself — no handler can add a route without being covered. `GET /metrics` exposes Prometheus text
-separately, gated by a signed-in account, `ADMIN_TOKEN`, `METRICS_TOKEN`, or `METRICS_PUBLIC=1`.
-
-A project can be moved between instances: `GET /api/projects/:id/export` writes one `.tar.gz`, and
-`POST /api/projects/import` (an instance `admin`'s) creates a project from it. The import is refused with
-`507 insufficient_disk` when `DATA_DIR` — and, with the embedded database, its data directory — cannot hold
-`DATA_DIR_MIN_FREE_BYTES` plus four times the archive's size. The check runs before the upload is read and
-again before it is unpacked, so a refusal leaves no project row or file behind; `DATA_DIR_MIN_FREE_BYTES=0`
-turns it off. It is advisory, and with an external database (`DATABASE_URL`) only `DATA_DIR` is measured.
-
-Full endpoint tables (projects, sources, uploads, webhooks, MCP tokens, accounts, tokens, audit
-query parameters) and the audit log's guarantees and limits — what it records, what it deliberately
-does not (refused requests, actions that fail after committing), its performance at 200,004 rows,
-and that it is not tamper-evident: [Admin API](https://contextator.com/en/docs/admin-api/).
-
-### Scaling signals: when one process is no longer enough
-
-Contextator runs one process with one indexer queue on purpose. `/metrics` carries the histograms
-that say when that stops being true — `contextator_search_request_duration_seconds{indexing}` and
-`contextator_search_duration_seconds{phase=embed|retrieve|rerank,indexing}` for every MCP and dashboard
-search, `contextator_embedding_batch_*` for indexing, and `contextator_index_run_wait_seconds{lane}`
-for the queue. `contextator_mcp_requests_total{method,tool,era}` counts MCP messages by protocol era, so you can
-see when the last 2025-era client has gone, and `contextator_mcp_tool_duration_seconds{tool}` times each tool
-call; no label carries a project, a document or a query. Revisit the single-process design when, sustained over a
-week, the search p95 while indexing is above 1 s and twice the idle p95, the interactive queue wait p95 is
-above 5 minutes, or the interactive backlog stays non-zero for 15 minutes at a time. The operations guide
-(`.ssot/OPERATIONS.md`, §7 *Capacity notes*) carries the PromQL, the reasoning behind each threshold, and what
-to check before adding a second instance.
-
-## Contributing to Contextator
-
-Running it without Docker, the checks a change has to pass, the full file-by-file project layout, how
-the single container and the schema migrations work, and the licence grant a pull request needs — all
-of that lives in [`CONTRIBUTING.md`](CONTRIBUTING.md), not here.
-
-## Security notes
-
-The port is published on `127.0.0.1` only by default; MCP endpoints require a token unless a project is
-explicitly set `open`; source tokens are encrypted at rest with `SECRET_KEY` (AES-256-GCM) and rotatable
-without re-entering them; local and Confluence sources are confined against path escapes and private-network
-egress; passwords are salted `scrypt` and sessions are revocable rows; and the last active root account can
-never be deleted, demoted or disabled.
-
-Full write-up of every guarantee above, plus what a reverse proxy has to add and what a static MCP token
-does and does not protect: [Security](https://contextator.com/en/docs/security/).
-
-## Troubleshooting
-
-Symptom → fix tables for embedding-dimension and chunk-budget mismatches, the model download and offline
-setup, PostgreSQL container restarts, document-root and source-token errors, webhook signature failures,
-search-floor tuning, sign-in and session problems, and MCP/OAuth connector errors:
-[Troubleshooting](https://contextator.com/en/docs/troubleshooting/).
-
-## Contributing and security
-
-[`CONTRIBUTING.md`](CONTRIBUTING.md) is the whole of how this project is worked on: getting it running, the
-four checks a change has to pass, the three places where one statement is kept in two files, and the commit
-register. Read it before the first pull request — it also explains the licence grant an outside
-contribution is asked for ([`CLA.md`](CLA.md), signed on the pull request), which exists because the commercial
-option below depends on the copyright being held in full.
-
-**Found a security problem? Do not open an issue.** [`SECURITY.md`](SECURITY.md) says where it goes
-instead, and lists the things that look like vulnerabilities and are documented behaviour — a project left
-`open`, and what an MCP token does and does not grant.
-
-[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) is the Contributor Covenant, and it applies here.
+**Found a security problem? Do not open an issue.** [`SECURITY.md`](SECURITY.md) says where it goes instead,
+and lists the things that look like vulnerabilities and are documented behaviour. What the defaults guarantee is
+in [Security notes](docs/security-notes.md).
 
 ## License
 
-**GNU Affero General Public License, version 3 or later** ([`LICENSE`](LICENSE), also served by every instance at
-`/license.txt`).
-
-Contextator is free software: run it, read it, change it, redistribute it. The one obligation the AGPL adds over the
-GPL is section 13, and it is the reason this license was chosen for a server: **if you modify Contextator and let people
-reach your modified version over a network, you owe those users its complete source**, under the same license. Running
-the unmodified software — for yourself, your team or your company — triggers nothing at all.
-
-```
-Contextator — self-hosted MCP documentation server
-Copyright (C) 2026 Muhammet Şafak — Tunedness
-
-This program is free software: you can redistribute it and/or modify it under the terms of the
-GNU Affero General Public License as published by the Free Software Foundation, either version 3
-of the License, or (at your option) any later version. It is distributed WITHOUT ANY WARRANTY;
-see the GNU Affero General Public License for more details.
-```
-
-The documents you index are yours; the license covers Contextator's own code, and an MCP client talking to `/mcp/…`
-does not become a derivative work of it. Dependencies keep their own permissive licenses — the
-`/license` page of a running instance lists them.
-
-**Commercial license.** The copyright is held in full by Muhammet Şafak, so a separate commercial license — without the
-source-disclosure obligations of sections 5, 6 and 13 — can be granted where the AGPL does not fit. Ask at
-[tunedness.com](https://tunedness.com). This is an alternative offered alongside the AGPL, not a restriction of it.
+Licensed under the [GNU Affero General Public License, version 3 or later](LICENSE) (`AGPL-3.0-or-later`).
+If you modify Contextator and let people reach your modified version over a network, you owe those users its
+complete source; running the unmodified software triggers nothing. The copyright is held in full by Muhammet
+Şafak, so a separate **commercial license** can be granted where the AGPL does not fit — ask at
+[tunedness.com](https://tunedness.com). The full explanation is in [docs/license.md](docs/license.md).
