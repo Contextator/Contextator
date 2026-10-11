@@ -1,8 +1,8 @@
 # Contextator
 
-[![Designed & Maintained with Tan](https://muhammetsafak.com/badges/designed-maintained-with-tan.svg)](https://muhammetsafak.com/tan/)
-
 Self-hosted MCP server that turns your documentation into one semantically searchable endpoint per project.
+
+[![Designed & Maintained with Tan](https://muhammetsafak.com/badges/designed-maintained-with-tan.svg)](https://muhammetsafak.com/tan/)
 
 Give a project its document sources — mounted folders, git repositories, uploaded archives, a Notion
 workspace, a Confluence Cloud site or Data Center instance, a published documentation site — and it becomes
@@ -126,7 +126,8 @@ Building the image from source instead of pulling it:
 line; `0.3.2` is one exact, immutable release. Pin a versioned tag for anything you upgrade
 deliberately by setting `CONTEXTATOR_TAG` in `.env` (e.g. `CONTEXTATOR_TAG=0.3.2`) and running
 `docker compose up -d` — this reads at every start, not only the first. Every one of those tags from
-`0.2.0` on has a `-slim` twin — `latest-slim`, `0.3-slim`, `0.3.2-slim` — which is described in [Bringing your own PostgreSQL](docs/deployment.md#bringing-your-own-postgresql).
+`0.2.0` on has a `-slim` twin — `latest-slim`, `0.3-slim`, `0.3.2-slim` — which is described in [Bringing your
+own PostgreSQL](docs/deployment.md#bringing-your-own-postgresql).
 
 ## Usage
 
@@ -161,7 +162,6 @@ Everything else — the protocol eras, the source types, access modes and file t
 
 Stack: TypeScript · Node.js 22+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/server` (MCP TypeScript SDK 2.x) · `@huggingface/transformers` · `unpdf` / `mammoth` / `turndown`.
 
-
 Each run syncs every source, hashes files to skip what has not changed, converts and chunks what has
 (frontmatter-aware, split at headings, a breadcrumb kept per chunk), then embeds each chunk and writes it
 beside a keyword index — search is **hybrid**, meaning and exact wording fused by rank, which is why an
@@ -173,11 +173,6 @@ window measures worse.
 Full run mechanics, the chunk-budget measurement, hybrid search and rank fusion, and the cross-lingual
 search limit (measured, not fixed, with what to do instead): [Indexing](https://contextator.com/en/docs/indexing/)
 and [Embedding Models](https://contextator.com/en/docs/embedding-models/#how-search-actually-works).
-
-Full run mechanics, the chunk-budget measurement, hybrid search and rank fusion, and the cross-lingual
-search limit (measured, not fixed, with what to do instead): [Indexing](https://contextator.com/en/docs/indexing/)
-and [Embedding Models](https://contextator.com/en/docs/embedding-models/#how-search-actually-works).
-
 
 ## Configuration
 
@@ -361,7 +356,8 @@ counted is judged on the rows of its own dump, still before the target is touche
 such secrets — which nothing ever read — are set to empty and their number is printed. Keep the key
 where the archive is not.
 
-That key is rotatable — a four-step runbook (`npm run rotate-secret` is step 3) — which gives the paragraph above a second edge: **retiring the old key — removing
+That key is rotatable — a four-step runbook (`npm run rotate-secret` is step 3) — which gives the paragraph
+above a second edge: **retiring the old key — removing
 `SECRET_KEY_PREVIOUS` — and then discarding it invalidates every archive taken before the rotation
 that carries a source's sync credential — a private git, Notion or Confluence token — encrypted under
 it.** The old archive's fingerprint names a key the environment no longer holds, and for that archive
@@ -592,14 +588,17 @@ a major bump. Breaking changes are listed in [`CHANGELOG.md`](CHANGELOG.md).
 ## Contributing
 
 Contributions are welcome. [`CONTRIBUTING.md`](CONTRIBUTING.md) is the whole of how this project is worked on:
-getting it running, the four checks a change has to pass and the commit register. It also explains the licence
-grant an outside contribution is asked for ([`CLA.md`](CLA.md), signed on the pull request). The
-[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) applies here.
+getting it running, the four checks a change has to pass, the three places where one statement is kept in two
+files, and the commit register. It also explains the licence grant an outside contribution is asked for
+([`CLA.md`](CLA.md), signed on the pull request), which exists because the commercial license below depends on
+the copyright being held in full. [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) is the Contributor Covenant, and it
+applies here.
 
 ## Security
 
 **Found a security problem? Do not open an issue.** [`SECURITY.md`](SECURITY.md) says where it goes instead,
-and lists the things that look like vulnerabilities and are documented behaviour. What the defaults guarantee is
+and lists the things that look like vulnerabilities and are documented behaviour — a project left `open`, and
+what an MCP token does and does not grant. What the defaults guarantee is
 in [Security notes](docs/security-notes.md).
 
 ## License
