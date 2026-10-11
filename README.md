@@ -8,7 +8,7 @@ documentation site — and it
 becomes its own [Model Context Protocol](https://modelcontextprotocol.io) endpoint that AI agents
 (Cursor, Claude Code, Claude Desktop, …) can search semantically:
 
-```
+```text
 http://localhost:3444/mcp/<project-name>
 ```
 
@@ -79,7 +79,7 @@ in `.env` and put a TLS-terminating reverse proxy or a VPN in front of it — se
    Left `SETUP_CODE` empty? The server generates one and prints it at every start until an account exists — it is in
    the log you are already tailing:
 
-   ```
+   ```text
    ┌─ Contextator first-run setup ───────────────────────────────────────────┐
    │ No user accounts exist yet; the dashboard is waiting for its first one. │
    │                                                                         │
@@ -208,7 +208,7 @@ both queue the same run.
 A source can carry a **version** — the *Version* field in its dialog — and every document it indexes is
 stamped with it. An agent then narrows a search to one release:
 
-```
+```text
 search_docs(query: "rotate the signing key", version: "v3")
 ```
 
@@ -347,7 +347,7 @@ errors: [Git Repository Source](https://contextator.com/en/docs/git-repository-s
 
 Every git source gets a webhook URL and a shared secret (shown while editing the source):
 
-```
+```http
 POST http://<your-host>/api/webhooks/git/<source-id>
 ```
 
@@ -604,8 +604,8 @@ docker compose restart contextator
 Run `npm run backup` with no path at all and it writes `<DATA_DIR>/backups/contextator-backup-<timestamp>.tar.gz`
 — on the data volume, never in the container's working directory, which is an image layer.
 
-**These two blocks are the only copy of this procedure.** The wiki, the documentation site and
-`.ssot/OPERATIONS.md` carry no commands for it and point here. `restore` overwrites a live database,
+**These two blocks are the only copy of this procedure.** The wiki and the documentation site carry
+no commands for it and point here. `restore` overwrites a live database,
 so a command is changed **here** and nowhere else. `test/readme-mirrors.test.ts` fails if a copy that
 declares itself a mirror (a `MIRRORED-IN` / `MIRRORED-FROM` marker) appears; it cannot see an unmarked
 copy in another repository, and review is what catches that.
@@ -698,7 +698,7 @@ read it. The day a release moves from PostgreSQL 16 to 17 is the day this applie
 
 What happens if you just pull:
 
-```
+```text
 PostgreSQL Database directory appears to contain a database; Skipping initialization
 FATAL:  database files are incompatible with server
 DETAIL:  The data directory was initialized by PostgreSQL version 16, which is not compatible with
@@ -1033,9 +1033,7 @@ for the queue. `contextator_mcp_requests_total{method,tool,era}` counts MCP mess
 see when the last 2025-era client has gone, and `contextator_mcp_tool_duration_seconds{tool}` times each tool
 call; no label carries a project, a document or a query. Revisit the single-process design when, sustained over a
 week, the search p95 while indexing is above 1 s and twice the idle p95, the interactive queue wait p95 is
-above 5 minutes, or the interactive backlog stays non-zero for 15 minutes at a time. The operations guide
-(`.ssot/OPERATIONS.md`, §7 *Capacity notes*) carries the PromQL, the reasoning behind each threshold, and what
-to check before adding a second instance.
+above 5 minutes, or the interactive backlog stays non-zero for 15 minutes at a time.
 
 ## Contributing to Contextator
 
@@ -1085,7 +1083,7 @@ GPL is section 13, and it is the reason this license was chosen for a server: **
 reach your modified version over a network, you owe those users its complete source**, under the same license. Running
 the unmodified software — for yourself, your team or your company — triggers nothing at all.
 
-```
+```text
 Contextator — self-hosted MCP documentation server
 Copyright (C) 2026 Muhammet Şafak — Tunedness
 

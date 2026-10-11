@@ -1,0 +1,32 @@
+name: Feature request
+description: Something Contextator should be able to do and cannot.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and where it stops working. Not the solution yet.
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What you do instead today
+      description: Even if the answer is "nothing" or "a shell script".
+    validations:
+      required: false
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: What you think it should do
+      description: If you have a shape in mind, describe it — but the problem above is the part that matters most.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything you already ruled out
+      description: What you considered and set aside, and why.
+    validations:
+      required: false

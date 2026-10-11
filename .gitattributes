@@ -1,3 +1,29 @@
-* text=auto
+# Normalize line endings to LF for all text files
+* text=auto eol=lf
+
+# Kept explicit from before the repository standard; already covered by the line above.
 *.sh text eol=lf
 Dockerfile text eol=lf
+
+# Binary files
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.webp   binary
+*.ico    binary
+*.pdf    binary
+*.zip    binary
+*.docx   binary
+*.gz     binary
+*.tar    binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+*.otf    binary
+*.eot    binary
+*.mp4    binary
+*.mp3    binary
+
+# Generated files (collapsed in diffs, excluded from language stats)
+package-lock.json  linguist-generated

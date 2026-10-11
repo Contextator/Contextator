@@ -61,6 +61,7 @@ jobs:
     name: Licence grant
     if: github.event_name == 'pull_request_target' || github.event.issue.pull_request != null
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       # Re-running the pull request's own workflow run once a signature lands — the step that turns the
       # check green without asking the contributor to push an empty commit. This is the job's own
@@ -132,6 +133,7 @@ jobs:
       github.event.action == 'closed' &&
       github.event.pull_request.merged == true
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       # Locking a pull request conversation goes through the issues API, and neither scope alone reaches

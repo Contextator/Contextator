@@ -108,7 +108,7 @@ vulnerabilities, and a report about one of them will be closed with a link back 
   request that succeeds is recorded in `audit_events` with the account that made it, and `actor_ip`
   is stored next to that account. Fastify runs with `trustProxy: true`, so the value is the left-most
   `X-Forwarded-For` — **which the client writes whenever the server is reachable directly**, exactly as
-  the sign-in rate limit's key is (see the threat table in `.ssot/SECURITY.md`, T7). The actor is the
+  the sign-in rate limit's key is. The actor is the
   account the policy layer resolved from a session cookie or a bearer credential; the address is a hint
   beside it. Pinning `trustProxy` to the proxy in front of this instance is not something this product
   currently exposes, and that is a known limit rather than scheduled work.
