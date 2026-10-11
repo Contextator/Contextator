@@ -52,7 +52,7 @@ vulnerabilities, and a report about one of them will be closed with a link back 
   remains a mode, and a project set to it, or created before that default moved, is readable by anyone
   who can reach the URL. Dashboard accounts and memberships do not reach `/mcp/*` at all — a `member`
   who is answered `404` for a project in the dashboard can still read that project through its endpoint
-  while it is open. Read the *MCP access* section of the [README](README.md#mcp-access) for what each
+  while it is open. Read [MCP access](docs/mcp-access.md) for what each
   mode does and does not do.
 - **An upgrade does not close a project that is already `open`.** The migration moves the column's
   default and rewrites no row, deliberately: closing configured endpoints during an upgrade would cut
@@ -108,7 +108,7 @@ vulnerabilities, and a report about one of them will be closed with a link back 
   request that succeeds is recorded in `audit_events` with the account that made it, and `actor_ip`
   is stored next to that account. Fastify runs with `trustProxy: true`, so the value is the left-most
   `X-Forwarded-For` — **which the client writes whenever the server is reachable directly**, exactly as
-  the sign-in rate limit's key is (see the threat table in `.ssot/SECURITY.md`, T7). The actor is the
+  the sign-in rate limit's key is. The actor is the
   account the policy layer resolved from a session cookie or a bearer credential; the address is a hint
   beside it. Pinning `trustProxy` to the proxy in front of this instance is not something this product
   currently exposes, and that is a known limit rather than scheduled work.
@@ -138,7 +138,7 @@ to see which page at the source. A page restricted to three people in Confluence
 document like any other in the project that holds it. Access is decided by the project, and by nothing
 finer: whoever can open the project's MCP endpoint (anyone for `open`, a token holder for `token`, a
 member or any administrator for `account`) reads every document in it, and a `viewer` reads every document in it in the
-dashboard too. See [MCP access](README.md#mcp-access) for what each mode does and does not do.
+dashboard too. See [MCP access](docs/mcp-access.md) for what each mode does and does not do.
 
 So material that not everyone with access to the rest of the documentation may read — HR policies, security
 runbooks, customer contracts, anything with its own audience — belongs in **a project of its own**, with
