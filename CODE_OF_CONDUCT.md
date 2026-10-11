@@ -51,15 +51,8 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the repository
-owner, who is the sole community leader responsible for enforcement.
-
-> **The contact channel is not filled in yet.** No enforcement address is published anywhere in this
-> project today, and none was invented for this file. Until one is, a report reaches the owner through
-> [tunedness.com](https://tunedness.com), or through any private channel you already have with them.
->
-> <!-- OWNER: replace the paragraph above with the address or form you want reports to go to. The
->      Contributor Covenant expects one specific, monitored contact method; "the owner, somehow" is
->      weaker than it should be and is a placeholder, not the intended end state. -->
+owner, who is the sole community leader responsible for enforcement, at
+[security@contextator.com](mailto:security@contextator.com).
 
 All complaints will be reviewed and investigated promptly and fairly. All community leaders are obligated
 to respect the privacy and security of the reporter of any incident.

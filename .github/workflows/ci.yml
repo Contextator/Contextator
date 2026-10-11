@@ -20,20 +20,13 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    name: Lint, typecheck and test
+  lint:
+    name: lint
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
-      # Mirrors the Dockerfile. onnxruntime-node's postinstall fetches optional GPU binaries that
-      # nothing here uses; without this the install pulls a CUDA runtime to run unit tests. The CPU
-      # binaries ship in the package, which is what lets the step below load a model at all.
+      # See the `test` job: the install is the same, and skipping the GPU binaries keeps it fast.
       ONNXRUNTIME_NODE_INSTALL: skip
-      # Pinned to the defaults in `src/config.ts` rather than left implicit, for the same reason the
-      # `eval` job pins them: they are what the cache key below is derived from, so a changed model or
-      # a faster dtype is a different download and must not be a cache hit.
-      EMBEDDING_MODEL: Xenova/multilingual-e5-small
-      EMBEDDING_DTYPE: fp32
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,6 +53,33 @@ jobs:
 
       # Both tsconfigs: the one that builds dist/, and the one that covers test/ and scripts/.
       - run: npm run typecheck
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Mirrors the Dockerfile. onnxruntime-node's postinstall fetches optional GPU binaries that
+      # nothing here uses; without this the install pulls a CUDA runtime to run unit tests. The CPU
+      # binaries ship in the package, which is what lets the step below load a model at all.
+      ONNXRUNTIME_NODE_INSTALL: skip
+      # Pinned to the defaults in `src/config.ts` rather than left implicit, for the same reason the
+      # `eval` job pins them: they are what the cache key below is derived from, so a changed model or
+      # a faster dtype is a different download and must not be a cache hit.
+      EMBEDDING_MODEL: Xenova/multilingual-e5-small
+      EMBEDDING_DTYPE: fp32
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # The image runs node:22-bookworm-slim, and since ADR-0056 so does the engines floor.
+          node-version: 22
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
 
       # Three tests in the unit suite load the real model: the tokenizer against Turkish text
       # (`test/chunker.test.ts`) and both sides of one sentence through the prefixes of ADR-0038

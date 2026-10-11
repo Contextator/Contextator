@@ -142,7 +142,7 @@ describe('what the passage prefix costs the chunk budget', () => {
  * the tokenizer test in `chunker.test.ts` is, rather than downloading the model inside `npm test`.
  *
  * The gate is a convenience for a contributor who has not warmed the cache, and stops applying under
- * CI, where the `check` job populates it — so an absent model there fails the job instead of quietly
+ * CI, where the `test` job populates it — so an absent model there fails the job instead of quietly
  * skipping the only check ADR-0038's mechanism has (see `support/model-cache.ts`).
  */
 const MODEL = 'Xenova/multilingual-e5-small';

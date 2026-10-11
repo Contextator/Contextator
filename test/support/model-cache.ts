@@ -7,7 +7,7 @@ import path from 'node:path';
  * downloading 448 MB into `npm test` is not something a contributor should discover by running it.
  *
  * The gate used to be a bare `describe.skipIf(!existsSync(...))`, and that is the defect this file
- * exists to close. CI's `check` job had no `.cache/models` step, so the directory was empty on every
+ * exists to close. CI's then `check` job had no `.cache/models` step, so the directory was empty on every
  * run, all three tests skipped, and the suite reported green — for months. "The cache was not there"
  * and "the assertions passed" were the same colour, which makes a test that cannot fail, which is
  * not a test.
@@ -54,7 +54,7 @@ export function modelCacheGate(...relative: string[]): ModelCacheGate {
       throw new Error(
         `${file} is missing, so this block cannot run.\n` +
           `Locally: run \`${CACHE_POPULATED_BY}\` once (a few hundred megabytes, then never again).\n` +
-          'In CI: the `check` job caches `.cache/models` and populates it on a miss. This test is not ' +
+          'In CI: the `test` job caches `.cache/models` and populates it on a miss. This test is not ' +
           'allowed to skip here — a skipped model test is indistinguishable from a passing one, which ' +
           'is how these went unrun for months. Fix the cache step rather than this assertion.',
       );

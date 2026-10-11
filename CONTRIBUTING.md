@@ -74,7 +74,7 @@ npm run warm-model       # ~490 MB into .cache/models, once, then never again
 ```
 
 downloads it through the server's own warm-up path and checks that the files those tests look for are
-where they look. CI does not skip them — the `check` job caches the same directory and populates it on a
+where they look. CI does not skip them — the `test` job caches the same directory and populates it on a
 miss, and an absent cache fails the job rather than quietly reporting three fewer assertions than the
 suite claims.
 

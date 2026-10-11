@@ -222,7 +222,7 @@ const MODEL = 'Xenova/multilingual-e5-small';
 const MODEL_WINDOW_TOKENS = 512;
 const BUDGET_TOKENS = 96;
 // Skipped for a developer who has never warmed the cache, and never skipped under CI, where the
-// `check` job populates it and an absent cache has to be a red build (see `support/model-cache.ts`).
+// `test` job populates it and an absent cache has to be a red build (see `support/model-cache.ts`).
 const tokenizerCache = modelCacheGate(MODEL, 'tokenizer.json');
 
 describe.skipIf(tokenizerCache.skip)('the real tokenizer, on Turkish', () => {
