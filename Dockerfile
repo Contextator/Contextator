@@ -20,7 +20,7 @@
 
 # ---- build stage ----
 # Debian (glibc) rather than Alpine: onnxruntime-node and sharp ship glibc prebuilds.
-FROM node:22-bookworm-slim AS build
+FROM node:26-bookworm-slim AS build
 WORKDIR /app
 # onnxruntime-node's postinstall only fetches optional GPU binaries; skip it to keep the build offline-friendly.
 ENV ONNXRUNTIME_NODE_INSTALL=skip
@@ -49,7 +49,7 @@ COPY LICENSE ./
 # Same Debian release as the build stage, and the same node binary — so nothing is copied out of
 # /usr/local here: node and npm are already what they were above. What it does not have is
 # PostgreSQL, which is the entire point: no postmaster, no initdb, no /var/lib/postgresql.
-FROM node:22-bookworm-slim AS slim
+FROM node:26-bookworm-slim AS slim
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends tini gosu ca-certificates; \
