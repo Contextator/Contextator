@@ -271,10 +271,40 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  // Refused before anything is opened: a missing credential should not wait behind a connection.
-  const s3 = args.s3 ? new S3Client(s3TargetFromEnv()) : undefined;
   const config = loadConfig();
   const { db, pool } = createDb(config.DATABASE_URL);
+  try {
+    await runRestoreCommand(args, {
+      db,
+      config,
+      env: process.env,
+      tools: (staging) => localPgTools(staging, connectionFromEnv()),
+      topology: describeTopology(),
+      secretKey: config.SECRET_KEY,
+      say: (line) => console.log(line),
+    });
+  } finally {
+    await pool.end();
+  }
+}
+
+export interface RestoreCommandDeps extends Omit<RestoreDeps, 'tools'> {
+  /** `BACKUP_S3_*` is read from here, never from `process.env`. */
+  env: NodeJS.ProcessEnv;
+  /** Given the staging directory this run names, so the real command and a test can scratch in different places. */
+  tools: (staging: string) => PgTools;
+}
+
+/**
+ * What `npm run restore` does once its arguments are parsed and its connections are open — the part
+ * `--s3` changes, apart from `main` so an integration test can drive the wiring an operator runs
+ * (flag → env → download → the same refusals as a local file) and not only the pieces.
+ */
+export async function runRestoreCommand(args: RestoreArgs, deps: RestoreCommandDeps): Promise<RestoreResult> {
+  const { config, env, say } = deps;
+  if (!args.reference) throw new BackupRefused('usage', 'Name the archive to restore.');
+  // Refused before anything is opened: a missing credential should not wait behind a connection.
+  const s3 = args.s3 ? new S3Client(s3TargetFromEnv(env)) : undefined;
   // Named rather than created: `runRestore` makes it when it reaches the unpacking, so a `--check`
   // run leaves no directory behind either. "Nothing was written." has to be true of the filesystem
   // and not only of the database.
@@ -285,23 +315,11 @@ async function main(): Promise<void> {
   // download, removed below whatever happens.
   const download = path.join(config.DATA_DIR, `${STAGING}-download-${randomUUID()}`);
   try {
-    const archive = s3 ? await fetchArchive(s3, args.reference, download, (line) => console.log(line)) : args.reference;
-    await runRestore(
-      {
-        db,
-        config,
-        tools: localPgTools(staging, connectionFromEnv()),
-        topology: describeTopology(),
-        secretKey: config.SECRET_KEY,
-        say: (line) => console.log(line),
-      },
-      archive,
-      { check: args.check },
-    );
+    const archive = s3 ? await fetchArchive(s3, args.reference, download, say) : args.reference;
+    return await runRestore({ ...deps, tools: deps.tools(staging) }, archive, { check: args.check });
   } finally {
     await fs.rm(staging, { recursive: true, force: true });
     await fs.rm(download, { recursive: true, force: true });
-    await pool.end();
   }
 }
 

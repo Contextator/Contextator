@@ -4,7 +4,7 @@
 # The sidecar writes to the local `backups` directory. To push archives to an S3-compatible
 # bucket (AWS S3, MinIO, ...) instead, put these in .env (the service already reads it) and run
 # the one-off command below from a scheduler of your choice. The sidecar itself ignores them
-# (ADR-0110: nothing schedules S3 uploads inside the app):
+# (ADR-0120: nothing schedules S3 uploads inside the app):
 #
 #   BACKUP_S3_ENDPOINT=https://minio.example.com:9000   # omit for AWS S3
 #   BACKUP_S3_BUCKET=contextator-backups
@@ -14,7 +14,7 @@
 #   BACKUP_S3_SECRET_ACCESS_KEY=...
 #
 #   docker compose -f docker-compose.slim.yml -f docker-compose.backup.yml run --rm \
-#     --no-deps --entrypoint npm backup run backup -- --s3
+#     --no-deps -e BACKUP_STAGING_DIR= --entrypoint npm backup run backup -- --s3
 services:
   backup:
     image: contextator/contextator:${CONTEXTATOR_TAG:-latest}

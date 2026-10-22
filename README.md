@@ -354,7 +354,7 @@ on Kubernetes the chart renders an optional CronJob
 orchestrator. `restore --check` with `--s3` downloads the archive to the data volume first and deletes
 the copy afterwards.
 
-**These two blocks are the only copy of this procedure.** The wiki and the documentation site
+**These blocks are the only copy of this procedure.** The wiki and the documentation site
 carry no commands for it and point here. `restore` overwrites a live database,
 so a command is changed **here** and nowhere else. `test/readme-mirrors.test.ts` fails if a copy that
 declares itself a mirror (a `MIRRORED-IN` / `MIRRORED-FROM` marker) appears; it cannot see an unmarked

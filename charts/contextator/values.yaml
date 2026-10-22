@@ -317,7 +317,7 @@ metrics:
 # -----------------------------------------------------------------------------------------------
 # Scheduled backup to S3 — optional CronJob (off by default)
 # -----------------------------------------------------------------------------------------------
-# The application schedules nothing (ADR-0110); this CronJob is the Kubernetes counterpart of the
+# The application schedules nothing (ADR-0120, extending ADR-0110); this CronJob is the Kubernetes counterpart of the
 # compose sidecar (docker-compose.backup.yml). Each run executes `npm run backup -- --s3`: the same
 # archive `npm run backup` writes (database dump, upload trees, manifest) goes to an S3-compatible
 # bucket (AWS S3, MinIO, Ceph RGW, Cloudflare R2, ...; path-style requests) and only the newest `keep`

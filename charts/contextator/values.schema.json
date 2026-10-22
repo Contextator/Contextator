@@ -586,7 +586,7 @@
       }
     },
     "backup": {
-      "description": "Optional scheduled backup CronJob (ADR-0110: the application itself schedules nothing). Off by default; uploads each archive to an S3-compatible bucket and keeps the newest `keep`.",
+      "description": "Optional scheduled backup CronJob (ADR-0120: the application itself schedules nothing). Off by default; uploads each archive to an S3-compatible bucket and keeps the newest `keep`.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -627,7 +627,8 @@
         "keep": {
           "description": "Archives kept in the bucket; the same meaning as BACKUP_KEEP.",
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "maximum": 999999
         },
         "backoffLimit": {
           "type": "integer",

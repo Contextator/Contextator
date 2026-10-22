@@ -342,7 +342,7 @@ the server you restore **into**.
 
 ## Scheduled backup to S3
 
-The application schedules nothing (ADR-0110); on Kubernetes the schedule is an optional CronJob that
+The application schedules nothing (ADR-0120, extending ADR-0110); on Kubernetes the schedule is an optional CronJob that
 this chart renders only when `backup.enabled=true`. Each run executes `npm run backup -- --s3`: the
 archive described in the product README (database dump, upload trees, manifest) is built in a scratch
 `emptyDir`, uploaded to an S3-compatible bucket (AWS S3, MinIO, Ceph RGW, Cloudflare R2; path-style
@@ -369,7 +369,13 @@ helm upgrade --install ctx contextator/contextator \
   for temporary credentials. Without `existingSecret`, `backup.s3.accessKeyId` and
   `backup.s3.secretAccessKey` make the chart create the Secret — use `--set` for those, never a
   committed values file. The Job also receives `DATABASE_URL`, `SECRET_KEY`, `env` and `envSecret`
-  from the same sources as the Deployment.
+  from the same sources as the Deployment. Variables derived from `config.*` are **not** forwarded,
+  and keys the Job sets itself (`HOME`, `DATA_DIR`, `BACKUP_STAGING_DIR`, `BACKUP_KEEP`,
+  `CONTEXTATOR_EMBEDDED_POSTGRES`, `DATABASE_URL`, `SECRET_KEY`, anything starting `BACKUP_S3_`) are
+  skipped when they appear in `env` / `envSecret`, so they cannot produce a duplicate entry.
+- **Bucket hygiene.** A multipart upload that is killed mid-way (a node loss, the one-hour deadline)
+  leaves its uploaded parts in the bucket, billed, until someone aborts them. Add a bucket lifecycle
+  rule that aborts incomplete multipart uploads after a few days.
 - **Image.** The Job runs the **default** image (`contextator/contextator:<version>`, your `-slim` tag
   without the suffix), because only that image carries `pg_dump`. Override with `backup.image.repository`
   / `backup.image.tag` for a mirrored registry. Its client is PostgreSQL 16: against a PostgreSQL 17 or
@@ -389,19 +395,14 @@ helm upgrade --install ctx contextator/contextator \
   your schedule allows.
 - **`SECRET_KEY`** is never part of the archive. Keep it separately (see "`SECRET_KEY`").
 
-**Restoring from the bucket.** `npm run restore` reads the archive from the bucket with `--s3`, in the
-same throwaway copy of the Pod and with the same PostgreSQL client rules as "Taking a backup" above
-(the `BACKUP_S3_*` variables must be set in that shell):
-
-```sh
-kubectl -n "$NS" exec contextator-backup -- sh -c \
-  "PATH=/usr/lib/postgresql/$PG_MAJOR/bin:\$PATH npm run restore -- --s3 latest --check"
-kubectl -n "$NS" exec contextator-backup -- sh -c \
-  "PATH=/usr/lib/postgresql/$PG_MAJOR/bin:\$PATH npm run restore -- --s3 latest"
-```
-
-`latest` is the newest timestamped archive under the prefix; a file name restores that one. The product
-README's order still applies (check first, restore, then restart the application).
+**Restoring from the bucket.** The restore commands, and the order they run in, are not repeated here
+(decision record ADR-0073: a procedure that overwrites a live database has one transcript). They are
+the product README's
+[Data and persistence](https://github.com/Contextator/Contextator/blob/main/README.md#data-and-persistence)
+section, "To an S3-compatible bucket" (`npm run restore -- --s3`); what differs on Kubernetes is only
+where they run (a throwaway copy of the Pod on the default image, with the `BACKUP_S3_*` variables set
+and the PostgreSQL client rules of "Taking a backup" above), and `.ssot/OPERATIONS.md` §4.10 covers the
+operational detail.
 
 ## Rotating `SECRET_KEY`
 

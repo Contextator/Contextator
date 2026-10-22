@@ -175,6 +175,8 @@ class FakeBucket {
   pageSize = 1000;
   failNext: { status: number; code: string; times: number } | undefined;
   failPart: number | undefined;
+  /** The completion commits, then its answer is lost (a 503); the retry finds the upload id spent. */
+  loseCompletionAnswer = false;
 
   readonly fetch: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -205,9 +207,14 @@ class FakeBucket {
       return new Response('', { headers: { etag: `"etag-${number}"` } });
     }
     if (call.method === 'POST' && q.has('uploadId')) {
-      const parts = this.uploads.get(q.get('uploadId') as string) as Map<number, Buffer>;
+      const parts = this.uploads.get(q.get('uploadId') as string);
+      if (!parts) return new Response('<Error><Code>NoSuchUpload</Code><Message>spent</Message></Error>', { status: 404 });
       this.objects.set(key, Buffer.concat([...parts.entries()].sort((a, b) => a[0] - b[0]).map(([, part]) => part)));
       this.uploads.delete(q.get('uploadId') as string);
+      if (this.loseCompletionAnswer) {
+        this.loseCompletionAnswer = false;
+        return new Response('<Error><Code>SlowDown</Code></Error>', { status: 503 });
+      }
       return new Response('<CompleteMultipartUploadResult></CompleteMultipartUploadResult>');
     }
     if (call.method === 'DELETE' && q.has('uploadId')) {
@@ -221,6 +228,10 @@ class FakeBucket {
     if (call.method === 'DELETE') {
       this.objects.delete(key);
       return new Response(null, { status: 204 });
+    }
+    if (call.method === 'HEAD') {
+      const found = this.objects.get(key);
+      return found ? new Response(null, { headers: { 'content-length': String(found.length) } }) : new Response(null, { status: 404 });
     }
     if (call.method === 'GET') {
       const found = this.objects.get(key);
@@ -302,6 +313,34 @@ describe('S3Client against a fake bucket', () => {
     bucket.failPart = 2;
     await expect(client().uploadFile(`team/prod/${name(1)}`, file)).rejects.toThrow(/part 2/);
     expect(bucket.uploads.size).toBe(0);
+    expect(bucket.objects.size).toBe(0);
+  });
+
+  it('treats NoSuchUpload on a retried completion as success when the object is there in full', async () => {
+    const file = path.join(dir, name(1));
+    await writeFile(file, '0123456789ab');
+    bucket.loseCompletionAnswer = true;
+    await client().uploadFile(`team/prod/${name(1)}`, file);
+    expect(bucket.objects.get(`team/prod/${name(1)}`)?.toString()).toBe('0123456789ab');
+    expect(bucket.calls.filter((call) => call.method === 'POST' && call.url.searchParams.has('uploadId'))).toHaveLength(2);
+    expect(bucket.calls.some((call) => call.method === 'HEAD')).toBe(true);
+  });
+
+  it('still fails a retried completion whose object is not there, rather than calling it done', async () => {
+    const file = path.join(dir, name(1));
+    await writeFile(file, '0123456789ab');
+    // The first completion answers 503 having stored nothing, and the upload id is gone by the retry:
+    // NoSuchUpload is then the true answer, and the missing object is what proves it.
+    let completions = 0;
+    const flaky: typeof fetch = async (input, init) => {
+      if (init?.method === 'POST' && new URL(String(input)).searchParams.has('uploadId') && completions++ === 0) {
+        bucket.uploads.clear();
+        return new Response('<Error><Code>SlowDown</Code></Error>', { status: 503 });
+      }
+      return bucket.fetch(input, init);
+    };
+    const lossy = new S3Client(TARGET, { fetch: flaky, partSize: 5, retryDelayMs: 0 });
+    await expect(lossy.uploadFile(`team/prod/${name(1)}`, file)).rejects.toThrow(/NoSuchUpload/);
     expect(bucket.objects.size).toBe(0);
   });
 

@@ -313,35 +313,53 @@ async function main(): Promise<void> {
   }
 
   const config = loadConfig();
-  // Refused before the dump starts: a misspelt bucket should cost an operator seconds, not a pg_dump.
-  const s3 = args.s3 ? new S3Client(s3TargetFromEnv()) : undefined;
-  const keep = args.s3 ? keepFromEnv() : 0;
   const { db, pool } = createDb(config.DATABASE_URL);
+  try {
+    await runBackupCommand(args, {
+      db,
+      config,
+      env: process.env,
+      tools: (staging) => localPgTools(staging, connectionFromEnv()),
+      topology: describeTopology(),
+      say: (line) => console.log(line),
+    });
+  } finally {
+    await pool.end();
+  }
+}
+
+export interface BackupCommandDeps extends Omit<BackupDeps, 'tools'> {
+  /** `BACKUP_S3_*`, `BACKUP_KEEP` and `BACKUP_STAGING_DIR` are read from here, never from `process.env`. */
+  env: NodeJS.ProcessEnv;
+  /** Given the staging directory this run made, so the real command and a test can scratch in different places. */
+  tools: (staging: string) => PgTools;
+}
+
+/**
+ * What `npm run backup` does once its arguments are parsed and its connections are open — the part
+ * `--s3` changes, kept apart from `main` so an integration test can drive the very wiring an operator
+ * runs (flag → env → upload → retention) and not only the pieces it is made of.
+ */
+export async function runBackupCommand(args: BackupArgs, deps: BackupCommandDeps): Promise<void> {
+  const { db, config, env, say } = deps;
+  // Refused before the dump starts: a misspelt bucket should cost an operator seconds, not a pg_dump.
+  const s3 = args.s3 ? new S3Client(s3TargetFromEnv(env)) : undefined;
+  const keep = args.s3 ? keepFromEnv(env) : 0;
   await fs.mkdir(config.DATA_DIR, { recursive: true });
   // The scheduled sidecar owns a separate scratch root, so it can clean up after SIGKILL
   // without deleting a manual backup's staging directory on the shared data volume.
   // BACKUP_STAGING_DIR is an internal sidecar knob, not a supported user setting.
-  const stagingRoot = process.env.BACKUP_STAGING_DIR || config.DATA_DIR;
+  const stagingRoot = env.BACKUP_STAGING_DIR || config.DATA_DIR;
   await fs.mkdir(stagingRoot, { recursive: true });
   const staging = await fs.mkdtemp(path.join(stagingRoot, `${STAGING}-`));
   try {
     // To the bucket only, the archive is built beside the staging tree and goes away with it: the
     // object store is then the one copy, and a CronJob's pod never needs a volume for it.
     const out = s3 && !args.file ? path.join(staging, defaultArchiveName()) : archiveDestination(args.file, config);
-    await runBackup(
-      {
-        db,
-        config,
-        tools: localPgTools(staging, connectionFromEnv()),
-        topology: describeTopology(),
-        say: (line) => console.log(line),
-      },
-      out,
-    );
-    if (s3) await publishArchive(s3, out, keep, (line) => console.log(line));
+    await runBackup({ db, config, tools: deps.tools(staging), topology: deps.topology, say }, out);
+    if (s3) await publishArchive(s3, out, keep, say);
   } finally {
     await fs.rm(staging, { recursive: true, force: true });
-    await pool.end();
   }
 }
 

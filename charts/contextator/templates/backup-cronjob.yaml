@@ -1,8 +1,8 @@
 {{- if .Values.backup.enabled }}
 {{- include "contextator.requireDatabase" . -}}
 {{- /*
-  Optional scheduled backup to an S3-compatible bucket (ADR-0110: the application schedules nothing,
-  so the schedule lives here, in the cluster, outside the server process).
+  Optional scheduled backup to an S3-compatible bucket (ADR-0120, which extends ADR-0110: the application
+  schedules nothing, so the schedule lives here, in the cluster, outside the server process).
 
   The archive is the one `npm run backup` writes (database dump + upload trees + manifest); only its
   destination differs (`--s3`). It is NOT written to the data volume: it is built in a scratch
@@ -18,7 +18,7 @@
 {{- end }}
 {{- /*
   The scheduled backup runs the FULL image, not the `-slim` one the Deployment uses: only the full
-  image carries pg_dump (ADR-0110, same reason the compose sidecar uses it). Its tag is the slim tag
+  image carries pg_dump (ADR-0120; the compose sidecar of ADR-0110 uses it for the same reason). Its tag is the slim tag
   without the suffix, as the chart README's manual backup procedure already describes.
 */ -}}
 {{- $slimTag := required "contextator: image.tag must be set (the backup image tag is derived from it). See charts/contextator/README.md." .Values.image.tag }}
@@ -86,7 +86,7 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           securityContext:
-            # The same user the compose sidecar runs as (ADR-0110); the data volume is mounted
+            # The same user the compose sidecar runs as (ADR-0110, ADR-0120); the data volume is mounted
             # read-only, so no fsGroup is needed.
             runAsNonRoot: true
             runAsUser: 1000
@@ -161,20 +161,27 @@ spec:
                       key: {{ $s3.sessionTokenKey }}
                 {{- end }}
                 {{- /*
-                  The same `env` / `envSecret` the Deployment gets: the backup loads the application's
-                  configuration (SECRET_KEY_PREVIOUS during a rotation, for one), and a setting the
-                  Pod has but this Job lacks would make the two disagree.
+                  Only the free-form `env` / `envSecret` maps are passed on, NOT the Deployment's
+                  `config.*`-derived variables (PUBLIC_BASE_URL, TRUST_PROXY, the *_ALLOWED_HOSTS, ...):
+                  the backup loads the application's configuration for SECRET_KEY_PREVIOUS during a
+                  rotation and similar settings, and reads none of those. A key this Job sets itself
+                  is skipped, so it is never rendered twice (`kubectl apply` warns on a duplicate).
                 */}}
+                {{- $jobOwned := list "HOME" "DATA_DIR" "BACKUP_STAGING_DIR" "CONTEXTATOR_EMBEDDED_POSTGRES" "BACKUP_KEEP" "DATABASE_URL" "SECRET_KEY" }}
                 {{- range $key, $value := .Values.env }}
+                {{- if not (or (has $key $jobOwned) (hasPrefix "BACKUP_S3_" $key)) }}
                 - name: {{ $key }}
                   value: {{ $value | quote }}
                 {{- end }}
+                {{- end }}
                 {{- range $key, $ref := .Values.envSecret }}
+                {{- if not (or (has $key $jobOwned) (hasPrefix "BACKUP_S3_" $key)) }}
                 - name: {{ $key }}
                   valueFrom:
                     secretKeyRef:
                       name: {{ $ref.secretName }}
                       key: {{ $ref.secretKey }}
+                {{- end }}
                 {{- end }}
               volumeMounts:
                 - name: data

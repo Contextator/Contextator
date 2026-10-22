@@ -8,11 +8,12 @@ import { BackupRefused } from './backup-archive.js';
 
 /**
  * An S3-compatible *destination for the archive `npm run backup` already writes*, and the same place
- * to read one back from (ACTION_PLAN 0.4-11, [ADR-0110](../.ssot/ADR.md#adr-0110)).
+ * to read one back from (ACTION_PLAN 0.4-11, [ADR-0120](../.ssot/ADR.md#adr-0120), which extends
+ * [ADR-0110](../.ssot/ADR.md#adr-0110)).
  *
  * **What this is not.** It is not an upload storage backend (K-11 stays rejected, ADR-0016): the
  * application never reads or writes S3, only this operator command does, and only with an archive that
- * is already a finished file. The server schedules nothing here either (ADR-0072/0110) — whoever runs
+ * is already a finished file. The server schedules nothing here either (ADR-0072/0120) — whoever runs
  * the command (cron, the compose sidecar, the Helm CronJob) owns the schedule and the failure channel.
  *
  * **No SDK, deliberately.** The five operations an archive needs — PutObject, multipart upload,
@@ -28,7 +29,7 @@ import { BackupRefused } from './backup-archive.js';
 /** `contextator-backup-2026-09-22T12-00-00Z.tar.gz` — exactly the shape `defaultArchiveName` writes. */
 export const TIMESTAMPED_ARCHIVE = /^contextator-backup-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z\.tar\.gz$/;
 
-/** The compose sidecar's default (ADR-0110), so the same `BACKUP_KEEP` means the same on every path. */
+/** The compose sidecar's default (ADR-0110; ADR-0120 carries it to the bucket), so the same `BACKUP_KEEP` means the same on every path. */
 export const DEFAULT_KEEP = 7;
 
 /** S3 refuses multipart parts under 5 MiB (other than the last); 16 MiB keeps 10,000 parts above 150 GB. */
@@ -273,7 +274,7 @@ export class S3Client {
     key: string | null,
     query: Array<[string, string]>,
     body: Buffer | undefined,
-    options: { allowNotFound?: boolean; what: string },
+    options: { allowNotFound?: boolean; what: string; onRetry?: () => void },
   ): Promise<Response> {
     const bucketPath = `/${encodeComponent(this.target.bucket)}`;
     const basePath = new URL(this.target.endpoint).pathname.replace(/\/+$/, '');
@@ -301,6 +302,7 @@ export class S3Client {
         const response = await this.fetchImpl(fullUrl, { method, headers, body: body ? new Uint8Array(body) : undefined });
         if (response.status >= 500 && attempt < this.attempts) {
           await response.arrayBuffer().catch(() => undefined);
+          options.onRetry?.();
           await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs * attempt));
           continue;
         }
@@ -310,7 +312,10 @@ export class S3Client {
       } catch (err) {
         if (err instanceof BackupRefused) throw err;
         lastError = err;
-        if (attempt < this.attempts) await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs * attempt));
+        if (attempt < this.attempts) {
+          options.onRetry?.();
+          await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs * attempt));
+        }
       }
     }
     const reason = lastError instanceof Error ? (lastError.cause instanceof Error ? lastError.cause.message : lastError.message) : String(lastError);
@@ -375,14 +380,7 @@ export class S3Client {
         const manifest = `<CompleteMultipartUpload>${parts
           .map((part) => `<Part><PartNumber>${part.number}</PartNumber><ETag>${escapeXml(part.etag)}</ETag></Part>`)
           .join('')}</CompleteMultipartUpload>`;
-        const done = await this.send('POST', key, [['uploadId', uploadId]], Buffer.from(manifest, 'utf8'), {
-          what: `multipart completion of ${key}`,
-        });
-        // S3 may answer 200 and still carry an <Error> element: the work happens after the headers.
-        const doneBody = await done.text();
-        if (/<Error>/.test(doneBody)) {
-          throw new BackupRefused('s3_request_failed', `S3 multipart completion of ${key} failed: ${xmlTag(doneBody, 'Code') ?? 'unknown error'}.`);
-        }
+        await this.completeMultipart(key, uploadId, manifest, size);
       } catch (err) {
         await this.send('DELETE', key, [['uploadId', uploadId]], undefined, {
           what: `abort of the multipart upload of ${key}`,
@@ -394,6 +392,41 @@ export class S3Client {
     } finally {
       await handle.close();
     }
+  }
+
+  /**
+   * CompleteMultipartUpload is a POST, and a POST is not idempotent: when a 5xx or a dropped connection
+   * is retried after the first attempt had in fact gone through, S3 answers the retry `NoSuchUpload`
+   * because the upload id is spent. That answer is not a failure of the upload, so it is settled by
+   * looking at the object: present, and exactly as large as what was sent, means the first attempt won.
+   */
+  private async completeMultipart(key: string, uploadId: string, manifest: string, size: number): Promise<void> {
+    let retried = false;
+    try {
+      const done = await this.send('POST', key, [['uploadId', uploadId]], Buffer.from(manifest, 'utf8'), {
+        what: `multipart completion of ${key}`,
+        onRetry: () => {
+          retried = true;
+        },
+      });
+      // S3 may answer 200 and still carry an <Error> element: the work happens after the headers.
+      const doneBody = await done.text();
+      if (/<Error>/.test(doneBody)) {
+        throw new BackupRefused('s3_request_failed', `S3 multipart completion of ${key} failed: ${xmlTag(doneBody, 'Code') ?? 'unknown error'}.`);
+      }
+    } catch (err) {
+      const spent = err instanceof BackupRefused && /NoSuchUpload/.test(err.message);
+      if (retried && spent && (await this.headSize(key)) === size) return;
+      throw err;
+    }
+  }
+
+  /** The size of an object, or `undefined` when there is none (HeadObject). */
+  async headSize(key: string): Promise<number | undefined> {
+    const response = await this.send('HEAD', key, [], undefined, { what: `lookup of ${key}`, allowNotFound: true });
+    if (response.status === 404) return undefined;
+    const length = response.headers.get('content-length');
+    return length === null ? undefined : Number(length);
   }
 
   /** Every object under `prefix`, following continuation tokens. */
@@ -474,7 +507,7 @@ export interface PublishResult {
 /**
  * Uploads one finished archive and then applies retention to the target.
  *
- * Retention is the compose sidecar's rule moved to the bucket (ADR-0110): keep the newest `keep`
+ * Retention is the compose sidecar's rule moved to the bucket (ADR-0120): keep the newest `keep`
  * objects whose name is **exactly** the timestamped shape, delete the rest, leave every other name
  * alone — an archive somebody named by hand is one they meant to keep. It runs only *after* the new
  * archive is stored, so a failed upload deletes nothing, and the archive just written is never a

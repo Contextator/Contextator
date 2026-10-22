@@ -14,9 +14,9 @@ import { GenericContainer, type StartedTestContainer, Wait } from 'testcontainer
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { describeTopology, secretKeyFingerprint, type Manifest as BackupManifest, type PgTool, type PgTools } from '../../scripts/backup-archive.js';
-import { defaultArchiveName, runBackup } from '../../scripts/backup.js';
-import { fetchArchive, publishArchive, S3Client, signRequest } from '../../scripts/backup-s3.js';
-import { runRestore, type RestoreDeps } from '../../scripts/restore.js';
+import { defaultArchiveName, runBackup, runBackupCommand } from '../../scripts/backup.js';
+import { publishArchive, S3Client, signRequest, TIMESTAMPED_ARCHIVE } from '../../scripts/backup-s3.js';
+import { runRestore, runRestoreCommand, type RestoreDeps } from '../../scripts/restore.js';
 import { loadConfig, MAX_SEARCH_LIMIT } from '../../src/config.js';
 import { MIGRATIONS_FOLDER } from '../../src/db/bootstrap.js';
 import { documentSources, projects, type ProjectRow } from '../../src/db/schema.js';
@@ -1375,13 +1375,15 @@ describe('the backup command, and the instance it is asked to bring back', () =>
      * Chainguard build of upstream MinIO, whose entrypoint is `minio`. `CONTEXTATOR_TEST_MINIO_IMAGE` swaps it
      * for any other S3-compatible server that takes `server /data` and `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`.
      */
-    const MINIO_IMAGE = process.env.CONTEXTATOR_TEST_MINIO_IMAGE ?? 'cgr.dev/chainguard/minio:latest';
+    const MINIO_IMAGE = process.env.CONTEXTATOR_TEST_MINIO_IMAGE || 'cgr.dev/chainguard/minio:latest';
     const BUCKET = 'contextator-backups';
     const MINIO_USER = 'minio-access-key';
     const MINIO_PASSWORD = 'minio-secret-key-0123456789';
     let minio: StartedTestContainer;
     let client: S3Client;
     let downloads: string;
+    /** The environment an operator (or the CronJob) hands the command: the only way `--s3` learns its target. */
+    let s3Env: NodeJS.ProcessEnv;
 
     /** Creates the bucket with the same signer the command uses; MinIO starts with none. */
     async function createBucket(target: { endpoint: string; region: string }): Promise<void> {
@@ -1418,6 +1420,13 @@ describe('the backup command, and the instance it is asked to bring back', () =>
       };
       await createBucket(target);
       client = new S3Client(target);
+      s3Env = {
+        BACKUP_S3_ENDPOINT: target.endpoint,
+        BACKUP_S3_BUCKET: BUCKET,
+        BACKUP_S3_REGION: target.region,
+        BACKUP_S3_ACCESS_KEY_ID: MINIO_USER,
+        BACKUP_S3_SECRET_ACCESS_KEY: MINIO_PASSWORD,
+      };
       downloads = await fsp.mkdtemp(nodePath.join(tmpdir(), 'contextator-backup-s3-'));
     }, 300_000);
 
@@ -1464,26 +1473,111 @@ describe('the backup command, and the instance it is asked to bring back', () =>
       await small.deleteObject(key);
     });
 
-    it('restores the newest archive into an empty instance, and the same question gets the same answer', async () => {
-      expect(originalHits.length).toBeGreaterThan(0);
-      await emptyInstance();
+    it('takes a backup through `npm run backup -- --s3`: dump, upload, retention, and no local copy left behind', async () => {
+      const env = { ...s3Env, BACKUP_S3_PREFIX: 'cli/backup', BACKUP_KEEP: '1' };
+      const cliClient = new S3Client({ ...client.target, prefix: 'cli/backup' });
+      // An older timestamped archive already in the bucket: BACKUP_KEEP=1 has to remove it once the new one is stored.
+      await cliClient.putObject(cliClient.keyFor('contextator-backup-2026-01-01T00-00-00Z.tar.gz'), await fsp.readFile(archive));
 
-      const downloaded = await fetchArchive(client, 'latest', nodePath.join(downloads, 'restore'), () => {});
-      const report = await runRestore(restoreDeps(BACKUP_KEY), downloaded);
-      expect(report.uploadsRestored).toBe(1);
+      const lines: string[] = [];
+      await runBackupCommand(
+        { help: false, s3: true },
+        {
+          db: cli.db,
+          config: loadConfig({ DATABASE_URL: cli.url, DATA_DIR: dataDir, SECRET_KEY: BACKUP_KEY }),
+          env,
+          tools: () => containerTools(scratch.local, scratch.remote),
+          topology: describeTopology({ DATABASE_URL: cli.url }),
+          say: (line) => lines.push(line),
+        },
+      );
 
-      const restored = await cli.db.select().from(projects).limit(1);
-      expect(restored).toHaveLength(1);
-      const hits = await searchChunks(cli.db, {
-        projectId: restored[0].id,
-        generation: restored[0].liveGeneration,
-        queryEmbedding: stubVector(S3_QUERY),
-        queryText: S3_QUERY,
-        limit: 5,
-        selection: WHOLE_PAGE,
+      const names = (await cliClient.list(cliClient.keyFor(''))).map((object) => object.key.slice('cli/backup/'.length));
+      expect(names).toHaveLength(1);
+      expect(names[0]).toMatch(TIMESTAMPED_ARCHIVE);
+      expect(names[0]).not.toBe('contextator-backup-2026-01-01T00-00-00Z.tar.gz');
+      expect(lines.join('\n')).toContain('retention: kept the newest 1, deleted 1');
+      // To the bucket only: neither a `backups/` directory nor a staging tree is left on the data volume.
+      expect((await fsp.readdir(dataDir)).filter((entry) => entry === 'backups' || entry.startsWith('.backup'))).toEqual([]);
+    });
+
+    it('refuses `--s3` without a target before it dumps anything', async () => {
+      const ran: PgTool[] = [];
+      await expect(
+        runBackupCommand(
+          { help: false, s3: true },
+          {
+            db: cli.db,
+            config: loadConfig({ DATABASE_URL: cli.url, DATA_DIR: dataDir, SECRET_KEY: BACKUP_KEY }),
+            env: {},
+            tools: () => containerTools(scratch.local, scratch.remote, ran),
+            topology: describeTopology({ DATABASE_URL: cli.url }),
+            say: () => {},
+          },
+        ),
+      ).rejects.toMatchObject({ code: 's3_config' });
+      expect(ran).toEqual([]);
+    });
+
+    describe('`npm run restore -- --s3 latest`, over an archive this suite uploads itself', () => {
+      const RESTORE_PREFIX = 'cli/restore';
+      let restoreClient: S3Client;
+      const commandDeps = (ran: PgTool[] = []) => ({
+        ...restoreDeps(BACKUP_KEY, ran),
+        env: { ...s3Env, BACKUP_S3_PREFIX: RESTORE_PREFIX },
+        tools: () => containerTools(scratch.local, scratch.remote, ran),
       });
-      // Identical rows, identical order, identical scores: what the original instance answered.
-      expect(hits).toEqual(originalHits);
+
+      beforeAll(async () => {
+        restoreClient = new S3Client({ ...client.target, prefix: RESTORE_PREFIX });
+        // Its own upload, so the result never depends on which test ran before it.
+        await restoreClient.putObject(restoreClient.keyFor('contextator-backup-2026-03-01T00-00-00Z.tar.gz'), await fsp.readFile(archive));
+      });
+
+      it('with --check, downloads, evaluates every refusal and writes nothing to the instance — then removes the download', async () => {
+        const ran: PgTool[] = [];
+        const before = await treeContents(dataDir);
+        const report = await runRestoreCommand({ help: false, check: true, s3: true, reference: 'latest' }, commandDeps(ran));
+        expect(ran).toEqual([]);
+        expect(report.checkedOnly).toBe(true);
+        expect(await treeContents(dataDir)).toEqual(before);
+        expect((await fsp.readdir(dataDir)).filter((entry) => entry.startsWith('.restore'))).toEqual([]);
+      });
+
+      it('refuses the wrong SECRET_KEY exactly as a local file does, and still leaves no download behind', async () => {
+        const ran: PgTool[] = [];
+        const deps = {
+          ...restoreDeps(WRONG_KEY, ran),
+          env: { ...s3Env, BACKUP_S3_PREFIX: RESTORE_PREFIX },
+          tools: () => containerTools(scratch.local, scratch.remote, ran),
+        };
+        await expect(runRestoreCommand({ help: false, check: false, s3: true, reference: 'latest' }, deps)).rejects.toMatchObject({
+          code: 'secret_key_mismatch',
+        });
+        expect(ran).toEqual([]);
+        expect((await fsp.readdir(dataDir)).filter((entry) => entry.startsWith('.restore'))).toEqual([]);
+      });
+
+      it('restores the newest archive into an empty instance, and the same question gets the same answer', async () => {
+        expect(originalHits.length).toBeGreaterThan(0);
+        await emptyInstance();
+
+        const report = await runRestoreCommand({ help: false, check: false, s3: true, reference: 'latest' }, commandDeps());
+        expect(report.uploadsRestored).toBe(1);
+
+        const restored = await cli.db.select().from(projects).limit(1);
+        expect(restored).toHaveLength(1);
+        const hits = await searchChunks(cli.db, {
+          projectId: restored[0].id,
+          generation: restored[0].liveGeneration,
+          queryEmbedding: stubVector(S3_QUERY),
+          queryText: S3_QUERY,
+          limit: 5,
+          selection: WHOLE_PAGE,
+        });
+        // Identical rows, identical order, identical scores: what the original instance answered.
+        expect(hits).toEqual(originalHits);
+      });
     });
   });
 });
