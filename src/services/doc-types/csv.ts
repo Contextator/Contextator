@@ -27,7 +27,7 @@ const SNIFF_BYTES = 8192;
  * of chunks, and a chunk of bare rows with no breadcrumb naming its columns is a chunk that retrieves
  * for nothing and reads as nothing. The section heading is what `chunkMarkdown` puts in `heading_path`.
  */
-const ROWS_PER_SECTION = 200;
+export const ROWS_PER_SECTION = 200;
 
 /**
  * RFC 4180, with CRLF normalised inside quoted fields as well as outside.
@@ -112,12 +112,12 @@ export function sniffDelimiter(text: string): string {
 }
 
 /** `|` ends a cell in GFM and a newline ends the row, so both have to stop being themselves. */
-function cell(value: string): string {
+export function cell(value: string): string {
   const text = value.replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>').replace(/\s+/g, ' ').trim();
   return text === '' ? ' ' : text;
 }
 
-function renderRow(values: string[], width: number): string {
+export function renderRow(values: string[], width: number): string {
   const padded = Array.from({ length: width }, (_, i) => cell(values[i] ?? ''));
   return `| ${padded.join(' | ')} |`;
 }

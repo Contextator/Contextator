@@ -61,9 +61,9 @@ async function searchable(name: string, phrase: string): Promise<boolean> {
  * Written here rather than committed as a fixture: an archive built to break a reader is an artefact
  * of this test, not a specimen of what the world sends.
  */
-function bombDocx(size: number): Buffer {
+function bombDocx(size: number, part = 'word/document.xml'): Buffer {
   const payload = deflateRawSync(Buffer.alloc(size, 0x41));
-  const name = Buffer.from('word/document.xml', 'utf8');
+  const name = Buffer.from(part, 'utf8');
 
   const local = Buffer.alloc(30 + name.length);
   local.writeUInt32LE(0x04034b50, 0);
@@ -118,6 +118,10 @@ describe('the document type registry', () => {
     const matcher = extensionMatcher(['md', 'html', 'htm', 'csv', 'docx', 'pdf']);
     for (const name of ['a.md', 'a.html', 'a.HTM', 'a.csv', 'report.docx', 'book.PDF']) expect(matcher.test(name)).toBe(true);
     for (const name of ['a.doc', 'a.pptx', 'a.xlsx', 'a.htmlx', 'a.pdf.bak']) expect(matcher.test(name)).toBe(false);
+    // ADR-0115: the five newer types are on the list, and are matched once a source opts in.
+    const opted = extensionMatcher(['pptx', 'xlsx', 'ipynb', 'rst', 'adoc']);
+    for (const name of ['deck.pptx', 'book.XLSX', 'nb.ipynb', 'guide.rst', 'manual.adoc']) expect(opted.test(name)).toBe(true);
+    for (const name of ['deck.ppt', 'book.xls', 'guide.rest', 'manual.asciidoc']) expect(opted.test(name)).toBe(false);
   });
 
   it('leaves Markdown exactly as it was, byte for byte', async () => {
@@ -495,6 +499,222 @@ describe('.pdf', () => {
  * like any other line. If either of these turns red, the footnote went missing; that is a regression,
  * not a test to relax.
  */
+describe('.pptx', () => {
+  const NAME = 'platform-roadmap.pptx';
+
+  it('gives each slide its own section, in the presentation order and not the file order', async () => {
+    const markdown = await readable(NAME);
+    expect(headings(markdown)).toEqual([
+      '# Platform Roadmap Review',
+      '## Slide 1: Platform Roadmap',
+      '## Slide 2: Cutover Plan',
+      '## Slide 3: Open Risks',
+    ]);
+  });
+
+  it('puts the speaker notes under their slide, on a Notes line', async () => {
+    const markdown = await readable(NAME);
+    const cutover = markdown.slice(markdown.indexOf('## Slide 2'), markdown.indexOf('## Slide 3'));
+    expect(cutover).toContain('- Freeze writes on the legacy ledger');
+    expect(cutover).toContain('Notes: Mention the pelican rollback rehearsal and the Friday freeze window.');
+    // Only that slide has notes, and the notes page's slide number is not a note.
+    expect(markdown.match(/^Notes:/gm)).toHaveLength(1);
+    expect(markdown).not.toMatch(/Notes: .*\b7\b/);
+  });
+
+  it('reads a table as a table and leaves the slide-number placeholder out', async () => {
+    const markdown = await readable(NAME);
+    expect(tableRows(markdown)).toEqual(['| Risk | Owner |', '| --- | --- |', '| Journal lag | Ingrid |', '| Quota exhaustion | Tomas |']);
+    expect(markdown).not.toMatch(/^2$/m);
+  });
+
+  it('can be found by a phrase from a slide and by one from the notes', async () => {
+    expect(await searchable(NAME, 'Replay the journal into the new cluster')).toBe(true);
+    expect(await searchable(NAME, 'pelican rollback rehearsal')).toBe(true);
+  });
+
+  it('refuses a zip that is not a presentation, and a file that is not a zip', async () => {
+    await expect(extract('book.pptx', bytesOf('warehouse-inventory.xlsx'))).rejects.toThrow(/not a PowerPoint presentation/);
+    await expect(extract('old.pptx', Buffer.from('\xd0\xcf\x11\xe0 an old binary deck'))).rejects.toThrow(/not a zip archive/);
+  });
+});
+
+describe('.xlsx', () => {
+  const NAME = 'warehouse-inventory.xlsx';
+
+  it('gives each visible sheet its own section, as a table', async () => {
+    const markdown = await readable(NAME);
+    expect(headings(markdown)).toEqual(['# Warehouse Inventory', '## Stock', '## Sites']);
+    expect(tableRows(markdown)).toEqual([
+      '| Item | Quantity | Total |',
+      '| --- | --- | --- |',
+      '| Anvil | 12 | 480 |',
+      '| Crowbar | 30 | 210 |',
+      '| Warehouse | Reorder level |',
+      '| --- | --- |',
+      '| Rotterdam | 75 |',
+    ]);
+  });
+
+  it('skips a hidden sheet entirely', async () => {
+    const markdown = await readable(NAME);
+    expect(markdown).not.toContain('Vault');
+    expect(markdown).not.toContain('Hiddenvault-ledger');
+  });
+
+  it('reads the cached value of a formula and never the formula', async () => {
+    const markdown = await readable(NAME);
+    expect(markdown).toContain('| Anvil | 12 | 480 |');
+    expect(markdown).not.toMatch(/B2\*40|SUM\(/);
+  });
+
+  it('can be found by a cell value', async () => {
+    expect(await searchable(NAME, 'Rotterdam | 75')).toBe(true);
+  });
+
+  it('refuses a zip that is not a workbook', async () => {
+    await expect(extract('deck.xlsx', bytesOf('platform-roadmap.pptx'))).rejects.toThrow(/not an Excel workbook/);
+  });
+});
+
+describe('.ipynb', () => {
+  const NAME = 'analysis-notebook.ipynb';
+
+  it('keeps markdown and code cells and leaves outputs and raw cells out', async () => {
+    const markdown = await readable(NAME);
+    expect(headings(markdown)).toEqual(['# Latency Investigation', '## Conclusion']);
+    expect(markdown).toContain("```python\nimport pandas as pd\nframe = pd.read_csv('latency.csv')\nframe.describe()\n```");
+    expect(markdown).not.toContain('SECRET-OUTPUT-MARKER');
+    expect(markdown).not.toContain('raw cell that is not content');
+  });
+
+  it('can be found by a phrase from a markdown cell', async () => {
+    expect(await searchable(NAME, 'before and after the vortexcache rollout')).toBe(true);
+  });
+
+  it('refuses JSON that is not a notebook, as a refusal naming the file', async () => {
+    await expect(extract('broken.ipynb', Buffer.from('{ not json'))).rejects.toBeInstanceOf(DocumentExtractionError);
+    await expect(extract('empty.ipynb', Buffer.from('{"cells": []}'))).rejects.toBeInstanceOf(DocumentExtractionError);
+  });
+
+  it('reads a version 3 notebook', async () => {
+    const v3 = JSON.stringify({
+      nbformat: 3,
+      worksheets: [
+        {
+          cells: [
+            { cell_type: 'heading', level: 1, source: ['Old Notebook'] },
+            { cell_type: 'markdown', source: ['Legacy text about the zebrafish pipeline.'] },
+            { cell_type: 'code', language: 'python', input: ['print(1)'], outputs: [{ text: ['LEAKED-V3'] }] },
+          ],
+        },
+      ],
+    });
+    const markdown = await extract('old.ipynb', Buffer.from(v3));
+    expect(markdown).toContain('zebrafish pipeline');
+    expect(markdown).toContain('print(1)');
+    expect(markdown).not.toContain('LEAKED-V3');
+  });
+});
+
+describe('.rst', () => {
+  const NAME = 'deployment-guide.rst';
+
+  it('keeps the heading hierarchy by order of appearance', async () => {
+    expect(headings(await readable(NAME))).toEqual(['# Deployment Guide', '## Overview', '### Prerequisites', '## Installation', '## Configuration']);
+  });
+
+  it('turns code, admonitions, links and tables into their Markdown forms', async () => {
+    const markdown = await readable(NAME);
+    expect(markdown).toContain('```yaml\nreplicas: 3\nport: 8080\n```');
+    expect(markdown).toContain('curl -fsSL https://example.com/install.sh | sh');
+    expect(markdown).toContain('**Note:** Back up the `/var/lib/quokka` directory before upgrading.');
+    expect(markdown).toContain('[the runbook](https://example.com/runbook)');
+    expect(tableRows(markdown)).toContain('| workers | 4 | per CPU |');
+    // Directives that drive the toolchain and carry no text are dropped.
+    expect(markdown).not.toContain('contents::');
+    expect(markdown).not.toContain('internal-target');
+  });
+
+  it('can be found by a phrase from the prose', async () => {
+    expect(await searchable(NAME, 'ships as a single container')).toBe(true);
+  });
+
+  it('survives a pathological nesting of directives without overflowing the stack', async () => {
+    const deep = Array.from({ length: 5000 }, (_, i) => `${' '.repeat(Math.min(i, 400))}.. note::`).join('\n');
+    await expect(extract('deep.rst', Buffer.from(`Title\n=====\n\n${deep}\n\nbody text\n`))).resolves.toContain('# Title');
+  });
+});
+
+describe('.adoc', () => {
+  const NAME = 'operations-manual.adoc';
+
+  it('keeps the heading hierarchy and drops the attribute entries', async () => {
+    const markdown = await readable(NAME);
+    expect(headings(markdown)).toEqual(['# Operations Manual', '## Overview', '## Procedures', '### Rotating credentials']);
+    expect(markdown).not.toContain(':author:');
+    expect(markdown).not.toContain('Platform Team');
+  });
+
+  it('substitutes attributes and converts macros, lists, code, tables and admonitions', async () => {
+    const markdown = await readable(NAME);
+    expect(markdown).toContain('The marmot scheduler runs **nightly**');
+    expect(markdown).toContain('[the status page](https://example.com/status)');
+    expect(markdown).toContain('**Note:** Never restart the scheduler during the reconciliation window.');
+    expect(markdown).toContain('```bash\nmarmot rotate --all\n```');
+    expect(tableRows(markdown)).toEqual(['| Dataset | Retention |', '| --- | --- |', '| Audit log | 400 days |', '| Metrics | 30 days |']);
+    expect(markdown).toContain('**Escalation**: Page the on-call engineer.');
+  });
+
+  it('drops comments', async () => {
+    expect(await readable(NAME)).not.toContain('internal reviewer comment');
+  });
+
+  it('can be found by a phrase from the prose', async () => {
+    expect(await searchable(NAME, 'Update the secret store')).toBe(true);
+  });
+});
+
+describe('the zip guard on the OOXML types (ADR-0115)', () => {
+  const SMALL = { ...LIMITS, maxUnpackedBytes: 1024 };
+
+  it.each([
+    ['platform-roadmap.pptx', 'a.pptx'],
+    ['warehouse-inventory.xlsx', 'a.xlsx'],
+  ])('refuses %s past the declared limit, before inflating any part', async (fixture, name) => {
+    await expect(extract(name, bytesOf(fixture), SMALL)).rejects.toThrow(/declare that they unpack past the limit.*MAX_DOCX_UNPACKED_BYTES/);
+  });
+
+  it('does not inflate when the declaration alone is over the limit', async () => {
+    // The part is not valid DEFLATE: inflating it would surface as "damaged part", not as a size refusal.
+    const bytes = Buffer.from(bytesOf('platform-roadmap.pptx'));
+    const honest = await extract('a.pptx', bytes);
+    expect(honest).toContain('## Slide 1');
+    await expect(extract('a.pptx', bytes, { ...LIMITS, maxUnpackedBytes: 100 })).rejects.not.toThrow(/damaged part/);
+  });
+
+  it.each([
+    ['a.pptx', 'ppt/presentation.xml'],
+    ['a.xlsx', 'xl/workbook.xml'],
+  ])('refuses a %s that lies about its size, by bounding what it really unpacks to', async (name, part) => {
+    const bomb = bombDocx(64 * 1024 * 1024, part);
+    expect(bomb.byteLength).toBeLessThan(1024 * 1024);
+    await expect(extract(name, bomb, { ...LIMITS, maxUnpackedBytes: 1024 * 1024 })).rejects.toThrow(/actually unpack past the limit/);
+  });
+
+  it('turns a damaged or truncated archive into a refusal, not a crash', async () => {
+    const full = bytesOf('warehouse-inventory.xlsx');
+    await expect(extract('cut.xlsx', full.subarray(0, full.length - 40))).rejects.toBeInstanceOf(DocumentExtractionError);
+    await expect(extract('cut.pptx', full.subarray(0, 12))).rejects.toBeInstanceOf(DocumentExtractionError);
+  });
+
+  it('refuses a workbook whose tables would render far past the converted-file ceiling', async () => {
+    await expect(extract('a.xlsx', bytesOf('warehouse-inventory.xlsx'), { ...LIMITS, maxFileBytes: 64 })).rejects.toBeInstanceOf(
+      DocumentExtractionError,
+    );
+  });
+});
+
 describe('footnotes', () => {
   const PHRASE = 'quarterly reconciliation ledger';
 

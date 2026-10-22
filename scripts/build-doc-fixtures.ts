@@ -458,6 +458,154 @@ function footnotedPdf(): Buffer {
   return buildPdf([contentStream(runs)], 'Refund Policy');
 }
 
+const XML_HEADER = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+const REL_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const PKG_REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships';
+const DRAWING_NS =
+  'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="' +
+  REL_NS +
+  '" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"';
+
+const escapeXml = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+const slideShape = (id: number, placeholder: string, paragraphs: string[], bullets = false): string =>
+  `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="Shape ${id}"/><p:cNvSpPr/><p:nvPr><p:ph type="${placeholder}"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/>` +
+  paragraphs.map((text) => `<a:p>${bullets ? '<a:pPr lvl="0"/>' : ''}<a:r><a:rPr lang="en-US"/><a:t>${escapeXml(text)}</a:t></a:r></a:p>`).join('') +
+  '</p:txBody></p:sp>';
+
+const slideXml = (shapes: string[]): string =>
+  `${XML_HEADER}<p:sld ${DRAWING_NS}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>${shapes.join('')}</p:spTree></p:cSld></p:sld>`;
+
+const notesXml = (text: string): string =>
+  `${XML_HEADER}<p:notes ${DRAWING_NS}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>` +
+  `<p:sp><p:nvSpPr><p:cNvPr id="2" name="Slide Image"/><p:cNvSpPr/><p:nvPr><p:ph type="sldImg"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>` +
+  slideShape(3, 'body', [text]) +
+  slideShape(4, 'sldNum', ['7']) +
+  '</p:spTree></p:cSld></p:notes>';
+
+const relsXml = (rels: Array<[string, string, string]>): string =>
+  `${XML_HEADER}<Relationships xmlns="${PKG_REL_NS}">${rels.map(([id, type, target]) => `<Relationship Id="${id}" Type="${REL_NS}/${type}" Target="${target}"/>`).join('')}</Relationships>`;
+
+/** A three-slide deck: the slide files are numbered out of order on purpose, and only the middle slide has speaker notes. */
+function roadmapPptx(): Buffer {
+  const presentation =
+    `${XML_HEADER}<p:presentation ${DRAWING_NS}><p:sldMasterIdLst/><p:sldIdLst>` +
+    '<p:sldId id="256" r:id="rId3"/><p:sldId id="257" r:id="rId2"/><p:sldId id="258" r:id="rId1"/></p:sldIdLst></p:presentation>';
+  return buildZip([
+    {
+      name: '[Content_Types].xml',
+      data: `${XML_HEADER}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>`,
+    },
+    {
+      name: 'docProps/core.xml',
+      data: `${XML_HEADER}<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Platform Roadmap Review</dc:title></cp:coreProperties>`,
+    },
+    { name: 'ppt/presentation.xml', data: presentation },
+    {
+      name: 'ppt/_rels/presentation.xml.rels',
+      data: relsXml([
+        ['rId1', 'slide', 'slides/slide1.xml'],
+        ['rId2', 'slide', 'slides/slide2.xml'],
+        ['rId3', 'slide', 'slides/slide3.xml'],
+      ]),
+    },
+    // slide3.xml is first in the presentation order, slide1.xml last: the deck order is sldIdLst, not the file number.
+    {
+      name: 'ppt/slides/slide3.xml',
+      data: slideXml([
+        slideShape(2, 'ctrTitle', ['Platform Roadmap']),
+        slideShape(3, 'body', ['Quarterly review of the glacier migration programme']),
+      ]),
+    },
+    {
+      name: 'ppt/slides/slide2.xml',
+      data: slideXml([
+        slideShape(2, 'title', ['Cutover Plan']),
+        slideShape(
+          3,
+          'body',
+          ['Freeze writes on the legacy ledger', 'Replay the journal into the new cluster', 'Verify checksums before the DNS switch'],
+          true,
+        ),
+        slideShape(4, 'sldNum', ['2']),
+      ]),
+    },
+    { name: 'ppt/slides/_rels/slide2.xml.rels', data: relsXml([['rId1', 'notesSlide', '../notesSlides/notesSlide1.xml']]) },
+    { name: 'ppt/notesSlides/notesSlide1.xml', data: notesXml('Mention the pelican rollback rehearsal and the Friday freeze window.') },
+    {
+      name: 'ppt/slides/slide1.xml',
+      data: slideXml([
+        slideShape(2, 'title', ['Open Risks']),
+        `<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="5" name="Table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><a:graphic><a:graphicData><a:tbl>` +
+          ['Risk|Owner', 'Journal lag|Ingrid', 'Quota exhaustion|Tomas']
+            .map(
+              (line) =>
+                `<a:tr>${line
+                  .split('|')
+                  .map((text) => `<a:tc><a:txBody><a:p><a:r><a:t>${text}</a:t></a:r></a:p></a:txBody></a:tc>`)
+                  .join('')}</a:tr>`,
+            )
+            .join('') +
+          '</a:tbl></a:graphicData></a:graphic></p:graphicFrame>',
+      ]),
+    },
+  ]);
+}
+
+const sheetCell = (ref: string, attrs: string, inner: string): string => `<c r="${ref}"${attrs}>${inner}</c>`;
+
+/** A workbook with a visible sheet (shared strings, a number, a formula with a cached value), a second visible sheet, and a hidden sheet. */
+function inventoryXlsx(): Buffer {
+  const strings = ['Item', 'Quantity', 'Total', 'Anvil', 'Crowbar', 'Reorder level', 'Warehouse', 'Rotterdam'];
+  const worksheet = (rows: string[]): string =>
+    `${XML_HEADER}<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows.join('')}</sheetData></worksheet>`;
+  const workbook =
+    `${XML_HEADER}<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="${REL_NS}"><sheets>` +
+    '<sheet name="Stock" sheetId="1" r:id="rId1"/><sheet name="Sites" sheetId="2" r:id="rId2"/><sheet name="Vault" sheetId="3" state="hidden" r:id="rId3"/></sheets></workbook>';
+  return buildZip([
+    {
+      name: '[Content_Types].xml',
+      data: `${XML_HEADER}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>`,
+    },
+    { name: 'xl/workbook.xml', data: workbook },
+    {
+      name: 'xl/_rels/workbook.xml.rels',
+      data: relsXml([
+        ['rId1', 'worksheet', 'worksheets/sheet1.xml'],
+        ['rId2', 'worksheet', 'worksheets/sheet2.xml'],
+        ['rId3', 'worksheet', 'worksheets/sheet3.xml'],
+        ['rId4', 'sharedStrings', 'sharedStrings.xml'],
+      ]),
+    },
+    {
+      name: 'xl/sharedStrings.xml',
+      data: `${XML_HEADER}<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="8" uniqueCount="8">${strings.map((s) => `<si><t>${s}</t></si>`).join('')}</sst>`,
+    },
+    {
+      name: 'xl/worksheets/sheet1.xml',
+      data: worksheet([
+        `<row r="1">${sheetCell('A1', ' t="s"', '<v>0</v>')}${sheetCell('B1', ' t="s"', '<v>1</v>')}${sheetCell('C1', ' t="s"', '<v>2</v>')}</row>`,
+        `<row r="2">${sheetCell('A2', ' t="s"', '<v>3</v>')}${sheetCell('B2', '', '<v>12</v>')}${sheetCell('C2', '', '<f>B2*40</f><v>480</v>')}</row>`,
+        `<row r="3">${sheetCell('A3', ' t="s"', '<v>4</v>')}${sheetCell('B3', '', '<v>30</v>')}${sheetCell('C3', '', '<f>SUM(B3*7)</f><v>210</v>')}</row>`,
+      ]),
+    },
+    {
+      name: 'xl/worksheets/sheet2.xml',
+      data: worksheet([
+        `<row r="1">${sheetCell('A1', ' t="s"', '<v>6</v>')}${sheetCell('B1', ' t="s"', '<v>5</v>')}</row>`,
+        `<row r="2">${sheetCell('A2', ' t="s"', '<v>7</v>')}${sheetCell('B2', '', '<v>75</v>')}</row>`,
+      ]),
+    },
+    {
+      name: 'xl/worksheets/sheet3.xml',
+      data: worksheet([
+        `<row r="1">${sheetCell('A1', ' t="inlineStr"', '<is><t>Secret</t></is>')}</row>`,
+        `<row r="2">${sheetCell('A2', ' t="inlineStr"', '<is><t>Hiddenvault-ledger</t></is>')}</row>`,
+      ]),
+    },
+  ]);
+}
+
 async function main(): Promise<void> {
   const files: Array<[string, Buffer]> = [
     ['support-handbook.pdf', handbookPdf()],
@@ -469,6 +617,8 @@ async function main(): Promise<void> {
     ['pictures-only.docx', picturesOnlyDocx()],
     ['footnoted-policy.docx', footnotedDocx()],
     ['footnoted-policy.pdf', footnotedPdf()],
+    ['platform-roadmap.pptx', roadmapPptx()],
+    ['warehouse-inventory.xlsx', inventoryXlsx()],
   ];
   for (const [name, data] of files) {
     await fs.writeFile(path.join(OUT, name), data);

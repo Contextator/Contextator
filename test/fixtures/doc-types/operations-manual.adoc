@@ -1,0 +1,37 @@
+= Operations Manual
+:author: Platform Team
+:service: marmot
+
+== Overview
+
+The {service} scheduler runs *nightly* and writes a report. See https://example.com/status[the status page].
+
+NOTE: Never restart the scheduler during the reconciliation window.
+
+== Procedures
+
+=== Rotating credentials
+
+. Generate a new token
+. Update the secret store
+. Restart the workers
+
+[source,bash]
+----
+marmot rotate --all
+----
+
+.Retention periods
+|===
+|Dataset |Retention
+
+|Audit log
+|400 days
+
+|Metrics
+|30 days
+|===
+
+// internal reviewer comment that must not appear
+
+Escalation:: Page the on-call engineer.

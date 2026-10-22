@@ -12,6 +12,11 @@ ships, that stops.
 
 ### Added
 
+- **PowerPoint, Excel, Jupyter, reStructuredText and AsciiDoc files.** A source can now index `.pptx`
+  (one section per slide, speaker notes on a `Notes:` line), `.xlsx` (one section per visible sheet,
+  cached formula values, hidden sheets skipped), `.ipynb` (markdown and code cells, no outputs), `.rst`
+  and `.adoc` (heading hierarchy kept). They are opt-in per source like the other converted types, and
+  the Office types share the `MAX_DOCX_UNPACKED_BYTES` guard with `.docx` (ADR-0115).
 - **Scheduled backups for the slim stack.** `docker-compose.backup.yml` is an optional overlay for
   `docker-compose.slim.yml` that runs `npm run backup` against the external database once at start and
   then every `BACKUP_INTERVAL_SECONDS` (default one day), keeping the newest `BACKUP_KEEP` (default 7)

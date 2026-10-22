@@ -2,7 +2,15 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { PathNotAllowedError, isInside, normalizeRelativePath, resolveProjectRoot, walkMarkdown } from '../src/services/fs-scan.js';
+import {
+  DEFAULT_EXTENSIONS,
+  PathNotAllowedError,
+  SUPPORTED_EXTENSIONS,
+  isInside,
+  normalizeRelativePath,
+  resolveProjectRoot,
+  walkMarkdown,
+} from '../src/services/fs-scan.js';
 
 describe('isInside', () => {
   it('accepts the directory itself and descendants', () => {
@@ -53,6 +61,8 @@ describe('resolveProjectRoot + walkMarkdown', () => {
     await fs.writeFile(path.join(root, 'proj', 'guides', 'install.MDX'), '# Install');
     await fs.writeFile(path.join(root, 'proj', 'guides', 'CHANGELOG.md'), '# Changes');
     await fs.writeFile(path.join(root, 'proj', 'guides', 'notes.txt'), 'not markdown');
+    await fs.writeFile(path.join(root, 'proj', 'guides', 'deck.pptx'), 'not a real deck');
+    await fs.writeFile(path.join(root, 'proj', 'guides', 'stock.xlsx'), 'not a real workbook');
     await fs.writeFile(path.join(root, 'proj', 'node_modules', 'pkg', 'README.md'), '# dep');
     await fs.writeFile(path.join(root, 'proj', '.hidden', 'secret.md'), '# hidden');
     await fs.writeFile(path.join(outside, 'leak.md'), '# leak');
@@ -79,5 +89,18 @@ describe('resolveProjectRoot + walkMarkdown', () => {
     const found: string[] = [];
     for await (const f of walkMarkdown(path.join(root, 'proj'), { ignoreGlobs: ['**/CHANGELOG.md'] })) found.push(f.relativePath);
     expect([...found].sort()).toEqual(['README.md', 'guides/install.MDX']);
+  });
+
+  it('keeps md and mdx as the defaults, so pptx and xlsx are opt-in per source (ADR-0115)', async () => {
+    expect(DEFAULT_EXTENSIONS).toEqual(['md', 'mdx']);
+    for (const ext of ['pptx', 'xlsx', 'ipynb', 'rst', 'adoc']) expect(SUPPORTED_EXTENSIONS).toContain(ext);
+
+    const found: string[] = [];
+    for await (const f of walkMarkdown(path.join(root, 'proj'), { ignoreGlobs: [], extensions: [] })) found.push(f.relativePath);
+    expect(found.some((f) => /\.(pptx|xlsx)$/.test(f))).toBe(false);
+
+    const opted: string[] = [];
+    for await (const f of walkMarkdown(path.join(root, 'proj'), { ignoreGlobs: [], extensions: ['pptx', 'xlsx'] })) opted.push(f.relativePath);
+    expect([...opted].sort()).toEqual(['guides/deck.pptx', 'guides/stock.xlsx']);
   });
 });
