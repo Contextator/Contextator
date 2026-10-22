@@ -141,14 +141,14 @@ The packages are pinned in `package.json`; after any upgrade of them this list n
 
 ### What a search produces
 
-One `tools/call` that searches yields one trace of six spans:
+One `tools/call` that searches yields one trace of up to six spans:
 
 | Span | Covers |
 |------|--------|
 | `contextator.search.query` | The whole search; the root. Attributes: `contextator.rerank`, `contextator.hits`, `contextator.below_floor`. |
 | `contextator.search.embed` | Embedding the query (a call to the embedding provider). No attributes. |
 | `contextator.search.candidates` | Retrieval: the whole of the candidate search. Attribute: `contextator.hits`. |
-| `contextator.search.rerank` | A child of `candidates`; present only when the reranker is enabled. The reranker's forward pass. Attribute: `contextator.passages`, the number of candidates it scored. |
+| `contextator.search.rerank` | A child of `candidates`; present only when the reranker is enabled and retrieval found at least one candidate to score (with none, the reranker is not called). The reranker's forward pass. Attribute: `contextator.passages`, the number of candidates it scored. |
 | `contextator.search.fusion` | The verdict on the fused result: whether it clears the score floor. Attribute: `contextator.below_floor`. |
 | `contextator.search.response` | Handing the answer off: the query log write and the metrics. |
 

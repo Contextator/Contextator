@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { Client as LegacyClient } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-import { InMemorySpanExporter, type ReadableSpan } from '@opentelemetry/sdk-trace-base';
+import type { InMemorySpanExporter, ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
 import type { ProjectRow } from '../../src/db/schema.js';
@@ -35,7 +35,14 @@ let database: TestDatabase;
 let live: LiveInstance;
 let root: string;
 let project: ProjectRow;
-const exporter = new InMemorySpanExporter();
+let exporter: InMemorySpanExporter;
+
+// `@opentelemetry/sdk-trace-base` is an optional dependency. Without it (`npm ci --omit=optional`) the
+// suite skips instead of failing on import; the hooks below bail out for the same reason.
+const otel = await import('@opentelemetry/sdk-trace-base').then(
+  (module) => module,
+  () => undefined,
+);
 
 const endpoint = () => new URL(`${live.origin}/mcp/${project.name}`);
 
@@ -74,6 +81,8 @@ const toolCall = (id: number, query: string, meta?: object) => ({
 });
 
 beforeAll(async () => {
+  if (!otel) return;
+  exporter = new otel.InMemorySpanExporter();
   database = await createTestDatabase(baseUrl, 'mcp_trace_context');
   await applySchema(database);
   root = await mkdtemp(path.join(tmpdir(), 'contextator-mcp-trace-'));
@@ -86,15 +95,16 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  if (!otel) return;
   setTracing();
   await live?.close();
   await rm(root, { recursive: true, force: true });
   await dropTestDatabase(baseUrl, database);
 });
 
-beforeEach(() => exporter.reset());
+beforeEach(() => exporter?.reset());
 
-describe('a client traceparent', () => {
+describe.skipIf(!otel)('a client traceparent', () => {
   it('joins the search on the stateless 2026-07-28 POST', async () => {
     const { header, traceId, parentId } = newTraceparent('a1');
     const res = await fetch(endpoint(), {
