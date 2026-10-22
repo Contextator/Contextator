@@ -12,6 +12,22 @@ ships, that stops.
 
 ### Added
 
+- **Source freshness metrics.** `/metrics` gains `contextator_source_last_sync_timestamp_seconds` and
+  `contextator_source_freshness_lag_seconds`, which describe the scheduled source that has gone longest
+  without a successful sync, and `contextator_sources_never_synced`. They are single, unlabeled series:
+  a `project` or `source` label would take its values from the data, which ADR-0105 rules out. Both
+  timestamp/lag series are absent until a scheduled source has synced. `docs/observability.md` has example
+  Prometheus alert rules.
+- **Grafana dashboard.** `docs/observability/grafana-dashboard.json` covers MCP traffic and latency, search
+  latency, source freshness and indexing, from series `/metrics` already renders. The Helm chart 1.3.1 README
+  shows how it goes with the ServiceMonitor.
+- **Opt-in OpenTelemetry traces.** Setting `OTEL_EXPORTER_OTLP_ENDPOINT` (and optionally
+  `OTEL_SERVICE_NAME`) exports a trace per search over OTLP/HTTP, with spans for the query, the embedding, the
+  candidates, the reranker (when one is configured), the score-floor verdict and the response, and joins
+  the caller's trace when the request carries a `traceparent` header. A failing export is logged, at most
+  once a minute. Unset, the OpenTelemetry packages are never loaded. The packages are optional
+  dependencies. The SDK also reads some `OTEL_*` variables of its own (sampler, batching, exporter
+  headers); the ones that apply are listed in `docs/observability.md`.
 - **Scheduled backups for the slim stack.** `docker-compose.backup.yml` is an optional overlay for
   `docker-compose.slim.yml` that runs `npm run backup` against the external database once at start and
   then every `BACKUP_INTERVAL_SECONDS` (default one day), keeping the newest `BACKUP_KEEP` (default 7)

@@ -528,6 +528,32 @@ Prometheus. `/metrics` answers `200` even while the
 database is down — `contextator_db_up` is the series that says so — and the operations manual
 (`OPERATIONS.md` §6.3) lists what each metric means.
 
+### Grafana dashboard
+
+`docs/observability/grafana-dashboard.json` in the code repository is a ready dashboard over what the
+ServiceMonitor scrapes: MCP traffic and latency, search latency, source freshness and indexing. Import it
+in Grafana (**Dashboards → New → Import**) and pick the Prometheus that scrapes the ServiceMonitor for
+`DS_PROMETHEUS`. Its `Job` variable lists the scrape jobs that carry Contextator's series. The chart ships
+no ConfigMap for it: the sidecar-based provisioning that would read one differs between Grafana
+installs, so importing the file is the portable route. Alert rules for source freshness are in
+`docs/observability.md`.
+
+### Traces (OpenTelemetry)
+
+Tracing is off unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and it needs no chart value of its own; the
+`env` passthrough carries it:
+
+```yaml
+env:
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability:4318
+  OTEL_SERVICE_NAME: contextator
+```
+
+The endpoint is an OTLP/HTTP collector's base URL (spans go to `/v1/traces`). The OpenTelemetry
+packages are not loaded at all while it is unset. Once it is set, the SDK also honours its own `OTEL_*`
+variables passed through `env` (for example `OTEL_TRACES_SAMPLER` or `OTEL_EXPORTER_OTLP_HEADERS`); the
+list is in `docs/observability.md`.
+
 ## Security context / running as root
 
 The container **must** start as uid 0. The image's own entrypoint checks `id -u = 0`, refuses to run
