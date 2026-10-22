@@ -237,6 +237,20 @@ export interface LastIndexRun {
   ok: boolean;
 }
 
+/**
+ * How stale the scheduled sources are, instance-wide. Unlabeled by rule: a project, a source or a
+ * path is a label value from the data, which ADR-0105 forbids, so this is the worst case across all
+ * of them and not a series per source.
+ */
+export interface SourceFreshnessSample {
+  /** Epoch seconds of the oldest successful sync among scheduled sources; null while none has synced. */
+  oldestSyncedAtSeconds: number | null;
+  /** Seconds since that sync; null while none has synced. */
+  lagSeconds: number | null;
+  /** Scheduled sources that have never completed a sync. */
+  neverSynced: number;
+}
+
 /** Everything one scrape reports, gathered by the route and rendered by the function below. */
 export interface MetricsSnapshot {
   version: string;
@@ -248,6 +262,8 @@ export interface MetricsSnapshot {
   pool: PoolGauges | null;
   queue: { interactive: number; scheduled: number; running: number };
   lastIndexRun: LastIndexRun | null;
+  /** Absent while the database is down, like the other rows that need it. */
+  sourceFreshness?: SourceFreshnessSample;
   searches: Record<QueryActor, number>;
   audit: { written: number; failed: number };
   /** MCP messages by method, tool and era. Optional so a snapshot built before it existed is still one. */
@@ -459,6 +475,29 @@ export function renderPrometheus(snapshot: MetricsSnapshot): string {
     family('contextator_last_index_run_ok', '1 if the most recent index run finished, 0 if it errored.', 'gauge', [
       ['', snapshot.lastIndexRun.ok ? 1 : 0],
     ]);
+  }
+
+  // Source freshness, one number for the instance (ADR-0105: no project or source label exists, so
+  // the worst case is the series). The two timestamp/lag gauges are stated only once some scheduled
+  // source has synced: a 0 for "no data" would read as "perfectly fresh" and silence the alert it
+  // exists to fire, while `contextator_sources_never_synced` carries the other case.
+  if (snapshot.sourceFreshness) {
+    const freshness = snapshot.sourceFreshness;
+    if (freshness.oldestSyncedAtSeconds !== null && freshness.lagSeconds !== null) {
+      family(
+        'contextator_source_last_sync_timestamp_seconds',
+        'When the scheduled source that has gone longest without a successful sync last synced, across every project.',
+        'gauge',
+        [['', freshness.oldestSyncedAtSeconds]],
+      );
+      family(
+        'contextator_source_freshness_lag_seconds',
+        'Seconds since the least recently synced scheduled source last synced successfully, across every project.',
+        'gauge',
+        [['', freshness.lagSeconds]],
+      );
+    }
+    family('contextator_sources_never_synced', 'Scheduled sources that have never completed a sync.', 'gauge', [['', freshness.neverSynced]]);
   }
 
   // Counted in the process rather than read from `search_queries`: the query log can be switched off

@@ -1154,6 +1154,20 @@ export const EnvSchema = z
      */
     METRICS_PUBLIC: z.string().default('0').transform(flag),
 
+    /**
+     * Where to send OpenTelemetry traces over OTLP/HTTP, as a base URL (`http://collector:4318`; the
+     * `/v1/traces` path is added). **Unset is the default and the off switch**: the OpenTelemetry modules
+     * are then never imported, so a server that does not trace pays nothing for the feature.
+     *
+     * It is the standard variable's name on purpose, so a collector address already exported for the
+     * host's other services works unchanged. Contextator reads it here and hands it to the exporter
+     * explicitly; the SDK's own `OTEL_EXPORTER_OTLP_*` variables are not consulted, which keeps this file
+     * the one place the environment is read.
+     */
+    OTEL_EXPORTER_OTLP_ENDPOINT: z.url({ protocol: /^https?$/, message: 'must be an http(s) URL such as http://collector:4318' }).optional(),
+    /** The `service.name` resource attribute on every exported span. Only read when tracing is on. */
+    OTEL_SERVICE_NAME: z.string().min(1).max(128).default('contextator'),
+
     // Scheduled sync (ADR-0048). The per-source interval is a column and not a setting, for the reason
     // the query log's per-project switch is one: it travels with a `pg_dump`. These two are the
     // instance's policy about sources it has not met yet, and about how hard one tick may push.

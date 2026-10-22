@@ -92,3 +92,18 @@ Changing `EMBEDDING_MODEL` (same dimension) triggers an automatic full re-index 
 `Re-index now` on each project; a different-dimension model (e.g. OpenAI's `text-embedding-3-small`)
 needs `RESET_VECTORS=1` on one restart first. Full procedure for both cases, plus upgrading across a
 default-model change: [Embedding Models](https://contextator.com/en/docs/embedding-models/#changing-the-model).
+
+## Tracing (OpenTelemetry)
+
+Tracing is off by default and switches on with one variable. Nothing else changes: with it unset the
+OpenTelemetry packages are never loaded, so a server that does not trace pays nothing for the feature.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset (off) | Base URL of an OTLP/HTTP collector, for example `http://otel-collector:4318`. Spans go to `<endpoint>/v1/traces`. Must be an `http(s)` URL. |
+| `OTEL_SERVICE_NAME` | `contextator` | The `service.name` resource attribute on every span. Only read when tracing is on. |
+
+Contextator reads these two itself and hands the address to the exporter; the SDK's other
+`OTEL_EXPORTER_OTLP_*` variables (headers, timeouts, per-signal endpoints) are not consulted. The spans, the
+trace-context propagation and the dashboard that goes with `/metrics` are described in
+[Observability](observability.md).
