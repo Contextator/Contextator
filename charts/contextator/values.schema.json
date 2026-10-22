@@ -18,6 +18,7 @@
     "env",
     "envSecret",
     "metrics",
+    "backup",
     "tests"
   ],
   "definitions": {
@@ -581,6 +582,160 @@
               "$ref": "#/definitions/openArray"
             }
           }
+        }
+      }
+    },
+    "backup": {
+      "description": "Optional scheduled backup CronJob (ADR-0110: the application itself schedules nothing). Off by default; uploads each archive to an S3-compatible bucket and keeps the newest `keep`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "schedule",
+        "timeZone",
+        "suspend",
+        "keep",
+        "backoffLimit",
+        "activeDeadlineSeconds",
+        "successfulJobsHistoryLimit",
+        "failedJobsHistoryLimit",
+        "image",
+        "stagingSizeLimit",
+        "s3",
+        "resources",
+        "podAnnotations",
+        "nodeSelector",
+        "tolerations",
+        "affinity"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "schedule": {
+          "description": "Cron expression with five fields, or an @-macro such as @daily.",
+          "type": "string",
+          "minLength": 1
+        },
+        "timeZone": {
+          "description": "IANA time zone name (Kubernetes 1.27+). Empty leaves the field out.",
+          "type": "string"
+        },
+        "suspend": {
+          "type": "boolean"
+        },
+        "keep": {
+          "description": "Archives kept in the bucket; the same meaning as BACKUP_KEEP.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "backoffLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "activeDeadlineSeconds": {
+          "description": "0 means no limit.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "successfulJobsHistoryLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failedJobsHistoryLimit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "image": {
+          "description": "The backup runs the full image (it carries pg_dump). Empty fields are derived from `image`.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository",
+            "tag"
+          ],
+          "properties": {
+            "repository": {
+              "type": "string"
+            },
+            "tag": {
+              "description": "A string, so a numeric-looking tag needs --set-string.",
+              "type": "string"
+            }
+          }
+        },
+        "stagingSizeLimit": {
+          "description": "A Kubernetes quantity such as 10Gi, or empty for no limit.",
+          "type": "string"
+        },
+        "s3": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "endpoint",
+            "bucket",
+            "prefix",
+            "region",
+            "existingSecret",
+            "accessKeyIdKey",
+            "secretAccessKeyKey",
+            "sessionTokenKey",
+            "accessKeyId",
+            "secretAccessKey"
+          ],
+          "properties": {
+            "endpoint": {
+              "description": "Empty uses AWS S3. Otherwise an http(s) URL without credentials.",
+              "type": "string",
+              "pattern": "^(https?://[^@/]+(/.*)?)?$"
+            },
+            "bucket": {
+              "description": "Required when backup.enabled is true; the template checks that and names what to set.",
+              "type": "string"
+            },
+            "prefix": {
+              "type": "string"
+            },
+            "region": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9-]*$"
+            },
+            "existingSecret": {
+              "type": "string"
+            },
+            "accessKeyIdKey": {
+              "type": "string",
+              "minLength": 1
+            },
+            "secretAccessKeyKey": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sessionTokenKey": {
+              "type": "string"
+            },
+            "accessKeyId": {
+              "type": "string"
+            },
+            "secretAccessKey": {
+              "type": "string"
+            }
+          }
+        },
+        "resources": {
+          "$ref": "#/definitions/openObject"
+        },
+        "podAnnotations": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "nodeSelector": {
+          "$ref": "#/definitions/stringMap"
+        },
+        "tolerations": {
+          "$ref": "#/definitions/openArray"
+        },
+        "affinity": {
+          "$ref": "#/definitions/openObject"
         }
       }
     },

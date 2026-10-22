@@ -315,6 +315,73 @@ metrics:
     metricRelabelings: []
 
 # -----------------------------------------------------------------------------------------------
+# Scheduled backup to S3 — optional CronJob (off by default)
+# -----------------------------------------------------------------------------------------------
+# The application schedules nothing (ADR-0110); this CronJob is the Kubernetes counterpart of the
+# compose sidecar (docker-compose.backup.yml). Each run executes `npm run backup -- --s3`: the same
+# archive `npm run backup` writes (database dump, upload trees, manifest) goes to an S3-compatible
+# bucket (AWS S3, MinIO, Ceph RGW, Cloudflare R2, ...; path-style requests) and only the newest `keep`
+# archives stay there. Restore from it with `npm run restore -- --s3 latest` (chart README, "Scheduled
+# backup to S3").
+#
+# It runs the FULL image (`contextator/contextator:<version>`), not the `-slim` one: only the full
+# image carries pg_dump. That client is PostgreSQL 16; against a PostgreSQL 17+ server set
+# `backup.image` to an image of your own that carries the matching client (chart README).
+# It needs `persistence.data.enabled` (the upload trees live there) and mounts that volume read-only.
+backup:
+  enabled: false
+  # Standard cron syntax, in the controller's time zone unless `timeZone` is set.
+  schedule: "17 3 * * *"
+  # IANA name such as Europe/Istanbul. Needs Kubernetes 1.27+; empty leaves the field out.
+  timeZone: ""
+  suspend: false
+  # Archives kept in the bucket under the prefix; older ones with a timestamped name are deleted
+  # after a successful upload. Objects with any other name are never touched.
+  keep: 7
+  backoffLimit: 1
+  # Seconds a single run may take before the Job is killed. 0 means no limit.
+  activeDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  # Empty repository uses `image.repository`; empty tag uses `image.tag` without its `-slim` suffix.
+  image:
+    repository: ""
+    tag: ""
+  # The archive is built here before it is uploaded, so size it for your database plus uploads
+  # (e.g. 10Gi). Empty means no limit beyond the node's ephemeral storage.
+  stagingSizeLimit: ""
+  s3:
+    # Empty uses AWS S3 for `region`. For MinIO and other S3-compatible stores: https://minio.example.com:9000
+    endpoint: ""
+    bucket: ""
+    # Folder inside the bucket, e.g. contextator/prod. Empty writes to the bucket root.
+    prefix: ""
+    region: us-east-1
+    # A Secret you manage (or External Secrets Operator creates) holding the access key pair. When
+    # set, `accessKeyId` and `secretAccessKey` below are ignored and the chart creates no Secret.
+    existingSecret: ""
+    accessKeyIdKey: BACKUP_S3_ACCESS_KEY_ID
+    secretAccessKeyKey: BACKUP_S3_SECRET_ACCESS_KEY
+    # Optional key in `existingSecret` holding a temporary-credentials session token.
+    sessionTokenKey: ""
+    # Only for local/dev convenience: pass them with `--set` or use `existingSecret`, and do not
+    # commit real values to a values file.
+    accessKeyId: ""
+    secretAccessKey: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  # Replaces the default. With a ReadWriteOnce data volume the default is a podAffinity to the
+  # application Pod (same node, so the volume can be mounted); with ReadWriteMany/ReadOnlyMany none.
+  affinity: {}
+
+# -----------------------------------------------------------------------------------------------
 # Helm test
 # -----------------------------------------------------------------------------------------------
 tests:

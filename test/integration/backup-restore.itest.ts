@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import fsp from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import nodePath from 'node:path';
@@ -9,10 +10,12 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { eq, sql } from 'drizzle-orm';
 import { readMigrationFiles } from 'drizzle-orm/migrator';
 import * as tar from 'tar';
+import { GenericContainer, type StartedTestContainer, Wait } from 'testcontainers';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { describeTopology, secretKeyFingerprint, type Manifest as BackupManifest, type PgTool, type PgTools } from '../../scripts/backup-archive.js';
-import { runBackup } from '../../scripts/backup.js';
+import { defaultArchiveName, runBackup } from '../../scripts/backup.js';
+import { fetchArchive, publishArchive, S3Client, signRequest } from '../../scripts/backup-s3.js';
 import { runRestore, type RestoreDeps } from '../../scripts/restore.js';
 import { loadConfig, MAX_SEARCH_LIMIT } from '../../src/config.js';
 import { MIGRATIONS_FOLDER } from '../../src/db/bootstrap.js';
@@ -826,6 +829,9 @@ async function treeContents(dir: string): Promise<Record<string, string>> {
   return out;
 }
 
+/** The question the S3 round trip is judged by; the uploaded file answers it. */
+const S3_QUERY = 'where do uploaded archives land';
+
 describe('the backup command, and the instance it is asked to bring back', () => {
   let cli: TestDatabase;
   let dataDir: string;
@@ -836,6 +842,7 @@ describe('the backup command, and the instance it is asked to bring back', () =>
   let uploadBefore: Record<string, string>;
   let backupOutput: string[];
   let backupManifest: BackupManifest;
+  let originalHits: SearchHit[];
 
   /** A fresh, empty instance at the shape a first start leaves: schema created, nothing in it. */
   async function emptyInstance(): Promise<void> {
@@ -928,6 +935,17 @@ describe('the backup command, and the instance it is asked to bring back', () =>
       archive,
     );
     backupManifest = result.manifest;
+
+    // The answers the original instance gives, taken while it still exists: the S3 round trip below is
+    // judged against these and not against some later restore of the same archive.
+    originalHits = await searchChunks(cli.db, {
+      projectId: project.id,
+      generation: project.liveGeneration,
+      queryEmbedding: stubVector(S3_QUERY),
+      queryText: S3_QUERY,
+      limit: 5,
+      selection: WHOLE_PAGE,
+    });
   }, 600_000);
 
   afterAll(async () => {
@@ -1348,6 +1366,124 @@ describe('the backup command, and the instance it is asked to bring back', () =>
       expect((rows.rows[0] as { n: number }).n).toBe(0);
       expect(await treeContents(dataDir)).toEqual({});
       expect(await fsp.stat(scratch.local).catch(() => null)).toBeNull();
+    });
+  });
+
+  describe('an S3-compatible target (MinIO), end to end', () => {
+    /**
+     * MinIO no longer publishes pullable images on Docker Hub (`minio/minio`) or Quay, so the default is the
+     * Chainguard build of upstream MinIO, whose entrypoint is `minio`. `CONTEXTATOR_TEST_MINIO_IMAGE` swaps it
+     * for any other S3-compatible server that takes `server /data` and `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`.
+     */
+    const MINIO_IMAGE = process.env.CONTEXTATOR_TEST_MINIO_IMAGE ?? 'cgr.dev/chainguard/minio:latest';
+    const BUCKET = 'contextator-backups';
+    const MINIO_USER = 'minio-access-key';
+    const MINIO_PASSWORD = 'minio-secret-key-0123456789';
+    let minio: StartedTestContainer;
+    let client: S3Client;
+    let downloads: string;
+
+    /** Creates the bucket with the same signer the command uses; MinIO starts with none. */
+    async function createBucket(target: { endpoint: string; region: string }): Promise<void> {
+      const url = new URL(`${target.endpoint}/${BUCKET}`);
+      const headers = signRequest({
+        method: 'PUT',
+        host: url.host,
+        path: url.pathname,
+        query: [],
+        payloadHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        region: target.region,
+        accessKeyId: MINIO_USER,
+        secretAccessKey: MINIO_PASSWORD,
+        date: new Date(),
+      });
+      const response = await fetch(url, { method: 'PUT', headers });
+      if (!response.ok) throw new Error(`could not create the test bucket: HTTP ${response.status} ${await response.text()}`);
+    }
+
+    beforeAll(async () => {
+      minio = await new GenericContainer(MINIO_IMAGE)
+        .withCommand(['server', '/data'])
+        .withEnvironment({ MINIO_ROOT_USER: MINIO_USER, MINIO_ROOT_PASSWORD: MINIO_PASSWORD })
+        .withExposedPorts(9000)
+        .withWaitStrategy(Wait.forHttp('/minio/health/ready', 9000))
+        .start();
+      const target = {
+        endpoint: `http://${minio.getHost()}:${minio.getMappedPort(9000)}`,
+        bucket: BUCKET,
+        prefix: 'nightly/contextator',
+        region: 'us-east-1',
+        accessKeyId: MINIO_USER,
+        secretAccessKey: MINIO_PASSWORD,
+      };
+      await createBucket(target);
+      client = new S3Client(target);
+      downloads = await fsp.mkdtemp(nodePath.join(tmpdir(), 'contextator-backup-s3-'));
+    }, 300_000);
+
+    afterAll(async () => {
+      await minio?.stop();
+      if (downloads) await fsp.rm(downloads, { recursive: true, force: true });
+    });
+
+    it('uploads, applies BACKUP_KEEP on the target, and leaves objects it did not name alone', async () => {
+      // Three older archives under the timestamped names, one the operator named by hand, then today's.
+      const older = ['2026-01-01T00-00-00Z', '2026-01-02T00-00-00Z', '2026-01-03T00-00-00Z'].map((stamp) => `contextator-backup-${stamp}.tar.gz`);
+      const staged = nodePath.join(downloads, 'upload');
+      await fsp.mkdir(staged, { recursive: true });
+      for (const name of [...older, 'hand-named.tar.gz']) {
+        await client.putObject(client.keyFor(name), await fsp.readFile(archive));
+      }
+      const fresh = nodePath.join(staged, defaultArchiveName(new Date('2026-02-01T00:00:00Z')));
+      await fsp.copyFile(archive, fresh);
+
+      const lines: string[] = [];
+      const published = await publishArchive(client, fresh, 2, (line) => lines.push(line));
+
+      expect(published.key).toBe('nightly/contextator/contextator-backup-2026-02-01T00-00-00Z.tar.gz');
+      const remaining = (await client.list(client.keyFor(''))).map((object) => object.key.slice('nightly/contextator/'.length)).sort();
+      expect(remaining).toEqual([
+        'contextator-backup-2026-01-03T00-00-00Z.tar.gz',
+        'contextator-backup-2026-02-01T00-00-00Z.tar.gz',
+        'hand-named.tar.gz',
+      ]);
+      expect(lines.join('\n')).toContain('retention: kept the newest 2, deleted 2');
+    });
+
+    it('moves a file larger than one part through the multipart path, byte for byte', async () => {
+      // 5 MiB is the smallest part S3 accepts; 12 MiB of incompressible bytes is three parts (5 + 5 + 2).
+      const original = randomBytes(12 * 1024 * 1024);
+      const source = nodePath.join(downloads, 'multipart-source.bin');
+      await fsp.writeFile(source, original);
+      const small = new S3Client(client.target, { partSize: 5 * 1024 * 1024 });
+      const key = small.keyFor('multipart-probe.bin');
+      await small.uploadFile(key, source);
+      const back = nodePath.join(downloads, 'multipart-probe.bin');
+      await small.downloadToFile(key, back);
+      expect((await fsp.readFile(back)).equals(original)).toBe(true);
+      await small.deleteObject(key);
+    });
+
+    it('restores the newest archive into an empty instance, and the same question gets the same answer', async () => {
+      expect(originalHits.length).toBeGreaterThan(0);
+      await emptyInstance();
+
+      const downloaded = await fetchArchive(client, 'latest', nodePath.join(downloads, 'restore'), () => {});
+      const report = await runRestore(restoreDeps(BACKUP_KEY), downloaded);
+      expect(report.uploadsRestored).toBe(1);
+
+      const restored = await cli.db.select().from(projects).limit(1);
+      expect(restored).toHaveLength(1);
+      const hits = await searchChunks(cli.db, {
+        projectId: restored[0].id,
+        generation: restored[0].liveGeneration,
+        queryEmbedding: stubVector(S3_QUERY),
+        queryText: S3_QUERY,
+        limit: 5,
+        selection: WHOLE_PAGE,
+      });
+      // Identical rows, identical order, identical scores: what the original instance answered.
+      expect(hits).toEqual(originalHits);
     });
   });
 });

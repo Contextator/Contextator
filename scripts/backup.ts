@@ -25,6 +25,7 @@ import {
   type PgTools,
   type Topology,
 } from './backup-archive.js';
+import { publishArchive, keepFromEnv, S3Client, s3TargetFromEnv } from './backup-s3.js';
 import { useEmbeddedDatabaseWhenNothingElseSays } from './embedded-database.js';
 import { APP_NAME, APP_VERSION } from '../src/version.js';
 
@@ -300,17 +301,21 @@ async function main(): Promise<void> {
   // database at all; everywhere else it is a no-op. See `embedded-database.ts`.
   useEmbeddedDatabaseWhenNothingElseSays();
 
-  const requested = process.argv[2];
-  if (requested === '--help' || requested === '-h') {
-    console.error('Usage: npm run backup -- [file.tar.gz]');
+  const args = parseBackupArgs(process.argv.slice(2));
+  if (args.help) {
+    console.error('Usage: npm run backup -- [file.tar.gz] [--s3]');
     console.error('  Writes the database, the upload trees and a manifest into one archive.');
     console.error('  Without a path, writes it under <DATA_DIR>/backups/, which is a volume.');
+    console.error('  --s3 uploads the archive to the S3-compatible bucket named by BACKUP_S3_* and keeps the newest');
+    console.error('  BACKUP_KEEP (default 7) archives there. Without a path the local copy is removed after the upload.');
     console.error('  SECRET_KEY is never written into it; keep it separately.');
     process.exit(2);
   }
 
   const config = loadConfig();
-  const out = archiveDestination(requested, config);
+  // Refused before the dump starts: a misspelt bucket should cost an operator seconds, not a pg_dump.
+  const s3 = args.s3 ? new S3Client(s3TargetFromEnv()) : undefined;
+  const keep = args.s3 ? keepFromEnv() : 0;
   const { db, pool } = createDb(config.DATABASE_URL);
   await fs.mkdir(config.DATA_DIR, { recursive: true });
   // The scheduled sidecar owns a separate scratch root, so it can clean up after SIGKILL
@@ -320,6 +325,9 @@ async function main(): Promise<void> {
   await fs.mkdir(stagingRoot, { recursive: true });
   const staging = await fs.mkdtemp(path.join(stagingRoot, `${STAGING}-`));
   try {
+    // To the bucket only, the archive is built beside the staging tree and goes away with it: the
+    // object store is then the one copy, and a CronJob's pod never needs a volume for it.
+    const out = s3 && !args.file ? path.join(staging, defaultArchiveName()) : archiveDestination(args.file, config);
     await runBackup(
       {
         db,
@@ -330,10 +338,36 @@ async function main(): Promise<void> {
       },
       out,
     );
+    if (s3) await publishArchive(s3, out, keep, (line) => console.log(line));
   } finally {
     await fs.rm(staging, { recursive: true, force: true });
     await pool.end();
   }
+}
+
+export interface BackupArgs {
+  help: boolean;
+  s3: boolean;
+  /** The one non-flag argument, when given. */
+  file?: string;
+}
+
+/**
+ * `--s3` may stand anywhere, because the compose sidecar's `npm run backup -- <file>` puts the path
+ * first and an operator's habit may not. Anything else that starts with a dash is refused rather than
+ * taken for a file name — `--s3` mistyped as `-s3` must not create a file called `-s3`.
+ */
+export function parseBackupArgs(argv: string[]): BackupArgs {
+  const result: BackupArgs = { help: false, s3: false };
+  for (const arg of argv) {
+    if (arg === '--help' || arg === '-h') result.help = true;
+    else if (arg === '--s3') result.s3 = true;
+    else if (arg.startsWith('-')) throw new BackupRefused('usage', `Unknown option ${arg}. Usage: npm run backup -- [file.tar.gz] [--s3]`);
+    else if (result.file !== undefined)
+      throw new BackupRefused('usage', 'Name at most one archive file. Usage: npm run backup -- [file.tar.gz] [--s3]');
+    else result.file = arg;
+  }
+  return result;
 }
 
 /** Only when this file *is* the command; importing it from a test must not back anything up. */

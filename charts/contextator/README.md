@@ -340,6 +340,69 @@ the server you restore **into**.
 | `docker cp` to or from the container | `kubectl -n "$NS" cp` to or from `contextator-backup:<path>` |
 | `docker compose restart contextator` (after a restore) | `kubectl -n "$NS" rollout restart deployment/<deployment-name>` — the application's Deployment, not the copy |
 
+## Scheduled backup to S3
+
+The application schedules nothing (ADR-0110); on Kubernetes the schedule is an optional CronJob that
+this chart renders only when `backup.enabled=true`. Each run executes `npm run backup -- --s3`: the
+archive described in the product README (database dump, upload trees, manifest) is built in a scratch
+`emptyDir`, uploaded to an S3-compatible bucket (AWS S3, MinIO, Ceph RGW, Cloudflare R2; path-style
+requests) and dropped with the Pod. Afterwards only the newest `backup.keep` archives stay under the
+prefix; objects with any other name are never touched.
+
+```sh
+helm upgrade --install ctx contextator/contextator \
+  --set-string image.tag=<version>-slim \
+  --set database.existingSecret=ctx-db \
+  --set backup.enabled=true \
+  --set backup.schedule="17 3 * * *" \
+  --set backup.keep=14 \
+  --set backup.s3.endpoint=https://minio.example.com:9000 \
+  --set backup.s3.bucket=contextator-backups \
+  --set backup.s3.prefix=prod \
+  --set backup.s3.existingSecret=ctx-backup-s3
+```
+
+- **Credentials.** `backup.s3.existingSecret` names a Secret you manage, or one the External Secrets
+  Operator creates (see "Secrets from External Secrets Operator" above); its keys default to
+  `BACKUP_S3_ACCESS_KEY_ID` and `BACKUP_S3_SECRET_ACCESS_KEY` and can be renamed with
+  `backup.s3.accessKeyIdKey` / `secretAccessKeyKey`. `backup.s3.sessionTokenKey` adds a session token
+  for temporary credentials. Without `existingSecret`, `backup.s3.accessKeyId` and
+  `backup.s3.secretAccessKey` make the chart create the Secret — use `--set` for those, never a
+  committed values file. The Job also receives `DATABASE_URL`, `SECRET_KEY`, `env` and `envSecret`
+  from the same sources as the Deployment.
+- **Image.** The Job runs the **default** image (`contextator/contextator:<version>`, your `-slim` tag
+  without the suffix), because only that image carries `pg_dump`. Override with `backup.image.repository`
+  / `backup.image.tag` for a mirrored registry. Its client is PostgreSQL 16: against a PostgreSQL 17 or
+  later server `pg_dump` refuses (`aborting because of server version mismatch`), so build an image
+  `FROM contextator/contextator:<version>` that installs `postgresql-client-<major>` and set
+  `backup.image` to it.
+- **Data volume.** The Job needs `persistence.data.enabled=true` (the chart refuses to render without
+  it: a backup without the upload trees would look complete) and mounts that PVC **read-only** as UID
+  1000, the user the compose sidecar uses. With a `ReadWriteOnce` volume it is scheduled beside the
+  application Pod through a `podAffinity`; replace that with `backup.affinity`, or use a
+  `ReadWriteMany` volume, which needs none. If the application Pod is not running, the Job waits
+  unscheduled instead of failing quietly.
+- **Staging space.** The archive is written to an `emptyDir` before the upload; `backup.stagingSizeLimit`
+  caps it, and the node's ephemeral storage must hold database plus uploads once.
+- **Failure.** A failed run keeps every archive already in the bucket and leaves the Job (and its logs)
+  for `backup.failedJobsHistoryLimit`. Alert on a failed Job, or on the newest object being older than
+  your schedule allows.
+- **`SECRET_KEY`** is never part of the archive. Keep it separately (see "`SECRET_KEY`").
+
+**Restoring from the bucket.** `npm run restore` reads the archive from the bucket with `--s3`, in the
+same throwaway copy of the Pod and with the same PostgreSQL client rules as "Taking a backup" above
+(the `BACKUP_S3_*` variables must be set in that shell):
+
+```sh
+kubectl -n "$NS" exec contextator-backup -- sh -c \
+  "PATH=/usr/lib/postgresql/$PG_MAJOR/bin:\$PATH npm run restore -- --s3 latest --check"
+kubectl -n "$NS" exec contextator-backup -- sh -c \
+  "PATH=/usr/lib/postgresql/$PG_MAJOR/bin:\$PATH npm run restore -- --s3 latest"
+```
+
+`latest` is the newest timestamped archive under the prefix; a file name restores that one. The product
+README's order still applies (check first, restore, then restart the application).
+
 ## Rotating `SECRET_KEY`
 
 The app holds two keys during a rotation (decision record ADR-0075): `SECRET_KEY` is the key every
@@ -596,7 +659,7 @@ same database.
 See `values.yaml` itself — every setting is documented inline there, which is the chart's actual
 contract. The sections above explain the *why* behind the values that are not self-explanatory
 (`database.*`, `secretKey.*`, `resources.*`, `probes.*`, `securityContext`,
-`metrics.serviceMonitor.*`); everything else
+`metrics.serviceMonitor.*`, `backup.*`); everything else
 (`service`, `ingress`, `env`, `envSecret`, `extraVolumes`, …) follows ordinary Helm chart conventions.
 
 ## Strict values schema

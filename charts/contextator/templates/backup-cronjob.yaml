@@ -1,0 +1,225 @@
+{{- if .Values.backup.enabled }}
+{{- include "contextator.requireDatabase" . -}}
+{{- /*
+  Optional scheduled backup to an S3-compatible bucket (ADR-0110: the application schedules nothing,
+  so the schedule lives here, in the cluster, outside the server process).
+
+  The archive is the one `npm run backup` writes (database dump + upload trees + manifest); only its
+  destination differs (`--s3`). It is NOT written to the data volume: it is built in a scratch
+  emptyDir, uploaded, and dropped with the Pod.
+*/ -}}
+{{- if not .Values.persistence.data.enabled }}
+{{- fail "contextator: backup.enabled needs persistence.data.enabled=true — the upload trees live on the data volume, and a backup without them would look complete and restore without any uploaded file. See charts/contextator/README.md, \"Scheduled backup to S3\"." }}
+{{- end }}
+{{- $s3 := .Values.backup.s3 }}
+{{- $bucket := required "contextator: backup.s3.bucket must be set when backup.enabled is true. See charts/contextator/README.md, \"Scheduled backup to S3\"." $s3.bucket }}
+{{- if and (not $s3.existingSecret) (or (not $s3.accessKeyId) (not $s3.secretAccessKey)) }}
+{{- fail "contextator: set backup.s3.existingSecret (a Secret holding the access key pair, e.g. one External Secrets Operator creates) or both backup.s3.accessKeyId and backup.s3.secretAccessKey. See charts/contextator/README.md, \"Scheduled backup to S3\"." }}
+{{- end }}
+{{- /*
+  The scheduled backup runs the FULL image, not the `-slim` one the Deployment uses: only the full
+  image carries pg_dump (ADR-0110, same reason the compose sidecar uses it). Its tag is the slim tag
+  without the suffix, as the chart README's manual backup procedure already describes.
+*/ -}}
+{{- $slimTag := required "contextator: image.tag must be set (the backup image tag is derived from it). See charts/contextator/README.md." .Values.image.tag }}
+{{- $backupRepository := .Values.backup.image.repository | default .Values.image.repository }}
+{{- $backupTag := .Values.backup.image.tag | default (trimSuffix "-slim" $slimTag) }}
+{{- $s3SecretName := $s3.existingSecret | default (printf "%s-backup-s3" (include "contextator.fullname" .)) }}
+{{- $accessKeyIdKey := ternary ($s3.accessKeyIdKey | default "BACKUP_S3_ACCESS_KEY_ID") "BACKUP_S3_ACCESS_KEY_ID" (ne $s3.existingSecret "") }}
+{{- $secretAccessKeyKey := ternary ($s3.secretAccessKeyKey | default "BACKUP_S3_SECRET_ACCESS_KEY") "BACKUP_S3_SECRET_ACCESS_KEY" (ne $s3.existingSecret "") }}
+{{- $dataAccessModes := .Values.persistence.data.accessModes }}
+{{- $shareable := or (has "ReadWriteMany" $dataAccessModes) (has "ReadOnlyMany" $dataAccessModes) }}
+{{- if not $s3.existingSecret }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $s3SecretName }}
+  labels:
+    {{- include "contextator.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  BACKUP_S3_ACCESS_KEY_ID: {{ $s3.accessKeyId | quote }}
+  BACKUP_S3_SECRET_ACCESS_KEY: {{ $s3.secretAccessKey | quote }}
+---
+{{- end }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "contextator.fullname" . }}-backup
+  labels:
+    {{- include "contextator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  {{- with .Values.backup.timeZone }}
+  timeZone: {{ . | quote }}
+  {{- end }}
+  suspend: {{ .Values.backup.suspend }}
+  # Forbid, not Replace: two archives of the same instance racing each other would both run
+  # retention against the same bucket.
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.backup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.backup.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.backup.backoffLimit }}
+      {{- with .Values.backup.activeDeadlineSeconds }}
+      activeDeadlineSeconds: {{ . }}
+      {{- end }}
+      template:
+        metadata:
+          labels:
+            # Deliberately NOT contextator.selectorLabels: the Service selects on those, and this
+            # Pod must never receive traffic.
+            app.kubernetes.io/name: {{ include "contextator.name" . }}-backup
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/component: backup
+          {{- with .Values.backup.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "contextator.serviceAccountName" . }}
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            # The same user the compose sidecar runs as (ADR-0110); the data volume is mounted
+            # read-only, so no fsGroup is needed.
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          containers:
+            - name: backup
+              image: "{{ $backupRepository }}:{{ $backupTag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              # Replaces the image entrypoint, which would start the embedded PostgreSQL and the
+              # server. `--s3` sends the archive to the bucket and applies BACKUP_KEEP there.
+              command:
+                - npm
+                - run
+                - backup
+                - --
+                - --s3
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "contextator.databaseSecretName" . }}
+                      key: {{ include "contextator.databaseSecretKey" . }}
+                - name: SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "contextator.secretKeySecretName" . }}
+                      key: {{ include "contextator.secretKeySecretKey" . }}
+                - name: HOME
+                  value: /tmp
+                - name: DATA_DIR
+                  value: /data
+                - name: BACKUP_STAGING_DIR
+                  value: /staging
+                - name: CONTEXTATOR_EMBEDDED_POSTGRES
+                  value: "0"
+                - name: BACKUP_KEEP
+                  value: {{ .Values.backup.keep | quote }}
+                - name: BACKUP_S3_BUCKET
+                  value: {{ $bucket | quote }}
+                {{- with $s3.endpoint }}
+                - name: BACKUP_S3_ENDPOINT
+                  value: {{ . | quote }}
+                {{- end }}
+                {{- with $s3.prefix }}
+                - name: BACKUP_S3_PREFIX
+                  value: {{ . | quote }}
+                {{- end }}
+                {{- with $s3.region }}
+                - name: BACKUP_S3_REGION
+                  value: {{ . | quote }}
+                {{- end }}
+                - name: BACKUP_S3_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $s3SecretName }}
+                      key: {{ $accessKeyIdKey }}
+                - name: BACKUP_S3_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $s3SecretName }}
+                      key: {{ $secretAccessKeyKey }}
+                {{- if and $s3.existingSecret $s3.sessionTokenKey }}
+                - name: BACKUP_S3_SESSION_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $s3SecretName }}
+                      key: {{ $s3.sessionTokenKey }}
+                {{- end }}
+                {{- /*
+                  The same `env` / `envSecret` the Deployment gets: the backup loads the application's
+                  configuration (SECRET_KEY_PREVIOUS during a rotation, for one), and a setting the
+                  Pod has but this Job lacks would make the two disagree.
+                */}}
+                {{- range $key, $value := .Values.env }}
+                - name: {{ $key }}
+                  value: {{ $value | quote }}
+                {{- end }}
+                {{- range $key, $ref := .Values.envSecret }}
+                - name: {{ $key }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $ref.secretName }}
+                      key: {{ $ref.secretKey }}
+                {{- end }}
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                  readOnly: true
+                - name: staging
+                  mountPath: /staging
+                - name: tmp
+                  mountPath: /tmp
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: {{ .Values.persistence.data.existingClaim | default (printf "%s-data" (include "contextator.fullname" .)) }}
+                readOnly: true
+            - name: staging
+              {{- if .Values.backup.stagingSizeLimit }}
+              emptyDir:
+                sizeLimit: {{ .Values.backup.stagingSizeLimit | quote }}
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+            - name: tmp
+              emptyDir: {}
+          {{- with .Values.backup.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.backup.affinity }}
+          affinity:
+            {{- toYaml .Values.backup.affinity | nindent 12 }}
+          {{- else if not $shareable }}
+          # A ReadWriteOnce volume can be mounted by Pods on one node only: land beside the
+          # application Pod that already holds it. Overridable with backup.affinity.
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      {{- include "contextator.selectorLabels" . | nindent 22 }}
+          {{- end }}
+          {{- with .Values.backup.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}
