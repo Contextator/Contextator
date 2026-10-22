@@ -19,7 +19,7 @@ import { BackupRefused } from './backup-archive.js';
  * **No SDK, deliberately.** The five operations an archive needs — PutObject, multipart upload,
  * ListObjectsV2, DeleteObject, GetObject — are plain HTTP with an AWS Signature V4 header, and `fetch`
  * and `node:crypto` are already in the runtime. The AWS SDK v3 is hundreds of transitive packages in an
- * image whose dependency list is audited line by line (ADR-0091's reasoning for the web driver); a
+ * image whose dependency list is audited line by line (ADR-0120; ADR-0070's reasoning for the web driver); a
  * ~300-line signer is the smaller thing to own. It is **path-style only** (`https://host/bucket/key`),
  * which is what MinIO, Ceph and every self-hosted gateway speak and what AWS still accepts.
  *
