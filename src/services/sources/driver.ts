@@ -36,6 +36,32 @@ export interface SyncResult {
   note?: string;
 }
 
+/** One scanned file, as the indexer hands it to `documentMeta`. */
+export interface DocumentMetaFile {
+  /** Relative to `docRoot()`, `/`-separated, without the source-name prefix. */
+  path: string;
+  absolutePath: string;
+  /** The file's modification time, taken by the scan that found it. */
+  mtimeMs: number;
+}
+
+/**
+ * Where a document lives at its origin and when the origin last changed it
+ * ([ADR-0116](../../../.ssot/ADR.md#adr-0116)). Either half may be unknown, and unknown is `null` — never a
+ * guess and never the time of the sync.
+ */
+export interface DocumentMeta {
+  url: string | null;
+  modifiedAt: Date | null;
+  /**
+   * `true` when the values describe the moment the document was **observed** rather than a property the
+   * origin keeps for it (git: a shallow clone has one commit, so the date is the head's, not the file's).
+   * The indexer then stamps them when a document is new or its content changed and leaves a stored value
+   * alone otherwise, so an unrelated commit does not make every document in the repository look edited today.
+   */
+  stampOnChange?: boolean;
+}
+
 /**
  * One implementation per source type. `sync` brings the materialised copy up to date (no-op for local
  * and upload sources); `docRoot` is the directory the indexer scans afterwards.
@@ -64,6 +90,15 @@ export interface SourceDriver {
    *    one way on the way in and another on the way out drifts on the first edge case.
    */
   probe?(): Promise<string | null>;
+  /**
+   * The origin address and last-modified date of the scanned files, keyed by `DocumentMetaFile.path`
+   * ([ADR-0116](../../../.ssot/ADR.md#adr-0116)). Called once per run after `sync()` and the scan.
+   *
+   * It reads what `sync()` left on disk and **never calls the remote** — a run must not cost another request
+   * per page for a link. A file missing from the map has neither value. The indexer treats a throw as "no
+   * metadata this run", so a driver may let an unexpected error escape; it never fails the run.
+   */
+  documentMeta?(files: readonly DocumentMetaFile[]): Promise<Map<string, DocumentMeta>>;
 }
 
 type DriverFactory = (source: DocumentSourceRow, ctx: DriverContext) => SourceDriver;

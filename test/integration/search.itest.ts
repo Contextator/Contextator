@@ -80,6 +80,9 @@ interface Excerpt {
   title: string;
   headingPath: string;
   content: string;
+  /** Provenance ([ADR-0116](../../.ssot/ADR.md#adr-0116)); absent for a document with no origin to name. */
+  sourceUrl?: string | null;
+  sourceModifiedAt?: Date | null;
 }
 
 const HANDBOOK: Excerpt[] = [
@@ -103,6 +106,17 @@ const HANDBOOK: Excerpt[] = [
   },
 ];
 
+/** A date inside the stale window and one far outside it ([ADR-0116](../../.ssot/ADR.md#adr-0116)). */
+const FRESH = new Date(Date.now() - 10 * 86_400_000);
+const OLD = new Date(Date.now() - 800 * 86_400_000);
+
+/** The same handbook, with provenance on two of its three documents. */
+const SOURCED_HANDBOOK: Excerpt[] = [
+  { ...HANDBOOK[0], sourceUrl: 'https://wiki.example.com/webhooks', sourceModifiedAt: FRESH },
+  { ...HANDBOOK[1], sourceUrl: 'https://wiki.example.com/uploads', sourceModifiedAt: OLD },
+  HANDBOOK[2],
+];
+
 /** The query is the one the first excerpt answers, and shares no word with the other two. */
 const QUERY = 'rotate the webhook secret';
 
@@ -111,6 +125,7 @@ let app: FastifyInstance;
 let indexedId: string;
 let barrenId: string;
 let staleId: string;
+let provenanceId: string;
 const cookies: Record<string, string> = {};
 
 async function buildApi(db: Db): Promise<FastifyInstance> {
@@ -139,6 +154,7 @@ async function buildApi(db: Db): Promise<FastifyInstance> {
       SEARCH_NEIGHBOR_CONTEXT: 1,
       SEARCH_MAX_RESULT_CHARS: 12_000,
       SEARCH_SCORE_FLOOR: 0.82,
+      SOURCE_STALE_AFTER_DAYS: 365,
       SECRET_KEY: undefined,
       UPLOAD_MAX_FILE_BYTES: 1024,
       UPLOAD_MAX_FILES_PER_REQUEST: 1,
@@ -196,6 +212,8 @@ async function seedProject(name: string, excerpts: Excerpt[], embeddingModel: st
           content: null,
           contentTruncated: false,
           version: '',
+          sourceUrl: excerpt.sourceUrl ?? null,
+          sourceModifiedAt: excerpt.sourceModifiedAt ?? null,
         },
         [chunk],
       );
@@ -226,6 +244,7 @@ beforeAll(async () => {
   indexedId = await seedProject('handbook', HANDBOOK, MODEL_ID);
   barrenId = await seedProject('barren', [], null);
   staleId = await seedProject('stale', HANDBOOK, 'local:a-model-this-server-no-longer-runs:fp32');
+  provenanceId = await seedProject('provenance', SOURCED_HANDBOOK, MODEL_ID);
 
   await signIn('owner', 'root');
   const readerId = await signIn('reader', 'member');
@@ -233,6 +252,7 @@ beforeAll(async () => {
   await setMemberRole(database.db, indexedId, readerId, 'viewer', null);
   await setMemberRole(database.db, staleId, readerId, 'viewer', null);
   await setMemberRole(database.db, barrenId, readerId, 'viewer', null);
+  await setMemberRole(database.db, provenanceId, readerId, 'viewer', null);
 });
 
 afterAll(async () => {
@@ -287,8 +307,32 @@ describe('a viewer searching a project they are a member of', () => {
         content: hit.content,
         contextBefore: hit.contextBefore,
         contextAfter: hit.contextAfter,
+        // The three ADR-0116 added: the stored link, the stored date as an ISO string, and the flag the
+        // configured threshold turns the date into.
+        sourceUrl: hit.sourceUrl,
+        sourceModifiedAt: hit.sourceModifiedAt?.toISOString() ?? null,
+        stale: hit.sourceModifiedAt !== null && Date.now() - hit.sourceModifiedAt.getTime() > 365 * 86_400_000,
       })),
     );
+  });
+
+  it('carries the origin link, its date and the stale flag of the document each excerpt came from', async () => {
+    const res = await search('reader', provenanceId, `q=${encodeURIComponent(QUERY)}`);
+    expect(res.statusCode).toBe(200);
+
+    const byPath = new Map<string, Record<string, unknown>>(res.json().hits.map((h: Record<string, unknown>) => [h.path as string, h]));
+    expect(byPath.get('handbook/webhooks.md')).toMatchObject({
+      sourceUrl: 'https://wiki.example.com/webhooks',
+      sourceModifiedAt: FRESH.toISOString(),
+      stale: false,
+    });
+    expect(byPath.get('handbook/uploads.md')).toMatchObject({
+      sourceUrl: 'https://wiki.example.com/uploads',
+      sourceModifiedAt: OLD.toISOString(),
+      stale: true,
+    });
+    // A document with no origin to name answers null twice and is never "stale": there is no date to age.
+    expect(byPath.get('handbook/notion.md')).toMatchObject({ sourceUrl: null, sourceModifiedAt: null, stale: false });
   });
 
   it('honours the limit rather than always returning five', async () => {

@@ -6,7 +6,7 @@ import { createMcpHandler } from '@modelcontextprotocol/server';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
 
-import { projects, type ProjectRow } from '../../src/db/schema.js';
+import { documents, projects, type ProjectRow } from '../../src/db/schema.js';
 import { documentUri } from '../../src/mcp/resources.js';
 import { createProjectMcpServer, MAX_CACHE_TTL_MS } from '../../src/mcp/server-factory.js';
 import { createMcpToken } from '../../src/services/auth/mcp-tokens.js';
@@ -46,6 +46,10 @@ Install the package from the registry before anything else. The container listen
 
 Set DISPATCH_WORKERS to the number of cores the host can spare for delivery.
 `;
+
+/** The origin the guide came from and when it last changed there — old enough to be past the 365-day default. */
+const GUIDE_SOURCE_URL = 'https://wiki.example.com/delivery-guide';
+const GUIDE_MODIFIED_AT = new Date('2020-03-04T10:00:00.000Z');
 
 const ENVELOPE = {
   'io.modelcontextprotocol/protocolVersion': MODERN_VERSION,
@@ -176,6 +180,10 @@ beforeAll(async () => {
   await applySchema(database);
   root = await mkdtemp(path.join(tmpdir(), 'contextator-mcp-response-shape-'));
   handbook = await seedProject(database.db, 'response-shape', { path: 'handbook/guide.md', body: HANDBOOK });
+  await database.db
+    .update(documents)
+    .set({ sourceUrl: GUIDE_SOURCE_URL, sourceModifiedAt: GUIDE_MODIFIED_AT })
+    .where(eq(documents.projectId, handbook.id));
   live = await startMcpInstance(database, { dataDir: path.join(root, '.data'), docRoot: root });
   flagged = await startMcpInstance(database, { dataDir: path.join(root, '.data-flagged'), docRoot: root, env: { MCP_STRUCTURED_OUTPUT: '1' } });
 }, 180_000);
@@ -349,6 +357,68 @@ describe('structured output (0.3-05)', () => {
     const [onList, onCall] = await legacy(flagged, LEGACY_SURFACE().slice(0, 2));
     for (const tool of toolsOf(onList)) expect(tool.outputSchema).toBeDefined();
     expect(onCall.result?.structuredContent).toBeTypeOf('object');
+  });
+});
+
+describe('where a document came from (0.4-01, 0.4-02)', () => {
+  const textOf = (reply: JsonRpcReply): string =>
+    ((reply.result?.content ?? []) as Array<{ type: string; text?: string }>).find((c) => c.type === 'text')?.text ?? '';
+
+  it('puts the link, the date and the stale flag on a search result, in the text and in the structured object', async () => {
+    const call = await modern('tools/call', { name: 'search_docs', arguments: { query: 'DISPATCH_WORKERS cores', limit: 3 } });
+    const structured = call.result?.structuredContent as { results: Array<Record<string, unknown>> };
+    expect(structured.results[0]).toMatchObject({
+      file: 'handbook/guide.md',
+      sourceUrl: GUIDE_SOURCE_URL,
+      sourceModifiedAt: GUIDE_MODIFIED_AT.toISOString(),
+      stale: true,
+    });
+    // The frozen heading is untouched; the provenance is a line of its own under it.
+    expect(textOf(call)).toMatch(
+      /### 1\. handbook\/guide\.md.*\(score \d\.\d{3}\)\nSource: https:\/\/wiki\.example\.com\/delivery-guide · modified 2020-03-04 \(unchanged for over 365 days\)/,
+    );
+  });
+
+  it('puts them on read_document too, after the frozen File and Title lines', async () => {
+    const call = await modern('tools/call', { name: 'read_document', arguments: { path: 'handbook/guide.md' } });
+    expect(call.result?.structuredContent).toMatchObject({
+      sourceUrl: GUIDE_SOURCE_URL,
+      sourceModifiedAt: GUIDE_MODIFIED_AT.toISOString(),
+      stale: true,
+    });
+    const lines = textOf(call).split('\n');
+    expect(lines[0]).toBe('File: handbook/guide.md');
+    expect(lines[1]).toMatch(/^Title: /);
+    expect(lines[2]).toBe(`Source: ${GUIDE_SOURCE_URL}`);
+    expect(lines[3]).toBe('Modified: 2020-03-04 (unchanged for over 365 days)');
+  });
+
+  it('declares the three fields in the output schema of both tools', async () => {
+    const tools = toolsOf(await modern('tools/list')) as Array<{ name: string; outputSchema?: { properties?: Record<string, unknown> } }>;
+    const search = tools.find((t) => t.name === 'search_docs')?.outputSchema?.properties as {
+      results: { items: { properties: Record<string, unknown> } };
+    };
+    for (const field of ['sourceUrl', 'sourceModifiedAt', 'stale']) {
+      expect(search.results.items.properties, field).toHaveProperty(field);
+      expect(tools.find((t) => t.name === 'read_document')?.outputSchema?.properties, field).toHaveProperty(field);
+    }
+  });
+
+  it('reaches a 2025 client in the text, and in the structured object when the flag is on', async () => {
+    const [offCall] = await legacy(live, [
+      { method: 'tools/call', params: { name: 'search_docs', arguments: { query: 'DISPATCH_WORKERS cores', limit: 3 } } },
+    ]);
+    expect(textOf(offCall)).toContain(`Source: ${GUIDE_SOURCE_URL}`);
+    expect(offCall.result).not.toHaveProperty('structuredContent');
+
+    const [onCall] = await legacy(flagged, [
+      { method: 'tools/call', params: { name: 'search_docs', arguments: { query: 'DISPATCH_WORKERS cores', limit: 3 } } },
+    ]);
+    const onStructured = onCall.result?.structuredContent as { results: Array<Record<string, unknown>> };
+    expect(onStructured.results[0]).toMatchObject({
+      sourceUrl: GUIDE_SOURCE_URL,
+      stale: true,
+    });
   });
 });
 

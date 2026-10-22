@@ -7,7 +7,8 @@ import { decryptSecret, keyringOf, SecretKeyMissingError } from '../crypto.js';
 import { sourceCurrentDir } from '../data-dir.js';
 import { ValidationError } from '../projects.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig, type NotionConfig } from '../sources.js';
-import { registerDriver, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
+import { registerDriver, type DocumentMeta, type DocumentMetaFile, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
+import { frontmatterMeta } from './frontmatter-meta.js';
 import { frontmatter, pageFileStem, pageTitle, renderBlocks, type NotionBlock } from './notion-render.js';
 
 /**
@@ -69,6 +70,11 @@ export class NotionDriver implements SourceDriver {
     const dir = sourceCurrentDir(this.ctx.config.DATA_DIR, this.source.projectId, this.source.id);
     await fs.mkdir(dir, { recursive: true });
     return dir;
+  }
+
+  /** The page URL and `last_edited_time` the sync wrote into each file's front matter ([ADR-0116](../../../.ssot/ADR.md#adr-0116)). */
+  documentMeta(files: readonly DocumentMetaFile[]): Promise<Map<string, DocumentMeta>> {
+    return frontmatterMeta(files, 'url', 'last_edited_time');
   }
 
   async test(): Promise<string> {

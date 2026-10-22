@@ -2,7 +2,8 @@ import type { DocumentSourceRow } from '../../db/schema.js';
 import { resolveProjectRoot } from '../fs-scan.js';
 import { allowedExtensionsFor, type Flavor } from '../flavors.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig } from '../sources.js';
-import type { DriverContext, SourceDriver, SyncResult } from './driver.js';
+import { parseSourceDate } from '../source-url.js';
+import type { DocumentMeta, DocumentMetaFile, DriverContext, SourceDriver, SyncResult } from './driver.js';
 import { directoryRevision } from './revision.js';
 
 /** A directory mounted into the server (must live inside ALLOWED_DOC_ROOTS). Nothing to sync. */
@@ -37,6 +38,17 @@ export class LocalDriver implements SourceDriver {
       // ([ADR-0057](../../../.ssot/ADR.md#adr-0057)).
       allowedExtensions: allowedExtensionsFor(this.source.flavor as Flavor),
     });
+  }
+
+  /**
+   * No address — the directory is mounted into the server, and a path on this host is no link a reader of
+   * the answer can open — and the file's own `mtime`, which the scan already took
+   * ([ADR-0116](../../../.ssot/ADR.md#adr-0116)).
+   */
+  async documentMeta(files: readonly DocumentMetaFile[]): Promise<Map<string, DocumentMeta>> {
+    const out = new Map<string, DocumentMeta>();
+    for (const f of files) out.set(f.path, { url: null, modifiedAt: parseSourceDate(f.mtimeMs) });
+    return out;
   }
 
   async test(): Promise<string> {

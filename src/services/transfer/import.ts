@@ -13,6 +13,7 @@ import { assertImportDiskSpace, type DiskSpace } from '../disk-space.js';
 import { removeProjectDir, sourceCurrentDir } from '../data-dir.js';
 import { allowedExtensionsFor, FLAVORS, type Flavor } from '../flavors.js';
 import { createProject } from '../projects.js';
+import { normalizeSourceUrl, parseSourceDate } from '../source-url.js';
 import { SOURCE_TYPES, type SourceType, parseSourceConfig, sourceVersion } from '../sources.js';
 import { textSearchConfigFor } from '../text-search.js';
 import { recountProject, replaceDocument } from '../vector-store.js';
@@ -89,6 +90,10 @@ const ImportedDocument = z.object({
   sizeBytes: z.number().int().min(0),
   content: z.string().nullable(),
   contentTruncated: z.boolean(),
+  // Optional because a tarball exported before 0.4 does not carry them (ADR-0116); both are re-validated
+  // below, since a tarball is input from another installation and not trusted to hold a safe link.
+  sourceUrl: z.string().max(4096).nullable().optional(),
+  sourceModifiedAt: z.string().max(64).nullable().optional(),
   indexedAt: z.string(),
   chunks: z.array(ImportedChunk),
 });
@@ -545,6 +550,8 @@ async function writeDocuments(
         content: doc.content,
         contentTruncated: doc.contentTruncated,
         version,
+        sourceUrl: normalizeSourceUrl(doc.sourceUrl),
+        sourceModifiedAt: doc.sourceModifiedAt ? parseSourceDate(doc.sourceModifiedAt) : null,
       },
       doc.chunks.map((c) => ({
         chunkIndex: c.chunkIndex,

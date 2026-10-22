@@ -50,3 +50,44 @@ export function sanitizeGitUrl(url: string): string {
     return url;
   }
 }
+
+/**
+ * The address of one file **at one commit** on the hosting service, or `null` when the host is not one
+ * whose layout is known ([ADR-0116](../../../.ssot/ADR.md#adr-0116)). A commit-sha permalink rather than a
+ * branch link: it points at the content that was indexed even after the branch moves or the file is
+ * renamed. An unrecognised (`generic`) host gets no link rather than a guessed one.
+ *
+ * The remote goes through `sanitizeGitUrl` first, and the result is rebuilt from origin and path alone, so
+ * credentials, query strings and fragments in the configured URL cannot reach the link (ADR-0075).
+ */
+export function blobUrl(remote: string, provider: GitProvider, sha: string, filePath: string): string | null {
+  if (!/^[0-9a-f]{7,64}$/i.test(sha)) return null;
+  let u: URL;
+  try {
+    u = new URL(sanitizeGitUrl(remote));
+  } catch {
+    return null;
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  const repo = u.pathname.replace(/\/+$/, '').replace(/\.git$/i, '');
+  if (repo === '' || repo === '/') return null;
+  const file = filePath
+    .split('/')
+    .filter((s) => s !== '')
+    .map(encodeURIComponent)
+    .join('/');
+  if (file === '') return null;
+  const base = `${u.protocol}//${u.host}${repo}`;
+  switch (provider) {
+    case 'github':
+      return `${base}/blob/${sha}/${file}`;
+    case 'gitlab':
+      return `${base}/-/blob/${sha}/${file}`;
+    case 'bitbucket':
+      return `${base}/src/${sha}/${file}`;
+    case 'gitea':
+      return `${base}/src/commit/${sha}/${file}`;
+    default:
+      return null;
+  }
+}

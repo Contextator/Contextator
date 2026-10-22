@@ -412,6 +412,24 @@ export const documents = pgTable(
      * second relation between pgvector and the predicate the two candidate lists depend on.
      */
     version: text('version').notNull().default(''),
+    /**
+     * Where the document lives at its origin ([ADR-0116](../../.ssot/ADR.md#adr-0116)) — a git commit
+     * permalink, a Notion or Confluence page, the final URL a web page was fetched from. NULL for a
+     * local or uploaded file (a path on the server's disk is not an address anybody else can open) and
+     * for every document written before this column existed, which fill on their next run.
+     *
+     * Only `http:`/`https:` is ever stored and never with credentials: a driver hands its candidate to
+     * `normalizeSourceUrl` (`services/source-url.ts`) and the result is all that reaches this column.
+     */
+    sourceUrl: text('source_url'),
+    /**
+     * When the origin last changed the document, as far as its driver can tell ([ADR-0116](../../.ssot/ADR.md#adr-0116)):
+     * Notion `last_edited_time`, Confluence `version.when`, the web `Last-Modified` header, a local
+     * file's mtime, the first-observed HEAD committer date for git. NULL when the origin says nothing —
+     * a web page without `Last-Modified`, an upload — and the product never substitutes `indexed_at`
+     * for it, because "indexed on" and "edited on" are different claims.
+     */
+    sourceModifiedAt: timestamp('source_modified_at', { withTimezone: true }),
     indexedAt: timestamp('indexed_at', { withTimezone: true }).notNull().defaultNow(),
     /**
      * The generation this row belongs to. Equal to the project's `live_generation` for everything a

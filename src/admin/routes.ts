@@ -16,6 +16,7 @@ import { latestIndexRun, listIndexRuns } from '../services/index-runs.js';
 import { type MetricsSnapshot, renderPrometheus } from '../services/metrics.js';
 import { PasswordPolicyError } from '../services/passwords.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
+import { sourceFieldsOf } from '../services/source-url.js';
 import { listProjectsForUser, membershipMap } from '../services/auth/memberships.js';
 import {
   ConflictError,
@@ -458,6 +459,10 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
         // rather than as a paragraph with no edges. `null` when there is none or the setting is 0.
         contextBefore: hit.contextBefore,
         contextAfter: hit.contextAfter,
+        // Where the document came from and when it last changed there (ADR-0116); additive, null for a
+        // local directory or an upload. `stale` is the server's own threshold applied, so a client need
+        // not know `SOURCE_STALE_AFTER_DAYS`.
+        ...sourceFieldsOf(hit, config.SOURCE_STALE_AFTER_DAYS),
       })),
     };
   });

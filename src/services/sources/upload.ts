@@ -3,7 +3,7 @@ import type { DocumentSourceRow } from '../../db/schema.js';
 import { sourceCurrentDir } from '../data-dir.js';
 import { allowedExtensionsFor, type Flavor } from '../flavors.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig } from '../sources.js';
-import type { DriverContext, SourceDriver, SyncResult } from './driver.js';
+import type { DocumentMeta, DocumentMetaFile, DriverContext, SourceDriver, SyncResult } from './driver.js';
 import { directoryRevision } from './revision.js';
 
 /** Files uploaded through the dashboard live under `<DATA_DIR>/projects/<p>/sources/<s>/current/`. */
@@ -23,6 +23,15 @@ export class UploadDriver implements SourceDriver {
     const dir = sourceCurrentDir(this.ctx.config.DATA_DIR, this.source.projectId, this.source.id);
     await fs.mkdir(dir, { recursive: true });
     return dir;
+  }
+
+  /**
+   * Neither an address nor a date ([ADR-0116](../../../.ssot/ADR.md#adr-0116)): a file's mtime here is the moment the
+   * upload was swapped in ([ADR-0016](../../../.ssot/ADR.md#adr-0016)), not when its author last changed it, so it would say
+   * "edited today" about a document that may be years old.
+   */
+  async documentMeta(files: readonly DocumentMetaFile[]): Promise<Map<string, DocumentMeta>> {
+    return new Map(files.map((f) => [f.path, { url: null, modifiedAt: null }]));
   }
 
   /**

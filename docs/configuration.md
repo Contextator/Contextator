@@ -92,3 +92,15 @@ Changing `EMBEDDING_MODEL` (same dimension) triggers an automatic full re-index 
 `Re-index now` on each project; a different-dimension model (e.g. OpenAI's `text-embedding-3-small`)
 needs `RESET_VECTORS=1` on one restart first. Full procedure for both cases, plus upgrading across a
 default-model change: [Embedding Models](https://contextator.com/en/docs/embedding-models/#changing-the-model).
+
+## Source links and the "unchanged for a long time" mark
+
+Search and `read_document` answers carry the link to the original document (`sourceUrl`) and the date it last
+changed there (`sourceModifiedAt`) when the source knows them: a git source links to the file at the indexed
+commit, Notion and Confluence to the page, a web source to the final URL after redirects. A local directory has a
+modification time but no link, and an upload has neither. Credentials in a git remote are never stored or shown.
+
+`SOURCE_STALE_AFTER_DAYS` (default `365`, `0` turns it off) sets how old `sourceModifiedAt` must be before an
+answer marks the passage as unchanged for a long time (`stale: true`). It is a hint to the reader, never a filter.
+
+Documents indexed before this feature have neither value until their source runs again.
