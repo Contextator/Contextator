@@ -33,8 +33,13 @@ Things worth knowing before you pick a threshold:
 - The timestamp moves only when a sync **succeeds**. A source whose last attempts failed keeps getting
   older, which is the signal.
 - A scheduled source whose content has not changed is probed and skipped, not re-synced, for up to
-  `SYNC_MAX_SKIP_HOURS` (24 by default, `0` switches this off). A healthy source can therefore read about
-  `SYNC_MAX_SKIP_HOURS` plus its own interval. Set the threshold above that.
+  `SYNC_MAX_SKIP_HOURS` (24 by default). A healthy source can therefore read about `SYNC_MAX_SKIP_HOURS`
+  plus its own interval. Set the threshold above that.
+- **`SYNC_MAX_SKIP_HOURS=0` does not mean "never skip".** It removes the upper bound: an unchanged source
+  is then probed and skipped indefinitely and its last-sync time never moves, so the lag grows without
+  limit and the stale-source alert below fires for a healthy instance. If you run with `0`, do not alert
+  on `contextator_source_freshness_lag_seconds`; keep `contextator_sources_never_synced` and the sync
+  failures in the dashboard instead.
 - The two timestamp/lag series are absent until some scheduled source has synced once. An absent series is
   not "fresh"; `contextator_sources_never_synced` covers that case, and `absent()` can cover a restart.
 
@@ -94,25 +99,67 @@ env:
 ```
 
 The packages are optional dependencies. If they are missing from an install (for example a build made with
-`npm install --omit=optional`) or the collector cannot be set up, the server logs one warning at startup and
+`npm install --omit=optional`) or the exporter cannot be set up, the server logs one warning at startup and
 carries on without tracing.
+
+Startup does not contact the collector, so `tracing enabled` in the log does not prove spans arrive. When
+an export fails (collector down, rejected, timed out) the server logs `tracing: exporting spans failed`
+with the collector's origin, the error class and its code, at most once a minute, and drops that batch.
+The error message is deliberately left out of the line.
+
+### Variables the OpenTelemetry SDK reads itself
+
+Contextator's own rule is that the environment is read in one place, `src/config.ts`, and it reads only
+`OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` there. The OpenTelemetry packages, however, read some
+`OTEL_*` variables from the process environment on their own, and Contextator does not stop them. This was
+checked against the pinned versions (`@opentelemetry/sdk-trace-base` and `core` 2.11.0,
+`otlp-exporter-base` 0.222.0; paths are under `node_modules/@opentelemetry/`). If the host exports any of
+these for other services, they apply here too, silently.
+
+| Variable | Effect | Where it is read |
+|----------|--------|------------------|
+| `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | Extra HTTP headers on every export (the usual place for a collector's API key). | `otlp-exporter-base/build/src/configuration/otlp-node-http-env-configuration.js:16-17` |
+| `OTEL_EXPORTER_OTLP_TIMEOUT`, `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` | Export timeout in milliseconds; an invalid value is ignored without a message. | `otlp-exporter-base/build/src/configuration/shared-env-configuration.js:10-24` |
+| `OTEL_EXPORTER_OTLP_COMPRESSION`, `OTEL_EXPORTER_OTLP_TRACES_COMPRESSION` | `gzip` or `none`. | `shared-env-configuration.js:25-37` |
+| `OTEL_EXPORTER_OTLP_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE`, `OTEL_EXPORTER_OTLP_CLIENT_KEY` (and `_TRACES_` forms) | Files read at startup for TLS to an `https` collector. | `otlp-node-http-env-configuration.js:76-100` |
+| `OTEL_BSP_SCHEDULE_DELAY`, `OTEL_BSP_MAX_QUEUE_SIZE`, `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`, `OTEL_BSP_EXPORT_TIMEOUT` | Batching of exported spans. | `sdk-trace-base/build/src/BatchSpanProcessor-shim.js:19-32` |
+| `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | Which traces are recorded. **`always_off` or a low ratio silently records nothing or little**, even though the endpoint is set. | `sdk-trace-base/build/src/config.js:31,51-91` (an invalid value is replaced by the default, again without a message) |
+| `OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT`, `OTEL_ATTRIBUTE_COUNT_LIMIT`, `OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT`, `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` (and the event and link count limits) | Span size limits. | `sdk-trace-base/build/src/config.js:33-43`, `utility.js:16-37` |
+
+Variables that look relevant and are **not** applied:
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` are read by the exporter too
+  (`otlp-node-http-env-configuration.js:63,70`), but the URL Contextator passes explicitly takes
+  precedence (`otlp-http-configuration.js:50`). The address Contextator reads is the one used.
+- `OTEL_RESOURCE_ATTRIBUTES` and the SDK's handling of `OTEL_SERVICE_NAME`: the resource is built from fixed
+  attributes and no resource detector runs. `OTEL_SERVICE_NAME` is honoured only because `config.ts`
+  reads it.
+- `OTEL_SDK_DISABLED` (nothing in the pinned packages reads it) and `OTEL_PROPAGATORS` (the W3C
+  propagator is constructed directly).
+
+The packages are pinned in `package.json`; after any upgrade of them this list needs re-checking.
 
 ### What a search produces
 
-One `tools/call` that searches yields one trace of four spans:
+One `tools/call` that searches yields one trace of six spans:
 
 | Span | Covers |
 |------|--------|
 | `contextator.search.query` | The whole search; the root. Attributes: `contextator.rerank`, `contextator.hits`, `contextator.below_floor`. |
-| `contextator.search.candidates` | Retrieval: the dense and lexical candidate lists. Attribute: `contextator.hits`. |
+| `contextator.search.embed` | Embedding the query (a call to the embedding provider). No attributes. |
+| `contextator.search.candidates` | Retrieval: the whole of the candidate search. Attribute: `contextator.hits`. |
+| `contextator.search.rerank` | A child of `candidates`; present only when the reranker is enabled. The reranker's forward pass. Attribute: `contextator.passages`, the number of candidates it scored. |
 | `contextator.search.fusion` | The verdict on the fused result: whether it clears the score floor. Attribute: `contextator.below_floor`. |
 | `contextator.search.response` | Handing the answer off: the query log write and the metrics. |
 
-Be aware that candidates and fusion are **one SQL statement** (ADR-0041: both candidate lists and the
-reciprocal-rank fusion run inside PostgreSQL, with the reranker, when enabled, called from inside it).
-There is no point between them at which Node could start and end a span, so `candidates` times that whole
-statement and `fusion` times the score-floor decision that follows it. To see how the time splits between
-embedding, retrieval and reranking, use the `contextator_search_duration_seconds{phase}` histogram.
+Be aware of two things about where the lines fall. The dense and lexical candidate lists and the
+reciprocal-rank fusion are **one SQL statement** (ADR-0041), so there is no point inside it at which Node
+could start a span: `candidates` times the whole retrieval, and `fusion` is named for the stage of the
+search it closes, but what it times is the score-floor decision that comes after the fusion. The
+reranker is not in that statement either. With it enabled, retrieval is two round trips with the
+reranker's forward pass in Node between them, and the `rerank` span covers that pass, so `candidates`
+minus `rerank` is the database time. The `contextator_search_duration_seconds{phase}` histogram gives the
+same split in aggregate.
 
 Span names and attribute names are fixed. Nothing from the query text, the project, a document or a token
 is put on a span, and a failed span records only the error's class name (`error.type`), never its message.

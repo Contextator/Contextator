@@ -223,8 +223,11 @@ async function runSearch(
 
   // `embedQuery`, never `embedPassages`: on an asymmetric model these are different encodings of the
   // same string, and the wrong one here costs recall without failing (ADR-0038).
+  //
+  // The span covers the model call alone, with no attribute: the query text is the one thing about this
+  // call worth knowing and the one thing a span must not carry (ADR-0119, ADR-0105).
   const embedTimer = startTimer();
-  const vector = await embeddings.embedQuery(input.query);
+  const vector = await tracing().span('contextator.search.embed', undefined, () => embeddings.embedQuery(input.query));
   const embedSeconds = embedTimer();
   // The live generation off the row that was just re-read, passed as a value (ADR-0039). A rebuild
   // may be filling `liveGeneration + 1` at this very moment; this query cannot see it, and the moment
@@ -256,7 +259,14 @@ async function runSearch(
         ? async (query, passages) => {
             const rerankTimer = startTimer();
             try {
-              return await rerank.score(query, passages);
+              // Started from inside `searchChunks`, which runs inside the `candidates` span, so the
+              // context it inherits makes this one its child: the rerank is a Node-side forward pass
+              // between the candidate statement and the page fetch, not part of the SQL (ADR-0041).
+              // The attribute is a count; the passages themselves are document text.
+              return await tracing().span('contextator.search.rerank', undefined, async (rerankSpan) => {
+                rerankSpan.setAttribute('contextator.passages', passages.length);
+                return rerank.score(query, passages);
+              });
             } finally {
               rerankSeconds = (rerankSeconds ?? 0) + rerankTimer();
             }
@@ -270,6 +280,9 @@ async function runSearch(
   // The project's own floor wins over the instance's, and only while the instance's floor is on:
   // `scoreFloor` unset or `0` is "off" for every project, so a column cannot turn on a refusal the
   // operator switched off. `project` is the row re-read at the top, so the override costs no query.
+  //
+  // Named `fusion` after the stage of the search it closes (ADR-0119); fusion itself is inside the
+  // candidate statement (ADR-0041), so what this span times is the score-floor verdict that follows it.
   const { effectiveFloor, scoreFloorOverridden, belowFloor } = await tracing().span('contextator.search.fusion', undefined, async (span) => {
     const floor = effectiveScoreFloor(scoreFloor, project.scoreFloor);
     const below = belowRelevanceFloor(input.query, hits, floor);

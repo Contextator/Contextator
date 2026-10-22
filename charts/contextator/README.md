@@ -550,7 +550,9 @@ env:
 ```
 
 The endpoint is an OTLP/HTTP collector's base URL (spans go to `/v1/traces`). The OpenTelemetry
-packages are not loaded at all while it is unset.
+packages are not loaded at all while it is unset. Once it is set, the SDK also honours its own `OTEL_*`
+variables passed through `env` (for example `OTEL_TRACES_SAMPLER` or `OTEL_EXPORTER_OTLP_HEADERS`); the
+list is in `docs/observability.md`.
 
 ## Security context / running as root
 

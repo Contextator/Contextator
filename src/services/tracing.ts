@@ -103,6 +103,8 @@ export interface TracingOptions {
   version: string;
   /** Replaces the OTLP exporter; the tracing test hands an in-memory one so nothing leaves the process. */
   spanExporter?: unknown;
+  /** Called with the error of an export that failed; `initTracing` supplies a rate-limited log line. */
+  onExportError?: (err: unknown) => void;
 }
 
 /**
@@ -122,7 +124,7 @@ export async function initTracing(
   }
   try {
     const { createOtelBackend } = await import('./tracing-otel.js');
-    const next = createTracing(createOtelBackend(options));
+    const next = createTracing(createOtelBackend({ ...options, onExportError: options.onExportError ?? exportFailureLogger(options.endpoint, log) }));
     setTracing(next);
     log.info({ endpoint: new URL(options.endpoint).origin, service: options.serviceName }, 'tracing enabled');
     return next;
@@ -134,4 +136,31 @@ export async function initTracing(
     setTracing();
     return NOOP_TRACING;
   }
+}
+
+/** Milliseconds between two "export failed" lines: a collector that is down fails every batch, and one line a minute says so. */
+const EXPORT_WARNING_INTERVAL_MS = 60_000;
+
+/**
+ * The log line for a failed export. It names the collector's origin (never the path or credentials in
+ * the URL) and the error's class and code only: the message of an HTTP failure can echo the collector's
+ * response body, and nothing here is worth leaking to find out why a batch was dropped.
+ */
+function exportFailureLogger(endpoint: string, log: { warn(o: object, m: string): void }, now: () => number = Date.now): (err: unknown) => void {
+  const origin = new URL(endpoint).origin;
+  let lastLoggedAt = Number.NEGATIVE_INFINITY;
+  return (err) => {
+    const at = now();
+    if (at - lastLoggedAt < EXPORT_WARNING_INTERVAL_MS) return;
+    lastLoggedAt = at;
+    const code = (err as { code?: unknown } | null | undefined)?.code;
+    log.warn(
+      {
+        endpoint: origin,
+        error: err instanceof Error ? err.name : 'unknown',
+        code: typeof code === 'string' || typeof code === 'number' ? code : undefined,
+      },
+      'tracing: exporting spans failed; spans in the failed batch are dropped (reported at most once a minute)',
+    );
+  };
 }

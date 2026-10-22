@@ -1161,8 +1161,14 @@ export const EnvSchema = z
      *
      * It is the standard variable's name on purpose, so a collector address already exported for the
      * host's other services works unchanged. Contextator reads it here and hands it to the exporter
-     * explicitly; the SDK's own `OTEL_EXPORTER_OTLP_*` variables are not consulted, which keeps this file
-     * the one place the environment is read.
+     * explicitly, and that explicit URL wins over the SDK's own reading of the same variable.
+     *
+     * **This is not the only place the environment is read** (ADR-0119): the pinned OpenTelemetry
+     * packages read some `OTEL_*` variables themselves — the exporter's headers, timeout, compression and
+     * TLS files, the batch processor's `OTEL_BSP_*`, and the sampler and span limits — and nothing here
+     * stops them. A host-wide `OTEL_TRACES_SAMPLER=always_off` therefore applies silently. Which variables,
+     * and the file and line in the SDK each is read at, are listed in `docs/observability.md`; recheck
+     * that list when the packages are upgraded.
      */
     OTEL_EXPORTER_OTLP_ENDPOINT: z.url({ protocol: /^https?$/, message: 'must be an http(s) URL such as http://collector:4318' }).optional(),
     /** The `service.name` resource attribute on every exported span. Only read when tracing is on. */

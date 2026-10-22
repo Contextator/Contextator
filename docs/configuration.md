@@ -103,7 +103,10 @@ OpenTelemetry packages are never loaded, so a server that does not trace pays no
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset (off) | Base URL of an OTLP/HTTP collector, for example `http://otel-collector:4318`. Spans go to `<endpoint>/v1/traces`. Must be an `http(s)` URL. |
 | `OTEL_SERVICE_NAME` | `contextator` | The `service.name` resource attribute on every span. Only read when tracing is on. |
 
-Contextator reads these two itself and hands the address to the exporter; the SDK's other
-`OTEL_EXPORTER_OTLP_*` variables (headers, timeouts, per-signal endpoints) are not consulted. The spans, the
-trace-context propagation and the dashboard that goes with `/metrics` are described in
-[Observability](observability.md).
+Contextator reads these two itself and hands the address to the exporter. The OpenTelemetry SDK also reads
+some `OTEL_*` variables from the environment on its own, which Contextator does not stop (headers, timeout,
+compression and TLS files for the exporter, batching, sampler and span limits): this is the one exception
+to "the environment is read only in `config.ts`", and a host-wide `OTEL_TRACES_SAMPLER=always_off` would
+silently record nothing. The list, checked against the pinned versions, is in
+[Observability](observability.md#variables-the-opentelemetry-sdk-reads-itself), which also describes the
+spans, the trace-context propagation and the dashboard that goes with `/metrics`.
