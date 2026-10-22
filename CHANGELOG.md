@@ -19,7 +19,7 @@ ships, that stops.
   timestamp/lag series are absent until a scheduled source has synced. `docs/observability.md` has example
   Prometheus alert rules.
 - **Grafana dashboard.** `docs/observability/grafana-dashboard.json` covers MCP traffic and latency, search
-  latency, source freshness and indexing, from series `/metrics` already renders. The Helm chart README
+  latency, source freshness and indexing, from series `/metrics` already renders. The Helm chart 1.3.1 README
   shows how it goes with the ServiceMonitor.
 - **Opt-in OpenTelemetry traces.** Setting `OTEL_EXPORTER_OTLP_ENDPOINT` (and optionally
   `OTEL_SERVICE_NAME`) exports a trace per search over OTLP/HTTP, with spans for the query, the embedding, the
