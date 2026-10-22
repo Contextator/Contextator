@@ -277,6 +277,8 @@ affinity: {}
 env: {}
 #   EMBEDDING_DTYPE: fp16
 #   RATE_LIMIT_MAX: "600"
+#   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability:4318   # opt-in traces; unset = off
+#   OTEL_SERVICE_NAME: contextator
 
 # Values that must not be plaintext in this file: each key becomes an env var sourced via
 # `secretKeyRef` from the entry's `secretName` / `secretKey` (see the example below) — the Secret

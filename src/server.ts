@@ -31,6 +31,7 @@ import { listProjects } from './services/projects.js';
 import { AuditWriter, sweepAuditLog } from './services/audit.js';
 import { QueryLog, sweepQueryLog } from './services/query-log.js';
 import { startSyncScheduler } from './services/scheduler.js';
+import { initTracing } from './services/tracing.js';
 import { floorModelWarning } from './services/relevance.js';
 import { countUsers } from './services/auth/users.js';
 import { sweepExpiredMcpCredentials } from './services/auth/mcp-tokens.js';
@@ -58,6 +59,13 @@ async function main(): Promise<void> {
   // one that actually happens is diagnosed from traffic rather than from settings. Installed before the
   // route plugins so the hook sees every request.
   warnAboutProxyConfiguration(app, config, (message) => log.warn(message));
+
+  // Before anything that could be traced. A no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set, in which case
+  // this is also the only point the OpenTelemetry modules are loaded.
+  const tracer = await initTracing(
+    { endpoint: config.OTEL_EXPORTER_OTLP_ENDPOINT, serviceName: config.OTEL_SERVICE_NAME, version: APP_VERSION },
+    log,
+  );
 
   const { db, pool } = createDb(config.DATABASE_URL, log);
   const embeddings = createEmbeddingProvider(config, log);
@@ -139,6 +147,8 @@ async function main(): Promise<void> {
     // after its response has gone, so a signal arriving in that gap would lose the record of the last
     // thing anybody did. `settled()` never rejects — a failed write has already been logged.
     await audit.settled();
+    // After the last request has finished, so the spans of the final searches are flushed rather than dropped.
+    await tracer.shutdown().catch((err: unknown) => log.warn({ err }, 'tracing did not flush on shutdown'));
     await pool.end();
   });
 
