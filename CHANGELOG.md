@@ -16,7 +16,7 @@ ships, that stops.
   archive to a bucket (AWS S3, MinIO, Ceph, R2; path-style, SigV4 signed with `node:crypto`, multipart
   for large archives, no new dependency) configured by `BACKUP_S3_*`, and applies `BACKUP_KEEP` to the
   timestamped archives under the prefix. `npm run restore -- --s3 <name|latest>` restores from the
-  bucket. The Helm chart gains an optional `backup.*` CronJob (off by default; credentials from an
+  bucket. Helm chart 1.4.0 gains an optional `backup.*` CronJob (off by default; credentials from an
   existing Secret, such as one created by the External Secrets Operator). The local-disk backup and the
   manifest format are unchanged (ADR-0120, which extends ADR-0110).
 - **Scheduled backups for the slim stack.** `docker-compose.backup.yml` is an optional overlay for

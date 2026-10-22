@@ -321,8 +321,8 @@ metrics:
 # compose sidecar (docker-compose.backup.yml). Each run executes `npm run backup -- --s3`: the same
 # archive `npm run backup` writes (database dump, upload trees, manifest) goes to an S3-compatible
 # bucket (AWS S3, MinIO, Ceph RGW, Cloudflare R2, ...; path-style requests) and only the newest `keep`
-# archives stay there. Restore from it with `npm run restore -- --s3 latest` (chart README, "Scheduled
-# backup to S3").
+# archives stay there. The restore procedure lives in the product README, "Data and persistence"
+# (ADR-0073).
 #
 # It runs the FULL image (`contextator/contextator:<version>`), not the `-slim` one: only the full
 # image carries pg_dump. That client is PostgreSQL 16; against a PostgreSQL 17+ server set
