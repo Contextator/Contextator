@@ -208,6 +208,7 @@ describe('a git source whose remote carries a token', () => {
   let head: string;
   const logLines: string[] = [];
   let indexer: Indexer;
+  let indexJob: JobState;
 
   beforeAll(async () => {
     database = await createTestDatabase(baseUrl, 'source_url_git');
@@ -252,6 +253,10 @@ describe('a git source whose remote carries a token', () => {
       log: capturingLogger(logLines),
       locks: new KeyedMutex(),
     });
+
+    // Indexed once here, so each test below can run on its own.
+    indexJob = await settle(database.db, indexer.enqueue(projectId));
+    indexer.forget(projectId);
   });
 
   let mcp: LiveInstance | undefined;
@@ -264,9 +269,7 @@ describe('a git source whose remote carries a token', () => {
   });
 
   it('links the commit, dates it, and shows no credential in the table, the answer or the log', async () => {
-    const job = await settle(database.db, indexer.enqueue(projectId));
-    indexer.forget(projectId);
-    expect(job.phase).toBe('done');
+    expect(indexJob.phase).toBe('done');
 
     const [row] = await database.db
       .select()
@@ -295,7 +298,7 @@ describe('a git source whose remote carries a token', () => {
   });
 
   it('hands the link out through search_docs and read_document, in the text and the structured result, without the credential', async () => {
-    // The previous test indexed the project; the handlers below are the production ones, on a real port.
+    // The handlers below are the production ones, on a real port.
     mcp = await startMcpInstance(database, { dataDir, docRoot: dataDir });
     const { token } = await createMcpToken(database.db, projectId, 'source url', null);
     const envelope = {
