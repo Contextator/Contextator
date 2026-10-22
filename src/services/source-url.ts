@@ -122,9 +122,11 @@ export interface StoredSourceMeta {
  *   the stored values stand, because a transient failure must not erase a link.
  * - A driver that answered is believed, `null` included: a page whose `Last-Modified` header went away has
  *   no date any more, and keeping the old one would be claiming something the origin no longer says.
- * - The exception is a driver that marks its values `stampOnChange` (git): they describe the moment of
- *   observation, so for a document whose text did not change the stored values are kept and only a column
- *   that is still `null` is filled. That is what stops one commit from dating every file in the repository.
+ * - The exception is a driver that marks its date `stampOnChange` (git): it describes the moment of
+ *   observation, so for a document whose text did not change the stored date is kept and is filled only
+ *   while it is still `null`. That is what stops one commit from dating every file in the repository. The
+ *   address is not kept; it is recomputed and replaced every run. `previous` is the stored row of the same
+ *   text: on a rebuild the caller finds it in the generation being replaced.
  *
  * Only an http(s) address survives, whatever a driver returned — a second line of defence behind the
  * driver's own sanitising.
@@ -139,7 +141,9 @@ export function resolveStoredMeta(
   const url = normalizeSourceUrl(meta.url);
   const modifiedAt = meta.modifiedAt && Number.isFinite(meta.modifiedAt.getTime()) ? meta.modifiedAt : null;
   if (meta.stampOnChange && !contentChanged && previous) {
-    return { sourceUrl: kept.sourceUrl ?? url, sourceModifiedAt: kept.sourceModifiedAt ?? modifiedAt };
+    // Only the date is a moment of observation. The address is derived from the remote and the sha every
+    // run, so a corrected remote or provider reaches documents whose text did not change.
+    return { sourceUrl: url, sourceModifiedAt: kept.sourceModifiedAt ?? modifiedAt };
   }
   return { sourceUrl: url, sourceModifiedAt: modifiedAt };
 }

@@ -15,11 +15,13 @@ ships, that stops.
 - **Every answer says where the document came from.** `search_docs`, `read_document` and the HTTP search API
   now carry `sourceUrl` (git: a commit-sha permalink with any credential stripped; Notion and Confluence: the
   page; web: the final URL after redirects; `null` for local directories and uploads) and `sourceModifiedAt`
-  (git commit date, Notion `last_edited_time`, Confluence version time, web `Last-Modified`, local file
-  `mtime`), plus a `stale` flag. The text answers gain a `Source:` line under the frozen first line of each
+  (git: the HEAD committer date of the run in which the indexer first saw the current text of the file, kept
+  while that text is unchanged and across rebuilds; Notion `last_edited_time`, Confluence version time, web
+  `Last-Modified`, local file `mtime`), plus a `stale` flag. The text answers gain a `Source:` line under the frozen first line of each
   hit and after `Title:` in `read_document`; the structured output schemas gain the three fields. Only `http(s)`
   links are stored. `SOURCE_STALE_AFTER_DAYS` (default `365`, `0` = off) sets when a document unchanged at its
-  origin is marked stale. Migration `0021` adds `documents.source_url` and `documents.source_modified_at`, and
+  origin is marked stale. A git link is built only for GitHub, GitLab, Gitea/Forgejo and Bitbucket Cloud
+  (a self-hosted Bitbucket gets none rather than a wrong one). Migration `0021` adds `documents.source_url` and `documents.source_modified_at`, and
   project export and import carry them (ADR-0116).
 
   **Upgrade note:** existing documents start with both columns empty. They are filled in on each source's next

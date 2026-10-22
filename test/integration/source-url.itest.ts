@@ -11,6 +11,7 @@ import { WEB_LIMIT_DEFAULTS } from '../../src/config.js';
 import type { Logger } from '../../src/context.js';
 import type { Db } from '../../src/db/client.js';
 import { documentSources, documents, projects } from '../../src/db/schema.js';
+import { createMcpToken } from '../../src/services/auth/mcp-tokens.js';
 import { sourceRepoDir } from '../../src/services/data-dir.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
 import { Indexer, type JobState } from '../../src/services/indexer.js';
@@ -20,6 +21,7 @@ import { sourceFieldsOf } from '../../src/services/source-url.js';
 import { registerDriver } from '../../src/services/sources/driver.js';
 import { GitDriver } from '../../src/services/sources/git.js';
 import { searchChunks } from '../../src/services/vector-store.js';
+import { startMcpInstance, type LiveInstance } from './support/mcp-instance.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 
 /**
@@ -252,7 +254,10 @@ describe('a git source whose remote carries a token', () => {
     });
   });
 
+  let mcp: LiveInstance | undefined;
+
   afterAll(async () => {
+    await mcp?.close();
     registerDriver('git', (row, ctx) => new GitDriver(row, ctx));
     await rm(dataDir, { recursive: true, force: true });
     await dropTestDatabase(baseUrl, database);
@@ -287,5 +292,183 @@ describe('a git source whose remote carries a token', () => {
       expect(text).not.toContain('alice:ghp_s3cretT0ken@');
       expect(text).not.toContain('ghp_s3cretT0ken');
     }
+  });
+
+  it('hands the link out through search_docs and read_document, in the text and the structured result, without the credential', async () => {
+    // The previous test indexed the project; the handlers below are the production ones, on a real port.
+    mcp = await startMcpInstance(database, { dataDir, docRoot: dataDir });
+    const { token } = await createMcpToken(database.db, projectId, 'source url', null);
+    const envelope = {
+      'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+      'io.modelcontextprotocol/clientCapabilities': {},
+      'io.modelcontextprotocol/clientInfo': { name: 'source-url-itest', version: '0.0.0' },
+    };
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const res = await fetch(`${(mcp as LiveInstance).origin}/mcp/source-url-git`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          'mcp-protocol-version': '2026-07-28',
+          'mcp-method': 'tools/call',
+          'mcp-name': name,
+          authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args, _meta: envelope } }),
+      });
+      expect(res.status).toBe(200);
+      const raw = await res.text();
+      const payload = res.headers.get('content-type')?.includes('text/event-stream')
+        ? (raw
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).trim())
+            .pop() as string)
+        : raw;
+      type Reply = { result?: { content?: Array<{ type: string; text?: string }>; structuredContent?: Record<string, unknown> } };
+      return { raw: payload, reply: JSON.parse(payload) as Reply };
+    };
+
+    const link = `https://github.com/org/repo/blob/${head}/guide.md`;
+    const search = await call('search_docs', { query: QUERY, limit: 3 });
+    const results = (search.reply.result?.structuredContent?.results ?? []) as Array<Record<string, unknown>>;
+    expect(results[0]).toMatchObject({ file: 'wiki/guide.md', sourceUrl: link });
+    const searchText = search.reply.result?.content?.find((c) => c.type === 'text')?.text ?? '';
+    expect(searchText).toContain(`Source: ${link}`);
+
+    const read = await call('read_document', { path: 'wiki/guide.md' });
+    expect(read.reply.result?.structuredContent).toMatchObject({ sourceUrl: link });
+    const readText = read.reply.result?.content?.find((c) => c.type === 'text')?.text ?? '';
+    expect(readText).toContain(`Source: ${link}`);
+
+    // The whole wire payload of both answers, not only the fields looked at above.
+    for (const text of [search.raw, read.raw]) {
+      expect(text).not.toContain('alice:ghp_s3cretT0ken@');
+      expect(text).not.toContain('ghp_s3cretT0ken');
+    }
+  });
+});
+
+describe('a git source whose history moves, and an index that is rebuilt', () => {
+  const T1 = 1_700_000_000;
+  const T2 = 1_710_000_000;
+  const T3 = 1_720_000_000;
+  const REMOTE = 'https://github.com/org/history.git';
+  let database: TestDatabase;
+  let dataDir: string;
+  let repoDir: string;
+  let projectId: string;
+  const logLines: string[] = [];
+  let indexer: Indexer;
+
+  class OfflineGit extends GitDriver {
+    override async sync() {
+      return { note: 'offline' };
+    }
+  }
+
+  async function commit(files: Record<string, string>, at: number, message: string): Promise<string> {
+    for (const [name, text] of Object.entries(files)) {
+      await fs.writeFile(path.join(repoDir, name), text);
+      await git.add({ fs, dir: repoDir, filepath: name });
+    }
+    const author = { name: 'A', email: 'a@example.com', timestamp: at - 100, timezoneOffset: 0 };
+    return git.commit({ fs, dir: repoDir, message, author, committer: { ...author, timestamp: at } });
+  }
+
+  const run = async (target: Indexer = indexer, opts: { force?: boolean } = {}) => {
+    const job = await settle(database.db, target.enqueue(projectId, opts));
+    target.forget(projectId);
+    expect(job.phase).toBe('done');
+  };
+
+  const dates = async () => {
+    const rows = await database.db.select().from(documents).where(eq(documents.projectId, projectId));
+    expect(rows).toHaveLength(2);
+    return Object.fromEntries(rows.map((r) => [r.relativePath, r.sourceModifiedAt?.toISOString()]));
+  };
+  const iso = (seconds: number) => new Date(seconds * 1000).toISOString();
+  const generationOf = async () => (await getProjectById(database.db, projectId))?.liveGeneration;
+  const lastFinishLine = () => [...logLines].reverse().find((l) => l.includes('indexing finished')) ?? '';
+
+  beforeAll(async () => {
+    database = await createTestDatabase(baseUrl, 'source_url_history');
+    await applySchema(database, DIMS);
+    dataDir = await mkdtemp(path.join(tmpdir(), 'source-url-history-'));
+
+    const [project] = await database.db.insert(projects).values({ name: 'source-url-history' }).returning({ id: projects.id });
+    projectId = project.id;
+    const [source] = await database.db
+      .insert(documentSources)
+      .values({
+        projectId,
+        type: 'git',
+        name: 'wiki',
+        config: { url: REMOTE, branch: 'main', subdir: '', username: '', provider: 'auto', extensions: ['md'] },
+      })
+      .returning({ id: documentSources.id });
+
+    repoDir = sourceRepoDir(dataDir, projectId, source.id);
+    await fs.mkdir(repoDir, { recursive: true });
+    await git.init({ fs, dir: repoDir, defaultBranch: 'main' });
+    registerDriver('git', (row, ctx) => new OfflineGit(row, ctx));
+
+    indexer = new Indexer({
+      db: database.db,
+      embeddings,
+      config: { ...indexerConfig, ALLOWED_DOC_ROOTS: [dataDir], DATA_DIR: dataDir },
+      log: capturingLogger(logLines),
+      locks: new KeyedMutex(),
+    });
+  });
+
+  afterAll(async () => {
+    registerDriver('git', (row, ctx) => new GitDriver(row, ctx));
+    await rm(dataDir, { recursive: true, force: true });
+    await dropTestDatabase(baseUrl, database);
+  });
+
+  it('dates both files with the first commit the indexer saw', async () => {
+    await commit({ 'guide.md': body('guide'), 'other.md': body('other') }, T1, 'init');
+    await run();
+    expect(await dates()).toEqual({ 'wiki/guide.md': iso(T1), 'wiki/other.md': iso(T1) });
+    // The run says how many documents it filled in, and how many it could not.
+    expect(lastFinishLine()).toMatch(/"metaFilled":2/);
+    expect(lastFinishLine()).toMatch(/"metaMissing":0/);
+  });
+
+  it('keeps the old date on the file a later commit left alone, and stamps the one it changed', async () => {
+    await commit({ 'other.md': `${body('other')}\nAn extra paragraph that changes the text.\n` }, T2, 'edit other');
+    await run();
+    expect(await dates()).toEqual({ 'wiki/guide.md': iso(T1), 'wiki/other.md': iso(T2) });
+  });
+
+  it('keeps every date through a forced rebuild', async () => {
+    const before = await generationOf();
+    await run(indexer, { force: true });
+    // A rebuild writes a new generation, so a wrong answer here would be the date of HEAD for both.
+    expect(await generationOf()).toBe((before ?? 0) + 1);
+    expect(await dates()).toEqual({ 'wiki/guide.md': iso(T1), 'wiki/other.md': iso(T2) });
+  });
+
+  it('keeps every date through a rebuild caused by a changed embedding model', async () => {
+    const before = await generationOf();
+    const swapped: EmbeddingProvider = { ...embeddings, id: 'local:stub-bag-of-words-v2:fp32', model: 'stub-bag-of-words-v2' };
+    const other = new Indexer({
+      db: database.db,
+      embeddings: swapped,
+      config: { ...indexerConfig, ALLOWED_DOC_ROOTS: [dataDir], DATA_DIR: dataDir },
+      log: capturingLogger(logLines),
+      locks: new KeyedMutex(),
+    });
+    await run(other);
+    expect(await generationOf()).toBe((before ?? 0) + 1);
+    expect(await dates()).toEqual({ 'wiki/guide.md': iso(T1), 'wiki/other.md': iso(T2) });
+  });
+
+  it('stamps a file whose text changed, on a rebuild, and still keeps the one that did not', async () => {
+    await commit({ 'other.md': `${body('other')}\nA third version of the text.\n` }, T3, 'edit other again');
+    await run(indexer, { force: true });
+    expect(await dates()).toEqual({ 'wiki/guide.md': iso(T1), 'wiki/other.md': iso(T3) });
   });
 });

@@ -94,6 +94,19 @@ describe('git', () => {
     expect(url).not.toContain('token');
   });
 
+  it('links Bitbucket Cloud, and gives a self-hosted Bitbucket no link rather than a wrong one', async () => {
+    const dir = await seedRepo();
+    const cloud = await driver('https://bitbucket.org/ws/repo.git', { subdir: 'docs' }).documentMeta([fileOf(dir, 'guide.md')]);
+    expect(cloud.get('guide.md')?.url).toBe(`https://bitbucket.org/ws/repo/src/${head}/docs/guide.md`);
+    // Server and Data Center keep files under /projects/<P>/repos/<r>/browse, not /src/<sha>/.
+    const server = await driver('https://bitbucket.acme.local/scm/team/repo.git', { subdir: 'docs' }).documentMeta([fileOf(dir, 'guide.md')]);
+    expect(server.get('guide.md')?.url).toBeNull();
+    const explicit = await driver('https://git.acme.local/scm/team/repo.git', { subdir: 'docs', provider: 'bitbucket' }).documentMeta([
+      fileOf(dir, 'guide.md'),
+    ]);
+    expect(explicit.get('guide.md')?.url).toBeNull();
+  });
+
   it('answers nothing when the clone is not there, rather than a wrong link', async () => {
     const meta = await driver('https://github.com/org/repo.git').documentMeta([fileOf(dataDir, 'guide.md')]);
     expect(meta.size).toBe(0);
@@ -314,9 +327,12 @@ describe('resolveStoredMeta', () => {
     expect(resolveStoredMeta({ url: 'file:///etc/passwd', modifiedAt: null }, undefined, true).sourceUrl).toBeNull();
   });
 
-  it('git: unchanged text keeps the stored values and only fills what is still null', () => {
+  it('git: unchanged text keeps the stored date, fills it only while null, and always takes the current address', () => {
     const stamped = { ...fresh, stampOnChange: true };
-    expect(resolveStoredMeta(stamped, stored, false)).toEqual(stored);
+    // The date is a moment of observation and stays; the address is derived and follows a corrected remote.
+    expect(resolveStoredMeta(stamped, stored, false)).toEqual({ sourceUrl: 'https://e.com/new', sourceModifiedAt: stored.sourceModifiedAt });
+    // An address the driver no longer produces is not kept alive by an unchanged file.
+    expect(resolveStoredMeta({ ...stamped, url: null }, stored, false)).toEqual({ sourceUrl: null, sourceModifiedAt: stored.sourceModifiedAt });
     expect(resolveStoredMeta(stamped, { sourceUrl: null, sourceModifiedAt: null }, false)).toEqual({
       sourceUrl: 'https://e.com/new',
       sourceModifiedAt: fresh.modifiedAt,

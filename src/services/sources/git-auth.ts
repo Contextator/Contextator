@@ -84,7 +84,9 @@ export function blobUrl(remote: string, provider: GitProvider, sha: string, file
     case 'gitlab':
       return `${base}/-/blob/${sha}/${file}`;
     case 'bitbucket':
-      return `${base}/src/${sha}/${file}`;
+      // Only Bitbucket Cloud has this layout. Server and Data Center use `/projects/<P>/repos/<r>/browse/…?at=<sha>`
+      // behind a different clone path, and a guessed link there is a 404 (design V2: wrong is worse than none).
+      return u.hostname.toLowerCase() === 'bitbucket.org' ? `${base}/src/${sha}/${file}` : null;
     case 'gitea':
       return `${base}/src/commit/${sha}/${file}`;
     default:
