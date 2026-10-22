@@ -144,7 +144,7 @@ const EXTRACTORS: Record<SupportedExtension, DocumentExtractor> = {
   // Plain-text formats that are still *converted*: JSON, reStructuredText and AsciiDoc are markup, not Markdown.
   ipynb: async (bytes, rel) => (await import('./ipynb.js')).ipynbToMarkdown(bytes, rel),
   rst: async (bytes, rel) => (await import('./rst.js')).rstToMarkdown(bytes, rel),
-  adoc: async (bytes, rel) => (await import('./adoc.js')).adocToMarkdown(bytes, rel),
+  adoc: async (bytes, rel, limits) => (await import('./adoc.js')).adocToMarkdown(bytes, rel, limits),
 };
 
 /**
@@ -155,6 +155,9 @@ const EXTRACTORS: Record<SupportedExtension, DocumentExtractor> = {
  * thing people commit and which this product has always skipped quietly. An empty `.pdf` is a
  * conversion that produced nothing from a file that plainly held something, and that is a failure.
  */
+/** The types whose converted output is checked against `maxFileBytes` (ADR-0115 §4). */
+const BOUNDED_OUTPUT: ReadonlySet<string> = new Set(['pptx', 'xlsx', 'ipynb', 'rst', 'adoc']);
+
 const CONVERTED: ReadonlySet<string> = new Set(['html', 'htm', 'csv', 'docx', 'pdf', 'pptx', 'xlsx', 'ipynb', 'rst', 'adoc']);
 
 /**
@@ -275,6 +278,15 @@ export async function extractDocument(relativePath: string, bytes: Buffer, limit
     if (err instanceof DocumentExtractionError) throw err;
     const message = err instanceof Error ? err.message : String(err);
     throw new DocumentExtractionError(`"${relativePath}" could not be read as a ".${ext}" file: ${message}`);
+  }
+
+  // ADR-0115 §4: what a converted file renders to is bounded by the same ceiling as what it was read from.
+  // The converters of these types stop earlier, while they build (`budget.ts`); this is the net under them.
+  if (BOUNDED_OUTPUT.has(ext) && Buffer.byteLength(markdown) > limits.maxFileBytes) {
+    throw new DocumentExtractionError(
+      `"${relativePath}" renders to more than the ${bytesLabel(limits.maxFileBytes)} a converted file may be. ` +
+        `Simplify the file, or raise MAX_CONVERTED_FILE_BYTES if the content is real.`,
+    );
   }
 
   if (converted && !hasBodyText(markdown)) {

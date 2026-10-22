@@ -125,7 +125,7 @@ const DIRECTIVE = /^\.\. +([\w][\w:.+-]*)::(?:\s+(.*))?$/;
 /** Roles, literals and hyperlink references, in one pass so that none of them is read inside another. */
 function inline(text: string): string {
   return text.replace(
-    /``([^`]+)``|:([\w:.+-]+):`([^`]+)`|`([^`<]*?)\s*<([^>]+)>`_{1,2}|`([^`]+)`_{1,2}/g,
+    /``([^`]+)``|:([\w:.+-]+):`([^`]+)`|`([^`<]*)<([^>]+)>`_{1,2}|`([^`]+)`_{1,2}/g,
     (_m, literal?: string, role?: string, roleText?: string, linkText?: string, target?: string, ref?: string) => {
       if (literal !== undefined) return `\`${literal}\``;
       if (role !== undefined && roleText !== undefined) {
@@ -148,7 +148,9 @@ function inline(text: string): string {
 }
 
 function dedent(lines: string[]): string[] {
-  const margin = Math.min(...lines.filter((l) => !isBlank(l)).map(indentOf));
+  // A loop, not `Math.min(...)`: the number of lines is the input's to choose, the call stack is not.
+  let margin = Number.POSITIVE_INFINITY;
+  for (const l of lines) if (!isBlank(l)) margin = Math.min(margin, indentOf(l));
   return Number.isFinite(margin) ? lines.map((l) => (isBlank(l) ? '' : l.slice(margin))) : lines.map(() => '');
 }
 
@@ -247,9 +249,10 @@ function simpleTable(lines: string[], start: number): { out: string[]; next: num
 function csvTable(body: string[], options: string[]): string[] {
   const rows = parseDelimited(body.join('\n'), ',').filter((r) => r.some((c) => c.trim() !== ''));
   const header = options.find((o) => /^:header:/i.test(o));
-  if (header) rows.unshift(...parseDelimited(header.replace(/^:header:\s*/i, ''), ','));
+  if (header) rows.splice(0, 0, ...parseDelimited(header.replace(/^:header:\s*/i, ''), ','));
   if (rows.length === 0) return [];
-  const width = Math.max(...rows.map((r) => r.length));
+  let width = 0;
+  for (const r of rows) width = Math.max(width, r.length);
   return [renderRow(rows[0], width), `|${' --- |'.repeat(width)}`, ...rows.slice(1).map((r) => renderRow(r, width))];
 }
 
@@ -257,6 +260,10 @@ function convert(lines: string[], levels: string[], depth: number): string[] {
   const out: string[] = [];
   const push = (...items: string[]): void => {
     out.push(...items);
+  };
+  // For arrays whose length the input chooses: spreading one into a call is bounded by the stack.
+  const pushAll = (items: readonly string[]): void => {
+    for (const item of items) out.push(item);
   };
   const lastIsBlank = (): boolean => out.length === 0 || isBlank(out[out.length - 1]);
   const blank = (): void => {
@@ -313,7 +320,8 @@ function convert(lines: string[], levels: string[], depth: number): string[] {
         const table = simpleTable(lines, i);
         if (table) {
           blank();
-          push(...table.out, '');
+          pushAll(table.out);
+          push('');
           i = table.next;
           continue;
         }
@@ -322,7 +330,8 @@ function convert(lines: string[], levels: string[], depth: number): string[] {
         let j = i;
         while (j < lines.length && /^[+|]/.test(lines[j].trim()) && indentOf(lines[j]) === 0) j++;
         blank();
-        push(...gridTable(lines.slice(i, j)), '');
+        pushAll(gridTable(lines.slice(i, j)));
+        push('');
         i = j;
         continue;
       }
@@ -354,14 +363,16 @@ function convert(lines: string[], levels: string[], depth: number): string[] {
       if (DROPPED_DIRECTIVES.has(base)) continue;
       if (CODE_DIRECTIVES.has(base)) {
         blank();
-        push(...fenced(content, base === 'parsed-literal' ? '' : arg.split(/\s+/)[0].toLowerCase()), '');
+        pushAll(fenced(content, base === 'parsed-literal' ? '' : arg.split(/\s+/)[0].toLowerCase()));
+        push('');
         continue;
       }
       if (base === 'csv-table') {
         const table = csvTable(content, options);
         if (table.length > 0) {
           blank();
-          push(...table, '');
+          pushAll(table);
+          push('');
         }
         continue;
       }
@@ -372,14 +383,19 @@ function convert(lines: string[], levels: string[], depth: number): string[] {
         blank();
         const firstText = inner.findIndex((l) => !isBlank(l));
         if (firstText === -1) push(head);
-        else push(...inner.slice(0, firstText), `${head} ${inner[firstText]}`, ...inner.slice(firstText + 1));
+        else {
+          pushAll(inner.slice(0, firstText));
+          push(`${head} ${inner[firstText]}`);
+          pushAll(inner.slice(firstText + 1));
+        }
         push('');
         continue;
       }
       blank();
       if (OBJECT_DIRECTIVES.has(base) && arg) push(`\`${arg}\``, '');
       else if (base !== 'figure' && arg) push(inline(arg), '');
-      push(...inner, '');
+      pushAll(inner);
+      push('');
       continue;
     }
 
@@ -391,13 +407,13 @@ function convert(lines: string[], levels: string[], depth: number): string[] {
 
     if (para[0].trim().startsWith('>>>')) {
       blank();
-      push(
-        ...fenced(
+      pushAll(
+        fenced(
           para.map((l) => l.trim()),
           'python',
         ),
-        '',
       );
+      push('');
       continue;
     }
 
@@ -425,7 +441,8 @@ function convert(lines: string[], levels: string[], depth: number): string[] {
       const code = trimBlankEdges(body);
       if (code.length > 0) {
         blank();
-        push(...fenced(dedent(code), ''), '');
+        pushAll(fenced(dedent(code), ''));
+        push('');
         i = next;
       }
     }

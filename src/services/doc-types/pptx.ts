@@ -14,6 +14,7 @@
  * the order of the files in the zip.
  */
 
+import { type OutputBudget, outputBudget } from './budget.js';
 import { DocumentExtractionError, type ExtractLimits, titleFromPath, withTitle } from './index.js';
 import { documentTitle, parseRelationships, relationshipId, relsPathFor, scanXml } from './xml.js';
 import { openZip, type ZipArchive } from './zip.js';
@@ -135,9 +136,13 @@ function readItems(xml: string): Item[] {
   return items;
 }
 
-/** A line of prose must not turn into a heading by starting with `#`, nor a table row by starting with `|`. */
+/**
+ * A line of prose must not turn into a heading by starting with `#`, nor a table row by starting with `|`,
+ * nor open a code fence with ``` or ~~~: the chunker follows fences, and an unclosed one swallows every
+ * later `## Slide N` heading into a code block.
+ */
 function plain(text: string): string {
-  return text.replace(/^([#|>])/, '\\$1');
+  return text.replace(/^([#|>]|`{3}|~{3})/, '\\$1');
 }
 
 function cellText(value: string): string {
@@ -145,13 +150,29 @@ function cellText(value: string): string {
   return text === '' ? ' ' : text;
 }
 
-function renderTable(rows: string[][]): string {
+/**
+ * Every row is padded to the widest one, so a table costs `width × rows` whatever the cells hold: one
+ * wide row and a few thousand narrow ones is megabytes from a kilobyte of XML. Each line is therefore
+ * paid for out of `budget` — and reserved *before* it is built, because a single row can itself be
+ * wider than the whole budget.
+ */
+function renderTable(rows: string[][], budget: OutputBudget): string {
   const width = rows.reduce((max, r) => Math.max(max, r.length), 0);
-  const line = (r: string[]): string => `| ${Array.from({ length: width }, (_, i) => cellText(r[i] ?? '')).join(' | ')} |`;
-  return [line(rows[0]), `|${' --- |'.repeat(width)}`, ...rows.slice(1).map(line)].join('\n');
+  // The least a row can take: `| ` + one character per cell + ` | ` between them + ` |`.
+  const floor = 4 * width + 1;
+  const line = (r: string[]): string => {
+    budget.reserve(floor);
+    const text = `| ${Array.from({ length: width }, (_, i) => cellText(r[i] ?? '')).join(' | ')} |`;
+    budget.spend(text.length + 1);
+    return text;
+  };
+  const header = line(rows[0]);
+  const divider = `|${' --- |'.repeat(width)}`;
+  budget.spend(divider.length + 1);
+  return [header, divider, ...rows.slice(1).map(line)].join('\n');
 }
 
-function renderBody(items: Item[]): string[] {
+function renderBody(items: Item[], budget: OutputBudget): string[] {
   const blocks: string[] = [];
   let list: string[] = [];
   const flush = (): void => {
@@ -161,7 +182,7 @@ function renderBody(items: Item[]): string[] {
   for (const item of items) {
     if (item.kind === 'table') {
       flush();
-      blocks.push(renderTable(item.rows));
+      blocks.push(renderTable(item.rows, budget));
       continue;
     }
     if (
@@ -239,6 +260,8 @@ export async function pptxToMarkdown(bytes: Buffer, relativePath: string, limits
     );
   }
 
+  // ADR-0115 §4: everything a slide renders, tables above all, is paid for out of one budget.
+  const budget = outputBudget(relativePath, limits);
   const sections: string[] = [];
   const parts = slideParts(zip, presentation);
   for (let index = 0; index < parts.length; index++) {
@@ -246,7 +269,7 @@ export async function pptxToMarkdown(bytes: Buffer, relativePath: string, limits
     if (xml === null) continue;
     const items = readItems(xml);
     const title = slideTitle(items);
-    const body = renderBody(items);
+    const body = renderBody(items, budget);
     const notes = readNotes(zip, parts[index]);
     if (title === '' && body.length === 0 && notes === '') continue;
 

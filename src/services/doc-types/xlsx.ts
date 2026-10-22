@@ -19,6 +19,7 @@
  * the XML that described it. Rendering therefore stops, with a refusal, at `maxFileBytes`.
  */
 
+import { type OutputBudget, outputBudget } from './budget.js';
 import { renderRow, ROWS_PER_SECTION } from './csv.js';
 import { DocumentExtractionError, type ExtractLimits, titleFromPath, withTitle } from './index.js';
 import { documentTitle, parseRelationships, relationshipId, scanXml } from './xml.js';
@@ -161,7 +162,7 @@ function readSheet(xml: string, shared: string[]): Row[] {
 }
 
 /** Renders one sheet's rows as the csv driver would, or `''` when nothing is left. Throws once `budget` is passed. */
-function renderSheet(rows: Row[], budget: { left: number }, tooBig: () => DocumentExtractionError): string {
+function renderSheet(rows: Row[], budget: OutputBudget): string {
   if (rows.length === 0) return '';
 
   // Only the columns some row actually uses, in order: a sheet with data in A and in Z is a two-column table.
@@ -169,13 +170,12 @@ function renderSheet(rows: Row[], budget: { left: number }, tooBig: () => Docume
   const width = used.length;
   const dense = (r: Row): string[] => used.map((c) => r.get(c) ?? '');
   const spend = (line: string): string => {
-    budget.left -= line.length + 1;
-    if (budget.left < 0) throw tooBig();
+    budget.spend(line.length + 1);
     return line;
   };
 
   const headerRow = dense(rows[0]).map((v, i) => v.trim() || `Column ${i + 1}`);
-  const header = spend(renderRow(headerRow, width));
+  const header = renderRow(headerRow, width);
   const divider = `|${' --- |'.repeat(width)}`;
   const body = rows.slice(1);
 
@@ -183,6 +183,9 @@ function renderSheet(rows: Row[], budget: { left: number }, tooBig: () => Docume
   for (let start = 0; start < body.length || start === 0; start += ROWS_PER_SECTION) {
     const slice = body.slice(start, start + ROWS_PER_SECTION);
     if (body.length > ROWS_PER_SECTION) parts.push(`### Rows ${start + 1}–${start + slice.length}`);
+    // The header and divider are written again for every block of rows, so every block pays for them.
+    spend(header);
+    spend(divider);
     parts.push([header, divider, ...slice.map((r) => spend(renderRow(dense(r), width)))].join('\n'));
     if (slice.length === 0) break;
   }
@@ -218,18 +221,13 @@ export async function xlsxToMarkdown(bytes: Buffer, relativePath: string, limits
   });
 
   const shared = readSharedStrings(zip.readText('xl/sharedStrings.xml'));
-  const budget = { left: limits.maxFileBytes };
-  const tooBig = (): DocumentExtractionError =>
-    new DocumentExtractionError(
-      `"${relativePath}" renders to more than the ${Math.round(limits.maxFileBytes / (1024 * 1024))} MiB a converted file may be: ` +
-        `its sheets use so many columns and rows that the tables are far larger than the file. Remove the unused cells, or raise MAX_CONVERTED_FILE_BYTES if the data is real.`,
-    );
+  const budget = outputBudget(relativePath, limits);
 
   const sections: string[] = [];
   for (const sheet of sheets) {
     const xml = zip.readText(sheet.part);
     if (xml === null) continue;
-    const table = renderSheet(readSheet(xml, shared), budget, tooBig);
+    const table = renderSheet(readSheet(xml, shared), budget);
     if (table === '') continue;
     sections.push(`## ${sheet.name || 'Sheet'}\n\n${table}`);
   }

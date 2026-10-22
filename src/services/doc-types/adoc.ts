@@ -11,8 +11,9 @@
  * It is a line scanner and not Asciidoctor. A construct it does not know stays as the text it was.
  */
 
+import { type OutputBudget, outputBudget } from './budget.js';
 import { renderRow } from './csv.js';
-import { decodeUtf8, titleFromPath, withTitle } from './index.js';
+import { decodeUtf8, type ExtractLimits, titleFromPath, withTitle } from './index.js';
 
 /** Past this a nested block is read as flat text: nesting depth is the input's to choose, the stack is not. */
 const MAX_DEPTH = 16;
@@ -20,14 +21,33 @@ const MAX_DEPTH = 16;
 const ADMONITIONS: Record<string, string> = { NOTE: 'Note', TIP: 'Tip', IMPORTANT: 'Important', WARNING: 'Warning', CAUTION: 'Caution' };
 const PREDEFINED: Record<string, string> = { nbsp: ' ', empty: '', plus: '+', startsb: '[', endsb: ']', lt: '<', gt: '>', amp: '&', vbar: '|' };
 
+/**
+ * The longest attribute value that is kept once its own references are expanded.
+ *
+ * **Attributes that refer to attributes multiply.** `:a1: {a0}{a0}{a0}` and so on down a few levels is
+ * the AsciiDoc form of the "billion laughs" file: a few hundred bytes that expand to megabytes, and one
+ * more level makes it gigabytes, in tens of milliseconds. Real attributes are names, versions and URLs.
+ * A value that expands past this is not defined at all, so a reference to it stays as the literal text
+ * `{name}` — which is also what Asciidoctor prints for an attribute it does not know.
+ */
+const MAX_ATTRIBUTE_VALUE = 4096;
+
 interface Context {
   attrs: Map<string, string>;
+  /** What substitution may add in all: even bounded values can be referenced a hundred thousand times on one line. */
+  budget: OutputBudget;
 }
 
 const isBlank = (line: string): boolean => line.trim() === '';
 
+/** One pass: what a reference expands to is never scanned for references again. */
 function substitute(text: string, ctx: Context): string {
-  return text.replace(/\{([\w-]+)\}/g, (whole, key: string) => ctx.attrs.get(key) ?? PREDEFINED[key] ?? whole);
+  return text.replace(/\{([\w-]+)\}/g, (whole, key: string) => {
+    const value = ctx.attrs.get(key) ?? PREDEFINED[key];
+    if (value === undefined) return whole;
+    ctx.budget.spend(value.length);
+    return value;
+  });
 }
 
 function inline(raw: string, ctx: Context): string {
@@ -110,6 +130,10 @@ function convert(lines: string[], ctx: Context, depth: number): string[] {
   const push = (...items: string[]): void => {
     out.push(...items);
   };
+  // For arrays whose length the input chooses: spreading one into a call is bounded by the stack.
+  const pushAll = (items: readonly string[]): void => {
+    for (const item of items) out.push(item);
+  };
   const blank = (): void => {
     if (out.length > 0 && !isBlank(out[out.length - 1])) out.push('');
   };
@@ -142,23 +166,27 @@ function convert(lines: string[], ctx: Context, depth: number): string[] {
         continue;
       }
       blank();
-      if (kind === '-' && trimmed.length >= 4) push(...fenced(inner, pending.language), '');
-      else if (kind === '.') push(...fenced(inner, ''), '');
-      else if (kind === '|') push(...table(inner, pending.cols, ctx), '');
+      if (kind === '-' && trimmed.length >= 4) pushAll(fenced(inner, pending.language));
+      else if (kind === '.') pushAll(fenced(inner, ''));
+      else if (kind === '|') pushAll(table(inner, pending.cols, ctx));
       else {
         const nested = depth < MAX_DEPTH ? convert(inner, ctx, depth + 1) : inner.map((l) => inline(l.trim(), ctx));
         const label = ADMONITIONS[pending.style.toUpperCase()];
         if (label) {
           const first = nested.findIndex((l) => !isBlank(l));
           if (first === -1) push(`**${label}:**`);
-          else push(...nested.slice(0, first), `**${label}:** ${nested[first]}`, ...nested.slice(first + 1));
+          else {
+            pushAll(nested.slice(0, first));
+            push(`**${label}:** ${nested[first]}`);
+            pushAll(nested.slice(first + 1));
+          }
         } else if (kind === '_' || pending.style === 'quote') {
-          push(...nested.map((l) => (isBlank(l) ? '>' : `> ${l}`)));
+          pushAll(nested.map((l) => (isBlank(l) ? '>' : `> ${l}`)));
         } else {
-          push(...nested);
+          pushAll(nested);
         }
-        push('');
       }
+      push('');
       clear();
       continue;
     }
@@ -174,7 +202,12 @@ function convert(lines: string[], ctx: Context, depth: number): string[] {
     if (entry) {
       const name = entry[2];
       if (entry[1] === '!' || entry[3] === '!') ctx.attrs.delete(name);
-      else ctx.attrs.set(name, substitute((entry[4] ?? '').trim(), ctx));
+      else {
+        const value = substitute((entry[4] ?? '').trim(), ctx);
+        // A value past the cap is left undefined (see MAX_ATTRIBUTE_VALUE), and so is the one it replaces.
+        if (value.length > MAX_ATTRIBUTE_VALUE) ctx.attrs.delete(name);
+        else ctx.attrs.set(name, value);
+      }
       i++;
       continue;
     }
@@ -278,15 +311,16 @@ function convert(lines: string[], ctx: Context, depth: number): string[] {
       let j = i;
       while (j < lines.length && /^\s/.test(lines[j]) && !isBlank(lines[j])) j++;
       const block = lines.slice(i, j);
-      const margin = Math.min(...block.map((l) => l.length - l.trimStart().length));
+      let margin = Number.POSITIVE_INFINITY;
+      for (const l of block) margin = Math.min(margin, l.length - l.trimStart().length);
       blank();
-      push(
-        ...fenced(
+      pushAll(
+        fenced(
           block.map((l) => l.slice(margin)),
           '',
         ),
-        '',
       );
+      push('');
       i = j;
       continue;
     }
@@ -300,20 +334,20 @@ function convert(lines: string[], ctx: Context, depth: number): string[] {
     blank();
     const label = ADMONITIONS[pending.style.toUpperCase()];
     if (label) text[0] = `**${label}:** ${text[0]}`;
-    if (pending.style === 'quote') push(...text.map((l) => `> ${l}`));
-    else push(...text);
+    if (pending.style === 'quote') pushAll(text.map((l) => `> ${l}`));
+    else pushAll(text);
     push('');
     clear();
   }
   return out;
 }
 
-export async function adocToMarkdown(bytes: Buffer, relativePath: string): Promise<string> {
+export async function adocToMarkdown(bytes: Buffer, relativePath: string, limits: ExtractLimits): Promise<string> {
   const lines = decodeUtf8(bytes)
     .replace(/\r\n?/g, '\n')
     .split('\n')
     .map((l) => l.trimEnd());
-  const markdown = convert(lines, { attrs: new Map() }, 0)
+  const markdown = convert(lines, { attrs: new Map(), budget: outputBudget(relativePath, limits) }, 0)
     .join('\n')
     .replace(/\n{3,}/g, '\n\n');
   return withTitle(markdown, titleFromPath(relativePath));

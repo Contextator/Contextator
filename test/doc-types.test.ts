@@ -94,6 +94,85 @@ function bombDocx(size: number, part = 'word/document.xml'): Buffer {
   return Buffer.concat([local, payload, central, end]);
 }
 
+interface ArchivePart {
+  name: string;
+  data: Buffer;
+  /** 0 stores the data, 8 deflates it; anything else is written into the directory as given. */
+  method?: number;
+  flags?: number;
+  /** What the directory claims the part unpacks to, when that should differ from the truth. */
+  declared?: number;
+}
+
+/** A zip written part by part, with the knobs a hostile archive turns: a false size, a flag, a method. */
+function archiveOf(parts: ArchivePart[]): Buffer {
+  const locals: Buffer[] = [];
+  const directory: Buffer[] = [];
+  let offset = 0;
+  for (const part of parts) {
+    const method = part.method ?? 8;
+    const payload = method === 8 ? deflateRawSync(part.data) : part.data;
+    const declared = part.declared ?? part.data.length;
+    const name = Buffer.from(part.name, 'utf8');
+
+    const local = Buffer.alloc(30 + name.length);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(part.flags ?? 0, 6);
+    local.writeUInt16LE(method, 8);
+    local.writeUInt32LE(payload.length, 18);
+    local.writeUInt32LE(declared, 22);
+    local.writeUInt16LE(name.length, 26);
+    name.copy(local, 30);
+
+    const entry = Buffer.alloc(46 + name.length);
+    entry.writeUInt32LE(0x02014b50, 0);
+    entry.writeUInt16LE(20, 4);
+    entry.writeUInt16LE(20, 6);
+    entry.writeUInt16LE(part.flags ?? 0, 8);
+    entry.writeUInt16LE(method, 10);
+    entry.writeUInt32LE(payload.length, 20);
+    entry.writeUInt32LE(declared, 24);
+    entry.writeUInt16LE(name.length, 28);
+    entry.writeUInt32LE(offset, 42);
+    name.copy(entry, 46);
+
+    locals.push(local, payload);
+    directory.push(entry);
+    offset += local.length + payload.length;
+  }
+  const central = Buffer.concat(directory);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(parts.length, 8);
+  end.writeUInt16LE(parts.length, 10);
+  end.writeUInt32LE(central.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, central, end]);
+}
+
+const utf8 = (text: string): Buffer => Buffer.from(text, 'utf8');
+const SLIDE_NS =
+  'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"';
+const textBox = (text: string): string =>
+  `<p:sp><p:nvSpPr><p:cNvPr id="2" name="Box"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>${text}</a:t></a:r></a:p></p:txBody></p:sp>`;
+const slideOf = (inner: string): string => `<p:sld ${SLIDE_NS}><p:cSld><p:spTree>${inner}</p:spTree></p:cSld></p:sld>`;
+const cellOf = (text: string): string => `<a:tc><a:txBody><a:p><a:r><a:t>${text}</a:t></a:r></a:p></a:txBody></a:tc>`;
+const tableOf = (rows: string[][]): string =>
+  `<p:graphicFrame><a:graphic><a:graphicData><a:tbl>${rows.map((r) => `<a:tr>${r.map(cellOf).join('')}</a:tr>`).join('')}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>`;
+const deckOf = (slides: string[]): Buffer =>
+  archiveOf([
+    { name: 'ppt/presentation.xml', data: utf8(`<p:presentation ${SLIDE_NS}/>`) },
+    ...slides.map((xml, i) => ({ name: `ppt/slides/slide${i + 1}.xml`, data: utf8(xml) })),
+  ]);
+
+/** The spreadsheet column letters of a zero-based column: 0 → A, 26 → AA. */
+const columnName = (index: number): string => {
+  let name = '';
+  for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26)) name = String.fromCharCode(65 + ((n - 1) % 26)) + name;
+  return name;
+};
+
 /** The `#` lines of a document, which is the structure a reader navigates by and the chunker splits on. */
 const headings = (markdown: string): string[] => markdown.split('\n').filter((line) => /^#{1,6}\s/.test(line));
 
@@ -686,11 +765,39 @@ describe('the zip guard on the OOXML types (ADR-0115)', () => {
   });
 
   it('does not inflate when the declaration alone is over the limit', async () => {
-    // The part is not valid DEFLATE: inflating it would surface as "damaged part", not as a size refusal.
-    const bytes = Buffer.from(bytesOf('platform-roadmap.pptx'));
-    const honest = await extract('a.pptx', bytes);
-    expect(honest).toContain('## Slide 1');
-    await expect(extract('a.pptx', bytes, { ...LIMITS, maxUnpackedBytes: 100 })).rejects.not.toThrow(/damaged part/);
+    // The part is not valid DEFLATE: had it been inflated, the refusal would read "damaged part".
+    const raw = archiveOf([{ name: 'ppt/presentation.xml', data: utf8('this is not a deflate stream'), method: 0, declared: 10 * 1024 * 1024 }]);
+    raw.writeUInt16LE(8, 8); // local header: deflate
+    raw.writeUInt16LE(8, raw.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02])) + 10); // directory: deflate
+    await expect(extract('a.pptx', raw, { ...LIMITS, maxUnpackedBytes: 1024 * 1024 })).rejects.toThrow(/declare that they unpack/);
+  });
+
+  it('refuses ZIP64 markers, an encrypted part and a compression method it does not read', async () => {
+    const zip64 = archiveOf([{ name: 'ppt/presentation.xml', data: utf8('<p/>'), declared: 0xffffffff }]);
+    await expect(extract('a.pptx', zip64)).rejects.toThrow(/ZIP64/);
+
+    const encrypted = archiveOf([{ name: 'ppt/presentation.xml', data: utf8('<p/>'), flags: 1 }]);
+    await expect(extract('a.pptx', encrypted)).rejects.toThrow(/password-protected/);
+
+    const bzip = archiveOf([{ name: 'xl/workbook.xml', data: utf8('<workbook/>'), method: 12 }]);
+    await expect(extract('a.xlsx', bzip)).rejects.toThrow(/method this product does not read/);
+  });
+
+  it('bounds a stored part by what it holds, not by what the directory says', async () => {
+    const stored = archiveOf([{ name: 'ppt/presentation.xml', data: Buffer.alloc(2 * 1024 * 1024, 0x41), method: 0, declared: 64 }]);
+    await expect(extract('a.pptx', stored, { ...LIMITS, maxUnpackedBytes: 1024 * 1024 })).rejects.toThrow(/actually unpack past the limit/);
+  });
+
+  it('shares one budget between the parts, so many small lies add up', async () => {
+    const half = Buffer.alloc(600 * 1024, 0x41);
+    const deck = archiveOf([
+      { name: 'ppt/presentation.xml', data: half, declared: 64 },
+      { name: 'ppt/slides/slide1.xml', data: half, declared: 64 },
+    ]);
+    await expect(extract('a.pptx', deck, { ...LIMITS, maxUnpackedBytes: 1024 * 1024 })).rejects.toThrow(/actually unpack past the limit/);
+    // Either part alone is within the budget, so it is the sum that is refused.
+    const one = archiveOf([{ name: 'ppt/presentation.xml', data: half, declared: 64 }]);
+    await expect(extract('a.pptx', one, { ...LIMITS, maxUnpackedBytes: 1024 * 1024 })).rejects.not.toThrow(/actually unpack/);
   });
 
   it.each([
@@ -708,10 +815,149 @@ describe('the zip guard on the OOXML types (ADR-0115)', () => {
     await expect(extract('cut.pptx', full.subarray(0, 12))).rejects.toBeInstanceOf(DocumentExtractionError);
   });
 
-  it('refuses a workbook whose tables would render far past the converted-file ceiling', async () => {
-    await expect(extract('a.xlsx', bytesOf('warehouse-inventory.xlsx'), { ...LIMITS, maxFileBytes: 64 })).rejects.toBeInstanceOf(
-      DocumentExtractionError,
+  it('refuses a workbook whose sheet renders far past the converted-file ceiling', async () => {
+    // One cell on each of 2 000 rows, every one in a column of its own: 2 000 columns, padded on every row.
+    const rows = Array.from(
+      { length: 2000 },
+      (_, i) => `<row r="${i + 1}"><c r="${columnName(i)}${i + 1}" t="inlineStr"><is><t>x</t></is></c></row>`,
     );
+    const book = archiveOf([
+      {
+        name: 'xl/workbook.xml',
+        data: utf8(
+          '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Wide" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        ),
+      },
+      {
+        name: 'xl/_rels/workbook.xml.rels',
+        data: utf8(
+          '<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+        ),
+      },
+      { name: 'xl/worksheets/sheet1.xml', data: utf8(`<worksheet><sheetData>${rows.join('')}</sheetData></worksheet>`) },
+    ]);
+    const limits = { ...LIMITS, maxFileBytes: 4 * 1024 * 1024 };
+    expect(book.byteLength).toBeLessThan(limits.maxFileBytes / 100);
+    await expect(extract('wide.xlsx', book, limits)).rejects.toThrow(/renders to more than/);
+    // The workbook is fine when the ceiling is not in the way: it is the render that was refused.
+    await expect(extract('wide.xlsx', book)).resolves.toContain('## Wide');
+  });
+});
+
+describe('what a small file may render to (ADR-0115 §4)', () => {
+  /** A table whose first row is `width` cells wide and whose next `width` rows are one cell each. */
+  const padded = (width: number): Buffer =>
+    deckOf([slideOf(tableOf([Array.from({ length: width }, () => 'x'), ...Array.from({ length: width }, () => ['x'])]))]);
+
+  it('refuses a 1.6 KB presentation that would render to 16 MB', async () => {
+    const attack = padded(2000);
+    expect(attack.byteLength).toBeLessThan(2048);
+    const limits = { ...LIMITS, maxFileBytes: 4 * 1024 * 1024 };
+    await expect(extract('attack.pptx', attack, limits)).rejects.toThrow(/renders to more than the 4 MiB/);
+    await expect(extract('attack.pptx', attack, limits)).rejects.toBeInstanceOf(DocumentExtractionError);
+  });
+
+  it('refuses a larger one at the default ceiling, without building it', async () => {
+    const attack = padded(20_000);
+    expect(attack.byteLength).toBeLessThan(64 * 1024);
+    const started = Date.now();
+    await expect(extract('attack.pptx', attack)).rejects.toThrow(/renders to more than the 32 MiB/);
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  it('still renders an ordinary wide table', async () => {
+    const deck = deckOf([
+      slideOf(
+        tableOf([
+          ['A', 'B', 'C'],
+          ['1', '2', '3'],
+        ]),
+      ),
+    ]);
+    expect(tableRows(await extract('ok.pptx', deck))).toEqual(['| A | B | C |', '| --- | --- | --- |', '| 1 | 2 | 3 |']);
+  });
+
+  it('does not let a paragraph that is only a code fence swallow the slides after it', async () => {
+    const deck = deckOf([slideOf(textBox('```')), slideOf(textBox('~~~ shell')), slideOf(textBox('Later slide text'))]);
+    const markdown = await extract('fence.pptx', deck);
+    expect(markdown.split('\n').filter((line) => /^(`{3}|~{3})/.test(line))).toEqual([]);
+    expect(headings(markdown)).toEqual(['# Fence', '## Slide 1', '## Slide 2', '## Slide 3']);
+    const { chunks } = chunkMarkdown(markdown, 'fence.pptx', { maxTokens: 400, overlapTokens: 40 });
+    expect(chunks.map((c) => c.content).join('\n')).toContain('Later slide text');
+  });
+
+  // 357 bytes: five levels of ten references, then ten paragraphs of the last. It is 11 000 023 characters.
+  const laughs = (): string => {
+    const lines = [':a0: lorem ipsum'];
+    for (let level = 1; level <= 5; level++) lines.push(`:a${level}: ${`{a${level - 1}}`.repeat(10)}`);
+    lines.push('', ...Array.from({ length: 10 }, () => '{a5}\n'));
+    return lines.join('\n');
+  };
+
+  it('does not expand attributes that refer to attributes into megabytes', async () => {
+    const attack = Buffer.from(laughs());
+    expect(attack.byteLength).toBeLessThan(400);
+    const markdown = await extract('laughs.adoc', attack);
+    expect(markdown.length).toBeLessThan(100_000);
+    // What would not fit is not defined, so its references stay as written, as for any unknown attribute.
+    expect(markdown).toContain('{a3}');
+  });
+
+  it('refuses many references to a large attribute on one line', async () => {
+    const value = 'x'.repeat(4000);
+    const line = '{big}'.repeat(200);
+    const source = `:big: ${value}\n\n${Array.from({ length: 20 }, () => `${line}\n`).join('\n')}`;
+    const limits = { ...LIMITS, maxFileBytes: 4 * 1024 * 1024 };
+    expect(Buffer.byteLength(source)).toBeLessThan(limits.maxFileBytes);
+    await expect(extract('many.adoc', Buffer.from(source), limits)).rejects.toThrow(/renders to more than/);
+  });
+
+  it('keeps an ordinary attribute chain', async () => {
+    const markdown = await extract('chain.adoc', Buffer.from(':product: Marmot\n:long: {product} Scheduler\n\nThe {long} runs nightly.\n'));
+    expect(markdown).toContain('The Marmot Scheduler runs nightly.');
+  });
+});
+
+describe('input shapes that are quadratic or overflow the stack', () => {
+  it('converts an AsciiDoc listing block of 80 000 lines', async () => {
+    const source = `----\n${'line of code\n'.repeat(80_000)}----\n`;
+    const markdown = await extract('big.adoc', Buffer.from(source));
+    expect(markdown).toContain('line of code');
+  });
+
+  it('converts a reStructuredText code-block of 100 000 lines', async () => {
+    const source = `Title\n=====\n\n.. code-block:: python\n\n${'   x = 1\n'.repeat(100_000)}\nafter\n`;
+    const markdown = await extract('big.rst', Buffer.from(source));
+    expect(markdown).toContain('x = 1');
+    expect(markdown).toContain('after');
+  });
+
+  it('reads a reStructuredText csv-table of 100 000 rows', async () => {
+    const source = `Title\n=====\n\n.. csv-table::\n   :header: "a","b"\n\n${'   1,2\n'.repeat(100_000)}`;
+    const markdown = await extract('rows.rst', Buffer.from(source));
+    expect(tableRows(markdown).length).toBeGreaterThan(100_000);
+  });
+
+  it('reads a long run of spaces in a reStructuredText link, an XML attribute and a notebook cell quickly', async () => {
+    const started = Date.now();
+    await extract('link.rst', Buffer.from(`Title\n=====\n\n\`${' '.repeat(100_000)}\`\n\ntext\n`));
+    const deck = deckOf([
+      `<p:sld ${SLIDE_NS}><p:cSld><p:spTree><p:sp ${'a'.repeat(200_000)}>${'<p:nvSpPr/>'}</p:sp>${textBox('Still here')}</p:spTree></p:cSld></p:sld>`,
+    ]);
+    await extract('attr.pptx', deck);
+    const notebook = JSON.stringify({ cells: [{ cell_type: 'code', source: [`a${' '.repeat(50_000)}x`], metadata: {} }] });
+    await extract('spaces.ipynb', Buffer.from(notebook));
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  it('takes a notebook cell language as one safe word and falls back to the notebook language', async () => {
+    const notebook = JSON.stringify({
+      metadata: { language_info: { name: 'Python' } },
+      cells: [{ cell_type: 'code', language: 'js\n```\n# injected', source: ['print(1)'] }],
+    });
+    const markdown = await extract('lang.ipynb', Buffer.from(notebook));
+    expect(markdown).toContain('```python\nprint(1)\n```');
+    expect(markdown).not.toContain('injected');
   });
 });
 

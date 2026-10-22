@@ -624,9 +624,15 @@ export const EnvSchema = z
       .default(1024 * 1024),
 
     /**
-     * What one file of a **converted** type — `.html`, `.csv`, `.docx`, `.pdf` — may weigh before the
-     * indexer will parse it ([ADR-0056](../../.ssot/ADR.md#adr-0056)). `.md`, `.mdx` and `.txt` are
-     * decoded rather than parsed and are not capped.
+     * What one file of a **converted** type — `.html`, `.csv`, `.docx`, `.pdf`, `.pptx`, `.xlsx`,
+     * `.ipynb`, `.rst`, `.adoc` — may weigh before the indexer will parse it
+     * ([ADR-0056](../../.ssot/ADR.md#adr-0056)). `.md`, `.mdx` and `.txt` are decoded rather than
+     * parsed and are not capped.
+     *
+     * **It bounds what a file converts to as well as what it weighs** for `.pptx`, `.xlsx`, `.ipynb`,
+     * `.rst` and `.adoc` ([ADR-0115](../../.ssot/ADR.md#adr-0115) §4): a kilobyte of presentation can
+     * describe a table that renders to many megabytes, so the output is counted while it is built and
+     * the file is refused by name past this.
      *
      * **It is deliberately lower than `UPLOAD_MAX_FILE_BYTES`, because it answers a different
      * question.** The upload limit is about what may be *stored*, and it never applied to a local
@@ -684,7 +690,9 @@ export const EnvSchema = z
     MAX_PDF_PAGES: z.coerce.number().int().min(1).default(2000),
 
     /**
-     * What a `.docx`'s own central directory may claim its parts unpack to (ADR-0056).
+     * What a zip-based document's own central directory may claim its parts unpack to (ADR-0056,
+     * ADR-0115). The name is older than its reach: it covers `.docx`, and also `.pptx` and `.xlsx`,
+     * which are read by the in-process reader in `zip.ts` under the same limit.
      *
      * A `.docx` is a zip, mammoth hands it to `jszip`, and `jszip` has no size ceiling of its own — so
      * a zip bomb, a megabyte that inflates to a terabyte, would inflate into this process's heap.

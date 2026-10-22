@@ -41,12 +41,17 @@ function stripEmbeddedImages(markdown: string): string {
   return markdown.replace(/!\[([^\]]*)\]\(\s*data:[^)]*\)/g, (_, alt: string) => alt.trim());
 }
 
+/** A fence info string is one short word: anything else (a newline, a backtick) would break out of the fence. */
+function safeLanguage(name: unknown): string {
+  return typeof name === 'string' && /^[\w+#.-]{1,30}$/.test(name) ? name.toLowerCase() : '';
+}
+
 function languageOf(notebook: Record<string, unknown>): string {
   const metadata = notebook.metadata as Record<string, unknown> | undefined;
   const info = metadata?.language_info as Record<string, unknown> | undefined;
   const kernel = metadata?.kernelspec as Record<string, unknown> | undefined;
   const name = info?.name ?? kernel?.language;
-  return typeof name === 'string' && /^[\w+#.-]{1,30}$/.test(name) ? name.toLowerCase() : '';
+  return safeLanguage(name);
 }
 
 function cellsOf(notebook: Record<string, unknown>): RawCell[] {
@@ -88,9 +93,9 @@ export async function ipynbToMarkdown(bytes: Buffer, relativePath: string): Prom
       if (text) blocks.push(text);
     } else if (kind === 'code') {
       // nbformat 3 keeps the code under `input` and the language on the cell.
-      const code = (cell.source !== undefined ? sourceOf(cell.source) : sourceOf(cell.input)).replace(/\s+$/, '');
+      const code = (cell.source !== undefined ? sourceOf(cell.source) : sourceOf(cell.input)).trimEnd();
       if (!code.trim()) continue;
-      const lang = typeof cell.language === 'string' ? cell.language : language;
+      const lang = typeof cell.language === 'string' ? safeLanguage(cell.language) || language : language;
       const marks = fence(code);
       blocks.push(`${marks}${lang}\n${code}\n${marks}`);
     }

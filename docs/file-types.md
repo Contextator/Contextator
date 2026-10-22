@@ -26,3 +26,9 @@ parts declare more than `MAX_DOCX_UNPACKED_BYTES` (the same limit as `.docx`, no
 Office Open XML type) before inflating anything, and that bounds what a part really unpacks to when
 its declared size is a lie. A file that is not a zip, is encrypted, or is a zip of a different kind is
 refused by name like any other unreadable file. The older binary `.ppt`, `.xls` and `.doc` are not read.
+
+What a file of these five types converts to is bounded as well as what it weighs: the output may not pass
+`MAX_CONVERTED_FILE_BYTES` (32 MiB by default). A small file can describe a lot of output — a table that
+pads every row to its widest, or `.adoc` attributes that refer to attributes — so the converters count what
+they build and refuse the file by name, with the reason on its source, when it would pass the limit. An
+`.adoc` attribute whose expanded value passes 4 KiB is left undefined and its references stay as written.

@@ -49,17 +49,46 @@ export function relationshipId(attrs: Record<string, string>): string | undefine
   return key === undefined ? undefined : attrs[key];
 }
 
-const ATTRIBUTE = /([^\s=/>"']+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+/** Characters that end an attribute name (and that never start one). */
+const NAME_BREAK = /[\s=/>"']/;
 
+/**
+ * `name="value"` pairs, read in one pass.
+ *
+ * A scanner and not a regular expression: `([^\s=/>"']+)\s*=` retried from every character of a long
+ * token that has no `=` after it, which is quadratic, and the token is the input's to make as long as
+ * it likes. Here every character is looked at a bounded number of times.
+ */
 function parseAttributes(source: string): Record<string, string> {
   const attrs: Record<string, string> = {};
-  ATTRIBUTE.lastIndex = 0;
-  for (let match = ATTRIBUTE.exec(source); match !== null; match = ATTRIBUTE.exec(source)) {
-    const value = decodeEntities(match[2] ?? match[3] ?? '');
-    attrs[match[1]] = value;
+  const length = source.length;
+  const skipSpace = (from: number): number => {
+    let at = from;
+    while (at < length && /\s/.test(source[at])) at++;
+    return at;
+  };
+  let i = 0;
+  while (i < length) {
+    if (NAME_BREAK.test(source[i])) {
+      i++;
+      continue;
+    }
+    const nameStart = i;
+    while (i < length && !NAME_BREAK.test(source[i])) i++;
+    const name = source.slice(nameStart, i);
+    let at = skipSpace(i);
+    if (source[at] !== '=') continue;
+    at = skipSpace(at + 1);
+    const quote = source[at];
+    if (quote !== '"' && quote !== "'") continue;
+    const close = source.indexOf(quote, at + 1);
+    if (close === -1) continue;
+    i = close + 1;
+    const value = decodeEntities(source.slice(at + 1, close));
+    attrs[name] = value;
     // Reachable by local name as well, unless an unprefixed attribute of that name was already seen.
-    const local = localName(match[1]);
-    if (local !== match[1] && !(local in attrs)) attrs[local] = value;
+    const local = localName(name);
+    if (local !== name && !(local in attrs)) attrs[local] = value;
   }
   return attrs;
 }

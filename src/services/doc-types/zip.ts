@@ -146,6 +146,8 @@ export function openZip(bytes: Buffer, relativePath: string, label: string, limi
         if ((err as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE') throw tooBig('actually unpack past the limit');
         throw new DocumentExtractionError(`"${relativePath}" has a damaged part ("${name}") and cannot be read as a ${label}.`);
       }
+      // `maxOutputLength` cannot be zero, so an exhausted budget still allows one byte: refuse it here.
+      if (out.byteLength > remaining) throw tooBig('actually unpack past the limit');
     } else {
       throw new DocumentExtractionError(
         `"${relativePath}" compresses "${name}" with a method this product does not read; re-save it as a standard ${label}.`,
