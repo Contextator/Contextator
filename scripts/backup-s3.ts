@@ -62,7 +62,7 @@ export function s3TargetFromEnv(env: NodeJS.ProcessEnv = process.env): S3Target 
   }
 
   const region = read('BACKUP_S3_REGION') || 'us-east-1';
-  if (!/^[a-z0-9-]+$/i.test(region)) {
+  if (!/^[a-z0-9-]+$/.test(region)) {
     throw new BackupRefused('s3_config', 'BACKUP_S3_REGION must be a region name such as us-east-1.');
   }
 

@@ -119,6 +119,7 @@ describe('s3TargetFromEnv', () => {
     ['a prefix that climbs', { BACKUP_S3_PREFIX: 'a/../b' }],
     ['a bucket that is not a bucket name', { BACKUP_S3_BUCKET: 'Bad Bucket' }],
     ['a region with a slash', { BACKUP_S3_REGION: 'us/east' }],
+    ['an upper-case region', { BACKUP_S3_REGION: 'US-EAST-1' }],
   ])('refuses %s', (_label, extra) => {
     expect(() => s3TargetFromEnv({ ...base, ...extra })).toThrow(BackupRefused);
   });
