@@ -163,7 +163,9 @@ What the upload cap counts:
   staged file of the same path counts once, as the difference.
 - A session that nobody has touched for 24 hours (no `files` request, no commit) stops counting, and the
   server deletes it: a sweep that runs every quarter of an hour removes the session's staged files, so what the
-  quota counts and what is on disk always agree. **An upload that was not committed within 24 hours of its
+  quota counts and what is on disk agree to within about a quarter of an hour. A removal that fails, or a project
+  that is busy indexing or committing at that moment, is retried on the next tick; the quota ignores an expired
+  session meanwhile. **An upload that was not committed within 24 hours of its
   last request is lost** and has to be uploaded again. This applies to every project, whether or not it has an
   upload quota.
 - The cap is checked by walking the upload directories, so each `files` request pays one walk over the
