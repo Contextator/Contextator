@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   check,
   customType,
@@ -161,8 +162,27 @@ export const projects = pgTable(
      * describes are this instance's.
      */
     lastLegacySseAt: timestamp('last_legacy_sse_at', { withTimezone: true }),
+    /**
+     * This project's own caps on how much it may hold ([ADR-0117](../../.ssot/ADR.md#adr-0117)):
+     * documents, chunks, and bytes stored for its upload sources.
+     *
+     * **`null` is the default and means "the instance's value"** (`PROJECT_MAX_DOCUMENTS`,
+     * `PROJECT_MAX_CHUNKS`, `PROJECT_MAX_UPLOAD_BYTES`), so a project nobody has touched behaves as it
+     * did before the columns existed. **`0` means unlimited, and it overrides a non-zero instance value**:
+     * the one way to say "this project is exempt" is a value that cannot be mistaken for "not set".
+     * Three columns on the row rather than a quotas table, for the reason `score_floor` is a column:
+     * the decision belongs to the project, a `pg_dump` carries it, and every check is a read of a row
+     * the caller already has. `max_upload_bytes` is a `bigint` because a byte cap is the one of the
+     * three that can pass 2 GiB.
+     */
+    maxDocuments: integer('max_documents'),
+    maxChunks: integer('max_chunks'),
+    maxUploadBytes: bigint('max_upload_bytes', { mode: 'number' }),
   },
   (t) => [
+    check('projects_max_documents_check', sql`${t.maxDocuments} is null or ${t.maxDocuments} >= 0`),
+    check('projects_max_chunks_check', sql`${t.maxChunks} is null or ${t.maxChunks} >= 0`),
+    check('projects_max_upload_bytes_check', sql`${t.maxUploadBytes} is null or ${t.maxUploadBytes} >= 0`),
     check('projects_mcp_auth_check', sql`${t.mcpAuth} in ('open', 'token', 'account')`),
     check('projects_score_floor_check', sql`${t.scoreFloor} is null or (${t.scoreFloor} >= 0 and ${t.scoreFloor} <= 1)`),
   ],

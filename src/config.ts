@@ -767,6 +767,19 @@ export const EnvSchema = z
       .min(1024)
       .default(1024 * 1024 * 1024),
 
+    // Per-project quotas ([ADR-0117](../.ssot/ADR.md#adr-0117))
+    /**
+     * The instance-wide default for how many documents one project may hold. **`0` is unlimited and is
+     * the default**, so an upgrade changes nothing until an operator writes a number. A project's own
+     * `max_documents` overrides this in both directions: a non-zero value tightens or loosens it, and
+     * `0` exempts that project.
+     */
+    PROJECT_MAX_DOCUMENTS: z.coerce.number().int().min(0).default(0),
+    /** The same for the number of chunks a project may hold (checked per document, before embedding). */
+    PROJECT_MAX_CHUNKS: z.coerce.number().int().min(0).default(0),
+    /** The same for the bytes stored for a project's upload sources, staging included. */
+    PROJECT_MAX_UPLOAD_BYTES: z.coerce.number().int().min(0).default(0),
+
     // What a web source may do to a site it does not own ([ADR-0070](../.ssot/ADR.md#adr-0070))
     /**
      * The most pages one web source will **fetch** in a run.

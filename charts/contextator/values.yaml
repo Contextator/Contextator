@@ -140,6 +140,14 @@ config:
   # baseline (see `resources` below). At least 1048576 (1 MiB). Unset or null leaves the application default,
   # 256 MiB (268435456).
   gitMaxPackBytes: null
+  # PROJECT_MAX_DOCUMENTS / PROJECT_MAX_CHUNKS / PROJECT_MAX_UPLOAD_BYTES (ADR-0117): the instance-wide
+  # default caps on how many documents, how many chunks and how many stored upload bytes one project may
+  # hold. A project the instance admin has given its own value (Quotas on the project page) uses that
+  # instead, and 0 on a project means unlimited whatever is set here. Null or 0 leaves a cap off, which is
+  # the application default.
+  projectMaxDocuments: null
+  projectMaxChunks: null
+  projectMaxUploadBytes: null
   # MCP_STRUCTURED_OUTPUT: true makes every MCP tool also return its answer as structured JSON
   # (`structuredContent`) beside the unchanged text answer. Off by default: Claude Code hands its
   # model the structured part alone when both are present, so the guidance each answer carries
