@@ -36,6 +36,8 @@ export interface UploadQuota {
 export class UploadRequestQuota {
   /** Bytes this request adds, net of the files it overwrites. */
   requestBytes = 0;
+  /** What the request has written so far, by path relative to the scratch directory: a path sent twice is charged for its growth only. */
+  readonly written = new Map<string, number>();
   constructor(
     readonly limit: number,
     /** What the project stores when the request began, with the session's overwrites of `current/` counted once. */
@@ -220,12 +222,20 @@ export class UploadService {
    */
   private async charge(tracker: UploadRequestQuota | undefined, stats: ImportStats): Promise<void> {
     if (!tracker) return;
-    let replaced = 0;
-    for (const written of stats.added ?? []) {
+    // The difference between what is on disk now and what the path held before this write: the request's own
+    // earlier write if there was one, else the session's staged file, else the committed one. Measured on disk,
+    // so a path repeated within one request or one archive is not subtracted twice.
+    for (const written of new Set(stats.added ?? [])) {
       const relative = path.relative(tracker.scratchDir, written);
-      replaced += (await fileSize(path.join(tracker.filesDir, relative))) ?? (await fileSize(path.join(tracker.currentDir, relative))) ?? 0;
+      const now = (await fileSize(written)) ?? 0;
+      const before =
+        tracker.written.get(relative) ??
+        (await fileSize(path.join(tracker.filesDir, relative))) ??
+        (await fileSize(path.join(tracker.currentDir, relative))) ??
+        0;
+      tracker.requestBytes += now - before;
+      tracker.written.set(relative, now);
     }
-    tracker.requestBytes += stats.bytes - replaced;
     if (tracker.baseUsed + tracker.requestBytes > tracker.limit) {
       throw new QuotaExceededError('max_upload_bytes', tracker.limit, tracker.baseUsed, Math.max(0, tracker.requestBytes));
     }

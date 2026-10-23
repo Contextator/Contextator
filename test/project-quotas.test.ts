@@ -217,6 +217,18 @@ describe('UploadService against a quota', () => {
     expect(second.baseUsed).toBe(60);
   });
 
+  it('subtracts a stored file once when one request sends its path several times', async () => {
+    const src = freshSource(7);
+    await putCurrent(src, 'big.md', bytes(400));
+    const session = await service.createSession(src, quota(1000, 400));
+    const tracker = await service.beginRequest(src, session, quota(1000, 400, 400));
+    for (let i = 0; i < 3; i++) await service.addFile(src, session, 'big.md', await stream(bytes(1)), tracker);
+    // 400 stored bytes are replaced by 1, once: the repeats replace the request's own earlier copy.
+    expect(tracker.requestBytes).toBe(-399);
+    // 1 + 1500 over a cap of 1000 does not fit, which a thrice-subtracted 400 would have hidden.
+    await expect(service.addFile(src, session, 'new.md', await stream(bytes(1500)), tracker)).rejects.toBeInstanceOf(QuotaExceededError);
+  });
+
   it('keeps what earlier requests staged when a later request over the same path is refused', async () => {
     const src = freshSource(6);
     const session = await service.createSession(src, quota(100, 0));
