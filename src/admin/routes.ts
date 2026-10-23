@@ -405,7 +405,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     const principal = req.principal as Principal;
     const member = principal.kind !== 'token' && principal.role === 'member' ? principal.userId : null;
     const [sourceCounts, roles] = await Promise.all([
-      countSourcesByProject(db),
+      countSourcesByProject(db, project.id),
       member ? membershipMap(db, member) : Promise.resolve({} as Record<string, 'viewer' | 'editor'>),
     ]);
     return {
