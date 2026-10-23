@@ -116,7 +116,7 @@ src/db/vector-indexes.ts      one partial HNSW index per project: its name, its 
 src/services/chunker.ts       Markdown/MDX-aware chunking with heading breadcrumbs; pure and synchronous, the token counter injected
 src/services/fs-scan.ts       safe directory walking + path-escape checks
 src/services/sources.ts       source CRUD and the zod schema of each type's config
-src/services/sources/         one driver per type: local, git (isomorphic-git), upload, notion, confluence
+src/services/sources/         one driver per type: local, git (isomorphic-git), upload, notion, confluence, web; adding one is walked through in docs/contributing-a-connector.md
 src/services/sources/confluence.ts        the Confluence driver, Cloud and Data Center: the page tree, the incremental skip, and the probe
 src/services/sources/confluence-client.ts the REST surface it talks to, as an interface plus an HTTPS implementation, and the one place CQL is built
 src/services/sources/confluence-egress.ts where a Confluence request may connect: the address check after DNS and on every redirect, CONFLUENCE_ALLOWED_HOSTS
@@ -234,6 +234,7 @@ docker-compose.yml            the `contextator` container and its volumes; embed
 docker-compose.build.yml      overlay for docker-compose.yml that builds the image from source instead of pulling it
 docker-compose.slim.yml       the `-slim` image against a PostgreSQL you operate — a whole file rather than an overlay, because the pgdata mount has to be absent
 docker-compose.dev.yml        PostgreSQL only, for `npm run dev`
+deploy/                       one-click deploy templates for Railway, Render and Fly.io; every one keeps the token requirement (test/deploy-templates.test.ts)
 charts/contextator/           Helm chart for Kubernetes: one Pod, the `-slim` image, an external PostgreSQL; `replicas: 1` is hardcoded, not a value; values checked by a strict values.schema.json
 DOCKERHUB.md                  what Docker Hub shows on the repository page; not this README, which is well past its 25,000-character limit
 biome.jsonc                   the one formatter and linter, and why each rule is set as it is
@@ -247,6 +248,10 @@ tsconfig.test.json            typechecks test/ and scripts/, which the build's t
 .github/ISSUE_TEMPLATE/       bug report, feature request, and the links the issue chooser offers first
 .git-blame-ignore-revs        commits that only reformatted; `git blame` should look through them
 ```
+
+Adding a **source type** (a new kind of connector) touches a dozen places that no single check links
+together. [docs/contributing-a-connector.md](docs/contributing-a-connector.md) lists every one, in order, and
+`test/connector-guide.test.ts` follows it with a throwaway driver so the guide cannot quietly rot.
 
 ### How the single container works
 
