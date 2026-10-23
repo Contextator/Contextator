@@ -46,9 +46,11 @@ services:
       # The one-time code the first-run setup page asks for, so a stranger who finds the URL first cannot claim the instance.
       - key: SETUP_CODE
         generateValue: true
-      # Render terminates TLS in front of the service and forwards over its private network.
-      - key: TRUST_PROXY
+      # Render terminates TLS in front of the service, so the session cookie is always sent over HTTPS.
+      - key: AUTH_COOKIE_SECURE
         value: "1"
+      # TRUST_PROXY is left at its default on purpose (ADR-0060). "1" would let any caller choose its own
+      # rate-limit key with an X-Forwarded-For header; see "Behind the platform's proxy" in docs/deployment.md.
       # Set to https://<service>.onrender.com (or your domain) after the first deploy.
       - key: PUBLIC_BASE_URL
         sync: false

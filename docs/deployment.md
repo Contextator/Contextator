@@ -81,6 +81,25 @@ authentication, and the templates are built around it:
   whenever it is listening on a non-loopback address — and on a hosted platform it always is. Open means
   anyone with the URL can read that project. Keep it token-protected.
 
+### Behind the platform's proxy
+
+Every template runs behind the platform's reverse proxy, and **none of them sets `TRUST_PROXY`**. That is
+deliberate ([ADR-0060](https://contextator.com/en/docs/configuration/#running-behind-a-reverse-proxy)).
+`TRUST_PROXY=1` makes the client address the left-most `X-Forwarded-For` value, and unless the platform
+replaces what a caller sends (which these templates do not assume), a caller writes that value itself: it
+could then pick a new rate-limit key on every request and walk past the sign-in and first-run setup limits.
+The templates therefore keep the safe default, and set what does not depend on it:
+`AUTH_COOKIE_SECURE=1` (these platforms are HTTPS only) and `PUBLIC_BASE_URL`, so published links do not
+read a header.
+
+The cost is the one the default is documented to have: the server sees the platform's proxy as the client of
+every request, so the per-address sign-in budget is shared by everyone, and ten failed sign-ins can pause the
+sign-in page for all. After the first forwarded request the log says once that a forwarded header was ignored;
+that line is expected here. To get per-client limits back, set `TRUST_PROXY` to the **address or CIDR block of the
+platform's proxy** (and nothing wider: the list applies to every hop, so a range that includes your clients lets
+them write their own address again) after checking that range in the platform's documentation. Do not use `1`
+unless nothing but the proxy can open a socket to the service.
+
 Whichever platform you choose, finish with the same three steps:
 
 1. Open the service URL, enter the setup code, and create the first account.
@@ -115,7 +134,7 @@ published slim image).
    - `SECRET_KEY` = 32 or more random characters (`openssl rand -hex 32`)
    - `SETUP_CODE` = 8 or more random characters
    - `DATA_DIR` = `/data` and `MODEL_CACHE_DIR` = `/data/models`
-   - `TRUST_PROXY` = `1`
+   - `AUTH_COOKIE_SECURE` = `1`
    - `PUBLIC_BASE_URL` = the service's public URL, after step 6
 5. In **Settings → Volumes**, attach a volume mounted at `/data`. Railway allows one volume per service, which is
    why the model cache lives under it.

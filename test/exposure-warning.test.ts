@@ -11,7 +11,7 @@ describe('isLoopbackHost', () => {
   });
 });
 
-describe('exposureWarning (ADR-0114)', () => {
+describe('exposureWarning (ADR-0065)', () => {
   it('stays silent when no project is open, whatever the bind address is', () => {
     expect(exposureWarning('0.0.0.0', [])).toBeNull();
   });
@@ -24,6 +24,12 @@ describe('exposureWarning (ADR-0114)', () => {
     const message = exposureWarning('0.0.0.0', ['docs', 'wiki']);
     expect(message).toContain('0.0.0.0');
     expect(message).toContain('docs, wiki');
+  });
+
+  it('says it can be ignored when the port is published on loopback only, since the process cannot tell', () => {
+    const message = exposureWarning('0.0.0.0', ['docs']) ?? '';
+    expect(message).toContain('127.0.0.1');
+    expect(message).toMatch(/ignore it/);
   });
 
   it('caps the list of names it prints', () => {

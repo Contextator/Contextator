@@ -9,7 +9,7 @@ import { DEFAULT_MCP_AUTH } from '../src/db/schema.js';
  * The one-click templates under `deploy/` put the port on the public internet, which the compose files
  * deliberately do not (ADR-0065). What keeps such an instance closed is authentication, so this file
  * is the gate on the property the templates must never lose: nothing in them opens a project, and the
- * things that keep the first-run page and the stored credentials safe are required (ADR-0114).
+ * things that keep the first-run page and the stored credentials safe are required (ADR-0065), and so is leaving `TRUST_PROXY` at its safe default (ADR-0060).
  *
  * The checks are structural. They cannot prove a platform accepts a file; they prove the file says
  * what `docs/deployment.md` promises.
@@ -17,6 +17,11 @@ import { DEFAULT_MCP_AUTH } from '../src/db/schema.js';
 const root = resolve(import.meta.dirname, '..');
 const read = (path: string): string => readFileSync(resolve(root, path), 'utf8');
 
+const baseEnv: NodeJS.ProcessEnv = {
+  DATABASE_URL: 'postgres://u:p@db.internal:5432/contextator',
+  SECRET_KEY: 'x'.repeat(40),
+  SETUP_CODE: 'x'.repeat(10),
+};
 const railwayRaw = read('deploy/railway/railway.json');
 const renderRaw = read('deploy/render/render.yaml');
 const flyRaw = read('deploy/fly/fly.toml');
@@ -82,6 +87,33 @@ describe('deploy templates never open authentication', () => {
     expect(flyRaw).not.toMatch(/^\s*(SECRET_KEY|SETUP_CODE|ADMIN_TOKEN|DATABASE_URL)\s*=/m);
     expect(flyRaw).not.toMatch(/postgres(ql)?:\/\/[^\s'"$]+:[^\s'"$]+@/);
     expect(railwayRaw).not.toMatch(/SECRET_KEY|SETUP_CODE|ADMIN_TOKEN|DATABASE_URL|postgres(ql)?:\/\//);
+  });
+});
+
+describe('deploy templates keep the proxy-trust default (ADR-0060)', () => {
+  // `1`/`true` trusts whoever wrote X-Forwarded-For, which hands every caller its own rate-limit key.
+  // A named proxy address or CIDR would be fine; "everything" never is.
+  it.each([
+    ['render.yaml', renderRaw],
+    ['fly.toml', flyRaw],
+    ['railway.json', railwayRaw],
+  ])('%s does not set TRUST_PROXY to a trust-everything value', (_name, raw) => {
+    expect(raw).not.toMatch(/TRUST_PROXY["']?\s*[:=]?\s*(-\s*)?(value:\s*)?["']?(1|true)["']?\s*$/im);
+    expect(raw).not.toMatch(/key:\s*TRUST_PROXY\s*\n\s*value:\s*["']?(1|true)["']?/i);
+  });
+
+  it('a Render env that sets TRUST_PROXY at all names a proxy rather than trusting everything', () => {
+    const value = renderService.envVars.find((v) => v.key === 'TRUST_PROXY')?.value;
+    if (value !== undefined) expect(loadConfig({ ...baseEnv, TRUST_PROXY: value }).TRUST_PROXY).not.toBe(true);
+  });
+
+  it('both templates that set cookies say they are HTTPS only, since the proxy is not trusted for the scheme', () => {
+    expect(renderService.envVars.find((v) => v.key === 'AUTH_COOKIE_SECURE')?.value).toBe('1');
+    expect(flyRaw).toMatch(/^\s*AUTH_COOKIE_SECURE = "1"$/m);
+  });
+
+  it('docs/deployment.md does not tell anyone to set TRUST_PROXY to 1', () => {
+    expect(read('docs/deployment.md')).not.toMatch(/`TRUST_PROXY`\s*=\s*`(1|true)`/);
   });
 });
 

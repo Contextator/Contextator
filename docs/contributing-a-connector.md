@@ -169,8 +169,8 @@ manual edit:
 ### 10. Documentation, changelog, facts
 
 - `docs/document-sources.md`: what the type is, what it needs, what it will not do.
-- `README.md` and `DOCKERHUB.md`, where they list the types; `test/readme-mirrors.test.ts` and
-  `test/dockerhub-description.test.ts` check them.
+- `README.md` and `DOCKERHUB.md`, where they list the types. These two are updated by hand and no test checks
+  that a new type appears in them, so a forgotten line stays green; look for the other types' names in both.
 - `CHANGELOG.md`, under `[Unreleased]`.
 - `npm run build:facts`, then commit `public/product-facts.json`: the number and names of source types are a
   product fact the website checks itself against. Never edit that file by hand.

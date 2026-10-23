@@ -25,8 +25,9 @@ ships, that stops.
   Projects stay token-protected, the first-run page needs `SETUP_CODE`, and `test/deploy-templates.test.ts`
   fails if a template carries a setting that opens authentication.
 - **Startup warning for open projects on a reachable address.** When the server listens on a non-loopback
-  address and at least one project has no MCP token, the log says which projects (ADR-0114). Said once at
-  start; nothing changes for a loopback bind or for token-protected projects.
+  address and at least one project has no MCP token, the log says which projects (ADR-0065). Said once at
+  start; nothing changes for a loopback bind or for token-protected projects. It cannot see how a container's port is
+  published, so it says that a loopback-only publish makes it safe to ignore.
 
 - **Source freshness metrics.** `/metrics` gains `contextator_source_last_sync_timestamp_seconds` and
   `contextator_source_freshness_lag_seconds`, which describe the scheduled source that has gone longest

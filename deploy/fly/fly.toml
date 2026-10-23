@@ -17,8 +17,10 @@ primary_region = "ams"
   PORT = "3444"
   DATA_DIR = "/data"
   MODEL_CACHE_DIR = "/data/models"
-  # Fly's proxy sits in front of the app.
-  TRUST_PROXY = "1"
+  # Fly terminates TLS (force_https below), so the session cookie is always sent over HTTPS.
+  AUTH_COOKIE_SECURE = "1"
+  # TRUST_PROXY is left at its default on purpose (ADR-0060). "1" would let any caller choose its own
+  # rate-limit key with an X-Forwarded-For header; see "Behind the platform's proxy" in docs/deployment.md.
 
 [mounts]
   source = "contextator_data"

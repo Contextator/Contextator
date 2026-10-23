@@ -274,7 +274,7 @@ async function main(): Promise<void> {
   stopSyncScheduler = startSyncScheduler({ db, indexer, log, config });
 
   // Said before the listener opens, from the same rows the dashboard shows. Never fatal: a failed read
-  // costs a warning, not the start (ADR-0114).
+  // costs a warning, not the start (ADR-0065).
   try {
     const openProjects = (await listProjects(db)).filter((p) => p.mcpAuth === 'open').map((p) => p.name);
     const exposure = exposureWarning(config.HOST, openProjects);
