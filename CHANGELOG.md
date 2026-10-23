@@ -12,6 +12,14 @@ ships, that stops.
 
 ### Added
 
+- **Per-project quotas.** A project can be capped on documents, chunks and upload bytes. `PROJECT_MAX_DOCUMENTS`,
+  `PROJECT_MAX_CHUNKS` and `PROJECT_MAX_UPLOAD_BYTES` set the instance default (`0`, the default, is unlimited);
+  `PATCH /api/projects/:id/quotas` gives one project its own value, `0` to exempt it or `null` to follow the
+  instance again, and is audited. `GET /api/projects/:id` is new and shows each quota's limit, current use and
+  whether it is inherited. An upload that would go over the cap is refused with `413 quota_exceeded` and
+  nothing from it is kept; an indexing run that would go over the document or chunk cap ends in `error` with
+  `quota_exceeded` (a rebuild keeps serving the previous generation, an incremental run keeps the documents it
+  had finished). Quotas travel in a project export. Migration `0022_project_quotas`.
 - **Source freshness metrics.** `/metrics` gains `contextator_source_last_sync_timestamp_seconds` and
   `contextator_source_freshness_lag_seconds`, which describe the scheduled source that has gone longest
   without a successful sync, and `contextator_sources_never_synced`. They are single, unlabeled series:

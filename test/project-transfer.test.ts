@@ -192,6 +192,27 @@ describe('the project floor the manifest carries', () => {
   });
 });
 
+describe('the project quotas the manifest carries', () => {
+  const project = (over: Record<string, unknown>) => Manifest.parse({ ...manifest(), project: { ...manifest().project, ...over } }).project;
+
+  it('carries a limit, a 0 that exempts the project, and null for the instance default', () => {
+    const p = project({ maxDocuments: 40, maxChunks: 0, maxUploadBytes: null });
+    expect(p.maxDocuments).toBe(40);
+    expect(p.maxChunks).toBe(0);
+    expect(p.maxUploadBytes).toBeNull();
+  });
+
+  it('reads an export taken before the columns existed as following the instance', () => {
+    expect('maxDocuments' in manifest().project).toBe(false);
+    expect(project({}).maxDocuments ?? null).toBeNull();
+  });
+
+  it('refuses a negative or fractional limit', () => {
+    expect(() => project({ maxDocuments: -1 })).toThrow();
+    expect(() => project({ maxChunks: 1.5 })).toThrow();
+  });
+});
+
 describe('the refusals, decided from the manifest before a byte of data is read', () => {
   it('accepts a file this instance is the right home for', () => {
     expect(() => checkManifest(manifest(), here)).not.toThrow();
