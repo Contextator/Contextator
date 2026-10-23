@@ -24,14 +24,15 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PgDialect, getTableConfig } from 'drizzle-orm/pg-core';
 import type { McpServer } from '@modelcontextprotocol/server';
+import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 import { EnvSchema } from '../src/config.js';
-import { type ProjectRow, projects } from '../src/db/schema.js';
+import { DEFAULT_MCP_AUTH, type ProjectRow, projects } from '../src/db/schema.js';
 import { registerTools, type ToolContext } from '../src/mcp/tools.js';
 import { ARCHIVE_RE } from '../src/services/archives.js';
 import { FLAVOR_ONLY_EXTENSIONS, FLAVORS } from '../src/services/flavors.js';
@@ -58,6 +59,8 @@ export interface ProductFacts {
     archive: readonly string[];
   };
   mcpAuthModes: readonly string[];
+  defaultMcpAuth: string;
+  defaultBindAddress: string;
   scoreFloorDefault: number;
   embeddingModel: string;
   embeddingDimensions: number;
@@ -101,6 +104,81 @@ function mcpAuthModes(): string[] {
   const modes = list?.match(/'([^']*)'/g)?.map((quoted) => quoted.slice(1, -1)) ?? [];
   if (modes.length === 0) throw new Error(`cannot read the allowed values out of: ${sql}`);
   return modes;
+}
+
+/** The container-side port the application listens on; a published mapping to it is the dashboard and MCP endpoint. */
+const APP_CONTAINER_PORT = '3444';
+
+/** The compose files that must each publish the application port, and so each state the bind address. */
+const PUBLISHING_COMPOSE_FILES = ['docker-compose.yml', 'docker-compose.slim.yml'] as const;
+
+/** `${CONTEXTATOR_BIND:-<address>}:${PORT:-<port>}:<container port>` — the only shape this generator can read an address out of. */
+const PUBLISHED_PORT_RE = /^\$\{CONTEXTATOR_BIND:-([^}:]+)\}:(?:\$\{PORT:-\d+\}|\d+):(\d+)$/;
+
+/**
+ * The address the application port is published on, per compose file, read from the parsed YAML.
+ *
+ * ADR-0114: the bind address is a fact, and its one statement is the `ports:` entry of the compose
+ * files. It is read with a YAML parser and then matched against one exact expression shape — a regex
+ * over the raw file would also "find" an address inside a comment or a different service, and would
+ * go on returning an answer after the expression was rewritten into something that no longer means
+ * the same thing. Anything outside the shape throws instead of yielding a best guess.
+ *
+ * `files` maps a file name to its text, so the failure cases are testable without touching the tree.
+ * Every file in the map is scanned for a mapping to the application port, which is how a third
+ * compose variant that publishes it joins the check on its own; the named files must each have one.
+ */
+export function composeBindAddresses(files: Record<string, string>): Record<string, string> {
+  const found: Record<string, string> = {};
+  for (const [name, text] of Object.entries(files)) {
+    const doc = parseYaml(text) as { services?: Record<string, { ports?: unknown[] }> } | null;
+    for (const [service, definition] of Object.entries(doc?.services ?? {})) {
+      for (const entry of definition?.ports ?? []) {
+        if (typeof entry !== 'string') {
+          // The long syntax (`target:`/`published:`/`host_ip:`) states the address elsewhere; it has no reading here.
+          if (typeof entry === 'object' && entry !== null && String((entry as { target?: unknown }).target) === APP_CONTAINER_PORT) {
+            throw new Error(`${name}: service ${service} publishes port ${APP_CONTAINER_PORT} in the long syntax, which this generator cannot read`);
+          }
+          continue;
+        }
+        const shaped = PUBLISHED_PORT_RE.exec(entry);
+        if (!shaped) {
+          if (entry.split(':').pop() === APP_CONTAINER_PORT) {
+            throw new Error(`${name}: service ${service} publishes port ${APP_CONTAINER_PORT} as "${entry}", which is not \${CONTEXTATOR_BIND:-<address>}:<port>:${APP_CONTAINER_PORT}`);
+          }
+          continue;
+        }
+        if (shaped[2] !== APP_CONTAINER_PORT) continue;
+        if (found[name] !== undefined) throw new Error(`${name}: more than one mapping publishes port ${APP_CONTAINER_PORT}`);
+        found[name] = shaped[1];
+      }
+    }
+  }
+  for (const required of PUBLISHING_COMPOSE_FILES) {
+    if (found[required] === undefined) throw new Error(`${required} no longer publishes port ${APP_CONTAINER_PORT} as \${CONTEXTATOR_BIND:-<address>}:<port>:${APP_CONTAINER_PORT}`);
+  }
+  return found;
+}
+
+/**
+ * The one address every compose variant publishes the application port on (`127.0.0.1`, ADR-0065).
+ * Two files that disagree mean there is no single default to report, so the build stops.
+ */
+export function defaultBindAddress(files: Record<string, string> = readComposeFiles()): string {
+  const addresses = composeBindAddresses(files);
+  const distinct = new Set(Object.values(addresses));
+  if (distinct.size !== 1) {
+    const detail = Object.entries(addresses)
+      .map(([name, address]) => `${name}=${address}`)
+      .join(', ');
+    throw new Error(`the compose files publish the port on different addresses (${detail}); there is no single default bind address to report`);
+  }
+  return [...distinct][0];
+}
+
+function readComposeFiles(): Record<string, string> {
+  const names = readdirSync(ROOT).filter((name) => /^docker-compose.*\.ya?ml$/.test(name));
+  return Object.fromEntries(names.map((name) => [name, readFileSync(path.join(ROOT, name), 'utf8')]));
 }
 
 /**
@@ -168,6 +246,8 @@ export function buildProductFacts(): ProductFacts {
       archive: archiveExtensions(),
     },
     mcpAuthModes: mcpAuthModes(),
+    defaultMcpAuth: DEFAULT_MCP_AUTH,
+    defaultBindAddress: defaultBindAddress(),
     scoreFloorDefault: defaultOf<number>('SEARCH_SCORE_FLOOR'),
     embeddingModel: defaultOf<string>('EMBEDDING_MODEL'),
     embeddingDimensions: defaultOf<number>('EMBEDDING_DIMENSIONS'),

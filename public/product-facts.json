@@ -9,6 +9,8 @@
     "archive": ["zip", "tar", "tgz", "tar.gz", "rar"]
   },
   "mcpAuthModes": ["open", "token", "account"],
+  "defaultMcpAuth": "token",
+  "defaultBindAddress": "127.0.0.1",
   "scoreFloorDefault": 0.82,
   "embeddingModel": "Xenova/multilingual-e5-small",
   "embeddingDimensions": 384,
