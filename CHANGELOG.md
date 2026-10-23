@@ -12,6 +12,13 @@ ships, that stops.
 
 ### Added
 
+- **Relevance floor suggestions.** After a re-index caused by an embedding-model change, and on request
+  (`POST /api/projects/:id/score-floor/suggestions`, manager), the server measures the project with the floor
+  off and stores the highest floor that still answers every one of its own section headings. Suggestions are
+  listed (`GET`, viewer) and adopted only by `POST .../suggestions/:suggestionId/apply` (manager); the project's
+  floor is never changed automatically, and a suggestion from an earlier model or index generation is refused.
+  The fit is shared with `scripts/floor-calibration.ts`. Migration `0024` adds the `floor_suggestions` table
+  (ADR-0083, ADR-0113).
 - **Re-index on embedding-model change.** With `REINDEX_ON_MODEL_CHANGE=1` (off by default; Helm
   `config.reindexOnModelChange`), start-up queues one scheduled run for every project stamped with a different
   model than the server runs and that has at least one source, scheduled or not. A project that was never

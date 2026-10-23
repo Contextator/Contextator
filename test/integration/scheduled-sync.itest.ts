@@ -671,3 +671,79 @@ describe('REINDEX_ON_MODEL_CHANGE at start-up', () => {
     expect(await maintain({ embeddingModelId: MODEL_ID })).toEqual([]);
   });
 });
+
+/**
+ * 0.4-16: the moment a model-change rebuild finishes is when the project's floor stops describing the
+ * vectors it serves, so the indexer tells its owner — and only then. The hook is fire-and-forget: a
+ * failure in it must not turn a finished run into a failed one.
+ */
+describe('the post-rebuild hook after a model change', () => {
+  const OLD_MODEL = 'local:old-model:fp32';
+  let fx: Fixture;
+  let notified: string[];
+  let hooked: Indexer;
+  let failing: boolean;
+
+  beforeAll(async () => {
+    fx = await buildFixture('rebuild_hook', ['stale', 'fresh']);
+    notified = [];
+    failing = false;
+    hooked = new Indexer({
+      db: fx.database.db,
+      embeddings,
+      config: fx.schedulerConfig,
+      log: silentLogger,
+      locks: new KeyedMutex(),
+      onModelChangeRebuilt: async (projectId) => {
+        notified.push(projectId);
+        if (failing) throw new Error('hook blew up');
+      },
+    });
+  });
+
+  afterAll(async () => {
+    for (const root of fx.roots.values()) await rm(root, { recursive: true, force: true }).catch(() => undefined);
+    await dropTestDatabase(baseUrl, fx.database);
+  });
+
+  const run = async (marker: string) => settle(fx.database.db, hooked.enqueue(fx.projectIds.get(marker)!, { trigger: 'scheduled' }));
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 50));
+
+  it('is not told about the first index of a project, which has no earlier encoder to differ from', async () => {
+    const job = await run('fresh');
+    expect(job.phase).toBe('done');
+    await flush();
+    expect(notified).toEqual([]);
+  }, 60_000);
+
+  it('is not told about a re-run under the same encoder', async () => {
+    await run('fresh');
+    await flush();
+    expect(notified).toEqual([]);
+  }, 60_000);
+
+  it('is told once, with the project, when the rebuild was for another encoder', async () => {
+    await run('stale');
+    await fx.database.db
+      .update(projects)
+      .set({ embeddingModel: OLD_MODEL })
+      .where(eq(projects.id, fx.projectIds.get('stale')!));
+    const job = await run('stale');
+    expect(job.phase).toBe('done');
+    await flush();
+    expect(notified).toEqual([fx.projectIds.get('stale')]);
+  }, 60_000);
+
+  it('does not fail the run when the hook throws', async () => {
+    failing = true;
+    await fx.database.db
+      .update(projects)
+      .set({ embeddingModel: OLD_MODEL })
+      .where(eq(projects.id, fx.projectIds.get('stale')!));
+    const job = await run('stale');
+    await flush();
+    expect(job.phase).toBe('done');
+    expect((await getProjectById(fx.database.db, fx.projectIds.get('stale')!))!.embeddingModel).toBe(MODEL_ID);
+    expect(notified).toHaveLength(2);
+  }, 60_000);
+});

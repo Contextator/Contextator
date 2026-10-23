@@ -101,6 +101,18 @@ logged with the reason; a run refused for lack of disk space is recorded in the 
 any other. With the flag off, nothing changes: such a project answers `model_mismatch` until someone
 re-indexes it.
 
+A relevance floor is a number about one encoder, so a project's own floor (`PATCH
+/api/projects/:id/score-floor`) stops meaning anything once its index is rebuilt with another model. When a
+re-index finishes because the model changed, the server measures the project against its new index and
+stores a **floor suggestion**: the highest floor, on a 0.001 grid from 0.6 to 0.99, that still answers
+every section heading of the project when each is asked as a question. A manager can also ask for one at any
+time with `POST /api/projects/:id/score-floor/suggestions`, read them with `GET` on the same path, and adopt
+one with `POST .../suggestions/:suggestionId/apply`. Nothing is applied automatically: the project keeps
+the floor it had until a manager applies a suggestion, and a suggestion measured against an earlier model
+or index generation is refused. A project with fewer than 20 headed sections is not measured and gets no
+suggestion; the response says so. The same arithmetic is what `scripts/floor-calibration.ts` runs against
+labelled question sets.
+
 ## Tracing (OpenTelemetry)
 
 Tracing is off by default and switches on with one variable. Nothing else changes: with it unset the

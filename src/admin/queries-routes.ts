@@ -1,7 +1,8 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
-import { NotFoundError, getProjectById, setProjectScoreFloor } from '../services/projects.js';
+import { applyFloorSuggestion, generateFloorSuggestion, listFloorSuggestions } from '../services/floor-calibration.js';
+import { ConflictError, NotFoundError, getProjectById, setProjectScoreFloor } from '../services/projects.js';
 import { effectiveScoreFloor } from '../services/relevance.js';
 import { buildExport, toJsonl } from '../services/query-export.js';
 import {
@@ -25,6 +26,7 @@ import {
   setQueryLogEnabled,
   volumeOverTime,
 } from '../services/query-summary.js';
+import { scanFrom, selectionFrom } from '../services/vector-store.js';
 
 /**
  * `/api/projects/:id/queries/*` and the two switch routes beside them — the read side of the query log
@@ -39,6 +41,7 @@ import {
  */
 
 const ProjectParams = z.object({ id: z.uuid() });
+const SuggestionParams = z.object({ id: z.uuid(), suggestionId: z.uuid() });
 
 /** A cosine similarity in a query string: digits, an optional fraction, between 0 and 1. */
 const floorNumber = (special: string) =>
@@ -324,6 +327,67 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
       scoreFloor: row.scoreFloor,
       instanceScoreFloor: config.SEARCH_SCORE_FLOOR,
       effectiveScoreFloor: effectiveScoreFloor(config.SEARCH_SCORE_FLOOR, row.scoreFloor),
+    };
+  });
+
+  /**
+   * Measures the project and stores the floor that would have answered every one of its own section
+   * headings — advice, never applied here. `manager`, by its row in `PROJECT_ROUTE_OVERRIDES`: it spends
+   * an embedding and a search per probe.
+   *
+   * `201` with the suggestion; `200` with `suggestion: null` and the reason when the project has too few
+   * headings to measure from or no floor on the grid would answer them all (an outcome, not an error);
+   * `409` when the project is not indexed with the encoder this server runs.
+   */
+  app.post('/api/projects/:id/score-floor/suggestions', async (req, reply) => {
+    const { id } = ProjectParams.parse(req.params);
+    const outcome = await generateFloorSuggestion(
+      { db, embeddings: ctx.embeddings, scan: scanFrom(config), selection: selectionFrom(config) },
+      id,
+      'operator',
+    );
+    switch (outcome.status) {
+      case 'project_gone':
+        throw new NotFoundError('Project not found');
+      case 'not_indexed':
+        throw new ConflictError('Project has no indexed content yet; index it before asking for a floor');
+      case 'model_mismatch':
+        throw new ConflictError(
+          `Project was indexed with ${outcome.indexedWith} and this server embeds with ${outcome.serverUses}; wait for the re-index before asking for a floor`,
+        );
+      case 'insufficient_data':
+        return { suggestion: null, reason: 'insufficient_data', probes: outcome.probes, required: outcome.required };
+      case 'no_fit':
+        return { suggestion: null, reason: 'no_fit', probes: outcome.probes };
+      case 'created':
+        return reply.code(201).send({ suggestion: outcome.suggestion });
+    }
+  });
+
+  /** A `viewer`'s, by the `GET` default: the stored suggestions, newest first, with whether each was applied. */
+  app.get('/api/projects/:id/score-floor/suggestions', async (req) => {
+    const { id } = ProjectParams.parse(req.params);
+    const project = await getProjectById(db, id);
+    if (!project) throw new NotFoundError('Project not found');
+    return {
+      current: { project: project.scoreFloor, embeddingModel: project.embeddingModel, liveGeneration: project.liveGeneration },
+      suggestions: await listFloorSuggestions(db, id),
+    };
+  });
+
+  /**
+   * The one way a suggestion becomes the project's floor, and a `manager`'s like the `PATCH` it
+   * amounts to. `409` for a suggestion already applied or measured against an index the project no
+   * longer serves.
+   */
+  app.post('/api/projects/:id/score-floor/suggestions/:suggestionId/apply', async (req) => {
+    const { id, suggestionId } = SuggestionParams.parse(req.params);
+    const { suggestion, scoreFloor } = await applyFloorSuggestion(db, id, suggestionId);
+    return {
+      suggestion,
+      scoreFloor,
+      instanceScoreFloor: config.SEARCH_SCORE_FLOOR,
+      effectiveScoreFloor: effectiveScoreFloor(config.SEARCH_SCORE_FLOOR, scoreFloor),
     };
   });
 

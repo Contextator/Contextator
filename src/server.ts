@@ -24,6 +24,7 @@ import { MCP_EXPOSED_HEADERS, mcpRoutes } from './mcp/router.js';
 import { SessionRegistry } from './mcp/sessions.js';
 import { newChunkBudgetState, verifyChunkBudget } from './services/chunk-budget.js';
 import { createEmbeddingProvider, loadEmbeddingTokenizer } from './services/embeddings/index.js';
+import { generateFloorSuggestion } from './services/floor-calibration.js';
 import { Indexer } from './services/indexer.js';
 import { KeyedMutex } from './services/locks.js';
 import { MetricsRegistry } from './services/metrics.js';
@@ -31,6 +32,7 @@ import { listProjects } from './services/projects.js';
 import { AuditWriter, sweepAuditLog } from './services/audit.js';
 import { QueryLog, sweepQueryLog } from './services/query-log.js';
 import { startSyncScheduler } from './services/scheduler.js';
+import { scanFrom, selectionFrom } from './services/vector-store.js';
 import { initTracing } from './services/tracing.js';
 import { floorModelWarning } from './services/relevance.js';
 import { countUsers } from './services/auth/users.js';
@@ -78,7 +80,24 @@ async function main(): Promise<void> {
   // scrape time, so there is nothing to keep up to date and nothing that can drift from the pool.
   const metrics = new MetricsRegistry(pool);
   // The indexer registers its "run in progress" probe with the registry itself (`indexing` label).
-  const indexer = new Indexer({ db, embeddings, config, log, locks, metrics });
+  // After a re-index forced by a model change the project's floor describes the old encoder: measure the new
+  // one and store a suggestion beside it. It is never applied from here (ADR-0113); a manager adopts it.
+  const onModelChangeRebuilt = async (projectId: string): Promise<void> => {
+    const outcome = await generateFloorSuggestion(
+      { db, embeddings, scan: scanFrom(config), selection: selectionFrom(config) },
+      projectId,
+      'model_change',
+    );
+    if (outcome.status === 'created') {
+      log.info(
+        { projectId, suggestedFloor: outcome.suggestion.suggestedFloor, previousFloor: outcome.suggestion.previousFloor },
+        'relevance floor suggestion stored',
+      );
+    } else {
+      log.info({ projectId, outcome: outcome.status }, 'no relevance floor suggestion stored');
+    }
+  };
+  const indexer = new Indexer({ db, embeddings, config, log, locks, metrics, onModelChangeRebuilt });
   const uploads = new UploadService(config);
   const setup = new SetupGate();
   const loginLimiter = new SlidingWindow(config.AUTH_LOGIN_MAX_ATTEMPTS, config.AUTH_LOGIN_WINDOW_MIN * 60_000);
