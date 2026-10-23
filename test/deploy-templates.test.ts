@@ -119,7 +119,9 @@ describe('deploy templates keep the proxy-trust default (ADR-0060)', () => {
     expect(docs).toMatch(/resets the shared budget/);
     expect(docs).toMatch(/OAuth connectors[^.]*refused with `invalid_target`/);
     // The URL has to be set before a connector is attached, so it comes before the project step.
-    expect(docs.indexOf('1. Make sure `PUBLIC_BASE_URL`')).toBeLessThan(docs.indexOf('3. Create a project.'));
+    const urlStep = docs.indexOf('1. Make sure `PUBLIC_BASE_URL`');
+    expect(urlStep).toBeGreaterThan(-1);
+    expect(urlStep).toBeLessThan(docs.indexOf('3. Create a project.'));
   });
 
   it('docs/deployment.md does not tell anyone to set TRUST_PROXY to 1', () => {

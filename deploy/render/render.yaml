@@ -51,6 +51,6 @@ services:
         value: "1"
       # TRUST_PROXY is left at its default on purpose (ADR-0060). "1" would let any caller choose its own
       # rate-limit key with an X-Forwarded-For header; see "Behind the platform's proxy" in docs/deployment.md.
-      # Set to https://<service>.onrender.com (or your domain) after the first deploy.
+      # Render asks for it when the Blueprint is created: https://<service>.onrender.com (or your domain).
       - key: PUBLIC_BASE_URL
         sync: false
