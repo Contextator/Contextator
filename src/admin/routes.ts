@@ -23,7 +23,7 @@ import { PathNotAllowedError } from '../services/fs-scan.js';
 import { latestIndexRun, listIndexRuns, sourceFreshness } from '../services/index-runs.js';
 import { type MetricsSnapshot, renderPrometheus } from '../services/metrics.js';
 import { PasswordPolicyError } from '../services/passwords.js';
-import { describeQuotas, setProjectQuotas } from '../services/quotas.js';
+import { QUOTA_BYTES_MAX, QUOTA_ROW_COUNT_MAX, describeQuotas, setProjectQuotas } from '../services/quotas.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { sourceFieldsOf } from '../services/source-url.js';
 import { listProjectsForUser, membershipMap } from '../services/auth/memberships.js';
@@ -401,18 +401,28 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     const { id } = IdParams.parse(req.params);
     const project = await getProjectById(db, id);
     if (!project) throw new NotFoundError('Project not found');
-    return { ...toView(req, project), quotas: await describeQuotas(db, config.DATA_DIR, config, project) };
+    // The same `access` and `sourceCount` the list reports, for the same reasons (see `GET /api/projects`).
+    const principal = req.principal as Principal;
+    const member = principal.kind !== 'token' && principal.role === 'member' ? principal.userId : null;
+    const [sourceCounts, roles] = await Promise.all([
+      countSourcesByProject(db),
+      member ? membershipMap(db, member) : Promise.resolve({} as Record<string, 'viewer' | 'editor'>),
+    ]);
+    return {
+      ...toView(req, project, undefined, sourceCounts, member ? (roles[project.id] ?? 'viewer') : 'manager'),
+      quotas: await describeQuotas(db, config.DATA_DIR, config, project),
+    };
   });
 
   // Each field is a whole number or `null` (inherit the instance's value); `0` is unlimited. An absent key is
   // left as it was. Row counts are `integer` columns, hence their ceiling; the byte quota is a `bigint`
-  // column read as a JS number, hence `MAX_SAFE_INTEGER`.
+  // column read as a JS number (see `QUOTA_ROW_COUNT_MAX`).
   const QuotaValue = (max: number) => z.union([z.number().int().min(0).max(max), z.null()]);
   const QuotasBody = z
     .object({
-      maxDocuments: QuotaValue(2147483647).optional(),
-      maxChunks: QuotaValue(2147483647).optional(),
-      maxUploadBytes: QuotaValue(Number.MAX_SAFE_INTEGER).optional(),
+      maxDocuments: QuotaValue(QUOTA_ROW_COUNT_MAX).optional(),
+      maxChunks: QuotaValue(QUOTA_ROW_COUNT_MAX).optional(),
+      maxUploadBytes: QuotaValue(QUOTA_BYTES_MAX).optional(),
     })
     .strict()
     .refine((b) => Object.values(b).some((v) => v !== undefined), { message: 'Give at least one of maxDocuments, maxChunks, maxUploadBytes' });

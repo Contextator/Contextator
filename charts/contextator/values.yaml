@@ -142,7 +142,7 @@ config:
   gitMaxPackBytes: null
   # PROJECT_MAX_DOCUMENTS / PROJECT_MAX_CHUNKS / PROJECT_MAX_UPLOAD_BYTES (ADR-0117): the instance-wide
   # default caps on how many documents, how many chunks and how many stored upload bytes one project may
-  # hold. A project the instance admin has given its own value (Quotas on the project page) uses that
+  # hold. A project the instance admin has given its own value (`PATCH /api/projects/:id/quotas`) uses that
   # instead, and 0 on a project means unlimited whatever is set here. Null or 0 leaves a cap off, which is
   # the application default.
   projectMaxDocuments: null

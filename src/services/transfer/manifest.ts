@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { QUOTA_BYTES_MAX, QUOTA_ROW_COUNT_MAX } from '../quotas.js';
 
 /**
  * The manifest of a project export, and the refusals that are decided from it
@@ -115,9 +116,9 @@ export const Manifest = z.object({
      * `manifestVersion` did not move, for the reason given on `mcpAuth`: an export taken before the columns
      * existed reads as "follow the instance", and an older importer ignores the keys.
      */
-    maxDocuments: z.number().int().min(0).nullable().optional(),
-    maxChunks: z.number().int().min(0).nullable().optional(),
-    maxUploadBytes: z.number().int().min(0).nullable().optional(),
+    maxDocuments: z.number().int().min(0).max(QUOTA_ROW_COUNT_MAX).nullable().optional(),
+    maxChunks: z.number().int().min(0).max(QUOTA_ROW_COUNT_MAX).nullable().optional(),
+    maxUploadBytes: z.number().int().min(0).max(QUOTA_BYTES_MAX).nullable().optional(),
     lastIndexedAt: z.string().nullable(),
   }),
   counts: z.object({

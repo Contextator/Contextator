@@ -211,6 +211,13 @@ describe('the project quotas the manifest carries', () => {
     expect(() => project({ maxDocuments: -1 })).toThrow();
     expect(() => project({ maxChunks: 1.5 })).toThrow();
   });
+
+  it('refuses a limit the column cannot hold, so the import is refused up front and not with a 500 mid-way', () => {
+    expect(project({ maxDocuments: 2147483647, maxChunks: 2147483647, maxUploadBytes: Number.MAX_SAFE_INTEGER }).maxDocuments).toBe(2147483647);
+    expect(() => project({ maxDocuments: 2147483648 })).toThrow();
+    expect(() => project({ maxChunks: 2147483648 })).toThrow();
+    expect(() => project({ maxUploadBytes: Number.MAX_SAFE_INTEGER + 1 })).toThrow();
+  });
 });
 
 describe('the refusals, decided from the manifest before a byte of data is read', () => {
