@@ -17,7 +17,7 @@ import './services/sources/web.js';
 import { loadConfig, OAUTH_CLIENT_STALE_MS, OAUTH_CLIENT_UNUSED_MS, OAUTH_CREDENTIAL_SWEEP_GRACE_MS } from './config.js';
 import type { AppContext } from './context.js';
 import { createDb, waitForDb } from './db/client.js';
-import { httpServerOptions, warnAboutProxyConfiguration } from './http.js';
+import { exposureWarning, httpServerOptions, warnAboutProxyConfiguration } from './http.js';
 import { bootstrapDatabase, SchemaMismatchError } from './db/bootstrap.js';
 import { oauthRoutes } from './mcp/oauth-routes.js';
 import { MCP_EXPOSED_HEADERS, mcpRoutes } from './mcp/router.js';
@@ -272,6 +272,16 @@ async function main(): Promise<void> {
   // `sync_interval_minutes = NULL`, so the tick is one indexed query that matches nothing, once a
   // minute, and NFR-10 holds by the data rather than by a flag somebody has to find.
   stopSyncScheduler = startSyncScheduler({ db, indexer, log, config });
+
+  // Said before the listener opens, from the same rows the dashboard shows. Never fatal: a failed read
+  // costs a warning, not the start (ADR-0114).
+  try {
+    const openProjects = (await listProjects(db)).filter((p) => p.mcpAuth === 'open').map((p) => p.name);
+    const exposure = exposureWarning(config.HOST, openProjects);
+    if (exposure) log.warn({ host: config.HOST, openProjects }, exposure);
+  } catch (err) {
+    log.warn({ err }, 'could not read the projects to check which of them are open; the exposure warning was skipped');
+  }
 
   await app.listen({ port: config.PORT, host: config.HOST });
   log.info({ dashboard: `http://localhost:${config.PORT}/`, mcp: `http://localhost:${config.PORT}/mcp/<project>` }, 'Contextator is up');
