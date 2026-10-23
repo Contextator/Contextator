@@ -161,9 +161,11 @@ What the upload cap counts:
 - Everything the project's upload sources store: each source's `current/` tree plus the staging of every open
   upload session, the requesting session's own staging included once. A file that overwrites a stored or
   staged file of the same path counts once, as the difference.
-- A session that nobody has touched for 24 hours (no `files` request, no commit) stops counting, so an
-  abandoned upload does not hold the quota forever. Its files stay on disk until the session is aborted or
-  committed; the 24 hours only decide whether they count.
+- A session that nobody has touched for 24 hours (no `files` request, no commit) stops counting, and the
+  server deletes it: a sweep that runs every quarter of an hour removes the session's staged files, so what the
+  quota counts and what is on disk always agree. **An upload that was not committed within 24 hours of its
+  last request is lost** and has to be uploaded again. This applies to every project, whether or not it has an
+  upload quota.
 - The cap is checked by walking the upload directories, so each `files` request pays one walk over the
   project's upload trees before it writes. With many thousands of staged files this is noticeable per request;
   an unlimited project (`0`) skips the walk entirely.

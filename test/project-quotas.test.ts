@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -6,8 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { QuotaExceededError, QuotaUsageUnavailableError } from '../src/services/errors.js';
 import { sourceCurrentDir, stagingDir } from '../src/services/data-dir.js';
-import { directoryBytes, overwrittenBytes, resolveQuota, resolveQuotas } from '../src/services/quotas.js';
-import { UploadRequestQuota, UploadService } from '../src/services/uploads.js';
+import { directoryBytes, overwrittenBytes, resolveQuota, resolveQuotas, UPLOAD_SESSION_TTL_MS } from '../src/services/quotas.js';
+import { sweepExpiredUploadSessions, UploadRequestQuota, UploadService } from '../src/services/uploads.js';
 import type { DocumentSourceRow } from '../src/db/schema.js';
 
 /**
@@ -313,6 +313,65 @@ describe('UploadService against a quota', () => {
         sourceCurrentDir(dataDir, src.projectId, src.id),
       ),
     ).toBe(7);
+  });
+
+  describe('the sweep of idle sessions', () => {
+    const exists = (file: string) =>
+      stat(file).then(
+        () => true,
+        () => false,
+      );
+    const age = async (dir: string, ms: number) => {
+      const when = new Date(Date.now() - ms);
+      await utimes(dir, when, when);
+    };
+
+    it('deletes a session idle past the expiry, files and scratch included, and leaves a live one', async () => {
+      const src = isolatedSource(11);
+      const stale = await service.createSession(src);
+      const live = await service.createSession(src);
+      await writeFile(stagedFile(src, stale, 'a.md'), bytes(30));
+      await mkdir(path.join(stagingDir(dataDir, src.projectId, src.id, stale), 'request-abc'), { recursive: true });
+      await writeFile(stagedFile(src, live, 'b.md'), bytes(30));
+      await age(stagingDir(dataDir, src.projectId, src.id, stale), UPLOAD_SESSION_TTL_MS + 60_000);
+      await age(stagingDir(dataDir, src.projectId, src.id, live), UPLOAD_SESSION_TTL_MS - 60_000);
+
+      expect(await sweepExpiredUploadSessions(dataDir)).toBe(1);
+      expect(await exists(stagingDir(dataDir, src.projectId, src.id, stale))).toBe(false);
+      expect(await exists(stagedFile(src, live, 'b.md'))).toBe(true);
+      // What the quota counts and what is on disk agree: only the live session's 30 bytes remain.
+      expect(await directoryBytes(path.join(stagingDir(dataDir, src.projectId, src.id, live), '..'))).toBe(30);
+    });
+
+    it('keeps a session that any use renewed, however old its files are', async () => {
+      const src = isolatedSource(12);
+      const session = await service.createSession(src);
+      await writeFile(stagedFile(src, session, 'a.md'), bytes(10));
+      await age(stagingDir(dataDir, src.projectId, src.id, session), UPLOAD_SESSION_TTL_MS + 60_000);
+      await service.renew(src, session);
+      expect(await sweepExpiredUploadSessions(dataDir)).toBe(0);
+      expect(await exists(stagedFile(src, session, 'a.md'))).toBe(true);
+    });
+
+    it('does not touch the committed tree, other files of .staging, or a missing data directory', async () => {
+      const src = isolatedSource(13);
+      await putCurrent(src, 'kept.md', bytes(5));
+      const stray = path.join(stagingDir(dataDir, src.projectId, src.id, '0'.repeat(32)), '..', 'not-a-session');
+      await mkdir(stray, { recursive: true });
+      await age(stray, UPLOAD_SESSION_TTL_MS * 3);
+      await sweepExpiredUploadSessions(dataDir);
+      expect(await exists(path.join(sourceCurrentDir(dataDir, src.projectId, src.id), 'kept.md'))).toBe(true);
+      expect(await exists(stray)).toBe(true);
+      expect(await sweepExpiredUploadSessions(path.join(dataDir, 'does-not-exist'))).toBe(0);
+    });
+
+    it('sweeps by the clock it is given', async () => {
+      const src = isolatedSource(14);
+      const session = await service.createSession(src);
+      expect(await sweepExpiredUploadSessions(dataDir)).toBe(0);
+      expect(await sweepExpiredUploadSessions(dataDir, Date.now() + UPLOAD_SESSION_TTL_MS + 60_000)).toBeGreaterThanOrEqual(1);
+      expect(await exists(stagingDir(dataDir, src.projectId, src.id, session))).toBe(false);
+    });
   });
 
   describe('at commit', () => {

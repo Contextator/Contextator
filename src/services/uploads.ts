@@ -11,7 +11,7 @@ import { QuotaExceededError } from './errors.js';
 import { allowedExtensionsFor, type Flavor } from './flavors.js';
 import { isInside, normalizeRelativePath } from './fs-scan.js';
 import { NotFoundError, ValidationError } from './projects.js';
-import { directoryBytes, fileSize, overwrittenBytes } from './quotas.js';
+import { directoryBytes, fileSize, overwrittenBytes, UPLOAD_SESSION_TTL_MS } from './quotas.js';
 
 /**
  * The upload quota in force for one request ([ADR-0117](../../.ssot/ADR.md#adr-0117)). Only built when the
@@ -419,4 +419,42 @@ export class UploadService {
   async clear(source: DocumentSourceRow): Promise<void> {
     await fs.rm(sourceCurrentDir(this.config.DATA_DIR, source.projectId, source.id), { recursive: true, force: true, maxRetries: 5 });
   }
+}
+
+/**
+ * Deletes every upload session nobody has touched for `UPLOAD_SESSION_TTL_MS`, in every project, so that what the
+ * quota counts (live sessions only, see `projectUploadUsage`) and what is on disk agree. A session is touched
+ * by each `files` request and by its commit, so only an abandoned one is old. Returns how many it removed.
+ *
+ * The modification time is read again right before the delete: a request that renewed the session in between
+ * keeps it. Nothing here throws on a path it cannot read; the next tick tries again.
+ */
+export async function sweepExpiredUploadSessions(dataDir: string, now: number = Date.now()): Promise<number> {
+  const entries = async (dir: string): Promise<string[]> => fs.readdir(dir).catch(() => []);
+  const idleSince = async (dir: string): Promise<number | null> => {
+    const stat = await fs.stat(dir).catch(() => null);
+    return stat?.isDirectory() ? stat.mtimeMs : null;
+  };
+  let removed = 0;
+  const projectsRoot = path.join(dataDir, 'projects');
+  for (const projectId of await entries(projectsRoot)) {
+    const sourcesRoot = path.join(projectsRoot, projectId, 'sources');
+    for (const sourceId of await entries(sourcesRoot)) {
+      const stagingRoot = path.join(sourcesRoot, sourceId, '.staging');
+      for (const session of await entries(stagingRoot)) {
+        if (!/^[0-9a-f]{32}$/.test(session)) continue;
+        const dir = path.join(stagingRoot, session);
+        const touched = await idleSince(dir);
+        if (touched === null || now - touched <= UPLOAD_SESSION_TTL_MS) continue;
+        if ((await idleSince(dir)) !== touched) continue;
+        try {
+          await fs.rm(dir, { recursive: true, force: true, maxRetries: 5 });
+          removed++;
+        } catch {
+          // Left for the next tick.
+        }
+      }
+    }
+  }
+  return removed;
 }

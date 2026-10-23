@@ -40,7 +40,7 @@ import { startSessionReaper } from './services/auth/sessions.js';
 import { SetupGate } from './services/auth/setup.js';
 import { SlidingWindow } from './services/rate-limit.js';
 import { runStartupMaintenance } from './services/startup-maintenance.js';
-import { UploadService } from './services/uploads.js';
+import { sweepExpiredUploadSessions, UploadService } from './services/uploads.js';
 import { APP_VERSION } from './version.js';
 
 async function main(): Promise<void> {
@@ -210,6 +210,14 @@ async function main(): Promise<void> {
         if (deleted > 0) log.info({ deleted, retentionDays: config.AUDIT_LOG_RETENTION_DAYS }, 'swept expired audit events');
       })
       .catch((err: unknown) => log.warn({ err }, 'audit log sweep failed'));
+    // Upload sessions idle for 24 hours, so that what the upload quota counts and what is on disk agree
+    // ([ADR-0117](../.ssot/ADR.md#adr-0117)). A directory walk of the staging roots, on the timer every other
+    // forgetting here uses. Also before the query log's `return`.
+    void sweepExpiredUploadSessions(config.DATA_DIR)
+      .then((deleted) => {
+        if (deleted > 0) log.info({ deleted }, 'swept idle upload sessions');
+      })
+      .catch((err: unknown) => log.warn({ err }, 'upload session sweep failed'));
     if (!config.SEARCH_QUERY_LOG) return;
     void sweepQueryLog(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)
       .then((deleted) => {
