@@ -109,6 +109,7 @@ describe('README default auth and bind address', () => {
     expect(readme, 'README no longer states the published address').toContain(`**The port is published on \`${facts.defaultBindAddress}\` only.**`);
     const published = [...readme.matchAll(/-p\s+([\d.]+):\d+:3444/g)].map((m) => m[1]);
     expect(published.length, 'README has no `docker run -p <address>:<port>:3444` example to check').toBeGreaterThan(0);
-    for (const address of published) expect(address, 'a README `docker run -p` example publishes on another address than the compose files').toBe(facts.defaultBindAddress);
+    for (const address of published)
+      expect(address, 'a README `docker run -p` example publishes on another address than the compose files').toBe(facts.defaultBindAddress);
   });
 });

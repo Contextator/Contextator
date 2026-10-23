@@ -52,7 +52,8 @@ describe('public/product-facts.json', () => {
  * to guess — a changed expression or a disagreement between the files stops the build.
  */
 describe('default auth and bind address facts', () => {
-  const compose = (ports: string) => `services:\n  contextator:\n    image: contextator/contextator\n    ports:\n      # a comment mentioning \${CONTEXTATOR_BIND:-10.0.0.1}:3444:3444\n      - ${ports}\n`;
+  const compose = (ports: string) =>
+    `services:\n  contextator:\n    image: contextator/contextator\n    ports:\n      # a comment mentioning \${CONTEXTATOR_BIND:-10.0.0.1}:3444:3444\n      - ${ports}\n`;
   const published = (address: string) => `"\${CONTEXTATOR_BIND:-${address}}:\${PORT:-3444}:3444"`;
 
   it('reports the schema default for the MCP auth mode and loopback for the bind address', () => {
@@ -73,9 +74,11 @@ describe('default auth and bind address facts', () => {
     expect(() => defaultBindAddress(files)).toThrow(/different addresses/);
   });
 
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: a compose expression, not a template literal
   it('fails when the expression leaves the ${CONTEXTATOR_BIND:-...} shape', () => {
     const files = { 'docker-compose.yml': compose('"127.0.0.1:3444:3444"'), 'docker-compose.slim.yml': compose(published('127.0.0.1')) };
     expect(() => defaultBindAddress(files)).toThrow(/not \$\{CONTEXTATOR_BIND:-<address>\}/);
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: a compose expression, not a template literal
     const renamed = { 'docker-compose.yml': compose(published('127.0.0.1')), 'docker-compose.slim.yml': compose('"${BIND:-127.0.0.1}:3444:3444"') };
     expect(() => defaultBindAddress(renamed)).toThrow(/not \$\{CONTEXTATOR_BIND:-<address>\}/);
   });
@@ -98,6 +101,7 @@ describe('default auth and bind address facts', () => {
     const files = {
       'docker-compose.yml': compose(published('127.0.0.1')),
       'docker-compose.slim.yml': compose(published('127.0.0.1')),
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: a compose expression, not a template literal
       'docker-compose.dev.yml': compose('"${POSTGRES_HOST_PORT:-5432}:5432"'),
     };
     expect(defaultBindAddress(files)).toBe('127.0.0.1');

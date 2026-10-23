@@ -144,7 +144,9 @@ export function composeBindAddresses(files: Record<string, string>): Record<stri
         const shaped = PUBLISHED_PORT_RE.exec(entry);
         if (!shaped) {
           if (entry.split(':').pop() === APP_CONTAINER_PORT) {
-            throw new Error(`${name}: service ${service} publishes port ${APP_CONTAINER_PORT} as "${entry}", which is not \${CONTEXTATOR_BIND:-<address>}:<port>:${APP_CONTAINER_PORT}`);
+            throw new Error(
+              `${name}: service ${service} publishes port ${APP_CONTAINER_PORT} as "${entry}", which is not \${CONTEXTATOR_BIND:-<address>}:<port>:${APP_CONTAINER_PORT}`,
+            );
           }
           continue;
         }
@@ -155,7 +157,8 @@ export function composeBindAddresses(files: Record<string, string>): Record<stri
     }
   }
   for (const required of PUBLISHING_COMPOSE_FILES) {
-    if (found[required] === undefined) throw new Error(`${required} no longer publishes port ${APP_CONTAINER_PORT} as \${CONTEXTATOR_BIND:-<address>}:<port>:${APP_CONTAINER_PORT}`);
+    if (found[required] === undefined)
+      throw new Error(`${required} no longer publishes port ${APP_CONTAINER_PORT} as \${CONTEXTATOR_BIND:-<address>}:<port>:${APP_CONTAINER_PORT}`);
   }
   return found;
 }

@@ -63,7 +63,7 @@ class DummyDriver implements SourceDriver {
   }
 
   async sync(): Promise<SyncResult> {
-    const config = parseSourceConfig(DUMMY, this.source.config) as z.infer<typeof DummyConfig>;
+    const config = parseSourceConfig(DUMMY, this.source.config) as unknown as z.infer<typeof DummyConfig>;
     await fs.mkdir(this.dir, { recursive: true });
     await fs.writeFile(path.join(this.dir, 'greeting.md'), `# Greeting\n\n${config.greeting}\n`);
     return { note: 'wrote 1 file', configPatch: { [PROBE_TOKEN_KEY]: PROBE } };
