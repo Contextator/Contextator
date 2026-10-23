@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { buildProductFacts } from '../scripts/build-product-facts.js';
 
 /**
  * `README.md` is the only copy of two destructive procedures — the backup and restore of ADR-0072,
@@ -81,4 +82,33 @@ describe('README mirrors', () => {
       }
     });
   }
+});
+
+/**
+ * The README states two defaults that `public/product-facts.json` publishes as facts (ADR-0114): the
+ * auth mode a new project is born with and the address the port is published on. The site checks its
+ * own prose against the same facts in its repository; this is the same bond for the README, so that
+ * changing `DEFAULT_MCP_AUTH` or the compose bind address cannot leave the README promising the old
+ * behaviour.
+ */
+describe('README default auth and bind address', () => {
+  const facts = buildProductFacts();
+
+  it('says a new project starts with the auth mode the schema defaults to', () => {
+    const phrases: Record<string, RegExp> = {
+      token: /A new project requires a \*\*bearer token\*\*/,
+      account: /A new project requires an? \*\*account\*\*/,
+      open: /A new project is \*\*open\*\*/,
+    };
+    const expected = phrases[facts.defaultMcpAuth];
+    expect(expected, `no README phrasing is known for the default mode "${facts.defaultMcpAuth}"; teach this test the new sentence`).toBeDefined();
+    expect(readme, `README no longer states that a new project starts as "${facts.defaultMcpAuth}"`).toMatch(expected);
+  });
+
+  it('says the port is published on the default bind address and on no other', () => {
+    expect(readme, 'README no longer states the published address').toContain(`**The port is published on \`${facts.defaultBindAddress}\` only.**`);
+    const published = [...readme.matchAll(/-p\s+([\d.]+):\d+:3444/g)].map((m) => m[1]);
+    expect(published.length, 'README has no `docker run -p <address>:<port>:3444` example to check').toBeGreaterThan(0);
+    for (const address of published) expect(address, 'a README `docker run -p` example publishes on another address than the compose files').toBe(facts.defaultBindAddress);
+  });
 });
