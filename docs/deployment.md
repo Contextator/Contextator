@@ -1,6 +1,6 @@
 # Deployment topologies
 
-Beyond the single container: an external PostgreSQL, and Kubernetes. The single-container install is in the [README](../README.md#quick-start).
+Beyond the single container: an external PostgreSQL, Kubernetes, and one-click templates for Railway, Render and Fly.io. The single-container install is in the [README](../README.md#quick-start).
 
 ## Bringing your own PostgreSQL
 
@@ -56,3 +56,106 @@ helm install ctx contextator/contextator \
 Full install guide — `SECRET_KEY` handling, Ingress and reverse-proxy interplay, persistence, probes,
 security context, resource sizing, uninstalling — on
 [Running on Kubernetes](https://contextator.com/en/docs/kubernetes/), and in `charts/contextator/README.md`.
+
+## One-click templates (Railway, Render, Fly.io)
+
+The files under `deploy/` set Contextator up on a hosted platform: the `-slim` image from Docker Hub, a
+PostgreSQL 16 with pgvector, and one volume for `/data`. They are the hosted counterpart of
+`docker-compose.slim.yml`, and they differ from it in one way that matters.
+
+**Read this first: these templates publish the port to the internet.** The compose files publish it on
+`127.0.0.1` ([ADR-0065](../.ssot/ADR.md#adr-0065)); a hosted platform gives the service a public URL, and
+`HOST=0.0.0.0` inside the container is how it receives traffic there. What keeps the instance closed is
+authentication, and the templates are built around it:
+
+- **A project is token-protected from the moment it exists.** Nothing in any template changes that
+  default, and there is no setting in them that opens a project. `test/deploy-templates.test.ts` fails if
+  one ever does.
+- **The first-run setup page needs a code** (`SETUP_CODE`), so whoever finds the URL before you do cannot
+  create the first account. Render generates one; on Railway and Fly you set it (below). Without it the
+  server generates a code and prints it once in the log, which is just as good, but is easy to miss on a
+  platform that rotates logs.
+- **`SECRET_KEY`** (32 characters or more) encrypts the credentials stored for git, Notion and Confluence
+  sources. Generate it once, keep a copy outside the platform: losing it makes those credentials unreadable.
+- If you do switch a project to *open* in the dashboard, the server says so in its log at the next start
+  whenever it is listening on a non-loopback address — and on a hosted platform it always is. Open means
+  anyone with the URL can read that project. Keep it token-protected.
+
+Whichever platform you choose, finish with the same three steps:
+
+1. Open the service URL, enter the setup code, and create the first account.
+2. Create a project. Its MCP endpoint is `https://<your-url>/mcp/<project>`, it is born token-protected, and
+   the creation dialog shows the project's first token **once**: copy it and give it to the client
+   ([MCP access](mcp-access.md)). Until a client sends it, the endpoint answers `401`.
+3. Set `PUBLIC_BASE_URL` to the public URL if the template did not, so the links Contextator prints do not
+   depend on a request header.
+
+The first start downloads the embedding model (about 500 MB) into the volume and takes a few minutes; the
+health check waits for it. Later starts reuse it. Backups are yours, as on any external-database topology:
+the platform's database backups cover the database, and **the `/data` volume** — uploaded sources — needs its
+own (see [Bringing your own PostgreSQL](#bringing-your-own-postgresql)).
+
+These templates have not been run on the platforms by the project's CI; the checks in
+`test/deploy-templates.test.ts` are structural. If a platform changed its file format since, the platform's
+own validator will say so, and the fix is a pull request against the file.
+
+### Railway
+
+Files: `deploy/railway/railway.json` and `deploy/railway/Dockerfile` (a single `FROM` line that names the
+published slim image).
+
+1. In Railway, **New Project → Deploy from GitHub repo** and pick your fork of this repository (or, to avoid
+   a fork, create an **Empty service** and set its **Source** to the Docker image
+   `contextator/contextator:latest-slim`, then skip step 3).
+2. In the service's **Settings → Config-as-code**, set the file path to `deploy/railway/railway.json`.
+3. Add a database: **New → Database → PostgreSQL** using a template that includes **pgvector**. The stock
+   PostgreSQL image has no pgvector, and the first start would fail on `CREATE EXTENSION vector`.
+4. In the Contextator service's **Variables**, set:
+   - `DATABASE_URL` = `${{<your database service>.DATABASE_URL}}`
+   - `SECRET_KEY` = 32 or more random characters (`openssl rand -hex 32`)
+   - `SETUP_CODE` = 8 or more random characters
+   - `DATA_DIR` = `/data` and `MODEL_CACHE_DIR` = `/data/models`
+   - `TRUST_PROXY` = `1`
+   - `PUBLIC_BASE_URL` = the service's public URL, after step 6
+5. In **Settings → Volumes**, attach a volume mounted at `/data`. Railway allows one volume per service, which is
+   why the model cache lives under it.
+6. In **Settings → Networking**, generate a domain. Deploy, and follow the three steps above.
+
+### Render
+
+File: `deploy/render/render.yaml` — a Blueprint with the web service, a disk at `/data` and a
+PostgreSQL 16 database.
+
+1. Fork this repository, or copy `deploy/render/render.yaml` into a repository of your own at the root as
+   `render.yaml`. (Render reads a Blueprint from the repository root, or from a path you give it.)
+2. In Render, **New → Blueprint**, pick that repository, and — if the file is not at the root — set the
+   Blueprint path to `deploy/render/render.yaml`.
+3. Render shows the resources it will create. `SECRET_KEY` and `SETUP_CODE` are generated; open the
+   service's **Environment** tab afterwards to read `SETUP_CODE` and to keep a copy of `SECRET_KEY`.
+   `PUBLIC_BASE_URL` is asked for; enter `https://<service>.onrender.com` (or your own domain).
+4. **Apply**. The disk and a paid instance are required: the free tier has neither a disk nor enough memory
+   for the embedding model. Then follow the three steps above.
+
+### Fly.io
+
+File: `deploy/fly/fly.toml`. It needs [`flyctl`](https://fly.io/docs/flyctl/) and an external PostgreSQL 16 with
+pgvector, which Fly's own managed Postgres offering provides when you pick a version and extension that
+supports it; any reachable server meeting
+[the requirements above](#bringing-your-own-postgresql) works.
+
+```bash
+cp deploy/fly/fly.toml fly.toml
+fly apps create <your-app-name>          # and put the same name in `app = "..."` in fly.toml
+fly volumes create contextator_data --size 5 --region <region>
+fly secrets set \
+  DATABASE_URL='postgres://user:password@host:5432/contextator' \
+  SECRET_KEY="$(openssl rand -hex 32)" \
+  SETUP_CODE="$(openssl rand -hex 8)" \
+  PUBLIC_BASE_URL='https://<your-app-name>.fly.dev'
+fly deploy
+```
+
+Print the setup code you generated before you close the shell (`echo` it, or set it from a value you
+already have), because secrets are write-only on Fly. The machine has 2 GB of memory; the embedding model
+does not fit in less. The volume belongs to one region and one machine, which matches the one-instance
+design: do not scale the app out.

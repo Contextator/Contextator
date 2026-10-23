@@ -1,0 +1,54 @@
+# Render Blueprint for Contextator (slim image + Render Postgres).
+#
+# Click-to-deploy steps and what to do afterwards: docs/deployment.md, "One-click templates".
+#
+# Nothing in this file switches authentication off. A project is born token-protected
+# (ADR-0065) and the first-run setup page is guarded by SETUP_CODE, which Render generates
+# below and shows in the dashboard under the service's Environment tab.
+# test/deploy-templates.test.ts keeps it that way.
+databases:
+  - name: contextator-db
+    plan: basic-256mb
+    postgresMajorVersion: "16"
+    # pgvector: Render Postgres 16 ships the extension; the first start runs
+    # CREATE EXTENSION IF NOT EXISTS vector with the owner role.
+
+services:
+  - type: web
+    name: contextator
+    runtime: image
+    image:
+      url: docker.io/contextator/contextator:latest-slim
+    plan: standard
+    healthCheckPath: /api/health
+    autoDeploy: false
+    disk:
+      name: contextator-data
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: contextator-db
+          property: connectionString
+      # The embedding model (~500 MB) is cached on the disk, so a restart does not download it again.
+      - key: MODEL_CACHE_DIR
+        value: /data/models
+      - key: DATA_DIR
+        value: /data
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: "3444"
+      # Encrypts the credentials stored for sources. Losing it makes them unreadable; copy it somewhere safe.
+      - key: SECRET_KEY
+        generateValue: true
+      # The one-time code the first-run setup page asks for, so a stranger who finds the URL first cannot claim the instance.
+      - key: SETUP_CODE
+        generateValue: true
+      # Render terminates TLS in front of the service and forwards over its private network.
+      - key: TRUST_PROXY
+        value: "1"
+      # Set to https://<service>.onrender.com (or your domain) after the first deploy.
+      - key: PUBLIC_BASE_URL
+        sync: false

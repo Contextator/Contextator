@@ -1,0 +1,44 @@
+# Fly.io configuration for Contextator (slim image + Fly Postgres / any PostgreSQL 16 with pgvector).
+#
+# Click-to-deploy steps and what to do afterwards: docs/deployment.md, "One-click templates".
+#
+# Secrets never live in this file. Set them before the first deploy:
+#   fly secrets set DATABASE_URL=... SECRET_KEY=$(openssl rand -hex 32) SETUP_CODE=$(openssl rand -hex 8)
+# Nothing here switches authentication off: a project is born token-protected (ADR-0065) and the
+# first-run setup page needs SETUP_CODE. test/deploy-templates.test.ts keeps it that way.
+app = "contextator"
+primary_region = "ams"
+
+[build]
+  image = "contextator/contextator:latest-slim"
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "3444"
+  DATA_DIR = "/data"
+  MODEL_CACHE_DIR = "/data/models"
+  # Fly's proxy sits in front of the app.
+  TRUST_PROXY = "1"
+
+[mounts]
+  source = "contextator_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 3444
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/api/health"
+    interval = "30s"
+    timeout = "5s"
+    # The embedding model download on the first start can take minutes.
+    grace_period = "180s"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
