@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import type { Config } from '../src/config.js';
 import { createEmbeddingProvider } from '../src/services/embeddings/index.js';
+import { type CalibrationSample, fitFloor, refusedCount } from '../src/services/floor-calibration.js';
 import { createReranker } from '../src/services/reranker.js';
 import { belowRelevanceFloor, isIdentifierShaped } from '../src/services/relevance.js';
 import type { TextSearchConfig } from '../src/services/text-search.js';
@@ -307,24 +308,19 @@ async function buildSpecs(options: Options): Promise<CorpusSpec[]> {
 
 const byClass = (run: CorpusRun, klass: Klass): Measured[] => run.measured.filter((m) => m.probe.klass === klass);
 
+const asSamples = (rows: readonly Measured[]): CalibrationSample[] => rows.map((m) => ({ query: m.probe.query, hits: m.hits }));
+
 function refusedShare(rows: readonly Measured[], floor: number): { refused: number; n: number } {
-  return { refused: rows.filter((m) => belowRelevanceFloor(m.probe.query, m.hits, floor)).length, n: rows.length };
+  return { refused: refusedCount(asSamples(rows), floor), n: rows.length };
 }
 
 /**
- * The highest floor on a 0.001 grid that refuses at most `allowed` answerable questions — "the floor
- * this corpus would have asked for". The escape hatch is applied as the product applies it.
+ * The highest floor on a 0.001 grid that refuses at most `allowedShare` of the answerable questions —
+ * "the floor this corpus would have asked for". The arithmetic is the product's own
+ * (`src/services/floor-calibration.ts`, which also serves `POST /api/projects/:id/score-floor/suggestions`),
+ * so the hand-run numbers and the suggestions an operator is shown cannot drift apart.
  */
-function fittedFloor(answerable: readonly Measured[], allowedShare: number): number {
-  const allowed = Math.floor(answerable.length * allowedShare);
-  let best = 0;
-  for (let milli = 600; milli <= 990; milli++) {
-    const floor = milli / 1000;
-    if (refusedShare(answerable, floor).refused <= allowed) best = floor;
-    else break;
-  }
-  return best;
-}
+const fittedFloor = (answerable: readonly Measured[], allowedShare: number): number => fitFloor(asSamples(answerable), allowedShare);
 
 const fmt = (value: number, digits = 3): string => (Number.isNaN(value) ? '—' : value.toFixed(digits));
 const pct = ({ refused, n }: { refused: number; n: number }): string => (n === 0 ? '—' : `${refused}/${n} (${((100 * refused) / n).toFixed(1)}%)`);

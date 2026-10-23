@@ -1,0 +1,272 @@
+import { and, desc, eq, isNull, ne, sql } from 'drizzle-orm';
+import type { Db } from '../db/client.js';
+import { chunks, floorSuggestions, projects, type FloorSuggestionRow } from '../db/schema.js';
+import { ConflictError, NotFoundError } from './projects.js';
+import { belowRelevanceFloor } from './relevance.js';
+import { type SearchDeps, searchProject } from './search.js';
+import type { SearchHit } from './vector-store.js';
+
+/**
+ * Where a project's relevance floor should sit, measured rather than guessed
+ * ([ADR-0042](../../.ssot/ADR.md#adr-0042), [ADR-0083](../../.ssot/ADR.md#adr-0083)).
+ *
+ * The arithmetic used to live only in `scripts/floor-calibration.ts`, where it was run by hand against
+ * four reference corpora. It is here now so that the script and the product share one implementation
+ * of "the highest floor that still answers every question the corpus answers", and so that an operator
+ * can ask for that number for their own project — in particular right after a model change, when the
+ * old floor means nothing (a cosine similarity is a number about one encoder, ADR-0037).
+ *
+ * **A suggestion is advice.** Nothing here writes `projects.score_floor` except
+ * {@link applyFloorSuggestion}, which only a manager's request reaches and which refuses a suggestion
+ * measured against a different encoder or generation than the project now has.
+ */
+
+/** The grid the fit walks, in thousandths: below 0.6 no usable encoder separates anything, above 0.99 nothing is answered. */
+export const FLOOR_GRID_MIN_MILLI = 600;
+export const FLOOR_GRID_MAX_MILLI = 990;
+
+/** Questions fewer than this say too little about a corpus to put a refusal rule on it. */
+export const MIN_CALIBRATION_PROBES = 20;
+/** The most questions one suggestion asks; each is an embedding and a search. */
+export const MAX_CALIBRATION_PROBES = 100;
+/** Suggestions kept per project; the oldest are dropped when a new one is written. */
+export const MAX_KEPT_SUGGESTIONS = 10;
+
+/** One answerable question and what the search returned for it, with the floor off. */
+export interface CalibrationSample {
+  query: string;
+  hits: readonly SearchHit[];
+}
+
+/** How many of these samples a floor would refuse — decided by {@link belowRelevanceFloor}, escape hatch included. */
+export function refusedCount(samples: readonly CalibrationSample[], floor: number): number {
+  return samples.filter((s) => belowRelevanceFloor(s.query, s.hits, floor)).length;
+}
+
+/**
+ * The highest floor on a 0.001 grid that refuses at most `floor(n * allowedShare)` of the answerable
+ * questions — "the floor this corpus would have asked for". `0` when even the bottom of the grid
+ * refuses more than that allows.
+ *
+ * Refusals only ever grow with the floor, which is what lets the walk stop at the first floor that
+ * refuses too many instead of scanning to the top.
+ */
+export function fitFloor(answerable: readonly CalibrationSample[], allowedShare = 0): number {
+  const allowed = Math.floor(answerable.length * allowedShare);
+  let best = 0;
+  for (let milli = FLOOR_GRID_MIN_MILLI; milli <= FLOOR_GRID_MAX_MILLI; milli++) {
+    const floor = milli / 1000;
+    if (refusedCount(answerable, floor) <= allowed) best = floor;
+    else break;
+  }
+  return best;
+}
+
+/** The distribution of the rank-1 cosine similarities, which is the number the floor reads. */
+export interface TopScoreSummary {
+  min: number;
+  p05: number;
+  median: number;
+  max: number;
+}
+
+function quantile(sorted: readonly number[], p: number): number {
+  if (sorted.length === 0) return Number.NaN;
+  const position = (sorted.length - 1) * p;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+}
+
+/** `null` when no sample returned a hit — then there is no distribution to describe. */
+export function summariseTopScores(samples: readonly CalibrationSample[]): TopScoreSummary | null {
+  const tops = samples
+    .map((s) => s.hits[0]?.score)
+    .filter((score): score is number => score !== undefined)
+    .sort((a, b) => a - b);
+  if (tops.length === 0) return null;
+  return { min: tops[0], p05: quantile(tops, 0.05), median: quantile(tops, 0.5), max: tops[tops.length - 1] };
+}
+
+/** What a suggestion was reached from — stored beside it so a reader can judge it. */
+export interface FloorSuggestionBasis {
+  /** `headings`: the project's own section headings, asked as questions the corpus certainly answers. */
+  method: 'headings';
+  probes: number;
+  /** The share of answerable questions the suggested floor may refuse. `0` is "none of them". */
+  allowedShare: number;
+  topScores: TopScoreSummary | null;
+  /** How many of the probes the project's floor at the time would have refused. */
+  refusedAtPrevious: number | null;
+}
+
+export interface FloorSuggestionView {
+  id: string;
+  createdAt: string;
+  trigger: 'model_change' | 'operator';
+  embeddingModel: string;
+  liveGeneration: number;
+  suggestedFloor: number;
+  previousFloor: number | null;
+  basis: FloorSuggestionBasis;
+  appliedAt: string | null;
+}
+
+function toView(row: FloorSuggestionRow): FloorSuggestionView {
+  return {
+    id: row.id,
+    createdAt: row.createdAt.toISOString(),
+    trigger: row.trigger as FloorSuggestionView['trigger'],
+    embeddingModel: row.embeddingModel,
+    liveGeneration: row.liveGeneration,
+    suggestedFloor: row.suggestedFloor,
+    previousFloor: row.previousFloor,
+    basis: row.basis as FloorSuggestionBasis,
+    appliedAt: row.appliedAt ? row.appliedAt.toISOString() : null,
+  };
+}
+
+/**
+ * The questions to ask: the project's own section breadcrumbs from the live generation, in an order
+ * fixed by their hash so that two runs over the same index ask the same questions. A heading is the
+ * one thing every section is certain to answer, which is what makes it a usable stand-in for an
+ * answerable question when nobody has labelled any.
+ */
+export async function calibrationQueries(db: Db, projectId: string, generation: number, limit = MAX_CALIBRATION_PROBES): Promise<string[]> {
+  const rows = await db
+    .select({ headingPath: chunks.headingPath })
+    .from(chunks)
+    .where(and(eq(chunks.projectId, projectId), eq(chunks.indexGeneration, generation), ne(chunks.headingPath, '')))
+    .groupBy(chunks.headingPath)
+    .orderBy(sql`md5(${chunks.headingPath})`)
+    .limit(limit);
+  return rows.map((row) => row.headingPath.split(' > ').join(' ').trim()).filter((query) => query.length > 0);
+}
+
+export type FloorSuggestionOutcome =
+  | { status: 'created'; suggestion: FloorSuggestionView }
+  | { status: 'project_gone' }
+  /** Too few sections to measure from — the project is empty, or a flat file with no headings. */
+  | { status: 'insufficient_data'; probes: number; required: number }
+  /** Even the bottom of the grid would refuse an answerable question: no floor is suggested, because `0` is not advice. */
+  | { status: 'no_fit'; probes: number }
+  /** The project's chunks and this server's encoder are not in one space; the next run re-embeds them. */
+  | { status: 'model_mismatch'; indexedWith: string; serverUses: string }
+  | { status: 'not_indexed' };
+
+/**
+ * Measures the project with the floor off and stores the floor that would have answered every probe.
+ *
+ * `deps.scoreFloor`, the query log and the metrics are deliberately left unset by the caller's
+ * {@link SearchDeps}: the probes are the product asking itself, not an agent asking a question.
+ */
+export async function generateFloorSuggestion(
+  deps: Pick<SearchDeps, 'db' | 'embeddings' | 'scan' | 'selection' | 'rerank'>,
+  projectId: string,
+  trigger: 'model_change' | 'operator',
+): Promise<FloorSuggestionOutcome> {
+  const { db, embeddings } = deps;
+  const [project] = await db.select().from(projects).where(eq(projects.id, projectId)).limit(1);
+  if (!project) return { status: 'project_gone' };
+  if (project.embeddingModel === null || project.chunkCount === 0) return { status: 'not_indexed' };
+  if (project.embeddingModel !== embeddings.id) {
+    return { status: 'model_mismatch', indexedWith: project.embeddingModel, serverUses: embeddings.id };
+  }
+
+  const queries = await calibrationQueries(db, projectId, project.liveGeneration);
+  if (queries.length < MIN_CALIBRATION_PROBES) return { status: 'insufficient_data', probes: queries.length, required: MIN_CALIBRATION_PROBES };
+
+  const samples: CalibrationSample[] = [];
+  for (const query of queries) {
+    const outcome = await searchProject({ ...deps, scoreFloor: undefined, queryLog: undefined, metrics: undefined }, { projectId, query, limit: 5 });
+    if (outcome.status === 'project_gone') return { status: 'project_gone' };
+    if (outcome.status === 'model_mismatch') return { status: 'model_mismatch', indexedWith: outcome.indexedWith, serverUses: outcome.serverUses };
+    if (outcome.status !== 'ok') return { status: 'not_indexed' };
+    samples.push({ query, hits: outcome.hits });
+  }
+
+  const allowedShare = 0;
+  const suggestedFloor = fitFloor(samples, allowedShare);
+  if (suggestedFloor === 0) return { status: 'no_fit', probes: samples.length };
+
+  const basis: FloorSuggestionBasis = {
+    method: 'headings',
+    probes: samples.length,
+    allowedShare,
+    topScores: summariseTopScores(samples),
+    refusedAtPrevious: project.scoreFloor === null || project.scoreFloor <= 0 ? null : refusedCount(samples, project.scoreFloor),
+  };
+
+  const row = await db.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(floorSuggestions)
+      .values({
+        projectId,
+        trigger,
+        embeddingModel: project.embeddingModel as string,
+        liveGeneration: project.liveGeneration,
+        suggestedFloor,
+        previousFloor: project.scoreFloor,
+        basis,
+      })
+      .returning();
+    // Keep the newest few: a suggestion older than the last model change is stale anyway, and the table
+    // is advice, not history.
+    await tx.execute(sql`
+      delete from floor_suggestions
+      where project_id = ${projectId}
+        and id not in (
+          select id from floor_suggestions where project_id = ${projectId} order by created_at desc, id desc limit ${MAX_KEPT_SUGGESTIONS}
+        )
+    `);
+    return created;
+  });
+  return { status: 'created', suggestion: toView(row) };
+}
+
+/** The project's suggestions, newest first. */
+export async function listFloorSuggestions(db: Db, projectId: string, limit = MAX_KEPT_SUGGESTIONS): Promise<FloorSuggestionView[]> {
+  const rows = await db
+    .select()
+    .from(floorSuggestions)
+    .where(eq(floorSuggestions.projectId, projectId))
+    .orderBy(desc(floorSuggestions.createdAt), desc(floorSuggestions.id))
+    .limit(limit);
+  return rows.map(toView);
+}
+
+/**
+ * Adopts a suggestion as the project's own floor — the only path that does.
+ *
+ * Refused (`ConflictError`) when the suggestion was already applied, or when the project has been
+ * re-indexed with another encoder or generation since it was measured: that number describes an index
+ * that is no longer served. The row is locked for the check so two managers cannot both apply it.
+ */
+export async function applyFloorSuggestion(
+  db: Db,
+  projectId: string,
+  suggestionId: string,
+): Promise<{ suggestion: FloorSuggestionView; scoreFloor: number }> {
+  return db.transaction(async (tx) => {
+    const [suggestion] = await tx
+      .select()
+      .from(floorSuggestions)
+      .where(and(eq(floorSuggestions.id, suggestionId), eq(floorSuggestions.projectId, projectId)))
+      .limit(1)
+      .for('update');
+    if (!suggestion) throw new NotFoundError('Floor suggestion not found');
+    if (suggestion.appliedAt !== null) throw new ConflictError('This suggestion has already been applied');
+    const [project] = await tx.select().from(projects).where(eq(projects.id, projectId)).limit(1).for('update');
+    if (!project) throw new NotFoundError('Project not found');
+    if (project.embeddingModel !== suggestion.embeddingModel || project.liveGeneration !== suggestion.liveGeneration) {
+      throw new ConflictError('This suggestion was measured against an earlier index of this project; generate a new one');
+    }
+    await tx.update(projects).set({ scoreFloor: suggestion.suggestedFloor }).where(eq(projects.id, projectId));
+    const [applied] = await tx
+      .update(floorSuggestions)
+      .set({ appliedAt: new Date() })
+      .where(and(eq(floorSuggestions.id, suggestionId), isNull(floorSuggestions.appliedAt)))
+      .returning();
+    return { suggestion: toView(applied), scoreFloor: suggestion.suggestedFloor };
+  });
+}
