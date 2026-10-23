@@ -128,6 +128,8 @@ function makeIndexer(db: Db, root: string, overrides: { MAX_SPEC_FILE_BYTES?: nu
       MAX_DOCX_UNPACKED_BYTES: 256 * 1024 * 1024,
       CONVERSION_TIMEOUT_MS: 120_000,
       CONVERSION_IDLE_MS: 60_000,
+      PROJECT_MAX_DOCUMENTS: 0,
+      PROJECT_MAX_CHUNKS: 0,
       ...overrides,
     },
     log: silentLogger,

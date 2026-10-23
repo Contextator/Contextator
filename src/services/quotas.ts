@@ -34,15 +34,16 @@ export interface EffectiveQuotas {
   uploadBytes: EffectiveQuota;
 }
 
-function effective(own: number | null, instance: number): EffectiveQuota {
+/** One quota's effective limit: the project's own value when it has one, the instance's otherwise. */
+export function resolveQuota(own: number | null, instance: number): EffectiveQuota {
   return own === null ? { limit: instance, inherited: true } : { limit: own, inherited: false };
 }
 
 export function resolveQuotas(project: QuotaColumns, defaults: QuotaDefaults): EffectiveQuotas {
   return {
-    documents: effective(project.maxDocuments, defaults.PROJECT_MAX_DOCUMENTS),
-    chunks: effective(project.maxChunks, defaults.PROJECT_MAX_CHUNKS),
-    uploadBytes: effective(project.maxUploadBytes, defaults.PROJECT_MAX_UPLOAD_BYTES),
+    documents: resolveQuota(project.maxDocuments, defaults.PROJECT_MAX_DOCUMENTS),
+    chunks: resolveQuota(project.maxChunks, defaults.PROJECT_MAX_CHUNKS),
+    uploadBytes: resolveQuota(project.maxUploadBytes, defaults.PROJECT_MAX_UPLOAD_BYTES),
   };
 }
 

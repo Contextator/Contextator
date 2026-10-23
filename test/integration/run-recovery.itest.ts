@@ -80,6 +80,8 @@ const indexerConfig = {
   MAX_DOCX_UNPACKED_BYTES: 256 * 1024 * 1024,
   CONVERSION_TIMEOUT_MS: 120_000,
   CONVERSION_IDLE_MS: 60_000,
+  PROJECT_MAX_DOCUMENTS: 0,
+  PROJECT_MAX_CHUNKS: 0,
 };
 
 /** Waits for the job to settle and then for the project row to stop saying `indexing` (see index-generations.itest.ts). */

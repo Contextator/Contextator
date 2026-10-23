@@ -8,6 +8,8 @@ import { chunkMarkdown, embeddingText } from './chunker.js';
 import { ConversionService } from './conversion/client.js';
 import { checkFileSize, DocumentExtractionError, readFailure } from './doc-types/index.js';
 import { assertRebuildDiskSpace, InsufficientDiskError } from './disk-space.js';
+import { QuotaExceededError } from './errors.js';
+import { resolveQuota } from './quotas.js';
 import type { EmbeddingProvider } from './embeddings/provider.js';
 import { expandsToManyDocuments, allowedExtensionsFor, type Flavor } from './flavors.js';
 import { readAndHash, walkMarkdown } from './fs-scan.js';
@@ -22,6 +24,7 @@ import { listSources, recountSources, setSourceStatus, sourceVersion } from './s
 import { textSearchConfigFor, type TextSearchConfig } from './text-search.js';
 import {
   deleteDocuments,
+  chunkCountsByDocument,
   getExistingDocuments,
   recountProject,
   replaceDocument,
@@ -113,6 +116,8 @@ export interface IndexerDeps {
     | 'MAX_DOCX_UNPACKED_BYTES'
     | 'CONVERSION_TIMEOUT_MS'
     | 'CONVERSION_IDLE_MS'
+    | 'PROJECT_MAX_DOCUMENTS'
+    | 'PROJECT_MAX_CHUNKS'
   > &
     Partial<
       Pick<
@@ -569,6 +574,42 @@ export class Indexer {
         const liveBeforeRebuild = rebuild ? await getExistingDocuments(db, project.id, live) : undefined;
         job.filesTotal = files.length;
 
+        // Project quotas ([ADR-0117](../../.ssot/ADR.md#adr-0117)). `0` is unlimited, and an unlimited quota costs
+        // nothing here: no count query, no comparison. A breach throws `QuotaExceededError` into this `try`, so
+        // the run ends through the same `catch` as any failed run. A rebuild publishes nothing then (the
+        // previous generation keeps serving, ADR-0039); an incremental run leaves the documents it had
+        // already finished in place, and the removal pass below never runs.
+        const documentLimit = resolveQuota(current.maxDocuments, config.PROJECT_MAX_DOCUMENTS).limit;
+        const chunkLimit = resolveQuota(current.maxChunks, config.PROJECT_MAX_CHUNKS).limit;
+        /** Documents the run is on course to leave behind; grows as a specification turns out to hold more. */
+        let projectedDocuments = 0;
+        if (documentLimit > 0) {
+          // After the scan and before any write. A file that is not a specification is exactly one document,
+          // so those are counted from the scan; what a specification expands to is only known once it is
+          // rendered, so its stored documents are assumed to stay and any new ones are counted as they come.
+          // The count is an upper bound: a file that later turns out unreadable or empty is still counted,
+          // and a document that is about to be removed is still counted until the removal pass.
+          const plain = new Set<string>();
+          const containers = new Set<string>();
+          for (const f of files) (expandsToManyDocuments(f.flavor, f.relativePath) ? containers : plain).add(f.relativePath);
+          let kept = 0;
+          for (const [storedPath, doc] of existing) {
+            const container = storedPath.slice(0, Math.max(0, storedPath.lastIndexOf('/')));
+            if (plain.has(storedPath) || containers.has(container) || (doc.sourceId && protectedSources.has(doc.sourceId))) kept++;
+          }
+          let added = 0;
+          for (const p of plain) if (!existing.has(p)) added++;
+          projectedDocuments = kept + added;
+          if (projectedDocuments > documentLimit) throw new QuotaExceededError('max_documents', documentLimit, kept, added);
+        }
+        /** Chunks stored in the generation this run writes to, kept current as documents are written. */
+        let runningChunks = 0;
+        let chunksOfDocument = new Map<string, number>();
+        if (chunkLimit > 0 && !rebuild) {
+          runningChunks = (await recountProject(db, project.id, generation)).chunkCount;
+          chunksOfDocument = await chunkCountsByDocument(db, project.id, generation);
+        }
+
         // The chunker counts with the model's own tokenizer (ADR-0036) and chunking happens before the
         // first `embed`, so the model has to be loaded before the loop rather than by it — otherwise the
         // first document of a run that beat the background warmup would be chunked against the estimate.
@@ -847,6 +888,20 @@ export class Indexer {
                 continue;
               }
 
+              // A document of a specification that no earlier run stored is a new one the scan could not count.
+              if (documentLimit > 0 && expands && !existing.has(doc.relativePath)) {
+                projectedDocuments++;
+                if (projectedDocuments > documentLimit) throw new QuotaExceededError('max_documents', documentLimit, projectedDocuments - 1, 1);
+              }
+              // Per document, before the first `embedPassages`: a breach costs no embedding work. The document
+              // being rewritten gives its old chunks back, so editing a document at the limit is not refused.
+              if (chunkLimit > 0) {
+                const given = chunksOfDocument.get(existing.get(doc.relativePath)?.id ?? '') ?? 0;
+                const after = runningChunks - given + chunks.length;
+                if (after > chunkLimit) throw new QuotaExceededError('max_chunks', chunkLimit, runningChunks - given, chunks.length);
+                runningChunks = after;
+              }
+
               const rows: NewChunk[] = [];
               for (let i = 0; i < chunks.length; i += config.EMBEDDING_BATCH_SIZE) {
                 const batch = chunks.slice(i, i + config.EMBEDDING_BATCH_SIZE);
@@ -1015,15 +1070,27 @@ export class Indexer {
         const message = err instanceof Error ? err.message : String(err);
         job.phase = 'error';
         job.error = message;
-        if (err instanceof InsufficientDiskError) job.errorCode = err.code;
+        if (err instanceof InsufficientDiskError || err instanceof QuotaExceededError) job.errorCode = err.code;
         job.finishedAt = new Date().toISOString();
         log.error({ err, project: project.name, rebuild, generation }, 'indexing failed');
+        // An incremental run that hit a quota has already written the documents it finished, straight into
+        // the live generation, so the project's counters are brought up to date with them. A rebuild wrote
+        // beside the live generation and published nothing, so its counters are already right.
+        const counted =
+          err instanceof QuotaExceededError && generation === live
+            ? await recountProject(db, project.id, generation).catch((countErr: unknown) => {
+                log.error({ err: countErr }, 'failed to recount after a quota breach');
+                return undefined;
+              })
+            : undefined;
+        if (counted)
+          await recountSources(db, project.id, generation).catch((countErr: unknown) => log.error({ err: countErr }, 'failed to recount sources'));
         // `live_generation` is deliberately not in this `SET`. A rebuild that failed leaves the
         // generation it was building behind and the previous one live, so every client connected to
         // the project keeps being served the index it was being served before the run started.
         await db
           .update(projects)
-          .set({ status: 'error', lastError: message.slice(0, 2000) })
+          .set({ status: 'error', lastError: message.slice(0, 2000), ...(counted ?? {}) })
           .where(eq(projects.id, project.id))
           .catch((updateErr: unknown) => log.error({ err: updateErr }, 'failed to record indexing error'));
         // Drop the half-built generation now rather than leaving it for the next run's sweep. Same
