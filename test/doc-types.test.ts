@@ -918,6 +918,122 @@ describe('what a small file may render to (ADR-0115 §4)', () => {
   });
 });
 
+/**
+ * **The multiplier is the input's to choose, and so is paid for as the output is written** (ADR-0115 §4).
+ * Each case below is a few kilobytes that renders to far more than the ceiling by *repeating* something
+ * small: a shared string, a padded column, a quote marker. The refusal must be the budget's, raised while the
+ * output is written, and quick — not a `RangeError` out of `join`, and not seconds spent building the result.
+ */
+describe('output that repetition multiplies (ADR-0115 §4)', () => {
+  const SMALL = { ...LIMITS, maxFileBytes: 4 * 1024 * 1024 };
+  const refused = /renders to more than the \d+ MiB/;
+
+  /** A workbook whose one sheet holds `sheetData`, with `shared` as its shared strings. */
+  const workbookOf = (sheetData: string, shared?: string): Buffer =>
+    archiveOf([
+      {
+        name: 'xl/workbook.xml',
+        data: utf8(
+          '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        ),
+      },
+      {
+        name: 'xl/_rels/workbook.xml.rels',
+        data: utf8(
+          '<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+        ),
+      },
+      ...(shared === undefined ? [] : [{ name: 'xl/sharedStrings.xml', data: utf8(shared) }]),
+      { name: 'xl/worksheets/sheet1.xml', data: utf8(`<worksheet><sheetData>${sheetData}</sheetData></worksheet>`) },
+    ]);
+
+  async function refusal(name: string, bytes: Buffer, limits: ExtractLimits = LIMITS): Promise<void> {
+    const started = Date.now();
+    const promise = extract(name, bytes, limits);
+    await expect(promise).rejects.toBeInstanceOf(DocumentExtractionError);
+    await expect(promise).rejects.toThrow(refused);
+    expect(Date.now() - started).toBeLessThan(5000);
+  }
+
+  it('refuses a row of cells that all point at one megabyte-long shared string', async () => {
+    // A cell is a reference to a string, not a copy: 1 000 cells of `<v>0</v>` are 1 GB of text.
+    const big = 'lorem ipsum '.repeat(90_000); // ~1 MB, with spaces so it is not one unbreakable word
+    const cells = Array.from({ length: 1000 }, (_, i) => `<c r="${columnName(i)}1" t="s"><v>0</v></c>`).join('');
+    const book = workbookOf(`<row r="1">${cells}</row>`, `<sst><si><t>${big}</t></si></sst>`);
+    expect(book.byteLength).toBeLessThan(16 * 1024);
+    await refusal('repeat.xlsx', book);
+  });
+
+  it('refuses the same repetition spread over many rows, and a repeated header', async () => {
+    const big = 'lorem ipsum '.repeat(9_000); // ~100 KB
+    const row = (n: number): string =>
+      `<row r="${n}">${Array.from({ length: 40 }, (_, i) => `<c r="${columnName(i)}${n}" t="s"><v>0</v></c>`).join('')}</row>`;
+    const rows = Array.from({ length: 60 }, (_, i) => row(i + 1)).join('');
+    await refusal('rows.xlsx', workbookOf(rows, `<sst><si><t>${big}</t></si></sst>`), SMALL);
+  });
+
+  it('refuses a csv-table whose first row is wide and the rest are one cell', async () => {
+    const width = 30_000;
+    const source = `Title\n=====\n\n.. csv-table::\n\n   ${'a,'.repeat(width)}\n${'   a\n'.repeat(width)}`;
+    const bytes = Buffer.from(source);
+    expect(bytes.byteLength).toBeLessThan(256 * 1024);
+    await refusal('wide.rst', bytes);
+    await refusal('wide-small.rst', Buffer.from(`.. csv-table::\n\n   ${'a,'.repeat(2000)}\n${'   a\n'.repeat(2000)}`), SMALL);
+  });
+
+  it('refuses a simple table with a border of thousands of columns above one-word rows', async () => {
+    const border = Array.from({ length: 5000 }, () => '=').join(' ');
+    const source = `${border}\nhead\n${border}\n${'x\n'.repeat(3000)}${border}\n\nafter\n`;
+    await refusal('border.rst', Buffer.from(source), SMALL);
+  });
+
+  it('refuses single-cell AsciiDoc tables declared 64 columns wide', async () => {
+    const source = '[cols="64*"]\n|===\n|x\n|===\n\n'.repeat(10_000);
+    const bytes = Buffer.from(source);
+    expect(bytes.byteLength).toBeLessThan(SMALL.maxFileBytes / 10);
+    await refusal('cols.adoc', bytes, SMALL);
+  });
+
+  it('refuses quote markers added at every level of a 16-deep nest', async () => {
+    // A block closes at the same delimiter, so each level needs its own length: 19 underscores down to 4.
+    const fence = (level: number): string => '_'.repeat(4 + level);
+    const levels = Array.from({ length: 16 }, (_, k) => 15 - k);
+    const open = levels.map((level) => `${fence(level)}\n`).join('');
+    const close = [...levels]
+      .reverse()
+      .map((level) => `${fence(level)}\n`)
+      .join('');
+    // Each line is "x", and leaves 16 levels deep as "> > ... > x".
+    const source = `${open}${'x\n\n'.repeat(250_000)}${close}`;
+    await refusal('nest.adoc', Buffer.from(source), SMALL);
+  });
+
+  it('refuses a slide of paragraphs and notes that outgrow a small ceiling', async () => {
+    const paragraph = (text: string): string => `<a:p><a:r><a:t>${text}</a:t></a:r></a:p>`;
+    const body = `<p:sp><p:nvSpPr><p:cNvPr id="2" name="Box"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/>${paragraph('word '.repeat(40)).repeat(200)}</p:txBody></p:sp>`;
+    await refusal('text.pptx', deckOf([slideOf(body)]), { ...LIMITS, maxFileBytes: 4096 });
+  });
+
+  it('still renders ordinary workbooks, tables and nests', async () => {
+    const shared = '<sst><si><t>Name</t></si><si><t>Ada</t></si></sst>';
+    const sheet = '<row r="1"><c r="A1" t="s"><v>0</v></c></row><row r="2"><c r="A2" t="s"><v>1</v></c></row>';
+    expect(tableRows(await extract('ok.xlsx', workbookOf(sheet, shared)))).toEqual(['| Name |', '| --- |', '| Ada |']);
+    expect(tableRows(await extract('ok.adoc', Buffer.from('[cols="3*"]\n|===\n|a |b |c\n|1 |2 |3\n|===\n')))).toEqual([
+      '| a | b | c |',
+      '| --- | --- | --- |',
+      '| 1 | 2 | 3 |',
+    ]);
+    expect(tableRows(await extract('ok.rst', Buffer.from('.. csv-table::\n\n   a,b\n   1,2\n')))).toEqual([
+      '| a | b |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+    ]);
+    const quote = await extract('ok-quote.adoc', Buffer.from('[quote]\n____\nfirst\n\nsecond\n____\n'));
+    expect(quote).toContain('> first');
+    expect(quote).toContain('> second');
+  });
+});
+
 describe('input shapes that are quadratic or overflow the stack', () => {
   it('converts an AsciiDoc listing block of 80 000 lines', async () => {
     const source = `----\n${'line of code\n'.repeat(80_000)}----\n`;
@@ -948,6 +1064,32 @@ describe('input shapes that are quadratic or overflow the stack', () => {
     const notebook = JSON.stringify({ cells: [{ cell_type: 'code', source: [`a${' '.repeat(50_000)}x`], metadata: {} }] });
     await extract('spaces.ipynb', Buffer.from(notebook));
     expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  it('reads unclosed image markers, link openers and role colons in linear time', async () => {
+    const notebook = (markdown: string): Buffer => Buffer.from(JSON.stringify({ cells: [{ cell_type: 'markdown', source: markdown }] }));
+    const cases: Array<[string, Buffer]> = [
+      ['open-image.ipynb', notebook(`${'![a'.repeat(40_000)}\n\ntail`)],
+      ['data-image.ipynb', notebook(`${'![](data:'.repeat(40_000)}\n\ntail`)],
+      ['link.rst', Buffer.from(`Title\n=====\n\n${'`<'.repeat(40_000)}\n\ntext\n`)],
+      ['role.rst', Buffer.from(`Title\n=====\n\n${':a'.repeat(40_000)}\n\ntext\n`)],
+      ['labelled.rst', Buffer.from(`Title\n=====\n\n:ref:\`${'<'.repeat(40_000)}\`\n\n:ref:\`${' '.repeat(40_000)}x>\`\n`)],
+      ['tables.rst', Buffer.from(`${'= =\n= =\nx\n\n'.repeat(20_000)}`)],
+    ];
+    for (const [name, bytes] of cases) {
+      const started = Date.now();
+      await extract(name, bytes);
+      expect(Date.now() - started, name).toBeLessThan(1500);
+    }
+  });
+
+  it('keeps the alt text of an embedded image and nothing else of it', async () => {
+    const source =
+      'See ![the plot](data:image/png;base64,AAAA) and ![ logo ]( data:image/png;base64,BBBB) but keep ![x](https://example.com/x.png) and ![open';
+    const notebook = Buffer.from(JSON.stringify({ cells: [{ cell_type: 'markdown', source }] }));
+    const markdown = await extract('images.ipynb', notebook);
+    expect(markdown).toContain('See the plot and logo but keep ![x](https://example.com/x.png) and ![open');
+    expect(markdown).not.toContain('base64');
   });
 
   it('takes a notebook cell language as one safe word and falls back to the notebook language', async () => {

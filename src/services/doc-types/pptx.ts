@@ -192,10 +192,11 @@ function renderBody(items: Item[], budget: OutputBudget): string[] {
     )
       continue;
     for (const p of item.paragraphs) {
-      if (p.bullet) list.push(`${'  '.repeat(Math.min(p.level, 6))}- ${plain(p.text)}`);
+      // Every line is paid for as it is written: a slide of ten thousand paragraphs is output too.
+      if (p.bullet) list.push(budget.emit(`${'  '.repeat(Math.min(p.level, 6))}- ${plain(p.text)}`));
       else {
         flush();
-        blocks.push(plain(p.text));
+        blocks.push(budget.emit(plain(p.text), 2));
       }
     }
     flush();
@@ -273,8 +274,9 @@ export async function pptxToMarkdown(bytes: Buffer, relativePath: string, limits
     const notes = readNotes(zip, parts[index]);
     if (title === '' && body.length === 0 && notes === '') continue;
 
-    const heading = `## Slide ${index + 1}${title === '' ? '' : `: ${title.replace(/[\r\n]+/g, ' ')}`}`;
-    sections.push([heading, ...body, ...(notes === '' ? [] : [`Notes: ${notes}`])].join('\n\n'));
+    const heading = budget.emit(`## Slide ${index + 1}${title === '' ? '' : `: ${title.replace(/[\r\n]+/g, ' ')}`}`, 2);
+    const notesLine = notes === '' ? [] : [budget.emit(`Notes: ${notes}`, 2)];
+    sections.push([heading, ...body, ...notesLine].join('\n\n'));
   }
 
   const deckTitle = documentTitle(zip.readText('docProps/core.xml')) || titleFromPath(relativePath);

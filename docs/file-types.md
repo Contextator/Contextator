@@ -30,5 +30,5 @@ refused by name like any other unreadable file. The older binary `.ppt`, `.xls` 
 What a file of these five types converts to is bounded as well as what it weighs: the output may not pass
 `MAX_CONVERTED_FILE_BYTES` (32 MiB by default). A small file can describe a lot of output — a table that
 pads every row to its widest, or `.adoc` attributes that refer to attributes — so the converters count what
-they build and refuse the file by name, with the reason on its source, when it would pass the limit. An
+they build as they write it (a repeated shared string, a column count, a quote marker are each paid for where they are added, not measured afterwards) and refuse the file by name, with the reason on its source, when it would pass the limit. An
 `.adoc` attribute whose expanded value passes 4 KiB is left undefined and its references stay as written.

@@ -161,32 +161,40 @@ function readSheet(xml: string, shared: string[]): Row[] {
   return rows;
 }
 
-/** Renders one sheet's rows as the csv driver would, or `''` when nothing is left. Throws once `budget` is passed. */
+/**
+ * Renders one sheet's rows as the csv driver would, or `''` when nothing is left. Throws once `budget` is passed.
+ *
+ * **Every row is paid for while it is rendered, and its cells one by one.** A cell holds a reference to
+ * a shared string and not a copy of it, so a row can be a thousand cells that all point at the same
+ * megabyte: a few kilobytes of XML, and a gigabyte once each cell is rendered. `renderRow` therefore
+ * spends the budget per cell and refuses the row mid-way, and the row's least cost is reserved before
+ * the dense array that would hold its cells is allocated.
+ */
 function renderSheet(rows: Row[], budget: OutputBudget): string {
   if (rows.length === 0) return '';
 
   // Only the columns some row actually uses, in order: a sheet with data in A and in Z is a two-column table.
   const used = [...new Set(rows.flatMap((r) => [...r.keys()]))].sort((a, b) => a - b);
   const width = used.length;
-  const dense = (r: Row): string[] => used.map((c) => r.get(c) ?? '');
-  const spend = (line: string): string => {
-    budget.spend(line.length + 1);
-    return line;
+  const dense = (r: Row): string[] => {
+    budget.reserve(4 * width + 2);
+    return used.map((c) => r.get(c) ?? '');
   };
 
   const headerRow = dense(rows[0]).map((v, i) => v.trim() || `Column ${i + 1}`);
-  const header = renderRow(headerRow, width);
-  const divider = `|${' --- |'.repeat(width)}`;
+  const header = renderRow(headerRow, width, budget);
+  budget.reserve(6 * width + 2);
+  const divider = budget.emit(`|${' --- |'.repeat(width)}`);
   const body = rows.slice(1);
 
   const parts: string[] = [];
-  for (let start = 0; start < body.length || start === 0; start += ROWS_PER_SECTION) {
+  for (let start = 0, block = 0; start < body.length || start === 0; start += ROWS_PER_SECTION, block++) {
     const slice = body.slice(start, start + ROWS_PER_SECTION);
-    if (body.length > ROWS_PER_SECTION) parts.push(`### Rows ${start + 1}–${start + slice.length}`);
-    // The header and divider are written again for every block of rows, so every block pays for them.
-    spend(header);
-    spend(divider);
-    parts.push([header, divider, ...slice.map((r) => spend(renderRow(dense(r), width)))].join('\n'));
+    if (body.length > ROWS_PER_SECTION) parts.push(budget.emit(`### Rows ${start + 1}–${start + slice.length}`, 2));
+    // The header and divider are written again for every block of rows, so every block pays for them
+    // (the first block's were paid when they were built).
+    if (block > 0) budget.spend(header.length + divider.length + 2);
+    parts.push([header, divider, ...slice.map((r) => renderRow(dense(r), width, budget))].join('\n'));
     if (slice.length === 0) break;
   }
   return parts.join('\n\n');

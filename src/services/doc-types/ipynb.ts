@@ -13,7 +13,8 @@
  * not index as an empty document.
  */
 
-import { DocumentExtractionError, decodeUtf8, titleFromPath, withTitle } from './index.js';
+import { outputBudget } from './budget.js';
+import { DocumentExtractionError, decodeUtf8, type ExtractLimits, titleFromPath, withTitle } from './index.js';
 
 interface RawCell {
   cell_type?: unknown;
@@ -36,9 +37,41 @@ function fence(code: string): string {
   return '`'.repeat(longest + 1);
 }
 
-/** An embedded image is megabytes of base64 and no words; keep its alt text, which is. */
+/**
+ * An embedded image is megabytes of base64 and no words; keep its alt text, which is.
+ *
+ * Reads `![alt](data:...)` with `indexOf` and not a regex: a notebook can hold forty thousand `![a` that never
+ * close, and a pattern that scans on to the end of the cell from each of them is quadratic. Here every `![`
+ * that shares a `]` shares the outcome, so the scan moves past that `]` and each character is read once.
+ */
 function stripEmbeddedImages(markdown: string): string {
-  return markdown.replace(/!\[([^\]]*)\]\(\s*data:[^)]*\)/g, (_, alt: string) => alt.trim());
+  let out = '';
+  let cursor = 0;
+  let from = 0;
+  let close = -1;
+  for (;;) {
+    const start = markdown.indexOf('![', from);
+    if (start === -1) break;
+    if (close < start + 2) {
+      close = markdown.indexOf(']', start + 2);
+      if (close === -1) break;
+    }
+    let p = close + 1;
+    if (markdown[p] === '(') {
+      p++;
+      while (p < markdown.length && /\s/.test(markdown[p])) p++;
+      if (markdown.startsWith('data:', p)) {
+        const end = markdown.indexOf(')', p + 5);
+        if (end === -1) break; // no `)` here means none further on either
+        out += markdown.slice(cursor, start) + markdown.slice(start + 2, close).trim();
+        cursor = end + 1;
+        from = end + 1;
+        continue;
+      }
+    }
+    from = close + 1; // every `![` before this `]` ends the same way
+  }
+  return out + markdown.slice(cursor);
 }
 
 /** A fence info string is one short word: anything else (a newline, a backtick) would break out of the fence. */
@@ -64,7 +97,7 @@ function cellsOf(notebook: Record<string, unknown>): RawCell[] {
   throw new DocumentExtractionError('is not a Jupyter notebook: it has neither "cells" (nbformat 4) nor "worksheets" (nbformat 3)');
 }
 
-export async function ipynbToMarkdown(bytes: Buffer, relativePath: string): Promise<string> {
+export async function ipynbToMarkdown(bytes: Buffer, relativePath: string, limits: ExtractLimits): Promise<string> {
   let notebook: unknown;
   try {
     notebook = JSON.parse(decodeUtf8(bytes));
@@ -84,20 +117,22 @@ export async function ipynbToMarkdown(bytes: Buffer, relativePath: string): Prom
   }
   const language = languageOf(notebook as Record<string, unknown>);
 
+  // ADR-0115 §4: every block is paid for as it is written.
+  const budget = outputBudget(relativePath, limits);
   const blocks: string[] = [];
   for (const cell of cells) {
     if (typeof cell !== 'object' || cell === null) continue;
     const kind = cell.cell_type;
     if (kind === 'markdown') {
       const text = stripEmbeddedImages(sourceOf(cell.source)).trim();
-      if (text) blocks.push(text);
+      if (text) blocks.push(budget.emit(text, 2));
     } else if (kind === 'code') {
       // nbformat 3 keeps the code under `input` and the language on the cell.
       const code = (cell.source !== undefined ? sourceOf(cell.source) : sourceOf(cell.input)).trimEnd();
       if (!code.trim()) continue;
       const lang = typeof cell.language === 'string' ? safeLanguage(cell.language) || language : language;
       const marks = fence(code);
-      blocks.push(`${marks}${lang}\n${code}\n${marks}`);
+      blocks.push(budget.emit(`${marks}${lang}\n${code}\n${marks}`, 2));
     }
   }
   return withTitle(blocks.join('\n\n'), titleFromPath(relativePath));

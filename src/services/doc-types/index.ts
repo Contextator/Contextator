@@ -142,8 +142,8 @@ const EXTRACTORS: Record<SupportedExtension, DocumentExtractor> = {
   pptx: async (bytes, rel, limits) => (await import('./pptx.js')).pptxToMarkdown(bytes, rel, limits),
   xlsx: async (bytes, rel, limits) => (await import('./xlsx.js')).xlsxToMarkdown(bytes, rel, limits),
   // Plain-text formats that are still *converted*: JSON, reStructuredText and AsciiDoc are markup, not Markdown.
-  ipynb: async (bytes, rel) => (await import('./ipynb.js')).ipynbToMarkdown(bytes, rel),
-  rst: async (bytes, rel) => (await import('./rst.js')).rstToMarkdown(bytes, rel),
+  ipynb: async (bytes, rel, limits) => (await import('./ipynb.js')).ipynbToMarkdown(bytes, rel, limits),
+  rst: async (bytes, rel, limits) => (await import('./rst.js')).rstToMarkdown(bytes, rel, limits),
   adoc: async (bytes, rel, limits) => (await import('./adoc.js')).adocToMarkdown(bytes, rel, limits),
 };
 

@@ -116,7 +116,14 @@ function table(inner: string[], colsAttr: string | undefined, ctx: Context): str
   const rows: string[][] = [];
   for (let k = 0; k < cells.length; k += width) rows.push(cells.slice(k, k + width));
   if (rows.length === 0) return [];
-  return [renderRow(rows[0], width), `|${' --- |'.repeat(width)}`, ...rows.slice(1).map((r) => renderRow(r, width))];
+  // Every row is padded to `width`, a number the input chooses (`[cols="64*"]` over a thousand one-cell rows):
+  // the padding is output, so each row is paid for as it is rendered, and the least a row costs is
+  // reserved before its cells are built. The lines returned are paid for already.
+  const out = [renderRow(rows[0], width, ctx.budget)];
+  ctx.budget.reserve(6 * width + 2);
+  out.push(ctx.budget.emit(`|${' --- |'.repeat(width)}`));
+  for (let k = 1; k < rows.length; k++) out.push(renderRow(rows[k], width, ctx.budget));
+  return out;
 }
 
 interface Pending {
@@ -127,15 +134,20 @@ interface Pending {
 
 function convert(lines: string[], ctx: Context, depth: number): string[] {
   const out: string[] = [];
+  // Every line written is paid for as it is written (ADR-0115 §4): nothing is built first and measured after.
   const push = (...items: string[]): void => {
-    out.push(...items);
+    for (const item of items) out.push(ctx.budget.emit(item));
   };
   // For arrays whose length the input chooses: spreading one into a call is bounded by the stack.
   const pushAll = (items: readonly string[]): void => {
+    for (const item of items) out.push(ctx.budget.emit(item));
+  };
+  // For lines that were paid for already (a nested block's, a table's): charging them again would count them twice.
+  const forward = (items: readonly string[]): void => {
     for (const item of items) out.push(item);
   };
   const blank = (): void => {
-    if (out.length > 0 && !isBlank(out[out.length - 1])) out.push('');
+    if (out.length > 0 && !isBlank(out[out.length - 1])) out.push(ctx.budget.emit(''));
   };
 
   let pending: Pending = { style: '', language: '', cols: undefined };
@@ -168,22 +180,27 @@ function convert(lines: string[], ctx: Context, depth: number): string[] {
       blank();
       if (kind === '-' && trimmed.length >= 4) pushAll(fenced(inner, pending.language));
       else if (kind === '.') pushAll(fenced(inner, ''));
-      else if (kind === '|') pushAll(table(inner, pending.cols, ctx));
+      else if (kind === '|') forward(table(inner, pending.cols, ctx));
       else {
-        const nested = depth < MAX_DEPTH ? convert(inner, ctx, depth + 1) : inner.map((l) => inline(l.trim(), ctx));
+        const nested = depth < MAX_DEPTH ? convert(inner, ctx, depth + 1) : inner.map((l) => ctx.budget.emit(inline(l.trim(), ctx)));
         const label = ADMONITIONS[pending.style.toUpperCase()];
         if (label) {
           const first = nested.findIndex((l) => !isBlank(l));
           if (first === -1) push(`**${label}:**`);
           else {
-            pushAll(nested.slice(0, first));
-            push(`**${label}:** ${nested[first]}`);
-            pushAll(nested.slice(first + 1));
+            forward(nested.slice(0, first));
+            out.push(ctx.budget.emit(`**${label}:** `, 0) + nested[first]);
+            forward(nested.slice(first + 1));
           }
         } else if (kind === '_' || pending.style === 'quote') {
-          pushAll(nested.map((l) => (isBlank(l) ? '>' : `> ${l}`)));
+          // The `> ` is added to lines already paid for, at every level of nesting: it is paid for here.
+          for (const l of nested) {
+            const quoted = isBlank(l) ? '>' : `> ${l}`;
+            ctx.budget.spend(quoted.length - l.length);
+            out.push(quoted);
+          }
         } else {
-          pushAll(nested);
+          forward(nested);
         }
       }
       push('');

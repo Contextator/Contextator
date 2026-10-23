@@ -10,7 +10,10 @@
  * counts what was *read*) sees.
  *
  * The budget is spent as the output is built, not checked afterwards: by the time a finished string
- * could be measured, the heap has already paid for it.
+ * could be measured, the heap has already paid for it. **Everything a converter writes goes through
+ * it** — a line, a table row, a repeated header, a substituted value — and anything that multiplies
+ * (a width, a repeat count, a reference to a shared string) is refused with {@link OutputBudget.reserve}
+ * *before* the array or string it would size is allocated.
  */
 
 import { DocumentExtractionError, type ExtractLimits } from './index.js';
@@ -20,6 +23,11 @@ export interface OutputBudget {
   reserve(count: number): void;
   /** Takes `count` characters from the budget, throwing once it is overdrawn. */
   spend(count: number): void;
+  /**
+   * Pays for `text` and hands it back: its length plus `separator` characters (the newline, or a blank
+   * line, that follows it in the output). The one call a converter makes for every piece it writes.
+   */
+  emit(text: string, separator?: number): string;
 }
 
 /** A budget of `limits.maxFileBytes`, whose refusal names the file and the setting that raises it. */
@@ -31,7 +39,7 @@ export function outputBudget(relativePath: string, limits: ExtractLimits): Outpu
         `its content expands far past the size of the file (wide tables, or attributes that refer to attributes). ` +
         `Simplify the file, or raise MAX_CONVERTED_FILE_BYTES if the content is real.`,
     );
-  return {
+  const budget: OutputBudget = {
     reserve(count) {
       if (count > left) throw tooBig();
     },
@@ -39,5 +47,10 @@ export function outputBudget(relativePath: string, limits: ExtractLimits): Outpu
       left -= count;
       if (left < 0) throw tooBig();
     },
+    emit(text, separator = 1) {
+      budget.spend(text.length + separator);
+      return text;
+    },
   };
+  return budget;
 }

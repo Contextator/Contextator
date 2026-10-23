@@ -13,6 +13,7 @@
  * comment. Every quoting rule it implements is pinned by a test.
  */
 
+import type { OutputBudget } from './budget.js';
 import { decodeUtf8, titleFromPath, withTitle } from './index.js';
 
 /** Sniffed in this order on ties, so a comma wins an ambiguous file. */
@@ -117,9 +118,31 @@ export function cell(value: string): string {
   return text === '' ? ' ' : text;
 }
 
-export function renderRow(values: string[], width: number): string {
-  const padded = Array.from({ length: width }, (_, i) => cell(values[i] ?? ''));
-  return `| ${padded.join(' | ')} |`;
+/**
+ * One table row, `width` cells wide.
+ *
+ * **With a `budget` the row is paid for as it is written** — the converters whose rows come from
+ * structures that can be wider than the file is long (a spreadsheet cell that points at a shared
+ * string, a `csv-table` whose first row is wide) pass one. The least the row can cost is refused before
+ * its cells are allocated, and each cell is paid for as it is rendered, so a row that repeats a
+ * megabyte-long string a thousand times stops after the few cells the budget affords instead of being
+ * built whole and measured. The row and its newline are spent here; the caller must not spend them again.
+ */
+export function renderRow(values: string[], width: number, budget?: OutputBudget): string {
+  if (!budget) {
+    const padded = Array.from({ length: width }, (_, i) => cell(values[i] ?? ''));
+    return `| ${padded.join(' | ')} |`;
+  }
+  // `| ` + one character per cell + ` | ` between them + ` |` + the newline.
+  budget.reserve(4 * width + 2);
+  budget.spend(2);
+  const cells: string[] = [];
+  for (let i = 0; i < width; i++) {
+    const text = cell(values[i] ?? '');
+    budget.spend(text.length + 3);
+    cells.push(text);
+  }
+  return `| ${cells.join(' | ')} |`;
 }
 
 export async function csvToMarkdown(bytes: Buffer, relativePath: string): Promise<string> {

@@ -15,8 +15,9 @@
  * a construct it does not understand costs some formatting, never a sentence.
  */
 
+import { type OutputBudget, outputBudget } from './budget.js';
 import { cell, parseDelimited, renderRow } from './csv.js';
-import { decodeUtf8, titleFromPath, withTitle } from './index.js';
+import { decodeUtf8, type ExtractLimits, titleFromPath, withTitle } from './index.js';
 
 /** Past this a directive body is read as flat text: nesting depth is the input's to choose, the stack is not. */
 const MAX_DEPTH = 16;
@@ -122,16 +123,29 @@ const isAdornment = (line: string): boolean => /^([!-/:-@[-`{-~])\1+\s*$/.test(l
 const SIMPLE_BORDER = /^=+( +=+)+\s*$/;
 const DIRECTIVE = /^\.\. +([\w][\w:.+-]*)::(?:\s+(.*))?$/;
 
+/**
+ * `label <target>` as `[label, target]`, or null. The target is what follows the first `<` after the last
+ * inner `>`; found with `indexOf`, because a regex that backtracks over a long run of `<` or spaces rescans it.
+ */
+function splitLabelledTarget(text: string): [string, string] | null {
+  if (!text.endsWith('>')) return null;
+  const open = text.indexOf('<', text.slice(0, -1).lastIndexOf('>') + 1);
+  if (open === -1 || open === text.length - 1) return null;
+  return [text.slice(0, open).trimEnd(), text.slice(open + 1, -1)];
+}
+
 /** Roles, literals and hyperlink references, in one pass so that none of them is read inside another. */
 function inline(text: string): string {
   return text.replace(
-    /``([^`]+)``|:([\w:.+-]+):`([^`]+)`|`([^`<]*)<([^>]+)>`_{1,2}|`([^`]+)`_{1,2}/g,
+    // Every quantifier stops at the next backtick (or is bounded): a run of `` `< `` or `:a:a` is the input's
+    // to choose, and a pattern that rescans the rest of the line from each of them is quadratic.
+    /``([^`]+)``|:([\w:.+-]{1,64}):`([^`]+)`|`([^`<]*)<([^>`]+)>`_{1,2}|`([^`]+)`_{1,2}/g,
     (_m, literal?: string, role?: string, roleText?: string, linkText?: string, target?: string, ref?: string) => {
       if (literal !== undefined) return `\`${literal}\``;
       if (role !== undefined && roleText !== undefined) {
         const base = role.split(':').pop() ?? role;
-        const labelled = /^(.*?)\s*<([^>]+)>$/.exec(roleText);
-        let shown = labelled ? labelled[1] || labelled[2] : roleText;
+        const labelled = splitLabelledTarget(roleText);
+        let shown = labelled ? labelled[0] || labelled[1] : roleText;
         if (CODE_ROLES.has(base)) {
           if (shown.startsWith('~')) shown = shown.slice(1).split('.').pop() ?? shown;
           return `\`${shown.replace(/^!/, '')}\``;
@@ -201,7 +215,12 @@ function gridTable(rows: string[]): string[] {
 }
 
 /** A "simple table": column spans come from the `=== ===` border, rows are the lines between borders. */
-function simpleTable(lines: string[], start: number): { out: string[]; next: number } | null {
+function simpleTable(lines: string[], start: number, budget: OutputBudget, noEnd: Map<number, number>): { out: string[]; next: number } | null {
+  // A scan that ran to the end of the file without finding a closing border proves that no later start of
+  // the same indent can find one either; remembering it keeps a file of unclosed tables linear.
+  const startIndent = indentOf(lines[start]);
+  const failedAt = noEnd.get(startIndent);
+  if (failedAt !== undefined && failedAt < start) return null;
   const borders = [start];
   let end = -1;
   for (let j = start + 1; j < lines.length; j++) {
@@ -215,11 +234,18 @@ function simpleTable(lines: string[], start: number): { out: string[]; next: num
       return null;
     }
   }
+  if (end === -1) noEnd.set(startIndent, noEnd.get(startIndent) ?? start);
   if (end === -1 || borders.length < 2) return null;
 
   const indent = indentOf(lines[start]);
   const spans = [...lines[start].trim().matchAll(/=+/g)].map((m) => (m.index ?? 0) + indent);
-  const split = (line: string): string[] => spans.map((from, k) => line.slice(from, spans[k + 1]).trim());
+  // Only the cells the line reaches: a border of a thousand columns above a one-word row is one cell, not a
+  // thousand retained empty strings per row. The width is paid for when the row is rendered.
+  const split = (line: string): string[] => {
+    const cells: string[] = [];
+    for (let k = 0; k < spans.length && spans[k] < line.length; k++) cells[k] = line.slice(spans[k], spans[k + 1]).trim();
+    return cells;
+  };
 
   const header: string[] = [];
   const body: string[][] = [];
@@ -231,7 +257,7 @@ function simpleTable(lines: string[], start: number): { out: string[]; next: num
       cells.forEach((c, k) => {
         header[k] = [header[k], c].filter(Boolean).join(' ');
       });
-    } else if (cells[0] === '' && body.length > 0) {
+    } else if ((cells[0] ?? '') === '' && body.length > 0) {
       const last = body[body.length - 1];
       cells.forEach((c, k) => {
         last[k] = [last[k], c].filter(Boolean).join(' ');
@@ -242,33 +268,54 @@ function simpleTable(lines: string[], start: number): { out: string[]; next: num
   }
   const head = header.length > 0 ? header : (body.shift() ?? []);
   const width = spans.length;
-  const render = (row: string[]): string => renderRow(row.map(inline), width);
-  return { out: [render(head), `|${' --- |'.repeat(width)}`, ...body.map(render)], next: end + 1 };
+  const render = (row: string[]): string =>
+    renderRow(
+      Array.from(row, (c) => inline(c ?? '')),
+      width,
+      budget,
+    );
+  const out = [render(head)];
+  budget.reserve(6 * width + 2);
+  out.push(budget.emit(`|${' --- |'.repeat(width)}`));
+  for (const row of body) out.push(render(row));
+  return { out, next: end + 1 };
 }
 
-function csvTable(body: string[], options: string[]): string[] {
+function csvTable(body: string[], options: string[], budget: OutputBudget): string[] {
   const rows = parseDelimited(body.join('\n'), ',').filter((r) => r.some((c) => c.trim() !== ''));
   const header = options.find((o) => /^:header:/i.test(o));
   if (header) rows.splice(0, 0, ...parseDelimited(header.replace(/^:header:\s*/i, ''), ','));
   if (rows.length === 0) return [];
   let width = 0;
   for (const r of rows) width = Math.max(width, r.length);
-  return [renderRow(rows[0], width), `|${' --- |'.repeat(width)}`, ...rows.slice(1).map((r) => renderRow(r, width))];
+  // The width is the widest row's, and every row is padded to it: one wide row among thousands multiplies
+  // into thousands of wide ones. Each row is paid for as it is rendered, the widest first.
+  const out = [renderRow(rows[0], width, budget)];
+  budget.reserve(6 * width + 2);
+  out.push(budget.emit(`|${' --- |'.repeat(width)}`));
+  for (let k = 1; k < rows.length; k++) out.push(renderRow(rows[k], width, budget));
+  return out;
 }
 
-function convert(lines: string[], levels: string[], depth: number): string[] {
+function convert(lines: string[], levels: string[], depth: number, budget: OutputBudget): string[] {
   const out: string[] = [];
+  // Every line written is paid for as it is written (ADR-0115 §4): nothing is built first and measured after.
   const push = (...items: string[]): void => {
-    out.push(...items);
+    for (const item of items) out.push(budget.emit(item));
   };
   // For arrays whose length the input chooses: spreading one into a call is bounded by the stack.
   const pushAll = (items: readonly string[]): void => {
+    for (const item of items) out.push(budget.emit(item));
+  };
+  // For lines that were paid for already (a nested block's, a table's): charging them again would count them twice.
+  const forward = (items: readonly string[]): void => {
     for (const item of items) out.push(item);
   };
   const lastIsBlank = (): boolean => out.length === 0 || isBlank(out[out.length - 1]);
   const blank = (): void => {
-    if (!lastIsBlank()) out.push('');
+    if (!lastIsBlank()) out.push(budget.emit(''));
   };
+  const noEnd = new Map<number, number>();
 
   let i = 0;
   while (i < lines.length) {
@@ -317,10 +364,10 @@ function convert(lines: string[], levels: string[], depth: number): string[] {
         continue;
       }
       if (SIMPLE_BORDER.test(trimmed)) {
-        const table = simpleTable(lines, i);
+        const table = simpleTable(lines, i, budget, noEnd);
         if (table) {
           blank();
-          pushAll(table.out);
+          forward(table.out);
           push('');
           i = table.next;
           continue;
@@ -368,15 +415,15 @@ function convert(lines: string[], levels: string[], depth: number): string[] {
         continue;
       }
       if (base === 'csv-table') {
-        const table = csvTable(content, options);
+        const table = csvTable(content, options, budget);
         if (table.length > 0) {
           blank();
-          pushAll(table);
+          forward(table);
           push('');
         }
         continue;
       }
-      const inner = depth < MAX_DEPTH ? convert(content, levels, depth + 1) : content.map((l) => inline(l.trim()));
+      const inner = depth < MAX_DEPTH ? convert(content, levels, depth + 1, budget) : content.map((l) => budget.emit(inline(l.trim())));
       if (base in ADMONITIONS) {
         const label = base === 'admonition' ? inline(arg) : ADMONITIONS[base];
         const head = `**${VERSIONED.has(base) && arg ? `${label} ${arg}` : label}:**`;
@@ -384,9 +431,9 @@ function convert(lines: string[], levels: string[], depth: number): string[] {
         const firstText = inner.findIndex((l) => !isBlank(l));
         if (firstText === -1) push(head);
         else {
-          pushAll(inner.slice(0, firstText));
-          push(`${head} ${inner[firstText]}`);
-          pushAll(inner.slice(firstText + 1));
+          forward(inner.slice(0, firstText));
+          out.push(budget.emit(head + ' ', 0) + inner[firstText]);
+          forward(inner.slice(firstText + 1));
         }
         push('');
         continue;
@@ -394,7 +441,7 @@ function convert(lines: string[], levels: string[], depth: number): string[] {
       blank();
       if (OBJECT_DIRECTIVES.has(base) && arg) push(`\`${arg}\``, '');
       else if (base !== 'figure' && arg) push(inline(arg), '');
-      pushAll(inner);
+      forward(inner);
       push('');
       continue;
     }
@@ -450,12 +497,12 @@ function convert(lines: string[], levels: string[], depth: number): string[] {
   return out;
 }
 
-export async function rstToMarkdown(bytes: Buffer, relativePath: string): Promise<string> {
+export async function rstToMarkdown(bytes: Buffer, relativePath: string, limits: ExtractLimits): Promise<string> {
   const lines = decodeUtf8(bytes)
     .replace(/\r\n?/g, '\n')
     .split('\n')
     .map((l) => l.replace(/\t/g, '        ').trimEnd());
-  const markdown = convert(lines, [], 0)
+  const markdown = convert(lines, [], 0, outputBudget(relativePath, limits))
     .join('\n')
     .replace(/\n{3,}/g, '\n\n');
   return withTitle(markdown, titleFromPath(relativePath));
