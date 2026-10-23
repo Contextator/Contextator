@@ -50,6 +50,13 @@ ships, that stops.
   bucket. Helm chart 1.4.0 gains an optional `backup.*` CronJob (off by default; credentials from an
   existing Secret, such as one created by the External Secrets Operator). The local-disk backup and the
   manifest format are unchanged (ADR-0120, which extends ADR-0110).
+- **PowerPoint, Excel, Jupyter, reStructuredText and AsciiDoc files.** A source can now index `.pptx`
+  (one section per slide, speaker notes on a `Notes:` line), `.xlsx` (one section per visible sheet,
+  cached formula values, hidden sheets skipped), `.ipynb` (markdown and code cells, no outputs), `.rst`
+  and `.adoc` (heading hierarchy kept). They are opt-in per source like the other converted types, and
+  the Office types share the `MAX_DOCX_UNPACKED_BYTES` guard with `.docx` (ADR-0115).
+  What those types convert to is bounded by `MAX_CONVERTED_FILE_BYTES` as well: a file whose output would
+  pass it is refused by name, and an `.adoc` attribute that expands past 4 KiB is left undefined.
 - **Scheduled backups for the slim stack.** `docker-compose.backup.yml` is an optional overlay for
   `docker-compose.slim.yml` that runs `npm run backup` against the external database once at start and
   then every `BACKUP_INTERVAL_SECONDS` (default one day), keeping the newest `BACKUP_KEEP` (default 7)

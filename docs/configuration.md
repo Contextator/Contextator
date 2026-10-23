@@ -128,3 +128,18 @@ for GitHub, GitLab, Gitea/Forgejo and Bitbucket Cloud (`bitbucket.org`); a self-
 answer marks the passage as unchanged for a long time (`stale: true`). It is a hint to the reader, never a filter.
 
 Documents indexed before this feature have neither value until their source runs again.
+
+## Limits on converted files
+
+`MAX_CONVERTED_FILE_BYTES` (default `33554432`, 32 MiB) bounds two things for every type that is converted
+before indexing: what the file may weigh before it is parsed, and, for `.pptx`, `.xlsx`, `.ipynb`, `.rst` and
+`.adoc`, what it may convert to. A small file can describe a lot of output, so the converters count the output
+as they write it. A file over either limit is refused by name, with the reason on its source (for example
+`renders to more than the 32 MiB`), and the run carries on. Raise it if your corpus genuinely holds bigger
+documents and the host has the memory.
+
+`MAX_DOCX_UNPACKED_BYTES` (default `268435456`, 256 MiB) bounds what an Office Open XML archive (`.docx`,
+`.pptx`, `.xlsx`) may unpack to. The sizes the archive declares are checked before anything is inflated, and
+each part is inflated through a counter, so an archive that lies about its sizes is still stopped at this limit.
+
+[File types](file-types.md) lists what each type keeps and drops.

@@ -61,9 +61,9 @@ async function searchable(name: string, phrase: string): Promise<boolean> {
  * Written here rather than committed as a fixture: an archive built to break a reader is an artefact
  * of this test, not a specimen of what the world sends.
  */
-function bombDocx(size: number): Buffer {
+function bombDocx(size: number, part = 'word/document.xml'): Buffer {
   const payload = deflateRawSync(Buffer.alloc(size, 0x41));
-  const name = Buffer.from('word/document.xml', 'utf8');
+  const name = Buffer.from(part, 'utf8');
 
   const local = Buffer.alloc(30 + name.length);
   local.writeUInt32LE(0x04034b50, 0);
@@ -94,6 +94,85 @@ function bombDocx(size: number): Buffer {
   return Buffer.concat([local, payload, central, end]);
 }
 
+interface ArchivePart {
+  name: string;
+  data: Buffer;
+  /** 0 stores the data, 8 deflates it; anything else is written into the directory as given. */
+  method?: number;
+  flags?: number;
+  /** What the directory claims the part unpacks to, when that should differ from the truth. */
+  declared?: number;
+}
+
+/** A zip written part by part, with the knobs a hostile archive turns: a false size, a flag, a method. */
+function archiveOf(parts: ArchivePart[]): Buffer {
+  const locals: Buffer[] = [];
+  const directory: Buffer[] = [];
+  let offset = 0;
+  for (const part of parts) {
+    const method = part.method ?? 8;
+    const payload = method === 8 ? deflateRawSync(part.data) : part.data;
+    const declared = part.declared ?? part.data.length;
+    const name = Buffer.from(part.name, 'utf8');
+
+    const local = Buffer.alloc(30 + name.length);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(part.flags ?? 0, 6);
+    local.writeUInt16LE(method, 8);
+    local.writeUInt32LE(payload.length, 18);
+    local.writeUInt32LE(declared, 22);
+    local.writeUInt16LE(name.length, 26);
+    name.copy(local, 30);
+
+    const entry = Buffer.alloc(46 + name.length);
+    entry.writeUInt32LE(0x02014b50, 0);
+    entry.writeUInt16LE(20, 4);
+    entry.writeUInt16LE(20, 6);
+    entry.writeUInt16LE(part.flags ?? 0, 8);
+    entry.writeUInt16LE(method, 10);
+    entry.writeUInt32LE(payload.length, 20);
+    entry.writeUInt32LE(declared, 24);
+    entry.writeUInt16LE(name.length, 28);
+    entry.writeUInt32LE(offset, 42);
+    name.copy(entry, 46);
+
+    locals.push(local, payload);
+    directory.push(entry);
+    offset += local.length + payload.length;
+  }
+  const central = Buffer.concat(directory);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(parts.length, 8);
+  end.writeUInt16LE(parts.length, 10);
+  end.writeUInt32LE(central.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, central, end]);
+}
+
+const utf8 = (text: string): Buffer => Buffer.from(text, 'utf8');
+const SLIDE_NS =
+  'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"';
+const textBox = (text: string): string =>
+  `<p:sp><p:nvSpPr><p:cNvPr id="2" name="Box"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>${text}</a:t></a:r></a:p></p:txBody></p:sp>`;
+const slideOf = (inner: string): string => `<p:sld ${SLIDE_NS}><p:cSld><p:spTree>${inner}</p:spTree></p:cSld></p:sld>`;
+const cellOf = (text: string): string => `<a:tc><a:txBody><a:p><a:r><a:t>${text}</a:t></a:r></a:p></a:txBody></a:tc>`;
+const tableOf = (rows: string[][]): string =>
+  `<p:graphicFrame><a:graphic><a:graphicData><a:tbl>${rows.map((r) => `<a:tr>${r.map(cellOf).join('')}</a:tr>`).join('')}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>`;
+const deckOf = (slides: string[]): Buffer =>
+  archiveOf([
+    { name: 'ppt/presentation.xml', data: utf8(`<p:presentation ${SLIDE_NS}/>`) },
+    ...slides.map((xml, i) => ({ name: `ppt/slides/slide${i + 1}.xml`, data: utf8(xml) })),
+  ]);
+
+/** The spreadsheet column letters of a zero-based column: 0 → A, 26 → AA. */
+const columnName = (index: number): string => {
+  let name = '';
+  for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26)) name = String.fromCharCode(65 + ((n - 1) % 26)) + name;
+  return name;
+};
+
 /** The `#` lines of a document, which is the structure a reader navigates by and the chunker splits on. */
 const headings = (markdown: string): string[] => markdown.split('\n').filter((line) => /^#{1,6}\s/.test(line));
 
@@ -118,6 +197,10 @@ describe('the document type registry', () => {
     const matcher = extensionMatcher(['md', 'html', 'htm', 'csv', 'docx', 'pdf']);
     for (const name of ['a.md', 'a.html', 'a.HTM', 'a.csv', 'report.docx', 'book.PDF']) expect(matcher.test(name)).toBe(true);
     for (const name of ['a.doc', 'a.pptx', 'a.xlsx', 'a.htmlx', 'a.pdf.bak']) expect(matcher.test(name)).toBe(false);
+    // ADR-0115: the five newer types are on the list, and are matched once a source opts in.
+    const opted = extensionMatcher(['pptx', 'xlsx', 'ipynb', 'rst', 'adoc']);
+    for (const name of ['deck.pptx', 'book.XLSX', 'nb.ipynb', 'guide.rst', 'manual.adoc']) expect(opted.test(name)).toBe(true);
+    for (const name of ['deck.ppt', 'book.xls', 'guide.rest', 'manual.asciidoc']) expect(opted.test(name)).toBe(false);
   });
 
   it('leaves Markdown exactly as it was, byte for byte', async () => {
@@ -495,6 +578,531 @@ describe('.pdf', () => {
  * like any other line. If either of these turns red, the footnote went missing; that is a regression,
  * not a test to relax.
  */
+describe('.pptx', () => {
+  const NAME = 'platform-roadmap.pptx';
+
+  it('gives each slide its own section, in the presentation order and not the file order', async () => {
+    const markdown = await readable(NAME);
+    expect(headings(markdown)).toEqual([
+      '# Platform Roadmap Review',
+      '## Slide 1: Platform Roadmap',
+      '## Slide 2: Cutover Plan',
+      '## Slide 3: Open Risks',
+    ]);
+  });
+
+  it('puts the speaker notes under their slide, on a Notes line', async () => {
+    const markdown = await readable(NAME);
+    const cutover = markdown.slice(markdown.indexOf('## Slide 2'), markdown.indexOf('## Slide 3'));
+    expect(cutover).toContain('- Freeze writes on the legacy ledger');
+    expect(cutover).toContain('Notes: Mention the pelican rollback rehearsal and the Friday freeze window.');
+    // Only that slide has notes, and the notes page's slide number is not a note.
+    expect(markdown.match(/^Notes:/gm)).toHaveLength(1);
+    expect(markdown).not.toMatch(/Notes: .*\b7\b/);
+  });
+
+  it('reads a table as a table and leaves the slide-number placeholder out', async () => {
+    const markdown = await readable(NAME);
+    expect(tableRows(markdown)).toEqual(['| Risk | Owner |', '| --- | --- |', '| Journal lag | Ingrid |', '| Quota exhaustion | Tomas |']);
+    expect(markdown).not.toMatch(/^2$/m);
+  });
+
+  it('can be found by a phrase from a slide and by one from the notes', async () => {
+    expect(await searchable(NAME, 'Replay the journal into the new cluster')).toBe(true);
+    expect(await searchable(NAME, 'pelican rollback rehearsal')).toBe(true);
+  });
+
+  it('refuses a zip that is not a presentation, and a file that is not a zip', async () => {
+    await expect(extract('book.pptx', bytesOf('warehouse-inventory.xlsx'))).rejects.toThrow(/not a PowerPoint presentation/);
+    await expect(extract('old.pptx', Buffer.from('\xd0\xcf\x11\xe0 an old binary deck'))).rejects.toThrow(/not a zip archive/);
+  });
+});
+
+describe('.xlsx', () => {
+  const NAME = 'warehouse-inventory.xlsx';
+
+  it('gives each visible sheet its own section, as a table', async () => {
+    const markdown = await readable(NAME);
+    expect(headings(markdown)).toEqual(['# Warehouse Inventory', '## Stock', '## Sites']);
+    expect(tableRows(markdown)).toEqual([
+      '| Item | Quantity | Total |',
+      '| --- | --- | --- |',
+      '| Anvil | 12 | 480 |',
+      '| Crowbar | 30 | 210 |',
+      '| Warehouse | Reorder level |',
+      '| --- | --- |',
+      '| Rotterdam | 75 |',
+    ]);
+  });
+
+  it('skips a hidden sheet entirely', async () => {
+    const markdown = await readable(NAME);
+    expect(markdown).not.toContain('Vault');
+    expect(markdown).not.toContain('Hiddenvault-ledger');
+  });
+
+  it('reads the cached value of a formula and never the formula', async () => {
+    const markdown = await readable(NAME);
+    expect(markdown).toContain('| Anvil | 12 | 480 |');
+    expect(markdown).not.toMatch(/B2\*40|SUM\(/);
+  });
+
+  it('can be found by a cell value', async () => {
+    expect(await searchable(NAME, 'Rotterdam | 75')).toBe(true);
+  });
+
+  it('refuses a zip that is not a workbook', async () => {
+    await expect(extract('deck.xlsx', bytesOf('platform-roadmap.pptx'))).rejects.toThrow(/not an Excel workbook/);
+  });
+});
+
+describe('.ipynb', () => {
+  const NAME = 'analysis-notebook.ipynb';
+
+  it('keeps markdown and code cells and leaves outputs and raw cells out', async () => {
+    const markdown = await readable(NAME);
+    expect(headings(markdown)).toEqual(['# Latency Investigation', '## Conclusion']);
+    expect(markdown).toContain("```python\nimport pandas as pd\nframe = pd.read_csv('latency.csv')\nframe.describe()\n```");
+    expect(markdown).not.toContain('SECRET-OUTPUT-MARKER');
+    expect(markdown).not.toContain('raw cell that is not content');
+  });
+
+  it('can be found by a phrase from a markdown cell', async () => {
+    expect(await searchable(NAME, 'before and after the vortexcache rollout')).toBe(true);
+  });
+
+  it('refuses JSON that is not a notebook, as a refusal naming the file', async () => {
+    await expect(extract('broken.ipynb', Buffer.from('{ not json'))).rejects.toBeInstanceOf(DocumentExtractionError);
+    await expect(extract('empty.ipynb', Buffer.from('{"cells": []}'))).rejects.toBeInstanceOf(DocumentExtractionError);
+  });
+
+  it('reads a version 3 notebook', async () => {
+    const v3 = JSON.stringify({
+      nbformat: 3,
+      worksheets: [
+        {
+          cells: [
+            { cell_type: 'heading', level: 1, source: ['Old Notebook'] },
+            { cell_type: 'markdown', source: ['Legacy text about the zebrafish pipeline.'] },
+            { cell_type: 'code', language: 'python', input: ['print(1)'], outputs: [{ text: ['LEAKED-V3'] }] },
+          ],
+        },
+      ],
+    });
+    const markdown = await extract('old.ipynb', Buffer.from(v3));
+    expect(markdown).toContain('zebrafish pipeline');
+    expect(markdown).toContain('print(1)');
+    expect(markdown).not.toContain('LEAKED-V3');
+  });
+});
+
+describe('.rst', () => {
+  const NAME = 'deployment-guide.rst';
+
+  it('keeps the heading hierarchy by order of appearance', async () => {
+    expect(headings(await readable(NAME))).toEqual(['# Deployment Guide', '## Overview', '### Prerequisites', '## Installation', '## Configuration']);
+  });
+
+  it('turns code, admonitions, links and tables into their Markdown forms', async () => {
+    const markdown = await readable(NAME);
+    expect(markdown).toContain('```yaml\nreplicas: 3\nport: 8080\n```');
+    expect(markdown).toContain('curl -fsSL https://example.com/install.sh | sh');
+    expect(markdown).toContain('**Note:** Back up the `/var/lib/quokka` directory before upgrading.');
+    expect(markdown).toContain('[the runbook](https://example.com/runbook)');
+    expect(tableRows(markdown)).toContain('| workers | 4 | per CPU |');
+    // Directives that drive the toolchain and carry no text are dropped.
+    expect(markdown).not.toContain('contents::');
+    expect(markdown).not.toContain('internal-target');
+  });
+
+  it('can be found by a phrase from the prose', async () => {
+    expect(await searchable(NAME, 'ships as a single container')).toBe(true);
+  });
+
+  it('survives a pathological nesting of directives without overflowing the stack', async () => {
+    const deep = Array.from({ length: 5000 }, (_, i) => `${' '.repeat(Math.min(i, 400))}.. note::`).join('\n');
+    await expect(extract('deep.rst', Buffer.from(`Title\n=====\n\n${deep}\n\nbody text\n`))).resolves.toContain('# Title');
+  });
+});
+
+describe('.adoc', () => {
+  const NAME = 'operations-manual.adoc';
+
+  it('keeps the heading hierarchy and drops the attribute entries', async () => {
+    const markdown = await readable(NAME);
+    expect(headings(markdown)).toEqual(['# Operations Manual', '## Overview', '## Procedures', '### Rotating credentials']);
+    expect(markdown).not.toContain(':author:');
+    expect(markdown).not.toContain('Platform Team');
+  });
+
+  it('substitutes attributes and converts macros, lists, code, tables and admonitions', async () => {
+    const markdown = await readable(NAME);
+    expect(markdown).toContain('The marmot scheduler runs **nightly**');
+    expect(markdown).toContain('[the status page](https://example.com/status)');
+    expect(markdown).toContain('**Note:** Never restart the scheduler during the reconciliation window.');
+    expect(markdown).toContain('```bash\nmarmot rotate --all\n```');
+    expect(tableRows(markdown)).toEqual(['| Dataset | Retention |', '| --- | --- |', '| Audit log | 400 days |', '| Metrics | 30 days |']);
+    expect(markdown).toContain('**Escalation**: Page the on-call engineer.');
+  });
+
+  it('drops comments', async () => {
+    expect(await readable(NAME)).not.toContain('internal reviewer comment');
+  });
+
+  it('can be found by a phrase from the prose', async () => {
+    expect(await searchable(NAME, 'Update the secret store')).toBe(true);
+  });
+});
+
+describe('the zip guard on the OOXML types (ADR-0115)', () => {
+  const SMALL = { ...LIMITS, maxUnpackedBytes: 1024 };
+
+  it.each([
+    ['platform-roadmap.pptx', 'a.pptx'],
+    ['warehouse-inventory.xlsx', 'a.xlsx'],
+  ])('refuses %s past the declared limit, before inflating any part', async (fixture, name) => {
+    await expect(extract(name, bytesOf(fixture), SMALL)).rejects.toThrow(/declare that they unpack past the limit.*MAX_DOCX_UNPACKED_BYTES/);
+  });
+
+  it('does not inflate when the declaration alone is over the limit', async () => {
+    // The part is not valid DEFLATE: had it been inflated, the refusal would read "damaged part".
+    const raw = archiveOf([{ name: 'ppt/presentation.xml', data: utf8('this is not a deflate stream'), method: 0, declared: 10 * 1024 * 1024 }]);
+    raw.writeUInt16LE(8, 8); // local header: deflate
+    raw.writeUInt16LE(8, raw.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02])) + 10); // directory: deflate
+    await expect(extract('a.pptx', raw, { ...LIMITS, maxUnpackedBytes: 1024 * 1024 })).rejects.toThrow(/declare that they unpack/);
+  });
+
+  it('refuses ZIP64 markers, an encrypted part and a compression method it does not read', async () => {
+    const zip64 = archiveOf([{ name: 'ppt/presentation.xml', data: utf8('<p/>'), declared: 0xffffffff }]);
+    await expect(extract('a.pptx', zip64)).rejects.toThrow(/ZIP64/);
+
+    const encrypted = archiveOf([{ name: 'ppt/presentation.xml', data: utf8('<p/>'), flags: 1 }]);
+    await expect(extract('a.pptx', encrypted)).rejects.toThrow(/password-protected/);
+
+    const bzip = archiveOf([{ name: 'xl/workbook.xml', data: utf8('<workbook/>'), method: 12 }]);
+    await expect(extract('a.xlsx', bzip)).rejects.toThrow(/method this product does not read/);
+  });
+
+  it('bounds a stored part by what it holds, not by what the directory says', async () => {
+    const stored = archiveOf([{ name: 'ppt/presentation.xml', data: Buffer.alloc(2 * 1024 * 1024, 0x41), method: 0, declared: 64 }]);
+    await expect(extract('a.pptx', stored, { ...LIMITS, maxUnpackedBytes: 1024 * 1024 })).rejects.toThrow(/actually unpack past the limit/);
+  });
+
+  it('shares one budget between the parts, so many small lies add up', async () => {
+    const half = Buffer.alloc(600 * 1024, 0x41);
+    const deck = archiveOf([
+      { name: 'ppt/presentation.xml', data: half, declared: 64 },
+      { name: 'ppt/slides/slide1.xml', data: half, declared: 64 },
+    ]);
+    await expect(extract('a.pptx', deck, { ...LIMITS, maxUnpackedBytes: 1024 * 1024 })).rejects.toThrow(/actually unpack past the limit/);
+    // Either part alone is within the budget, so it is the sum that is refused.
+    const one = archiveOf([{ name: 'ppt/presentation.xml', data: half, declared: 64 }]);
+    await expect(extract('a.pptx', one, { ...LIMITS, maxUnpackedBytes: 1024 * 1024 })).rejects.not.toThrow(/actually unpack/);
+  });
+
+  it.each([
+    ['a.pptx', 'ppt/presentation.xml'],
+    ['a.xlsx', 'xl/workbook.xml'],
+  ])('refuses a %s that lies about its size, by bounding what it really unpacks to', async (name, part) => {
+    const bomb = bombDocx(64 * 1024 * 1024, part);
+    expect(bomb.byteLength).toBeLessThan(1024 * 1024);
+    await expect(extract(name, bomb, { ...LIMITS, maxUnpackedBytes: 1024 * 1024 })).rejects.toThrow(/actually unpack past the limit/);
+  });
+
+  it('turns a damaged or truncated archive into a refusal, not a crash', async () => {
+    const full = bytesOf('warehouse-inventory.xlsx');
+    await expect(extract('cut.xlsx', full.subarray(0, full.length - 40))).rejects.toBeInstanceOf(DocumentExtractionError);
+    await expect(extract('cut.pptx', full.subarray(0, 12))).rejects.toBeInstanceOf(DocumentExtractionError);
+  });
+
+  it('refuses a workbook whose sheet renders far past the converted-file ceiling', async () => {
+    // One cell on each of 2 000 rows, every one in a column of its own: 2 000 columns, padded on every row.
+    const rows = Array.from(
+      { length: 2000 },
+      (_, i) => `<row r="${i + 1}"><c r="${columnName(i)}${i + 1}" t="inlineStr"><is><t>x</t></is></c></row>`,
+    );
+    const book = archiveOf([
+      {
+        name: 'xl/workbook.xml',
+        data: utf8(
+          '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Wide" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        ),
+      },
+      {
+        name: 'xl/_rels/workbook.xml.rels',
+        data: utf8(
+          '<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+        ),
+      },
+      { name: 'xl/worksheets/sheet1.xml', data: utf8(`<worksheet><sheetData>${rows.join('')}</sheetData></worksheet>`) },
+    ]);
+    const limits = { ...LIMITS, maxFileBytes: 4 * 1024 * 1024 };
+    expect(book.byteLength).toBeLessThan(limits.maxFileBytes / 100);
+    await expect(extract('wide.xlsx', book, limits)).rejects.toThrow(/renders to more than/);
+    // The workbook is fine when the ceiling is not in the way: it is the render that was refused.
+    await expect(extract('wide.xlsx', book)).resolves.toContain('## Wide');
+  });
+});
+
+describe('what a small file may render to (ADR-0115 §4)', () => {
+  /** A table whose first row is `width` cells wide and whose next `width` rows are one cell each. */
+  const padded = (width: number): Buffer =>
+    deckOf([slideOf(tableOf([Array.from({ length: width }, () => 'x'), ...Array.from({ length: width }, () => ['x'])]))]);
+
+  it('refuses a 1.6 KB presentation that would render to 16 MB', async () => {
+    const attack = padded(2000);
+    expect(attack.byteLength).toBeLessThan(2048);
+    const limits = { ...LIMITS, maxFileBytes: 4 * 1024 * 1024 };
+    await expect(extract('attack.pptx', attack, limits)).rejects.toThrow(/renders to more than the 4 MiB/);
+    await expect(extract('attack.pptx', attack, limits)).rejects.toBeInstanceOf(DocumentExtractionError);
+  });
+
+  it('refuses a larger one at the default ceiling, without building it', async () => {
+    const attack = padded(20_000);
+    expect(attack.byteLength).toBeLessThan(64 * 1024);
+    const started = Date.now();
+    await expect(extract('attack.pptx', attack)).rejects.toThrow(/renders to more than the 32 MiB/);
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  it('still renders an ordinary wide table', async () => {
+    const deck = deckOf([
+      slideOf(
+        tableOf([
+          ['A', 'B', 'C'],
+          ['1', '2', '3'],
+        ]),
+      ),
+    ]);
+    expect(tableRows(await extract('ok.pptx', deck))).toEqual(['| A | B | C |', '| --- | --- | --- |', '| 1 | 2 | 3 |']);
+  });
+
+  it('does not let a paragraph that is only a code fence swallow the slides after it', async () => {
+    const deck = deckOf([slideOf(textBox('```')), slideOf(textBox('~~~ shell')), slideOf(textBox('Later slide text'))]);
+    const markdown = await extract('fence.pptx', deck);
+    expect(markdown.split('\n').filter((line) => /^(`{3}|~{3})/.test(line))).toEqual([]);
+    expect(headings(markdown)).toEqual(['# Fence', '## Slide 1', '## Slide 2', '## Slide 3']);
+    const { chunks } = chunkMarkdown(markdown, 'fence.pptx', { maxTokens: 400, overlapTokens: 40 });
+    expect(chunks.map((c) => c.content).join('\n')).toContain('Later slide text');
+  });
+
+  // 357 bytes: five levels of ten references, then ten paragraphs of the last. It is 11 000 023 characters.
+  const laughs = (): string => {
+    const lines = [':a0: lorem ipsum'];
+    for (let level = 1; level <= 5; level++) lines.push(`:a${level}: ${`{a${level - 1}}`.repeat(10)}`);
+    lines.push('', ...Array.from({ length: 10 }, () => '{a5}\n'));
+    return lines.join('\n');
+  };
+
+  it('does not expand attributes that refer to attributes into megabytes', async () => {
+    const attack = Buffer.from(laughs());
+    expect(attack.byteLength).toBeLessThan(400);
+    const markdown = await extract('laughs.adoc', attack);
+    expect(markdown.length).toBeLessThan(100_000);
+    // What would not fit is not defined, so its references stay as written, as for any unknown attribute.
+    expect(markdown).toContain('{a3}');
+  });
+
+  it('refuses many references to a large attribute on one line', async () => {
+    const value = 'x'.repeat(4000);
+    const line = '{big}'.repeat(200);
+    const source = `:big: ${value}\n\n${Array.from({ length: 20 }, () => `${line}\n`).join('\n')}`;
+    const limits = { ...LIMITS, maxFileBytes: 4 * 1024 * 1024 };
+    expect(Buffer.byteLength(source)).toBeLessThan(limits.maxFileBytes);
+    await expect(extract('many.adoc', Buffer.from(source), limits)).rejects.toThrow(/renders to more than/);
+  });
+
+  it('keeps an ordinary attribute chain', async () => {
+    const markdown = await extract('chain.adoc', Buffer.from(':product: Marmot\n:long: {product} Scheduler\n\nThe {long} runs nightly.\n'));
+    expect(markdown).toContain('The Marmot Scheduler runs nightly.');
+  });
+});
+
+/**
+ * **The multiplier is the input's to choose, and so is paid for as the output is written** (ADR-0115 §4).
+ * Each case below is a few kilobytes that renders to far more than the ceiling by *repeating* something
+ * small: a shared string, a padded column, a quote marker. The refusal must be the budget's, raised while the
+ * output is written, and quick — not a `RangeError` out of `join`, and not seconds spent building the result.
+ */
+describe('output that repetition multiplies (ADR-0115 §4)', () => {
+  const SMALL = { ...LIMITS, maxFileBytes: 4 * 1024 * 1024 };
+  const refused = /renders to more than the \d+ MiB/;
+
+  /** A workbook whose one sheet holds `sheetData`, with `shared` as its shared strings. */
+  const workbookOf = (sheetData: string, shared?: string): Buffer =>
+    archiveOf([
+      {
+        name: 'xl/workbook.xml',
+        data: utf8(
+          '<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        ),
+      },
+      {
+        name: 'xl/_rels/workbook.xml.rels',
+        data: utf8(
+          '<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+        ),
+      },
+      ...(shared === undefined ? [] : [{ name: 'xl/sharedStrings.xml', data: utf8(shared) }]),
+      { name: 'xl/worksheets/sheet1.xml', data: utf8(`<worksheet><sheetData>${sheetData}</sheetData></worksheet>`) },
+    ]);
+
+  async function refusal(name: string, bytes: Buffer, limits: ExtractLimits = LIMITS): Promise<void> {
+    const started = Date.now();
+    const promise = extract(name, bytes, limits);
+    await expect(promise).rejects.toBeInstanceOf(DocumentExtractionError);
+    await expect(promise).rejects.toThrow(refused);
+    expect(Date.now() - started).toBeLessThan(5000);
+  }
+
+  it('refuses a row of cells that all point at one megabyte-long shared string', async () => {
+    // A cell is a reference to a string, not a copy: 1 000 cells of `<v>0</v>` are 1 GB of text.
+    const big = 'lorem ipsum '.repeat(90_000); // ~1 MB, with spaces so it is not one unbreakable word
+    const cells = Array.from({ length: 1000 }, (_, i) => `<c r="${columnName(i)}1" t="s"><v>0</v></c>`).join('');
+    const book = workbookOf(`<row r="1">${cells}</row>`, `<sst><si><t>${big}</t></si></sst>`);
+    expect(book.byteLength).toBeLessThan(16 * 1024);
+    await refusal('repeat.xlsx', book);
+  });
+
+  it('refuses the same repetition spread over many rows, and a repeated header', async () => {
+    const big = 'lorem ipsum '.repeat(9_000); // ~100 KB
+    const row = (n: number): string =>
+      `<row r="${n}">${Array.from({ length: 40 }, (_, i) => `<c r="${columnName(i)}${n}" t="s"><v>0</v></c>`).join('')}</row>`;
+    const rows = Array.from({ length: 60 }, (_, i) => row(i + 1)).join('');
+    await refusal('rows.xlsx', workbookOf(rows, `<sst><si><t>${big}</t></si></sst>`), SMALL);
+  });
+
+  it('refuses a csv-table whose first row is wide and the rest are one cell', async () => {
+    const width = 30_000;
+    const source = `Title\n=====\n\n.. csv-table::\n\n   ${'a,'.repeat(width)}\n${'   a\n'.repeat(width)}`;
+    const bytes = Buffer.from(source);
+    expect(bytes.byteLength).toBeLessThan(256 * 1024);
+    await refusal('wide.rst', bytes);
+    await refusal('wide-small.rst', Buffer.from(`.. csv-table::\n\n   ${'a,'.repeat(2000)}\n${'   a\n'.repeat(2000)}`), SMALL);
+  });
+
+  it('refuses a simple table with a border of thousands of columns above one-word rows', async () => {
+    const border = Array.from({ length: 5000 }, () => '=').join(' ');
+    const source = `${border}\nhead\n${border}\n${'x\n'.repeat(3000)}${border}\n\nafter\n`;
+    await refusal('border.rst', Buffer.from(source), SMALL);
+  });
+
+  it('refuses single-cell AsciiDoc tables declared 64 columns wide', async () => {
+    const source = '[cols="64*"]\n|===\n|x\n|===\n\n'.repeat(10_000);
+    const bytes = Buffer.from(source);
+    expect(bytes.byteLength).toBeLessThan(SMALL.maxFileBytes / 10);
+    await refusal('cols.adoc', bytes, SMALL);
+  });
+
+  it('refuses quote markers added at every level of a 16-deep nest', async () => {
+    // A block closes at the same delimiter, so each level needs its own length: 19 underscores down to 4.
+    const fence = (level: number): string => '_'.repeat(4 + level);
+    const levels = Array.from({ length: 16 }, (_, k) => 15 - k);
+    const open = levels.map((level) => `${fence(level)}\n`).join('');
+    const close = [...levels]
+      .reverse()
+      .map((level) => `${fence(level)}\n`)
+      .join('');
+    // Each line is "x", and leaves 16 levels deep as "> > ... > x".
+    const source = `${open}${'x\n\n'.repeat(250_000)}${close}`;
+    await refusal('nest.adoc', Buffer.from(source), SMALL);
+  });
+
+  it('refuses a slide of paragraphs and notes that outgrow a small ceiling', async () => {
+    const paragraph = (text: string): string => `<a:p><a:r><a:t>${text}</a:t></a:r></a:p>`;
+    const body = `<p:sp><p:nvSpPr><p:cNvPr id="2" name="Box"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/>${paragraph('word '.repeat(40)).repeat(200)}</p:txBody></p:sp>`;
+    await refusal('text.pptx', deckOf([slideOf(body)]), { ...LIMITS, maxFileBytes: 4096 });
+  });
+
+  it('still renders ordinary workbooks, tables and nests', async () => {
+    const shared = '<sst><si><t>Name</t></si><si><t>Ada</t></si></sst>';
+    const sheet = '<row r="1"><c r="A1" t="s"><v>0</v></c></row><row r="2"><c r="A2" t="s"><v>1</v></c></row>';
+    expect(tableRows(await extract('ok.xlsx', workbookOf(sheet, shared)))).toEqual(['| Name |', '| --- |', '| Ada |']);
+    expect(tableRows(await extract('ok.adoc', Buffer.from('[cols="3*"]\n|===\n|a |b |c\n|1 |2 |3\n|===\n')))).toEqual([
+      '| a | b | c |',
+      '| --- | --- | --- |',
+      '| 1 | 2 | 3 |',
+    ]);
+    expect(tableRows(await extract('ok.rst', Buffer.from('.. csv-table::\n\n   a,b\n   1,2\n')))).toEqual([
+      '| a | b |',
+      '| --- | --- |',
+      '| 1 | 2 |',
+    ]);
+    const quote = await extract('ok-quote.adoc', Buffer.from('[quote]\n____\nfirst\n\nsecond\n____\n'));
+    expect(quote).toContain('> first');
+    expect(quote).toContain('> second');
+  });
+});
+
+describe('input shapes that are quadratic or overflow the stack', () => {
+  it('converts an AsciiDoc listing block of 80 000 lines', async () => {
+    const source = `----\n${'line of code\n'.repeat(80_000)}----\n`;
+    const markdown = await extract('big.adoc', Buffer.from(source));
+    expect(markdown).toContain('line of code');
+  });
+
+  it('converts a reStructuredText code-block of 100 000 lines', async () => {
+    const source = `Title\n=====\n\n.. code-block:: python\n\n${'   x = 1\n'.repeat(100_000)}\nafter\n`;
+    const markdown = await extract('big.rst', Buffer.from(source));
+    expect(markdown).toContain('x = 1');
+    expect(markdown).toContain('after');
+  });
+
+  it('reads a reStructuredText csv-table of 100 000 rows', async () => {
+    const source = `Title\n=====\n\n.. csv-table::\n   :header: "a","b"\n\n${'   1,2\n'.repeat(100_000)}`;
+    const markdown = await extract('rows.rst', Buffer.from(source));
+    expect(tableRows(markdown).length).toBeGreaterThan(100_000);
+  });
+
+  it('reads a long run of spaces in a reStructuredText link, an XML attribute and a notebook cell quickly', async () => {
+    const started = Date.now();
+    await extract('link.rst', Buffer.from(`Title\n=====\n\n\`${' '.repeat(100_000)}\`\n\ntext\n`));
+    const deck = deckOf([
+      `<p:sld ${SLIDE_NS}><p:cSld><p:spTree><p:sp ${'a'.repeat(200_000)}>${'<p:nvSpPr/>'}</p:sp>${textBox('Still here')}</p:spTree></p:cSld></p:sld>`,
+    ]);
+    await extract('attr.pptx', deck);
+    const notebook = JSON.stringify({ cells: [{ cell_type: 'code', source: [`a${' '.repeat(50_000)}x`], metadata: {} }] });
+    await extract('spaces.ipynb', Buffer.from(notebook));
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  it('reads unclosed image markers, link openers and role colons in linear time', async () => {
+    const notebook = (markdown: string): Buffer => Buffer.from(JSON.stringify({ cells: [{ cell_type: 'markdown', source: markdown }] }));
+    const cases: Array<[string, Buffer]> = [
+      ['open-image.ipynb', notebook(`${'![a'.repeat(40_000)}\n\ntail`)],
+      ['data-image.ipynb', notebook(`${'![](data:'.repeat(40_000)}\n\ntail`)],
+      ['link.rst', Buffer.from(`Title\n=====\n\n${'`<'.repeat(40_000)}\n\ntext\n`)],
+      ['role.rst', Buffer.from(`Title\n=====\n\n${':a'.repeat(40_000)}\n\ntext\n`)],
+      ['labelled.rst', Buffer.from(`Title\n=====\n\n:ref:\`${'<'.repeat(40_000)}\`\n\n:ref:\`${' '.repeat(40_000)}x>\`\n`)],
+      ['tables.rst', Buffer.from(`${'= =\n= =\nx\n\n'.repeat(20_000)}`)],
+    ];
+    for (const [name, bytes] of cases) {
+      const started = Date.now();
+      await extract(name, bytes);
+      expect(Date.now() - started, name).toBeLessThan(1500);
+    }
+  });
+
+  it('keeps the alt text of an embedded image and nothing else of it', async () => {
+    const source =
+      'See ![the plot](data:image/png;base64,AAAA) and ![ logo ]( data:image/png;base64,BBBB) but keep ![x](https://example.com/x.png) and ![open';
+    const notebook = Buffer.from(JSON.stringify({ cells: [{ cell_type: 'markdown', source }] }));
+    const markdown = await extract('images.ipynb', notebook);
+    expect(markdown).toContain('See the plot and logo but keep ![x](https://example.com/x.png) and ![open');
+    expect(markdown).not.toContain('base64');
+  });
+
+  it('takes a notebook cell language as one safe word and falls back to the notebook language', async () => {
+    const notebook = JSON.stringify({
+      metadata: { language_info: { name: 'Python' } },
+      cells: [{ cell_type: 'code', language: 'js\n```\n# injected', source: ['print(1)'] }],
+    });
+    const markdown = await extract('lang.ipynb', Buffer.from(notebook));
+    expect(markdown).toContain('```python\nprint(1)\n```');
+    expect(markdown).not.toContain('injected');
+  });
+});
+
 describe('footnotes', () => {
   const PHRASE = 'quarterly reconciliation ledger';
 

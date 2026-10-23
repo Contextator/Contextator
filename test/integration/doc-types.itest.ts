@@ -186,7 +186,7 @@ beforeAll(async () => {
       projectId: project.id,
       type: 'local',
       name: 'handbook',
-      config: { path: root, extensions: ['md', 'txt', 'html', 'htm', 'csv', 'docx', 'pdf'] },
+      config: { path: root, extensions: ['md', 'txt', 'html', 'htm', 'csv', 'docx', 'pdf', 'pptx', 'xlsx', 'ipynb', 'rst', 'adoc'] },
     })
     .returning();
 
@@ -223,16 +223,21 @@ describe('a project of mixed file types', () => {
       .from(documents)
       .where(eq(documents.projectId, fx.project.id));
     expect(rows.map((r) => r.relativePath).sort()).toEqual([
+      'handbook/analysis-notebook.ipynb',
       'handbook/architecture-diagram.html',
       'handbook/changelog.htm',
+      'handbook/deployment-guide.rst',
       'handbook/escalation-policy.txt',
       'handbook/footnoted-policy.docx',
       'handbook/footnoted-policy.pdf',
       'handbook/onboarding-checklist.docx',
+      'handbook/operations-manual.adoc',
+      'handbook/platform-roadmap.pptx',
       'handbook/release-notes.html',
       'handbook/service-owners.csv',
       'handbook/support-handbook.pdf',
       'handbook/two-column-brief.pdf',
+      'handbook/warehouse-inventory.xlsx',
     ]);
     // The title came from the converted Markdown, so no document is called "Service-owners.csv".
     expect(rows.find((r) => r.relativePath.endsWith('.csv'))?.title).toBe('Service Owners');
@@ -247,6 +252,11 @@ describe('a project of mixed file types', () => {
       ['what opens on the first morning of onboarding', 'handbook/onboarding-checklist.docx'],
       ['how long is the delivery timeout now', 'handbook/release-notes.html'],
       ['who owns the billing api runbook', 'handbook/service-owners.csv'],
+      ['the pelican rollback rehearsal', 'handbook/platform-roadmap.pptx'],
+      ['how many Crowbar items are in stock', 'handbook/warehouse-inventory.xlsx'],
+      ['vortexcache rollout latency', 'handbook/analysis-notebook.ipynb'],
+      ['back up the quokka directory', 'handbook/deployment-guide.rst'],
+      ['marmot scheduler reconciliation window', 'handbook/operations-manual.adoc'],
     ];
     for (const [query, expected] of cases) {
       const answer = await call('search_docs', { query, limit: 10 });
@@ -274,11 +284,36 @@ describe('a project of mixed file types', () => {
     const html = await call('read_document', { path: 'handbook/release-notes.html', max_tokens: 20_000 });
     expect(html.text).toContain('## Upgrading');
     expect(html.text).not.toContain('window.analytics');
+
+    // ADR-0115: one section per slide, with the speaker notes under their slide.
+    const pptx = await call('read_document', { path: 'handbook/platform-roadmap.pptx', max_tokens: 20_000 });
+    expect(pptx.isError).toBe(false);
+    expect(pptx.text).toContain('## Slide 2: Cutover Plan');
+    expect(pptx.text).toContain('Notes: Mention the pelican rollback rehearsal');
+    expect(pptx.text).toContain('## Slide 3: Open Risks');
+
+    // ADR-0115: one section per visible sheet; the hidden sheet and the formulas stay out.
+    const xlsx = await call('read_document', { path: 'handbook/warehouse-inventory.xlsx', max_tokens: 20_000 });
+    expect(xlsx.isError).toBe(false);
+    expect(xlsx.text).toContain('## Stock');
+    expect(xlsx.text).toContain('## Sites');
+    expect(xlsx.text).toContain('| Anvil | 12 | 480 |');
+    expect(xlsx.text).not.toContain('Hiddenvault-ledger');
+
+    const notebook = await call('read_document', { path: 'handbook/analysis-notebook.ipynb', max_tokens: 20_000 });
+    expect(notebook.text).toContain('## Conclusion');
+    expect(notebook.text).not.toContain('SECRET-OUTPUT-MARKER');
+
+    const rst = await call('read_document', { path: 'handbook/deployment-guide.rst', max_tokens: 20_000 });
+    expect(rst.text).toContain('### Prerequisites');
+
+    const adoc = await call('read_document', { path: 'handbook/operations-manual.adoc', max_tokens: 20_000 });
+    expect(adoc.text).toContain('### Rotating credentials');
   });
 
   it('writes every refusal onto the source, and indexes nothing for any of them', async () => {
     const [source] = await fx.database.db.select().from(documentSources).where(eq(documentSources.id, fx.sourceId));
-    expect(source.lastError).toMatch(/4 of 14 file\(s\) could not be indexed/);
+    expect(source.lastError).toMatch(/4 of 19 file\(s\) could not be indexed/);
     expect(source.lastError).toContain('scanned-invoice.pdf');
     expect(source.lastError).toMatch(/no text layer/);
     expect(source.lastError).toMatch(/character recognition is out of scope/);
@@ -312,7 +347,7 @@ describe('a project of mixed file types', () => {
     const project = await getProjectById(fx.database.db, fx.project.id);
     expect(project?.status).toBe('idle');
     expect(project?.lastError).toBeNull();
-    expect(project?.documentCount).toBe(10);
+    expect(project?.documentCount).toBe(15);
   });
 
   /**
@@ -399,8 +434,8 @@ describe('a project of mixed file types', () => {
     const indexer = new Indexer({ db: fx.database.db, embeddings, config: indexerConfig(fx.root), log: silentLogger, locks: new KeyedMutex() });
     const job = await settle(fx.database.db, indexer.enqueue(fx.project.id));
     expect(job.phase).toBe('done');
-    // Ten unchanged documents plus the four that are refused again.
-    expect(job.filesSkipped).toBe(14);
+    // Fifteen unchanged documents plus the four that are refused again.
+    expect(job.filesSkipped).toBe(19);
     expect(job.chunksDone).toBe(0);
     expect(job.filesRemoved).toBe(0);
   }, 120_000);
