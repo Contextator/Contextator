@@ -16,7 +16,8 @@ import type { KeyedMutex } from './locks.js';
 import { type IndexerObserver, startTimer } from './metrics.js';
 import { checkSpecSize, type DerivedDocument } from './openapi.js';
 import { getProjectById } from './projects.js';
-import { driverFor } from './sources/driver.js';
+import { driverFor, type DocumentMeta } from './sources/driver.js';
+import { resolveStoredMeta, type StoredSourceMeta, sourceMetaDiffers } from './source-url.js';
 import { listSources, recountSources, setSourceStatus, sourceVersion } from './sources.js';
 import { textSearchConfigFor, type TextSearchConfig } from './text-search.js';
 import {
@@ -26,6 +27,7 @@ import {
   replaceDocument,
   storedDocumentContent,
   sweepGenerations,
+  updateDocumentSourceMeta,
   type NewChunk,
 } from './vector-store.js';
 
@@ -152,6 +154,14 @@ interface SourceFile {
   absolutePath: string;
   /** Taken by the walk, so a ceiling can be applied before the file is read (ADR-0056). */
   sizeBytes: number;
+  /** Taken by the walk; `documentMeta` of the local driver reads it ([ADR-0116](../../.ssot/ADR.md#adr-0116)). */
+  mtimeMs: number;
+  /**
+   * The origin address and date of this file, as its source's driver reported them this run
+   * ([ADR-0116](../../.ssot/ADR.md#adr-0116)). `undefined` is "the driver gave no answer" — it has no
+   * `documentMeta`, or it threw — and then whatever the document already stores stands.
+   */
+  meta?: DocumentMeta;
   sourceId: string;
   flavor: Flavor;
   /**
@@ -394,25 +404,48 @@ export class Indexer {
     }
 
     let scanned = false;
+    const scannedHere: SourceFile[] = [];
     try {
       const root = await driver.docRoot();
       for await (const f of walkMarkdown(root, { ignoreGlobs: config.IGNORE_GLOBS, extensions, allowedExtensions: allowedExtensionsFor(flavor) })) {
         // Stored paths always equal on-disk paths (flavor path cleanup happens when files are written, see uploads.ts).
-        files.push({
+        const file: SourceFile = {
           relativePath: `${source.name}/${f.relativePath}`,
           absolutePath: f.absolutePath,
           sizeBytes: f.sizeBytes,
+          mtimeMs: f.mtimeMs,
           sourceId: source.id,
           flavor,
           textSearchConfig,
           version,
-        });
+        };
+        files.push(file);
+        scannedHere.push(file);
       }
       scanned = true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       syncError = syncError ? `${syncError}; ${message}` : message;
       log.error({ err, source: source.name }, 'source scan failed');
+    }
+
+    // **Where each file came from, asked once the files are known and never of the remote**
+    // ([ADR-0116](../../.ssot/ADR.md#adr-0116)). It runs after the scan, and outside the scan's `try`, because a
+    // driver that cannot answer is a source without links and not a source that failed to index: the
+    // error is logged and the files keep `meta: undefined`, which leaves what each document stores alone.
+    if (scanned && driver.documentMeta && scannedHere.length > 0) {
+      try {
+        const answers = await driver.documentMeta(
+          scannedHere.map((file) => ({
+            path: file.relativePath.slice(source.name.length + 1),
+            absolutePath: file.absolutePath,
+            mtimeMs: file.mtimeMs,
+          })),
+        );
+        for (const file of scannedHere) file.meta = answers.get(file.relativePath.slice(source.name.length + 1)) ?? { url: null, modifiedAt: null };
+      } catch (err) {
+        log.warn({ err, source: source.name }, 'document origin metadata unavailable; stored links are left as they are');
+      }
     }
 
     if (syncError) {
@@ -530,6 +563,10 @@ export class Indexer {
         // re-embed everything" falls out of the generation rather than being a branch.
         job.phase = 'scanning';
         const existing = await getExistingDocuments(db, project.id, generation);
+        // A rebuild's generation starts empty, so the documents it is about to rewrite are looked up in the live
+        // one — only for what they remember about their origin (ADR-0116 decision 3): "the first time the indexer
+        // saw this content" must survive a re-embed, or one model change would date every git file as of today.
+        const liveBeforeRebuild = rebuild ? await getExistingDocuments(db, project.id, live) : undefined;
         job.filesTotal = files.length;
 
         // The chunker counts with the model's own tokenizer (ADR-0036) and chunking happens before the
@@ -614,6 +651,48 @@ export class Indexer {
           return previous !== undefined && previous.contentHash === hash && previous.sourceId === sourceId;
         };
 
+        /**
+         * A document whose text is current still gets its origin address and date compared with this run's
+         * ([ADR-0116](../../.ssot/ADR.md#adr-0116)). A metadata-only `UPDATE`: no chunking, no embedding. It is what
+         * fills the columns of documents that predate them, and what follows a page edited at its origin
+         * without its text changing.
+         */
+        const refreshSourceMeta = async (storedPath: string, file: SourceFile): Promise<void> => {
+          const previous = existing.get(storedPath);
+          if (!previous) return;
+          const next = resolveStoredMeta(file.meta, previous, false);
+          noteSourceMeta(previous, next);
+          if (sourceMetaDiffers(next, previous)) await updateDocumentSourceMeta(db, previous.id, next);
+        };
+
+        /**
+         * What the document about to be written remembers of its origin, and whether its text is new.
+         *
+         * An incremental run reaches a write only for text it has not stored (`isCurrent` was false), so the
+         * text is new and the stored row, if any, is the one being replaced. A rebuild reaches it for every
+         * file, so the same text is looked up in the live generation by path and hash: a document that comes
+         * out of the rebuild byte for byte as it went in is not new, and keeps the date it had
+         * ([ADR-0116](../../.ssot/ADR.md#adr-0116) decision 3). Text that did change, or never existed, starts afresh.
+         */
+        const metaBasis = (
+          storedPath: string,
+          hash: string,
+          sourceId: string,
+        ): { previous: StoredSourceMeta | undefined; contentChanged: boolean } => {
+          if (!liveBeforeRebuild) return { previous: existing.get(storedPath), contentChanged: true };
+          const before = liveBeforeRebuild.get(storedPath);
+          const sameText = before !== undefined && before.contentHash === hash && before.sourceId === sourceId;
+          return { previous: sameText ? before : undefined, contentChanged: !sameText };
+        };
+
+        /** Run counters for the closing log line: documents that gained or changed an origin address or date, and those with neither. */
+        let metaFilled = 0;
+        let metaMissing = 0;
+        const noteSourceMeta = (previous: StoredSourceMeta | undefined, next: StoredSourceMeta): void => {
+          if (next.sourceUrl === null && next.sourceModifiedAt === null) metaMissing++;
+          else if (!previous || sourceMetaDiffers(next, previous)) metaFilled++;
+        };
+
         for (const file of files) {
           const expands = expandsToManyDocuments(file.flavor, file.relativePath);
           /** The stored paths this file's documents occupy right now — one of them, or all of an expansion. */
@@ -666,6 +745,7 @@ export class Indexer {
            */
           if (!expands && claimed.length > 0 && isCurrent(file.relativePath, hash, file.sourceId)) {
             seen.add(file.relativePath);
+            await refreshSourceMeta(file.relativePath, file);
             job.filesSkipped++;
             job.filesDone++;
             continue;
@@ -745,6 +825,7 @@ export class Indexer {
               // is the whole of the saving for a specification that gained one operation and kept forty.
               if (isCurrent(doc.relativePath, hash, file.sourceId)) {
                 seen.add(doc.relativePath);
+                await refreshSourceMeta(doc.relativePath, file);
                 unchanged++;
                 continue;
               }
@@ -779,6 +860,9 @@ export class Indexer {
                 });
               }
 
+              const basis = metaBasis(doc.relativePath, hash, file.sourceId);
+              const storedMeta = resolveStoredMeta(file.meta, basis.previous, basis.contentChanged);
+              noteSourceMeta(basis.previous, storedMeta);
               await replaceDocument(
                 db,
                 {
@@ -794,6 +878,9 @@ export class Indexer {
                   // specification are forty documents of one release; there is no sense in which some
                   // of them could be a different version from the file they came from.
                   version: file.version,
+                  // Every document derived from one file shares the file's address and date
+                  // ([ADR-0116](../../.ssot/ADR.md#adr-0116)): there is no per-operation link to a specification.
+                  ...storedMeta,
                   ...storedDocumentContent(doc.markdown, config.MAX_STORED_DOCUMENT_BYTES),
                 },
                 rows,
@@ -916,6 +1003,8 @@ export class Indexer {
             unusableSources: unusable.length,
             removed: job.filesRemoved,
             chunksWritten: job.chunksDone,
+            metaFilled,
+            metaMissing,
             generation,
             ...counts,
           },

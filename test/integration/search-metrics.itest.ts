@@ -12,6 +12,7 @@ import { loadConfig, WEB_LIMIT_DEFAULTS } from '../../src/config.js';
 import { documentSources, projects } from '../../src/db/schema.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
 import { Indexer, type JobState } from '../../src/services/indexer.js';
+import { sourceFreshness } from '../../src/services/index-runs.js';
 import { KeyedMutex } from '../../src/services/locks.js';
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
 import { type HistogramSnapshot, MetricsRegistry, renderPrometheus } from '../../src/services/metrics.js';
@@ -252,6 +253,45 @@ describe('search and indexer histograms', () => {
     expect(text).toMatch(/^contextator_search_duration_seconds_bucket\{phase="rerank",indexing="false",le="\+Inf"\} 1$/m);
     expect(text).toMatch(/^contextator_index_run_wait_seconds_count\{lane="interactive"\} 1$/m);
     expect(text).toMatch(/^contextator_embedding_batch_size_bucket\{le="256"\} 3$/m);
+  });
+
+  it('reports the stalest scheduled source as unlabeled freshness gauges, and ignores a manual-only one', async () => {
+    const HOUR_MS = 3_600_000;
+    // The indexed source becomes a scheduled one whose last successful sync was two hours ago.
+    await database.db
+      .update(documentSources)
+      .set({ syncIntervalMinutes: 60, lastSyncedAt: new Date(Date.now() - 2 * HOUR_MS) })
+      .where(eq(documentSources.projectId, projectId));
+    // A manual-only source (no interval) that is far older must not be what the gauge reports, and a
+    // scheduled one that has never synced is counted instead of aged.
+    await database.db
+      .insert(documentSources)
+      .values({ projectId, type: 'local', name: 'manual', config: { path: root }, lastSyncedAt: new Date(Date.now() - 90 * 24 * HOUR_MS) });
+    await database.db.insert(documentSources).values({ projectId, type: 'local', name: 'fresh', config: { path: root }, syncIntervalMinutes: 60 });
+
+    const freshness = await sourceFreshness(database.db);
+    expect(freshness.neverSynced).toBe(1);
+    expect(freshness.lagSeconds).toBeGreaterThanOrEqual(2 * 3600);
+    expect(freshness.lagSeconds).toBeLessThan(2 * 3600 + 120);
+
+    const text = renderPrometheus({
+      version: '0.0.0-test',
+      uptimeSeconds: 1,
+      embeddingId: embeddings.id,
+      embeddingReady: true,
+      dbUp: true,
+      pool: null,
+      queue: indexer.stats(),
+      lastIndexRun: null,
+      sourceFreshness: freshness,
+      searches: { mcp: 0, dashboard: 0 },
+      audit: { written: 0, failed: 0 },
+    });
+    expect(text).toMatch(/^contextator_source_last_sync_timestamp_seconds \d+$/m);
+    expect(text).toMatch(/^contextator_source_freshness_lag_seconds 7[2-3]\d\d(\.\d+)?$/m);
+    expect(text).toMatch(/^contextator_sources_never_synced 1$/m);
+    // ADR-0105: no project or source name is a label value.
+    expect(text).not.toMatch(/contextator_source[a-z_]*\{/);
   });
 });
 

@@ -1,7 +1,7 @@
-import { and, desc, eq, notInArray } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, notInArray, sql } from 'drizzle-orm';
 import type { Logger } from '../context.js';
 import type { Db } from '../db/client.js';
-import { indexRuns, projects, type IndexRunInsert, type IndexRunRow } from '../db/schema.js';
+import { documentSources, indexRuns, projects, type IndexRunInsert, type IndexRunRow } from '../db/schema.js';
 import type { IndexTrigger } from './indexer.js';
 
 /** How many finished runs are kept per project; older ones are pruned after each insert. */
@@ -165,4 +165,46 @@ export async function listIndexRuns(db: Db, projectId: string, limit = RUN_HISTO
 export async function latestIndexRun(db: Db): Promise<IndexRunRow | undefined> {
   const [row] = await db.select().from(indexRuns).orderBy(desc(indexRuns.finishedAt)).limit(1);
   return row;
+}
+
+/** How stale the instance's scheduled sources are, as one answer for the whole instance. */
+export interface SourceFreshness {
+  /** `last_synced_at` of the scheduled source that has gone longest without a successful sync, in epoch seconds; null when none has synced. */
+  oldestSyncedAtSeconds: number | null;
+  /** How long ago that was, by the database's clock; null when none has synced. */
+  lagSeconds: number | null;
+  /** Scheduled sources that have never completed a sync. */
+  neverSynced: number;
+}
+
+/**
+ * The freshness of the sources that are *meant* to stay fresh: those with a `sync_interval_minutes`
+ * ([ADR-0048](../../.ssot/ADR.md#adr-0048)). A manual-only source has no schedule to fall behind.
+ *
+ * **One answer per instance, not one per source.** The metric labels are closed sets and carry no
+ * project or source name ([ADR-0105](../../.ssot/ADR.md#adr-0105)), so the per-source series that
+ * would name the stalest source cannot exist; the stalest *value* can, and that is the one an alert
+ * needs. Which source it is, is a question for the sources list in the panel.
+ *
+ * The age is computed by the database (`now()`) so it does not depend on this process's clock agreeing
+ * with the one that wrote `last_synced_at`. The column moves only on a successful sync
+ * (`services/indexer.ts`), so a source whose sync keeps failing keeps ageing here; a healthy one
+ * stays under `SYNC_MAX_SKIP_HOURS` plus its interval, because an unchanged source is probed and
+ * skipped until then.
+ */
+export async function sourceFreshness(db: Db): Promise<SourceFreshness> {
+  const scheduled = isNotNull(documentSources.syncIntervalMinutes);
+  const [row] = await db
+    .select({
+      oldest: sql<string | null>`extract(epoch from min(${documentSources.lastSyncedAt}))`,
+      lag: sql<string | null>`extract(epoch from now() - min(${documentSources.lastSyncedAt}))`,
+      never: sql<string>`count(*) filter (where ${documentSources.lastSyncedAt} is null)`,
+    })
+    .from(documentSources)
+    .where(scheduled);
+  return {
+    oldestSyncedAtSeconds: row?.oldest == null ? null : Math.round(Number(row.oldest)),
+    lagSeconds: row?.lag == null ? null : Math.max(0, Number(row.lag)),
+    neverSynced: Number(row?.never ?? 0),
+  };
 }

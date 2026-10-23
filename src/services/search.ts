@@ -8,6 +8,7 @@ import type { QueryLogSink } from './query-log.js';
 import { belowRelevanceFloor, effectiveScoreFloor } from './relevance.js';
 import { getSourceByName, listSources } from './sources.js';
 import type { Reranker } from './reranker.js';
+import { type TraceSpan, tracing } from './tracing.js';
 import { documentVersionExists, type HnswScan, listDocumentVersions, type ResultSelection, searchChunks, type SearchHit } from './vector-store.js';
 
 /**
@@ -146,9 +147,23 @@ export type SearchOutcome =
   /** Those chunks and this query are not in the same space; the next run re-embeds the project. */
   | { status: 'model_mismatch'; project: ProjectRow; indexedWith: string; serverUses: string };
 
-export async function searchProject(
+/**
+ * One search, as a trace when tracing is on: `contextator.search.query` is the question from the
+ * moment it is accepted to the moment it is answered, and it parents three stages that are real seams in
+ * the code below — `candidates`, `fusion`, `response`. The mapping is deliberately not "one span per
+ * retriever": the dense list, the lexical list and their RRF fusion are **one SQL statement**
+ * ([ADR-0041](../../.ssot/ADR.md#adr-0041)), so `candidates` times that statement whole (and the optional
+ * rerank inside it), and `fusion` is the verdict taken over the fused list afterwards. No attribute
+ * carries the query, a project or a path (see `tracing.ts`); with tracing off this is one call into a no-op.
+ */
+export function searchProject(deps: SearchDeps, input: SearchInput): Promise<SearchOutcome> {
+  return tracing().span('contextator.search.query', { 'contextator.rerank': deps.rerank !== undefined }, (span) => runSearch(deps, input, span));
+}
+
+async function runSearch(
   { db, embeddings, scan, selection, scoreFloor, queryLog, rerank, metrics }: SearchDeps,
   input: SearchInput,
+  querySpan: TraceSpan,
 ): Promise<SearchOutcome> {
   const startedAt = Date.now();
   const sinceStart = startTimer();
@@ -208,8 +223,11 @@ export async function searchProject(
 
   // `embedQuery`, never `embedPassages`: on an asymmetric model these are different encodings of the
   // same string, and the wrong one here costs recall without failing (ADR-0038).
+  //
+  // The span covers the model call alone, with no attribute: the query text is the one thing about this
+  // call worth knowing and the one thing a span must not carry (ADR-0119, ADR-0105).
   const embedTimer = startTimer();
-  const vector = await embeddings.embedQuery(input.query);
+  const vector = await tracing().span('contextator.search.embed', undefined, () => embeddings.embedQuery(input.query));
   const embedSeconds = embedTimer();
   // The live generation off the row that was just re-read, passed as a value (ADR-0039). A rebuild
   // may be filling `liveGeneration + 1` at this very moment; this query cannot see it, and the moment
@@ -223,37 +241,58 @@ export async function searchProject(
   // Wrapping the function changes nothing about what it is given or what it returns.
   let rerankSeconds: number | undefined;
   const retrieveTimer = startTimer();
-  const hits = await searchChunks(db, {
-    projectId: project.id,
-    generation: project.liveGeneration,
-    queryEmbedding: vector,
-    queryText: input.query,
-    limit: input.limit ?? DEFAULT_SEARCH_LIMIT,
-    sourceId,
-    pathPrefix,
-    version,
-    scan,
-    selection,
-    // `rerank.score` and not the reranker: `searchChunks` takes a function of strings for the reason
-    // it takes a vector rather than a provider, and binding it here is what keeps the model out of it.
-    rerank: rerank
-      ? async (query, passages) => {
-          const rerankTimer = startTimer();
-          try {
-            return await rerank.score(query, passages);
-          } finally {
-            rerankSeconds = (rerankSeconds ?? 0) + rerankTimer();
+  const hits = await tracing().span('contextator.search.candidates', undefined, async (span) => {
+    const found = await searchChunks(db, {
+      projectId: project.id,
+      generation: project.liveGeneration,
+      queryEmbedding: vector,
+      queryText: input.query,
+      limit: input.limit ?? DEFAULT_SEARCH_LIMIT,
+      sourceId,
+      pathPrefix,
+      version,
+      scan,
+      selection,
+      // `rerank.score` and not the reranker: `searchChunks` takes a function of strings for the reason
+      // it takes a vector rather than a provider, and binding it here is what keeps the model out of it.
+      rerank: rerank
+        ? async (query, passages) => {
+            const rerankTimer = startTimer();
+            try {
+              // Started from inside `searchChunks`, which runs inside the `candidates` span, so the
+              // context it inherits makes this one its child: the rerank is a Node-side forward pass
+              // between the candidate statement and the page fetch, not part of the SQL (ADR-0041).
+              // The attribute is a count; the passages themselves are document text.
+              return await tracing().span('contextator.search.rerank', undefined, async (rerankSpan) => {
+                rerankSpan.setAttribute('contextator.passages', passages.length);
+                return rerank.score(query, passages);
+              });
+            } finally {
+              rerankSeconds = (rerankSeconds ?? 0) + rerankTimer();
+            }
           }
-        }
-      : undefined,
+        : undefined,
+    });
+    span.setAttribute('contextator.hits', found.length);
+    return found;
   });
   const searchSeconds = retrieveTimer();
   // The project's own floor wins over the instance's, and only while the instance's floor is on:
   // `scoreFloor` unset or `0` is "off" for every project, so a column cannot turn on a refusal the
   // operator switched off. `project` is the row re-read at the top, so the override costs no query.
-  const effectiveFloor = effectiveScoreFloor(scoreFloor, project.scoreFloor);
-  const scoreFloorOverridden = scoreFloor !== undefined && scoreFloor > 0 && project.scoreFloor !== null;
-  const belowFloor = belowRelevanceFloor(input.query, hits, effectiveFloor);
+  //
+  // Named `fusion` after the stage of the search it closes (ADR-0119); fusion itself is inside the
+  // candidate statement (ADR-0041), so what this span times is the score-floor verdict that follows it.
+  const { effectiveFloor, scoreFloorOverridden, belowFloor } = await tracing().span('contextator.search.fusion', undefined, async (span) => {
+    const floor = effectiveScoreFloor(scoreFloor, project.scoreFloor);
+    const below = belowRelevanceFloor(input.query, hits, floor);
+    span.setAttribute('contextator.below_floor', below);
+    return {
+      effectiveFloor: floor,
+      scoreFloorOverridden: scoreFloor !== undefined && scoreFloor > 0 && project.scoreFloor !== null,
+      belowFloor: below,
+    };
+  });
 
   // **One seam, three callers** ([ADR-0047](../../.ssot/ADR.md#adr-0047)). The MCP tool and the
   // dashboard route pass a sink; the evaluation harness does not, and that is the whole of why it
@@ -266,42 +305,46 @@ export async function searchProject(
   //
   // `project.queryLogEnabled` is free here: the row was re-read at the top of this function anyway, so
   // the per-project switch costs no query. `record()` is not awaited — see `QueryLogSink`.
-  if (queryLog && project.queryLogEnabled) {
-    queryLog.record({
-      projectId: project.id,
-      query: input.query,
-      limit: input.limit ?? DEFAULT_SEARCH_LIMIT,
-      source: input.source,
-      // The normalised prefix rather than what was typed, so that two spellings of one filter are one
-      // filter in the log, as they are in the query.
-      pathPrefix,
-      // The resolved label rather than what was typed, for the same reason — and it is only ever
-      // recorded when it named a version this index carries, because an unknown one never reached
-      // the search at all (ADR-0058).
-      version,
-      hits: hits.map((hit) => ({
-        relativePath: hit.file,
-        headingPath: hit.headingPath,
-        chunkIndex: hit.chunkIndex,
-        score: hit.score,
-      })),
-      belowFloor,
-      scoreFloor: effectiveFloor,
-      durationMs: Date.now() - startedAt,
-      // The encoder that answered *this* question and the generation it answered from, taken from the
-      // provider and the row in hand rather than from configuration: a log recorded across a model
-      // change otherwise averages two different systems (ROADMAP.md Item 6).
-      embeddingModel: embeddings.id,
-      liveGeneration: project.liveGeneration,
-    });
-  }
+  await tracing().span('contextator.search.response', undefined, async () => {
+    if (queryLog && project.queryLogEnabled) {
+      queryLog.record({
+        projectId: project.id,
+        query: input.query,
+        limit: input.limit ?? DEFAULT_SEARCH_LIMIT,
+        source: input.source,
+        // The normalised prefix rather than what was typed, so that two spellings of one filter are one
+        // filter in the log, as they are in the query.
+        pathPrefix,
+        // The resolved label rather than what was typed, for the same reason — and it is only ever
+        // recorded when it named a version this index carries, because an unknown one never reached
+        // the search at all (ADR-0058).
+        version,
+        hits: hits.map((hit) => ({
+          relativePath: hit.file,
+          headingPath: hit.headingPath,
+          chunkIndex: hit.chunkIndex,
+          score: hit.score,
+        })),
+        belowFloor,
+        scoreFloor: effectiveFloor,
+        durationMs: Date.now() - startedAt,
+        // The encoder that answered *this* question and the generation it answered from, taken from the
+        // provider and the row in hand rather than from configuration: a log recorded across a model
+        // change otherwise averages two different systems (ROADMAP.md Item 6).
+        embeddingModel: embeddings.id,
+        liveGeneration: project.liveGeneration,
+      });
+    }
 
-  metrics?.observeSearch({
-    embed: embedSeconds,
-    retrieve: Math.max(0, searchSeconds - (rerankSeconds ?? 0)),
-    rerank: rerankSeconds,
-    total: sinceStart(),
+    metrics?.observeSearch({
+      embed: embedSeconds,
+      retrieve: Math.max(0, searchSeconds - (rerankSeconds ?? 0)),
+      rerank: rerankSeconds,
+      total: sinceStart(),
+    });
   });
+  querySpan.setAttribute('contextator.hits', hits.length);
+  querySpan.setAttribute('contextator.below_floor', belowFloor);
 
   return { status: 'ok', project, hits, belowFloor, scoreFloor: effectiveFloor, scoreFloorOverridden };
 }

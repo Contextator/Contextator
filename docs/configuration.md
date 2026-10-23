@@ -92,3 +92,39 @@ Changing `EMBEDDING_MODEL` (same dimension) triggers an automatic full re-index 
 `Re-index now` on each project; a different-dimension model (e.g. OpenAI's `text-embedding-3-small`)
 needs `RESET_VECTORS=1` on one restart first. Full procedure for both cases, plus upgrading across a
 default-model change: [Embedding Models](https://contextator.com/en/docs/embedding-models/#changing-the-model).
+
+## Tracing (OpenTelemetry)
+
+Tracing is off by default and switches on with one variable. Nothing else changes: with it unset the
+OpenTelemetry packages are never loaded, so a server that does not trace pays nothing for the feature.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset (off) | Base URL of an OTLP/HTTP collector, for example `http://otel-collector:4318`. Spans go to `<endpoint>/v1/traces`. Must be an `http(s)` URL. |
+| `OTEL_SERVICE_NAME` | `contextator` | The `service.name` resource attribute on every span. Only read when tracing is on. |
+
+Contextator reads these two itself and hands the address to the exporter. The OpenTelemetry SDK also reads
+some `OTEL_*` variables from the environment on its own, which Contextator does not stop (headers, timeout,
+compression and TLS files for the exporter, batching, sampler and span limits): this is the one exception
+to "the environment is read only in `config.ts`", and a host-wide `OTEL_TRACES_SAMPLER=always_off` would
+silently record nothing. The list, checked against the pinned versions, is in
+[Observability](observability.md#variables-the-opentelemetry-sdk-reads-itself), which also describes the
+spans, the trace-context propagation and the dashboard that goes with `/metrics`.
+
+## Source links and the "unchanged for a long time" mark
+
+Search and `read_document` answers carry the link to the original document (`sourceUrl`) and the date it last
+changed there (`sourceModifiedAt`) when the source knows them: a git source links to the file at the indexed
+commit, Notion and Confluence to the page, a web source to the final URL after redirects. A local directory has a
+modification time but no link, and an upload has neither. Credentials in a git remote are never stored or shown.
+
+A git repository has no per-file date in a shallow clone, so the date of a git document is the committer date of
+the HEAD commit at the run in which the indexer first saw the file's current text. It stays while the text is
+unchanged, including through a rebuild (`Re-index now` or a model change), and moves to the new HEAD date when the
+text changes. The link is recomputed on every run, so it always points at the commit just indexed. Links are built
+for GitHub, GitLab, Gitea/Forgejo and Bitbucket Cloud (`bitbucket.org`); a self-hosted Bitbucket has no link.
+
+`SOURCE_STALE_AFTER_DAYS` (default `365`, `0` turns it off) sets how old `sourceModifiedAt` must be before an
+answer marks the passage as unchanged for a long time (`stale: true`). It is a hint to the reader, never a filter.
+
+Documents indexed before this feature have neither value until their source runs again.

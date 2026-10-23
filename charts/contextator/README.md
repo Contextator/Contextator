@@ -340,6 +340,70 @@ the server you restore **into**.
 | `docker cp` to or from the container | `kubectl -n "$NS" cp` to or from `contextator-backup:<path>` |
 | `docker compose restart contextator` (after a restore) | `kubectl -n "$NS" rollout restart deployment/<deployment-name>` — the application's Deployment, not the copy |
 
+## Scheduled backup to S3
+
+The application schedules nothing (ADR-0120, extending ADR-0110); on Kubernetes the schedule is an optional CronJob that
+this chart renders only when `backup.enabled=true`. Each run executes `npm run backup -- --s3`: the
+archive described in the product README (database dump, upload trees, manifest) is built in a scratch
+`emptyDir`, uploaded to an S3-compatible bucket (AWS S3, MinIO, Ceph RGW, Cloudflare R2; path-style
+requests) and dropped with the Pod. Afterwards only the newest `backup.keep` archives stay under the
+prefix; objects with any other name are never touched.
+
+```sh
+helm upgrade --install ctx contextator/contextator \
+  --set-string image.tag=<version>-slim \
+  --set database.existingSecret=ctx-db \
+  --set backup.enabled=true \
+  --set backup.schedule="17 3 * * *" \
+  --set backup.keep=14 \
+  --set backup.s3.endpoint=https://minio.example.com:9000 \
+  --set backup.s3.bucket=contextator-backups \
+  --set backup.s3.prefix=prod \
+  --set backup.s3.existingSecret=ctx-backup-s3
+```
+
+- **Credentials.** `backup.s3.existingSecret` names a Secret you manage, or one the External Secrets
+  Operator creates (see "Secrets from External Secrets Operator" above); its keys default to
+  `BACKUP_S3_ACCESS_KEY_ID` and `BACKUP_S3_SECRET_ACCESS_KEY` and can be renamed with
+  `backup.s3.accessKeyIdKey` / `secretAccessKeyKey`. `backup.s3.sessionTokenKey` adds a session token
+  for temporary credentials. Without `existingSecret`, `backup.s3.accessKeyId` and
+  `backup.s3.secretAccessKey` make the chart create the Secret — use `--set` for those, never a
+  committed values file. The Job also receives `DATABASE_URL`, `SECRET_KEY`, `env` and `envSecret`
+  from the same sources as the Deployment. Variables derived from `config.*` are **not** forwarded,
+  and keys the Job sets itself (`HOME`, `DATA_DIR`, `BACKUP_STAGING_DIR`, `BACKUP_KEEP`,
+  `CONTEXTATOR_EMBEDDED_POSTGRES`, `DATABASE_URL`, `SECRET_KEY`, anything starting `BACKUP_S3_`) are
+  skipped when they appear in `env` / `envSecret`, so they cannot produce a duplicate entry.
+- **Bucket hygiene.** A multipart upload that is killed mid-way (a node loss, the one-hour deadline)
+  leaves its uploaded parts in the bucket, billed, until someone aborts them. Add a bucket lifecycle
+  rule that aborts incomplete multipart uploads after a few days.
+- **Image.** The Job runs the **default** image (`contextator/contextator:<version>`, your `-slim` tag
+  without the suffix), because only that image carries `pg_dump`. Override with `backup.image.repository`
+  / `backup.image.tag` for a mirrored registry. Its client is PostgreSQL 16: against a PostgreSQL 17 or
+  later server `pg_dump` refuses (`aborting because of server version mismatch`), so build an image
+  `FROM contextator/contextator:<version>` that installs `postgresql-client-<major>` and set
+  `backup.image` to it.
+- **Data volume.** The Job needs `persistence.data.enabled=true` (the chart refuses to render without
+  it: a backup without the upload trees would look complete) and mounts that PVC **read-only** as UID
+  1000, the user the compose sidecar uses. With a `ReadWriteOnce` volume it is scheduled beside the
+  application Pod through a `podAffinity`; replace that with `backup.affinity`, or use a
+  `ReadWriteMany` volume, which needs none. If the application Pod is not running, the Job waits
+  unscheduled instead of failing quietly.
+- **Staging space.** The archive is written to an `emptyDir` before the upload; `backup.stagingSizeLimit`
+  caps it, and the node's ephemeral storage must hold database plus uploads once.
+- **Failure.** A failed run keeps every archive already in the bucket and leaves the Job (and its logs)
+  for `backup.failedJobsHistoryLimit`. Alert on a failed Job, or on the newest object being older than
+  your schedule allows.
+- **`SECRET_KEY`** is never part of the archive. Keep it separately (see "`SECRET_KEY`").
+
+**Restoring from the bucket.** The restore commands, and the order they run in, are not repeated here
+(decision record ADR-0073: a procedure that overwrites a live database has one transcript). They are
+the product README's
+[Data and persistence](https://github.com/Contextator/Contextator/blob/main/README.md#data-and-persistence)
+section, "To an S3-compatible bucket" (`npm run restore -- --s3`); what differs on Kubernetes is only
+where they run (a throwaway copy of the Pod on the default image, with the `BACKUP_S3_*` variables set
+and the PostgreSQL client rules of "Taking a backup" above), and `.ssot/OPERATIONS.md` §4.10 covers the
+operational detail.
+
 ## Rotating `SECRET_KEY`
 
 The app holds two keys during a rotation (decision record ADR-0075): `SECRET_KEY` is the key every
@@ -528,6 +592,32 @@ Prometheus. `/metrics` answers `200` even while the
 database is down — `contextator_db_up` is the series that says so — and the operations manual
 (`OPERATIONS.md` §6.3) lists what each metric means.
 
+### Grafana dashboard
+
+`docs/observability/grafana-dashboard.json` in the code repository is a ready dashboard over what the
+ServiceMonitor scrapes: MCP traffic and latency, search latency, source freshness and indexing. Import it
+in Grafana (**Dashboards → New → Import**) and pick the Prometheus that scrapes the ServiceMonitor for
+`DS_PROMETHEUS`. Its `Job` variable lists the scrape jobs that carry Contextator's series. The chart ships
+no ConfigMap for it: the sidecar-based provisioning that would read one differs between Grafana
+installs, so importing the file is the portable route. Alert rules for source freshness are in
+`docs/observability.md`.
+
+### Traces (OpenTelemetry)
+
+Tracing is off unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and it needs no chart value of its own; the
+`env` passthrough carries it:
+
+```yaml
+env:
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.observability:4318
+  OTEL_SERVICE_NAME: contextator
+```
+
+The endpoint is an OTLP/HTTP collector's base URL (spans go to `/v1/traces`). The OpenTelemetry
+packages are not loaded at all while it is unset. Once it is set, the SDK also honours its own `OTEL_*`
+variables passed through `env` (for example `OTEL_TRACES_SAMPLER` or `OTEL_EXPORTER_OTLP_HEADERS`); the
+list is in `docs/observability.md`.
+
 ## Security context / running as root
 
 The container **must** start as uid 0. The image's own entrypoint checks `id -u = 0`, refuses to run
@@ -596,7 +686,7 @@ same database.
 See `values.yaml` itself — every setting is documented inline there, which is the chart's actual
 contract. The sections above explain the *why* behind the values that are not self-explanatory
 (`database.*`, `secretKey.*`, `resources.*`, `probes.*`, `securityContext`,
-`metrics.serviceMonitor.*`); everything else
+`metrics.serviceMonitor.*`, `backup.*`); everything else
 (`service`, `ingress`, `env`, `envSecret`, `extraVolumes`, …) follows ordinary Helm chart conventions.
 
 ## Strict values schema

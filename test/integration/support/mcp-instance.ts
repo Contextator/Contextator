@@ -67,7 +67,15 @@ export const stubEmbeddings: EmbeddingProvider = {
 };
 
 /** Indexes one Markdown page into a project the way the indexer does, chunks, vectors and all. */
-export async function seedDocument(db: Db, projectId: string, sourceId: string, relativePath: string, body: string): Promise<void> {
+export async function seedDocument(
+  db: Db,
+  projectId: string,
+  sourceId: string,
+  relativePath: string,
+  body: string,
+  // Provenance ([ADR-0116](../../../.ssot/ADR.md#adr-0116)); omitted, the document has no origin to name.
+  provenance: { sourceUrl: string | null; sourceModifiedAt: Date | null } = { sourceUrl: null, sourceModifiedAt: null },
+): Promise<void> {
   const { title, chunks } = chunkMarkdown(body, relativePath, { maxTokens: 96, overlapTokens: 24, countTokens: estimateTokens });
   const rows: NewChunk[] = chunks.map((c) => ({
     chunkIndex: c.index,
@@ -87,6 +95,8 @@ export async function seedDocument(db: Db, projectId: string, sourceId: string, 
       sizeBytes: Buffer.byteLength(body),
       indexGeneration: 0,
       version: '',
+      sourceUrl: provenance.sourceUrl,
+      sourceModifiedAt: provenance.sourceModifiedAt,
       ...storedDocumentContent(body, 1024 * 1024),
     },
     rows,

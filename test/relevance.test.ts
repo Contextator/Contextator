@@ -34,6 +34,8 @@ const hit = (score: number, lexicalRank: number | null = null): SearchHit => ({
   chunkIndex: 3,
   contextBefore: null,
   contextAfter: null,
+  sourceUrl: null,
+  sourceModifiedAt: null,
 });
 
 describe('what the question has to look like for the floor to let it past', () => {

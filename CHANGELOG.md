@@ -12,6 +12,44 @@ ships, that stops.
 
 ### Added
 
+- **Source freshness metrics.** `/metrics` gains `contextator_source_last_sync_timestamp_seconds` and
+  `contextator_source_freshness_lag_seconds`, which describe the scheduled source that has gone longest
+  without a successful sync, and `contextator_sources_never_synced`. They are single, unlabeled series:
+  a `project` or `source` label would take its values from the data, which ADR-0105 rules out. Both
+  timestamp/lag series are absent until a scheduled source has synced. `docs/observability.md` has example
+  Prometheus alert rules.
+- **Grafana dashboard.** `docs/observability/grafana-dashboard.json` covers MCP traffic and latency, search
+  latency, source freshness and indexing, from series `/metrics` already renders. The Helm chart 1.3.1 README
+  shows how it goes with the ServiceMonitor.
+- **Opt-in OpenTelemetry traces.** Setting `OTEL_EXPORTER_OTLP_ENDPOINT` (and optionally
+  `OTEL_SERVICE_NAME`) exports a trace per search over OTLP/HTTP, with spans for the query, the embedding, the
+  candidates, the reranker (when one is configured), the score-floor verdict and the response, and joins
+  the caller's trace when the request carries a `traceparent` header. A failing export is logged, at most
+  once a minute. Unset, the OpenTelemetry packages are never loaded. The packages are optional
+  dependencies. The SDK also reads some `OTEL_*` variables of its own (sampler, batching, exporter
+  headers); the ones that apply are listed in `docs/observability.md`.
+- **Every answer says where the document came from.** `search_docs`, `read_document` and the HTTP search API
+  now carry `sourceUrl` (git: a commit-sha permalink with any credential stripped; Notion and Confluence: the
+  page; web: the final URL after redirects; `null` for local directories and uploads) and `sourceModifiedAt`
+  (git: the HEAD committer date of the run in which the indexer first saw the current text of the file, kept
+  while that text is unchanged and across rebuilds; Notion `last_edited_time`, Confluence version time, web
+  `Last-Modified`, local file `mtime`), plus a `stale` flag. The text answers gain a `Source:` line under the frozen first line of each
+  hit and after `Title:` in `read_document`; the structured output schemas gain the three fields. Only `http(s)`
+  links are stored. `SOURCE_STALE_AFTER_DAYS` (default `365`, `0` = off) sets when a document unchanged at its
+  origin is marked stale. A git link is built only for GitHub, GitLab, Gitea/Forgejo and Bitbucket Cloud
+  (a self-hosted Bitbucket gets none rather than a wrong one). Migration `0021` adds `documents.source_url` and `documents.source_modified_at`, and
+  project export and import carry them (ADR-0116).
+
+  **Upgrade note:** existing documents start with both columns empty. They are filled in on each source's next
+  index run without re-embedding anything; until then answers show no `Source:` line for them.
+
+- **Backups to S3-compatible storage, and a Helm CronJob.** `npm run backup -- --s3` uploads the
+  archive to a bucket (AWS S3, MinIO, Ceph, R2; path-style, SigV4 signed with `node:crypto`, multipart
+  for large archives, no new dependency) configured by `BACKUP_S3_*`, and applies `BACKUP_KEEP` to the
+  timestamped archives under the prefix. `npm run restore -- --s3 <name|latest>` restores from the
+  bucket. Helm chart 1.4.0 gains an optional `backup.*` CronJob (off by default; credentials from an
+  existing Secret, such as one created by the External Secrets Operator). The local-disk backup and the
+  manifest format are unchanged (ADR-0120, which extends ADR-0110).
 - **PowerPoint, Excel, Jupyter, reStructuredText and AsciiDoc files.** A source can now index `.pptx`
   (one section per slide, speaker notes on a `Notes:` line), `.xlsx` (one section per visible sheet,
   cached formula values, hidden sheets skipped), `.ipynb` (markdown and code cells, no outputs), `.rst`

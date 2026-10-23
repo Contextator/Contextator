@@ -1049,6 +1049,12 @@ export const EnvSchema = z
      */
     SEARCH_MAX_RESULT_CHARS: z.coerce.number().int().min(500).default(12_000),
     /**
+     * Days after which a document whose origin has not changed is marked stale in search and read
+     * results ([ADR-0116](../.ssot/ADR.md#adr-0116)). The mark is a hint on `source_modified_at`, never a
+     * filter: an old page is often still right, and the agent decides. `0` turns the mark off.
+     */
+    SOURCE_STALE_AFTER_DAYS: z.coerce.number().int().min(0).max(36_500).default(365),
+    /**
      * The cosine similarity below which `search_docs` answers "no good match" instead of handing over
      * its best hit ([ADR-0042](../.ssot/ADR.md#adr-0042)). `0` turns the gate off.
      *
@@ -1161,6 +1167,26 @@ export const EnvSchema = z
      * written down.
      */
     METRICS_PUBLIC: z.string().default('0').transform(flag),
+
+    /**
+     * Where to send OpenTelemetry traces over OTLP/HTTP, as a base URL (`http://collector:4318`; the
+     * `/v1/traces` path is added). **Unset is the default and the off switch**: the OpenTelemetry modules
+     * are then never imported, so a server that does not trace pays nothing for the feature.
+     *
+     * It is the standard variable's name on purpose, so a collector address already exported for the
+     * host's other services works unchanged. Contextator reads it here and hands it to the exporter
+     * explicitly, and that explicit URL wins over the SDK's own reading of the same variable.
+     *
+     * **This is not the only place the environment is read** (ADR-0119): the pinned OpenTelemetry
+     * packages read some `OTEL_*` variables themselves — the exporter's headers, timeout, compression and
+     * TLS files, the batch processor's `OTEL_BSP_*`, and the sampler and span limits — and nothing here
+     * stops them. A host-wide `OTEL_TRACES_SAMPLER=always_off` therefore applies silently. Which variables,
+     * and the file and line in the SDK each is read at, are listed in `docs/observability.md`; recheck
+     * that list when the packages are upgraded.
+     */
+    OTEL_EXPORTER_OTLP_ENDPOINT: z.url({ protocol: /^https?$/, message: 'must be an http(s) URL such as http://collector:4318' }).optional(),
+    /** The `service.name` resource attribute on every exported span. Only read when tracing is on. */
+    OTEL_SERVICE_NAME: z.string().min(1).max(128).default('contextator'),
 
     // Scheduled sync (ADR-0048). The per-source interval is a column and not a setting, for the reason
     // the query log's per-project switch is one: it travels with a `pg_dump`. These two are the
