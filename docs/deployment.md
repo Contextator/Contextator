@@ -89,25 +89,48 @@ deliberate ([ADR-0060](https://contextator.com/en/docs/configuration/#running-be
 replaces what a caller sends (which these templates do not assume), a caller writes that value itself: it
 could then pick a new rate-limit key on every request and walk past the sign-in and first-run setup limits.
 The templates therefore keep the safe default, and set what does not depend on it:
-`AUTH_COOKIE_SECURE=1` (these platforms are HTTPS only) and `PUBLIC_BASE_URL`, so published links do not
+`AUTH_COOKIE_SECURE=1` (these platforms are HTTPS only) and `PUBLIC_BASE_URL`, so published URLs do not
 read a header.
 
-The cost is the one the default is documented to have: the server sees the platform's proxy as the client of
-every request, so the per-address sign-in budget is shared by everyone, and ten failed sign-ins can pause the
-sign-in page for all. After the first forwarded request the log says once that a forwarded header was ignored;
-that line is expected here. To get per-client limits back, set `TRUST_PROXY` to the **address or CIDR block of the
-platform's proxy** (and nothing wider: the list applies to every hop, so a range that includes your clients lets
-them write their own address again) after checking that range in the platform's documentation. Do not use `1`
-unless nothing but the proxy can open a socket to the service.
+**The cost.** The server sees the platform's proxy as the client of every request, so everything that is
+limited per address is limited for the whole instance at once (or, if the platform uses several proxy
+addresses, for a small set of them). Concretely:
 
-Whichever platform you choose, finish with the same three steps:
+- **Sign-in and the first-run setup page share one budget** (`AUTH_LOGIN_MAX_ATTEMPTS` in
+  `AUTH_LOGIN_WINDOW_MIN` minutes, 10 in 15 by default). `/api/setup` spends from it too.
+- **Anyone who can reach the URL can hold that budget empty.** Ten requests every fifteen minutes keep password
+  sign-in closed for everybody, and need no user name; on a brand-new instance the same requests can keep the
+  owner from completing setup. The URL is a public `*.onrender.com` or `*.fly.dev` address.
+- **A successful sign-in resets the shared budget**, so after a legitimate login the same caller has ten new
+  attempts. The per-account lockout is unaffected.
+- **OAuth client registration (60 an hour) and the metadata-document fetch limiter are instance-wide too**, so one
+  caller can use up the hour's registrations for every connector. Bearer-token clients do not register and are
+  not affected.
+- **The audit log's `actor_ip` and the session's IP are the proxy's address**, which tells you nothing about who
+  signed in.
 
-1. Open the service URL, enter the setup code, and create the first account.
-2. Create a project. Its MCP endpoint is `https://<your-url>/mcp/<project>`, it is born token-protected, and
+What the shared key does not do is let anyone guess faster than the budget allows, which is the property
+`TRUST_PROXY=1` would have lost. If you would rather have per-client limits, the choice is yours: set
+`TRUST_PROXY` to the **address or CIDR block of the platform's proxy** — check that range in the platform's own
+documentation, and name nothing wider, because the list applies to every hop and a range that includes your
+clients lets them write their own address again. Do not use `1` unless nothing but the proxy can open a socket
+to the service.
+
+Two habits shrink the exposure on a hosted instance: **do not share the URL before the first account exists**,
+and **do the first-run setup right after the deploy** (step 2 below). After the first forwarded request the log
+says once that a forwarded header was ignored; that line is expected here.
+
+Whichever platform you choose, finish with the same three steps, in this order:
+
+1. Make sure `PUBLIC_BASE_URL` is set to the public URL (`https://...`; Render asks for it, Railway and Fly set it
+   in the steps below). **Without it, OAuth connectors such as Claude are refused with `invalid_target`**, because the
+   proxy is not trusted for the scheme and the server would build `http://` URLs for a client that sends
+   `https://`. Clients that send a bearer token directly are not affected, which is what makes a missing value
+   easy to miss.
+2. Open the service URL, enter the setup code, and create the first account.
+3. Create a project. Its MCP endpoint is `https://<your-url>/mcp/<project>`, it is born token-protected, and
    the creation dialog shows the project's first token **once**: copy it and give it to the client
    ([MCP access](mcp-access.md)). Until a client sends it, the endpoint answers `401`.
-3. Set `PUBLIC_BASE_URL` to the public URL if the template did not, so the links Contextator prints do not
-   depend on a request header.
 
 The first start downloads the embedding model (about 500 MB) into the volume and takes a few minutes; the
 health check waits for it. Later starts reuse it. Backups are yours, as on any external-database topology:
@@ -138,7 +161,7 @@ published slim image).
    - `PUBLIC_BASE_URL` = the service's public URL, after step 6
 5. In **Settings → Volumes**, attach a volume mounted at `/data`. Railway allows one volume per service, which is
    why the model cache lives under it.
-6. In **Settings → Networking**, generate a domain. Deploy, and follow the three steps above.
+6. In **Settings → Networking**, generate a domain, then set `PUBLIC_BASE_URL` (step 4) to it and deploy. Follow the three steps above.
 
 ### Render
 

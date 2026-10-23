@@ -112,6 +112,16 @@ describe('deploy templates keep the proxy-trust default (ADR-0060)', () => {
     expect(flyRaw).toMatch(/^\s*AUTH_COOKIE_SECURE = "1"$/m);
   });
 
+  it('docs/deployment.md states what the shared rate-limit key costs, and that OAuth needs PUBLIC_BASE_URL', () => {
+    const docs = read('docs/deployment.md');
+    expect(docs).toMatch(/setup page share one budget/);
+    expect(docs).toMatch(/hold that budget empty/);
+    expect(docs).toMatch(/resets the shared budget/);
+    expect(docs).toMatch(/OAuth connectors[^.]*refused with `invalid_target`/);
+    // The URL has to be set before a connector is attached, so it comes before the project step.
+    expect(docs.indexOf('1. Make sure `PUBLIC_BASE_URL`')).toBeLessThan(docs.indexOf('3. Create a project.'));
+  });
+
   it('docs/deployment.md does not tell anyone to set TRUST_PROXY to 1', () => {
     expect(read('docs/deployment.md')).not.toMatch(/`TRUST_PROXY`\s*=\s*`(1|true)`/);
   });
