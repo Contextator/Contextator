@@ -25,6 +25,7 @@ import { textSearchConfigFor, type TextSearchConfig } from './text-search.js';
 import {
   deleteDocuments,
   chunkCountsByDocument,
+  type ExistingDocument,
   getExistingDocuments,
   recountProject,
   replaceDocument,
@@ -583,31 +584,56 @@ export class Indexer {
         const chunkLimit = resolveQuota(current.maxChunks, config.PROJECT_MAX_CHUNKS).limit;
         /** Documents the run is on course to leave behind; grows as a specification turns out to hold more. */
         let projectedDocuments = 0;
-        if (documentLimit > 0) {
-          // After the scan and before any write. A file that is not a specification is exactly one document,
-          // so those are counted from the scan; what a specification expands to is only known once it is
-          // rendered, so its stored documents are assumed to stay and any new ones are counted as they come.
-          // The count is an upper bound: a file that later turns out unreadable or empty is still counted,
-          // and a document that is about to be removed is still counted until the removal pass.
-          const plain = new Set<string>();
-          const containers = new Set<string>();
+        // What the scan can already say about the stored documents: a file that is not a specification is
+        // exactly one document, so those are known from the scan; what a specification expands to is only known
+        // once it is rendered, so its stored documents are assumed to stay and any new ones are counted as they
+        // come. A stored document the scan does not account for at all is certain to be removed.
+        const plain = new Set<string>();
+        const containers = new Set<string>();
+        if (documentLimit > 0 || chunkLimit > 0) {
           for (const f of files) (expandsToManyDocuments(f.flavor, f.relativePath) ? containers : plain).add(f.relativePath);
+        }
+        const containerOf = (storedPath: string): string => storedPath.slice(0, Math.max(0, storedPath.lastIndexOf('/')));
+        const staysInRun = (storedPath: string, doc: ExistingDocument): boolean =>
+          plain.has(storedPath) || containers.has(containerOf(storedPath)) || Boolean(doc.sourceId && protectedSources.has(doc.sourceId));
+        if (documentLimit > 0) {
+          // After the scan and before any write. The count is an upper bound: a file that later turns out
+          // unreadable or empty is still counted, and a document that is about to be removed is still counted
+          // until the removal pass.
           let kept = 0;
-          for (const [storedPath, doc] of existing) {
-            const container = storedPath.slice(0, Math.max(0, storedPath.lastIndexOf('/')));
-            if (plain.has(storedPath) || containers.has(container) || (doc.sourceId && protectedSources.has(doc.sourceId))) kept++;
-          }
+          for (const [storedPath, doc] of existing) if (staysInRun(storedPath, doc)) kept++;
           let added = 0;
           for (const p of plain) if (!existing.has(p)) added++;
           projectedDocuments = kept + added;
           if (projectedDocuments > documentLimit) throw new QuotaExceededError('max_documents', documentLimit, kept, added);
         }
-        /** Chunks stored in the generation this run writes to, kept current as documents are written. */
+        /** Chunks stored in the generation this run writes to, kept current as documents are written or released. */
         let runningChunks = 0;
         let chunksOfDocument = new Map<string, number>();
+        /** Documents whose chunks are already out of `runningChunks`, so a document is only given back once. */
+        const released = new Set<string>();
+        /** The stored documents of each specification file, by its path, for the operations it may stop producing. */
+        const storedOfContainer = new Map<string, Array<[string, ExistingDocument]>>();
+        /** A document that is leaving the index gives its chunks back to the quota, so it cannot lock the run out. */
+        const releaseChunks = (docId: string): void => {
+          if (released.has(docId)) return;
+          released.add(docId);
+          runningChunks -= chunksOfDocument.get(docId) ?? 0;
+        };
         if (chunkLimit > 0 && !rebuild) {
           runningChunks = (await recountProject(db, project.id, generation)).chunkCount;
           chunksOfDocument = await chunkCountsByDocument(db, project.id, generation);
+          // The removal pass runs only after the loop, and never after a breach. A document no file accounts for
+          // would otherwise hold its chunks against the limit for a pass that is skipped by the very breach they
+          // cause: a project near its limit that renamed a file could never index again.
+          for (const [storedPath, doc] of existing) {
+            if (!staysInRun(storedPath, doc)) releaseChunks(doc.id);
+            else if (containers.has(containerOf(storedPath))) {
+              const list = storedOfContainer.get(containerOf(storedPath)) ?? [];
+              list.push([storedPath, doc]);
+              storedOfContainer.set(containerOf(storedPath), list);
+            }
+          }
         }
 
         // The chunker counts with the model's own tokenizer (ADR-0036) and chunking happens before the
@@ -884,7 +910,11 @@ export class Indexer {
                 // Empty document: make sure no stale row lingers. Leaving the path out of `seen` is what
                 // makes it count as removed below, which is also how an operation deleted from a
                 // specification loses its document — nothing here has to know it was ever there.
-                if (existing.has(doc.relativePath)) await deleteDocuments(db, project.id, generation, [doc.relativePath]);
+                const stale = existing.get(doc.relativePath);
+                if (stale) {
+                  await deleteDocuments(db, project.id, generation, [doc.relativePath]);
+                  releaseChunks(stale.id);
+                }
                 continue;
               }
 
@@ -896,7 +926,8 @@ export class Indexer {
               // Per document, before the first `embedPassages`: a breach costs no embedding work. The document
               // being rewritten gives its old chunks back, so editing a document at the limit is not refused.
               if (chunkLimit > 0) {
-                const given = chunksOfDocument.get(existing.get(doc.relativePath)?.id ?? '') ?? 0;
+                const storedId = existing.get(doc.relativePath)?.id ?? '';
+                const given = released.has(storedId) ? 0 : (chunksOfDocument.get(storedId) ?? 0);
                 const after = runningChunks - given + chunks.length;
                 if (after > chunkLimit) throw new QuotaExceededError('max_chunks', chunkLimit, runningChunks - given, chunks.length);
                 runningChunks = after;
@@ -956,6 +987,8 @@ export class Indexer {
             reject(file, renderFailure, claimed);
             continue;
           }
+          // An operation the specification no longer has is removed by the pass below; its chunks leave the quota now.
+          for (const [storedPath, doc] of storedOfContainer.get(file.relativePath) ?? []) if (!seen.has(storedPath)) releaseChunks(doc.id);
           // **A file every one of whose documents was already current is a skipped file** — and only
           // then. A document that chunked to nothing was neither written nor unchanged, so a one-document
           // file that has just been emptied no longer reports itself to the dashboard as "unchanged"
