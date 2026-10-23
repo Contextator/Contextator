@@ -25,6 +25,7 @@ import {
   type PgTools,
   type Topology,
 } from './backup-archive.js';
+import { publishArchive, keepFromEnv, S3Client, s3TargetFromEnv } from './backup-s3.js';
 import { useEmbeddedDatabaseWhenNothingElseSays } from './embedded-database.js';
 import { APP_NAME, APP_VERSION } from '../src/version.js';
 
@@ -300,40 +301,91 @@ async function main(): Promise<void> {
   // database at all; everywhere else it is a no-op. See `embedded-database.ts`.
   useEmbeddedDatabaseWhenNothingElseSays();
 
-  const requested = process.argv[2];
-  if (requested === '--help' || requested === '-h') {
-    console.error('Usage: npm run backup -- [file.tar.gz]');
+  const args = parseBackupArgs(process.argv.slice(2));
+  if (args.help) {
+    console.error('Usage: npm run backup -- [file.tar.gz] [--s3]');
     console.error('  Writes the database, the upload trees and a manifest into one archive.');
     console.error('  Without a path, writes it under <DATA_DIR>/backups/, which is a volume.');
+    console.error('  --s3 uploads the archive to the S3-compatible bucket named by BACKUP_S3_* and keeps the newest');
+    console.error('  BACKUP_KEEP (default 7) archives there. Without a path the local copy is removed after the upload.');
     console.error('  SECRET_KEY is never written into it; keep it separately.');
     process.exit(2);
   }
 
   const config = loadConfig();
-  const out = archiveDestination(requested, config);
   const { db, pool } = createDb(config.DATABASE_URL);
+  try {
+    await runBackupCommand(args, {
+      db,
+      config,
+      env: process.env,
+      tools: (staging) => localPgTools(staging, connectionFromEnv()),
+      topology: describeTopology(),
+      say: (line) => console.log(line),
+    });
+  } finally {
+    await pool.end();
+  }
+}
+
+export interface BackupCommandDeps extends Omit<BackupDeps, 'tools'> {
+  /** `BACKUP_S3_*`, `BACKUP_KEEP` and `BACKUP_STAGING_DIR` are read from here, never from `process.env`. */
+  env: NodeJS.ProcessEnv;
+  /** Given the staging directory this run made, so the real command and a test can scratch in different places. */
+  tools: (staging: string) => PgTools;
+}
+
+/**
+ * What `npm run backup` does once its arguments are parsed and its connections are open — the part
+ * `--s3` changes, kept apart from `main` so an integration test can drive the very wiring an operator
+ * runs (flag → env → upload → retention) and not only the pieces it is made of.
+ */
+export async function runBackupCommand(args: BackupArgs, deps: BackupCommandDeps): Promise<void> {
+  const { db, config, env, say } = deps;
+  // Refused before the dump starts: a misspelt bucket should cost an operator seconds, not a pg_dump.
+  const s3 = args.s3 ? new S3Client(s3TargetFromEnv(env)) : undefined;
+  const keep = args.s3 ? keepFromEnv(env) : 0;
   await fs.mkdir(config.DATA_DIR, { recursive: true });
   // The scheduled sidecar owns a separate scratch root, so it can clean up after SIGKILL
   // without deleting a manual backup's staging directory on the shared data volume.
   // BACKUP_STAGING_DIR is an internal sidecar knob, not a supported user setting.
-  const stagingRoot = process.env.BACKUP_STAGING_DIR || config.DATA_DIR;
+  const stagingRoot = env.BACKUP_STAGING_DIR || config.DATA_DIR;
   await fs.mkdir(stagingRoot, { recursive: true });
   const staging = await fs.mkdtemp(path.join(stagingRoot, `${STAGING}-`));
   try {
-    await runBackup(
-      {
-        db,
-        config,
-        tools: localPgTools(staging, connectionFromEnv()),
-        topology: describeTopology(),
-        say: (line) => console.log(line),
-      },
-      out,
-    );
+    // To the bucket only, the archive is built beside the staging tree and goes away with it: the
+    // object store is then the one copy, and a CronJob's pod never needs a volume for it.
+    const out = s3 && !args.file ? path.join(staging, defaultArchiveName()) : archiveDestination(args.file, config);
+    await runBackup({ db, config, tools: deps.tools(staging), topology: deps.topology, say }, out);
+    if (s3) await publishArchive(s3, out, keep, say);
   } finally {
     await fs.rm(staging, { recursive: true, force: true });
-    await pool.end();
   }
+}
+
+export interface BackupArgs {
+  help: boolean;
+  s3: boolean;
+  /** The one non-flag argument, when given. */
+  file?: string;
+}
+
+/**
+ * `--s3` may stand anywhere, because the compose sidecar's `npm run backup -- <file>` puts the path
+ * first and an operator's habit may not. Anything else that starts with a dash is refused rather than
+ * taken for a file name — `--s3` mistyped as `-s3` must not create a file called `-s3`.
+ */
+export function parseBackupArgs(argv: string[]): BackupArgs {
+  const result: BackupArgs = { help: false, s3: false };
+  for (const arg of argv) {
+    if (arg === '--help' || arg === '-h') result.help = true;
+    else if (arg === '--s3') result.s3 = true;
+    else if (arg.startsWith('-')) throw new BackupRefused('usage', `Unknown option ${arg}. Usage: npm run backup -- [file.tar.gz] [--s3]`);
+    else if (result.file !== undefined)
+      throw new BackupRefused('usage', 'Name at most one archive file. Usage: npm run backup -- [file.tar.gz] [--s3]');
+    else result.file = arg;
+  }
+  return result;
 }
 
 /** Only when this file *is* the command; importing it from a test must not back anything up. */

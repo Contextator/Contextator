@@ -26,6 +26,7 @@ import {
   type PgTools,
   type Topology,
 } from './backup-archive.js';
+import { fetchArchive, S3Client, s3TargetFromEnv } from './backup-s3.js';
 import { useEmbeddedDatabaseWhenNothingElseSays } from './embedded-database.js';
 
 /**
@@ -260,39 +261,88 @@ async function main(): Promise<void> {
   await import('dotenv/config');
   useEmbeddedDatabaseWhenNothingElseSays();
 
-  const args = process.argv.slice(2);
-  const check = args.includes('--check');
-  const archive = args.find((arg) => !arg.startsWith('-'));
-  if (!archive) {
+  const args = parseRestoreArgs(process.argv.slice(2));
+  if (args.help || !args.reference) {
     console.error('Usage: npm run restore -- <file.tar.gz> [--check]');
+    console.error('       npm run restore -- --s3 <archive-name|latest> [--check]');
     console.error("  Replaces this instance's database and upload trees with what is in the archive.");
-    console.error('  --check reads the manifest, evaluates every refusal and writes nothing.');
+    console.error('  --s3 fetches the archive from the bucket named by BACKUP_S3_* first; "latest" is the newest timestamped one.');
+    console.error('  --check reads the manifest, evaluates every refusal and writes nothing to the database or the upload trees.');
     process.exit(2);
   }
 
   const config = loadConfig();
   const { db, pool } = createDb(config.DATABASE_URL);
+  try {
+    await runRestoreCommand(args, {
+      db,
+      config,
+      env: process.env,
+      tools: (staging) => localPgTools(staging, connectionFromEnv()),
+      topology: describeTopology(),
+      secretKey: config.SECRET_KEY,
+      say: (line) => console.log(line),
+    });
+  } finally {
+    await pool.end();
+  }
+}
+
+export interface RestoreCommandDeps extends Omit<RestoreDeps, 'tools'> {
+  /** `BACKUP_S3_*` is read from here, never from `process.env`. */
+  env: NodeJS.ProcessEnv;
+  /** Given the staging directory this run names, so the real command and a test can scratch in different places. */
+  tools: (staging: string) => PgTools;
+}
+
+/**
+ * What `npm run restore` does once its arguments are parsed and its connections are open — the part
+ * `--s3` changes, apart from `main` so an integration test can drive the wiring an operator runs
+ * (flag → env → download → the same refusals as a local file) and not only the pieces.
+ */
+export async function runRestoreCommand(args: RestoreArgs, deps: RestoreCommandDeps): Promise<RestoreResult> {
+  const { config, env, say } = deps;
+  if (!args.reference) throw new BackupRefused('usage', 'Name the archive to restore.');
+  // Refused before anything is opened: a missing credential should not wait behind a connection.
+  const s3 = args.s3 ? new S3Client(s3TargetFromEnv(env)) : undefined;
   // Named rather than created: `runRestore` makes it when it reaches the unpacking, so a `--check`
   // run leaves no directory behind either. "Nothing was written." has to be true of the filesystem
   // and not only of the database.
   const staging = path.join(config.DATA_DIR, `${STAGING}-${randomUUID()}`);
+  // A sibling of `staging`, never inside it: `runRestore` empties its scratch directory before it
+  // unpacks, and the archive it is about to read must not be in the way of that. With `--s3` a
+  // `--check` still needs the bytes on disk to read the manifest, so the one thing it writes is this
+  // download, removed below whatever happens.
+  const download = path.join(config.DATA_DIR, `${STAGING}-download-${randomUUID()}`);
   try {
-    await runRestore(
-      {
-        db,
-        config,
-        tools: localPgTools(staging, connectionFromEnv()),
-        topology: describeTopology(),
-        secretKey: config.SECRET_KEY,
-        say: (line) => console.log(line),
-      },
-      archive,
-      { check },
-    );
+    const archive = s3 ? await fetchArchive(s3, args.reference, download, say) : args.reference;
+    return await runRestore({ ...deps, tools: deps.tools(staging) }, archive, { check: args.check });
   } finally {
     await fs.rm(staging, { recursive: true, force: true });
-    await pool.end();
+    await fs.rm(download, { recursive: true, force: true });
   }
+}
+
+export interface RestoreArgs {
+  help: boolean;
+  check: boolean;
+  s3: boolean;
+  /** The archive file, or with `--s3` an archive name under the prefix or `latest`. */
+  reference?: string;
+}
+
+export function parseRestoreArgs(argv: string[]): RestoreArgs {
+  const result: RestoreArgs = { help: false, check: false, s3: false };
+  for (const arg of argv) {
+    if (arg === '--help' || arg === '-h') result.help = true;
+    else if (arg === '--check') result.check = true;
+    else if (arg === '--s3') result.s3 = true;
+    else if (arg.startsWith('-'))
+      throw new BackupRefused('usage', `Unknown option ${arg}. Usage: npm run restore -- <file.tar.gz> [--check] | --s3 <name|latest>`);
+    else if (result.reference !== undefined) throw new BackupRefused('usage', 'Name exactly one archive.');
+    else result.reference = arg;
+  }
+  return result;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

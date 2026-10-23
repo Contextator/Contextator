@@ -43,6 +43,13 @@ ships, that stops.
   **Upgrade note:** existing documents start with both columns empty. They are filled in on each source's next
   index run without re-embedding anything; until then answers show no `Source:` line for them.
 
+- **Backups to S3-compatible storage, and a Helm CronJob.** `npm run backup -- --s3` uploads the
+  archive to a bucket (AWS S3, MinIO, Ceph, R2; path-style, SigV4 signed with `node:crypto`, multipart
+  for large archives, no new dependency) configured by `BACKUP_S3_*`, and applies `BACKUP_KEEP` to the
+  timestamped archives under the prefix. `npm run restore -- --s3 <name|latest>` restores from the
+  bucket. Helm chart 1.4.0 gains an optional `backup.*` CronJob (off by default; credentials from an
+  existing Secret, such as one created by the External Secrets Operator). The local-disk backup and the
+  manifest format are unchanged (ADR-0120, which extends ADR-0110).
 - **Scheduled backups for the slim stack.** `docker-compose.backup.yml` is an optional overlay for
   `docker-compose.slim.yml` that runs `npm run backup` against the external database once at start and
   then every `BACKUP_INTERVAL_SECONDS` (default one day), keeping the newest `BACKUP_KEEP` (default 7)
