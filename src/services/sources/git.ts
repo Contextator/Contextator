@@ -8,9 +8,10 @@ import { sourceRepoDir } from '../data-dir.js';
 import { isInside } from '../fs-scan.js';
 import { PathNotAllowedError } from '../fs-scan.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig, type GitConfig } from '../sources.js';
-import { registerDriver, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
+import { normalizeSourceUrl, parseSourceDate } from '../source-url.js';
+import { registerDriver, type DocumentMeta, type DocumentMetaFile, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
 import { EgressRefusedError, gitEgress, type EgressOptions } from './confluence-egress.js';
-import { credentialsFor, detectProvider, sanitizeGitUrl } from './git-auth.js';
+import { blobUrl, credentialsFor, detectProvider, sanitizeGitUrl } from './git-auth.js';
 import { GitResponseTooLargeError, guardedGitHttp, type GitHttpClient } from './git-http.js';
 
 /**
@@ -190,6 +191,38 @@ export class GitDriver implements SourceDriver {
       throw new PathNotAllowedError(`Subdirectory "${this.cfg.subdir}" does not exist in the repository (branch ${this.cfg.branch})`);
     }
     return sub;
+  }
+
+  /**
+   * A permalink to each file at the commit that was indexed, and that commit's date
+   * ([ADR-0116](../../../.ssot/ADR.md#adr-0116)).
+   *
+   * The link names the sha, not the branch, so it keeps showing the text the answer was built from after the
+   * branch moves on. The remote goes through `sanitizeGitUrl` first, so a token pasted into the URL never
+   * reaches a link ([ADR-0107](../../../.ssot/ADR.md#adr-0107)).
+   *
+   * The date is the head commit's committer date for every file, because the checkout is shallow (depth 1)
+   * and has no per-file history; `stampOnChange` tells the indexer to record it only when a document is new or
+   * its text changed, so a commit that touches one file does not date the rest of the repository today.
+   */
+  async documentMeta(files: readonly DocumentMetaFile[]): Promise<Map<string, DocumentMeta>> {
+    const out = new Map<string, DocumentMeta>();
+    const head = await this.currentHead();
+    if (!head) return out;
+    let committedAt: Date | null = null;
+    try {
+      const { commit } = await git.readCommit({ fs, dir: this.dir, oid: head });
+      committedAt = parseSourceDate(commit.committer.timestamp * 1000);
+    } catch {
+      /* the commit object is unreadable: links without a date */
+    }
+    const remote = sanitizeGitUrl(this.cfg.url);
+    const provider = detectProvider(remote, this.cfg.provider);
+    for (const f of files) {
+      const repoPath = [this.cfg.subdir, f.path].filter(Boolean).join('/');
+      out.set(f.path, { url: normalizeSourceUrl(blobUrl(remote, provider, head, repoPath)), modifiedAt: committedAt, stampOnChange: true });
+    }
+    return out;
   }
 
   async test(): Promise<string> {

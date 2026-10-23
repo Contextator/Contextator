@@ -1041,6 +1041,12 @@ export const EnvSchema = z
      */
     SEARCH_MAX_RESULT_CHARS: z.coerce.number().int().min(500).default(12_000),
     /**
+     * Days after which a document whose origin has not changed is marked stale in search and read
+     * results ([ADR-0116](../.ssot/ADR.md#adr-0116)). The mark is a hint on `source_modified_at`, never a
+     * filter: an old page is often still right, and the agent decides. `0` turns the mark off.
+     */
+    SOURCE_STALE_AFTER_DAYS: z.coerce.number().int().min(0).max(36_500).default(365),
+    /**
      * The cosine similarity below which `search_docs` answers "no good match" instead of handing over
      * its best hit ([ADR-0042](../.ssot/ADR.md#adr-0042)). `0` turns the gate off.
      *

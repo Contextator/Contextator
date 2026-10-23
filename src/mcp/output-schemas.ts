@@ -43,6 +43,22 @@ import { z } from 'zod';
 
 const nonNegativeInt = z.number().int().min(0);
 
+/**
+ * Where a document came from and when it last changed at that origin (ADR-0116). Shared by the search
+ * results and `read_document` so the two cannot describe the same fields differently.
+ */
+const sourceFields = {
+  sourceUrl: z
+    .string()
+    .nullable()
+    .describe('Link to the original document (http or https), or null when the source has none — a local directory or an upload'),
+  sourceModifiedAt: z
+    .string()
+    .nullable()
+    .describe('When the document last changed at its origin, as an ISO 8601 timestamp, or null when the source does not say'),
+  stale: z.boolean().describe("True when sourceModifiedAt is older than the server's staleness threshold, so the passage may be out of date"),
+};
+
 export const searchDocsOutput = z.object({
   project: z.string().describe('The project that was searched'),
   query: z.string().describe('The query as it was asked'),
@@ -60,6 +76,7 @@ export const searchDocsOutput = z.object({
         title: z.string().describe("The document's title"),
         headingPath: z.string().describe('Heading breadcrumb of the excerpt, e.g. "Guide > Install"; empty at the top of a document'),
         score: z.number().describe('Cosine similarity, for display: the list is ordered by fused rank, not by this'),
+        ...sourceFields,
         text: z
           .string()
           .describe(
@@ -116,6 +133,7 @@ export const listTopicsOutput = z.object({
 export const readDocumentOutput = z.object({
   path: z.string().describe('The indexed path that was read'),
   title: z.string(),
+  ...sourceFields,
   section: z.string().optional().describe('heading reads only: the breadcrumb that matched; empty for text above the first heading'),
   chunks: z
     .object({ first: nonNegativeInt, last: nonNegativeInt, total: nonNegativeInt })

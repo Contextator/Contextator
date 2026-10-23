@@ -56,6 +56,13 @@ const MODEL_ID = 'local:stub-bag-of-words:fp32';
 const ORIGIN_LIVE = 3;
 
 /** Values seeded on the origin that must not appear anywhere in the tarball, asserted against the bytes. */
+/** The origin address and date one document carries ([ADR-0116](../../.ssot/ADR.md#adr-0116)). */
+const PROVENANCE = {
+  file: 'wiki/credentials.md',
+  url: 'https://git.example.invalid/wiki/blob/0123abc/credentials.md',
+  modifiedAt: new Date('2025-05-06T07:08:09.000Z'),
+};
+
 const SECRETS = {
   sourceToken: 'v1.NEVER-EXPORT-THIS-CIPHERTEXT.aaa.bbb',
   webhookSecret: 'c0ffee1234567890deadbeefc0ffee12',
@@ -261,6 +268,9 @@ async function seedOrigin(db: Db): Promise<void> {
         content: `# ${title}\n\n${rows.map((r) => r.content).join('\n\n')}\n`,
         contentTruncated: false,
         version: '',
+        // One document that knows where it came from, the rest as a 0.3 index left them: the move must carry both.
+        sourceUrl: relativePath === PROVENANCE.file ? PROVENANCE.url : null,
+        sourceModifiedAt: relativePath === PROVENANCE.file ? PROVENANCE.modifiedAt : null,
       },
       rows,
       relativePath.startsWith('manual/') ? 'english' : 'simple',
@@ -461,6 +471,16 @@ describe('importing it into a second instance', () => {
     const chunkRows = await destination.db.select().from(chunks).where(eq(chunks.projectId, report.projectId));
     expect(chunkRows.every((r) => r.indexGeneration === 0)).toBe(true);
   }, 120_000);
+
+  it('keeps where each document came from, and leaves the ones that never knew empty', async () => {
+    const rows = await destination.db.select().from(documents).where(eq(documents.projectId, report.projectId));
+    const carried = rows.find((r) => r.relativePath === PROVENANCE.file);
+    expect(carried?.sourceUrl).toBe(PROVENANCE.url);
+    expect(carried?.sourceModifiedAt?.toISOString()).toBe(PROVENANCE.modifiedAt.toISOString());
+    const others = rows.filter((r) => r.relativePath !== PROVENANCE.file);
+    expect(others.length).toBeGreaterThan(0);
+    expect(others.every((r) => r.sourceUrl === null && r.sourceModifiedAt === null)).toBe(true);
+  });
 
   /**
    * **The item's own "done when", and the shape of the assertion is a finding in its own right.**
