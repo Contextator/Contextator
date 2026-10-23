@@ -664,6 +664,38 @@ export class Indexer {
         /** What a specification may weigh before it is parsed ([ADR-0057](../../.ssot/ADR.md#adr-0057)). */
         const specLimits = { maxSpecBytes: config.MAX_SPEC_FILE_BYTES };
 
+        let vanishedOperationsReleased = false;
+        /**
+         * Gives back the chunks of every stored operation that a specification in this run no longer produces.
+         * Run on the first would-be breach and not up front, so a run under its limit pays nothing: it reads each
+         * specification that has stored documents once more and expands it, rendering paths only. Nothing is
+         * chunked or embedded here. A specification that cannot be read or expanded releases nothing, which is
+         * the conservative side, and its refusal is reported by the loop below as it always was.
+         */
+        const releaseVanishedOperations = async (): Promise<void> => {
+          if (vanishedOperationsReleased) return;
+          vanishedOperationsReleased = true;
+          for (const file of files) {
+            const stored = storedOfContainer.get(file.relativePath);
+            if (!stored || !expandsToManyDocuments(file.flavor, file.relativePath)) continue;
+            try {
+              checkSpecSize(file.relativePath, file.sizeBytes, specLimits);
+              let bytes: Awaited<ReturnType<typeof readAndHash>>['bytes'];
+              try {
+                ({ bytes } = await readAndHash(file.absolutePath));
+              } catch (err) {
+                throw readFailure(err, file.relativePath);
+              }
+              const produced = new Set<string>();
+              for await (const doc of (await this.conversion.expand(file.relativePath, bytes, specLimits)).documents())
+                produced.add(doc.relativePath);
+              for (const [storedPath, doc] of stored) if (!produced.has(storedPath)) releaseChunks(doc.id);
+            } catch (err) {
+              if (!(err instanceof DocumentExtractionError)) throw err;
+            }
+          }
+        };
+
         /**
          * One file refused, recorded against its source. Returns nothing: every caller `continue`s.
          *
@@ -927,8 +959,17 @@ export class Indexer {
               // being rewritten gives its old chunks back, so editing a document at the limit is not refused.
               if (chunkLimit > 0) {
                 const storedId = existing.get(doc.relativePath)?.id ?? '';
-                const given = released.has(storedId) ? 0 : (chunksOfDocument.get(storedId) ?? 0);
-                const after = runningChunks - given + chunks.length;
+                const projected = (): { given: number; after: number } => {
+                  const given = released.has(storedId) ? 0 : (chunksOfDocument.get(storedId) ?? 0);
+                  return { given, after: runningChunks - given + chunks.length };
+                };
+                let { given, after } = projected();
+                if (after > chunkLimit) {
+                  // The operations a specification no longer has are only known once it is expanded. Find out before
+                  // refusing, so a rename inside a specification at the limit does not lock the project out.
+                  await releaseVanishedOperations();
+                  ({ given, after } = projected());
+                }
                 if (after > chunkLimit) throw new QuotaExceededError('max_chunks', chunkLimit, runningChunks - given, chunks.length);
                 runningChunks = after;
               }

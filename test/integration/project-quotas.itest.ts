@@ -695,3 +695,122 @@ describe('document and chunk quotas in an indexing run', () => {
     for (const hit of everything) expect(rows).toContain(hit.split('|')[0]);
   });
 });
+
+/** A specification with one `get` operation per name, each with enough text to be a document of its own. */
+function specWith(operations: string[]): string {
+  const lines = ['openapi: 3.0.3', 'info:', '  title: Fleet API', '  version: "4.2"', 'paths:'];
+  for (const name of operations) {
+    lines.push(`  /fleet/${name}:`);
+    lines.push('    get:');
+    lines.push(`      summary: Read ${name}`);
+    lines.push(`      description: The ${name} record of the fleet, with its telemetry and its maintenance window.`);
+    lines.push('      responses:');
+    lines.push('        "200": { description: OK }');
+  }
+  return lines.join('\n');
+}
+
+describe('chunk quota and the operations of a specification that no longer exist', () => {
+  let database: TestDatabase;
+  let root: string;
+  let projectId: string;
+  let embeddedTexts = 0;
+
+  const counting: EmbeddingProvider = {
+    ...embeddings,
+    embedPassages: async (texts: string[]) => {
+      embeddedTexts += texts.length;
+      return embeddings.embedPassages(texts);
+    },
+  };
+
+  const makeIndexer = (): Indexer =>
+    new Indexer({
+      db: database.db,
+      embeddings: counting,
+      config: { ...indexerConfig, ALLOWED_DOC_ROOTS: [path.dirname(root)], DATA_DIR: path.join(root, '.data') },
+      log: silentLogger,
+      locks: new KeyedMutex(),
+    });
+
+  const run = async (): Promise<JobState> => {
+    const indexer = makeIndexer();
+    const job = await settle(database.db, indexer.enqueue(projectId));
+    indexer.forget(projectId);
+    return job;
+  };
+
+  const storedPaths = async (): Promise<string[]> =>
+    (await database.db.select({ p: documents.relativePath }).from(documents).where(eq(documents.projectId, projectId))).map((r) => r.p).sort();
+
+  beforeAll(async () => {
+    database = await createTestDatabase(baseUrl, 'project_quotas_spec');
+    await applySchema(database, DIMS);
+    root = await mkdtemp(path.join(tmpdir(), 'quotas-spec-'));
+    await writeFile(path.join(root, 'api.yaml'), specWith(['trucks', 'vans', 'buses']), 'utf8');
+    const [project] = await database.db.insert(projects).values({ name: 'quota-spec' }).returning({ id: projects.id });
+    projectId = project.id;
+    await database.db
+      .insert(documentSources)
+      .values({ projectId, type: 'local', name: 'fleet', flavor: 'openapi', config: { path: root, extensions: ['md', 'yaml'] } });
+    const first = await run();
+    expect(first.phase, first.error).toBe('done');
+  });
+
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+    await dropTestDatabase(baseUrl, database);
+  });
+
+  it('lets a run at the limit rename an operation, because the old operation stops counting', async () => {
+    const before = await getProjectById(database.db, projectId);
+    const operations = (await storedPaths()).filter((p) => p.startsWith('fleet/api.yaml/'));
+    expect(operations).toHaveLength(3);
+    await setProjectQuotas(database.db, projectId, { maxChunks: before?.chunkCount ?? 0 });
+
+    await writeFile(path.join(root, 'api.yaml'), specWith(['trucks', 'vans', 'coaches']), 'utf8');
+    const job = await run();
+    expect(job.phase, job.error).toBe('done');
+
+    const after = await getProjectById(database.db, projectId);
+    expect(after).toMatchObject({ documentCount: before?.documentCount, chunkCount: before?.chunkCount });
+    const renamed = (await storedPaths()).filter((p) => p.startsWith('fleet/api.yaml/'));
+    expect(renamed).toHaveLength(3);
+    expect(renamed.some((p) => p.includes('coaches'))).toBe(true);
+    expect(renamed.some((p) => p.includes('buses'))).toBe(false);
+  });
+
+  it('lets a file sorted before the specification add chunks when the specification gives some back', async () => {
+    const before = await getProjectById(database.db, projectId);
+    await setProjectQuotas(database.db, projectId, { maxChunks: before?.chunkCount ?? 0 });
+
+    // `aaa-intro.md` is processed first and adds a chunk while the limit is exact; the operation the
+    // specification no longer has is the only thing that pays for it.
+    await writeFile(path.join(root, 'aaa-intro.md'), '# Intro\n\nThis handbook introduces the fleet interface and how to read it.\n', 'utf8');
+    await writeFile(path.join(root, 'api.yaml'), specWith(['trucks', 'coaches']), 'utf8');
+    const job = await run();
+    expect(job.phase, job.error).toBe('done');
+
+    const after = await getProjectById(database.db, projectId);
+    expect(after).toMatchObject({ documentCount: before?.documentCount, chunkCount: before?.chunkCount });
+    const paths = await storedPaths();
+    expect(paths).toContain('fleet/aaa-intro.md');
+    expect(paths.filter((p) => p.startsWith('fleet/api.yaml/'))).toHaveLength(2);
+  });
+
+  it('refuses a run that really is over the limit before it embeds anything', async () => {
+    const before = await getProjectById(database.db, projectId);
+    await setProjectQuotas(database.db, projectId, { maxChunks: before?.chunkCount ?? 0 });
+    // The new operation comes first in the file, so the document that crosses the limit is the first one the run
+    // reaches. The file's hash changed, which makes every other operation a rewrite, and a rewrite is allowed to
+    // embed: it gives its own chunk back. Nothing of that is reached.
+    await writeFile(path.join(root, 'api.yaml'), specWith(['aardvarks', 'trucks', 'coaches']), 'utf8');
+
+    embeddedTexts = 0;
+    const job = await run();
+    expect(job.phase).toBe('error');
+    expect(job.errorCode).toBe('quota_exceeded');
+    expect(embeddedTexts).toBe(0);
+    expect(await getProjectById(database.db, projectId)).toMatchObject({ chunkCount: before?.chunkCount });
+  });
+});
