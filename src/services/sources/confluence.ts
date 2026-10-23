@@ -9,7 +9,8 @@ import { PROBE_TOKEN_KEY, parseSourceConfig, type ConfluenceConfig } from '../so
 import { checkDataCenterVersion, cqlFor, HttpConfluenceClient, type ConfluenceClient, type ConfluencePageSummary } from './confluence-client.js';
 import { confluenceEgress, type EgressOptions } from './confluence-egress.js';
 import { ConfluenceRenderError, storageToMarkdown } from './confluence-render.js';
-import { registerDriver, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
+import { registerDriver, type DocumentMeta, type DocumentMetaFile, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
+import { frontmatterMeta } from './frontmatter-meta.js';
 // Reused rather than reimplemented: the file-stem rule (a slug plus an id prefix, so two pages with
 // one title are two files) and the front-matter writer are not Notion's, they are this product's, and
 // a second slugifier would differ from the first on the day somebody fixed one of them. The module
@@ -130,6 +131,15 @@ export class ConfluenceDriver implements SourceDriver {
     const dir = sourceCurrentDir(this.ctx.config.DATA_DIR, this.source.projectId, this.source.id);
     await fs.mkdir(dir, { recursive: true });
     return dir;
+  }
+
+  /**
+   * The page URL and last-modified time the sync wrote into each file's front matter
+   * ([ADR-0116](../../../.ssot/ADR.md#adr-0116)). `last_modified` is the content API's `version.when` (Data Center)
+   * or the search result's `lastModified` (Cloud) — the same edit time under either name.
+   */
+  documentMeta(files: readonly DocumentMetaFile[]): Promise<Map<string, DocumentMeta>> {
+    return frontmatterMeta(files, 'url', 'last_modified');
   }
 
   async test(): Promise<string> {

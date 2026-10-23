@@ -319,6 +319,9 @@ async function writeDocuments(db: Db, staging: string, projectId: string, genera
           sizeBytes: doc.sizeBytes,
           content: doc.content,
           contentTruncated: doc.contentTruncated,
+          // Provenance travels with the document (ADR-0116); an export from before 0.4 simply lacks both.
+          sourceUrl: doc.sourceUrl,
+          sourceModifiedAt: doc.sourceModifiedAt ? doc.sourceModifiedAt.toISOString() : null,
           indexedAt: doc.indexedAt.toISOString(),
           chunks: own,
         });

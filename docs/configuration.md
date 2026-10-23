@@ -110,3 +110,21 @@ to "the environment is read only in `config.ts`", and a host-wide `OTEL_TRACES_S
 silently record nothing. The list, checked against the pinned versions, is in
 [Observability](observability.md#variables-the-opentelemetry-sdk-reads-itself), which also describes the
 spans, the trace-context propagation and the dashboard that goes with `/metrics`.
+
+## Source links and the "unchanged for a long time" mark
+
+Search and `read_document` answers carry the link to the original document (`sourceUrl`) and the date it last
+changed there (`sourceModifiedAt`) when the source knows them: a git source links to the file at the indexed
+commit, Notion and Confluence to the page, a web source to the final URL after redirects. A local directory has a
+modification time but no link, and an upload has neither. Credentials in a git remote are never stored or shown.
+
+A git repository has no per-file date in a shallow clone, so the date of a git document is the committer date of
+the HEAD commit at the run in which the indexer first saw the file's current text. It stays while the text is
+unchanged, including through a rebuild (`Re-index now` or a model change), and moves to the new HEAD date when the
+text changes. The link is recomputed on every run, so it always points at the commit just indexed. Links are built
+for GitHub, GitLab, Gitea/Forgejo and Bitbucket Cloud (`bitbucket.org`); a self-hosted Bitbucket has no link.
+
+`SOURCE_STALE_AFTER_DAYS` (default `365`, `0` turns it off) sets how old `sourceModifiedAt` must be before an
+answer marks the passage as unchanged for a long time (`stale: true`). It is a hint to the reader, never a filter.
+
+Documents indexed before this feature have neither value until their source runs again.

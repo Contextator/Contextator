@@ -129,6 +129,13 @@ export interface SearchHit {
   contextBefore: string | null;
   /** The same, after. */
   contextAfter: string | null;
+  /**
+   * Where the document lives at its origin, and when the origin last changed it — both `null` when the
+   * source cannot say ([ADR-0116](../../.ssot/ADR.md#adr-0116)). Read straight off the `documents` row the
+   * hit already joins, so they cost no extra lookup.
+   */
+  sourceUrl: string | null;
+  sourceModifiedAt: Date | null;
 }
 
 /** What one search is: a project, a generation, both encodings of the question, and how far to look. */
@@ -197,6 +204,9 @@ interface HybridRow extends Record<string, unknown> {
   chunk_index: number;
   context_before: string | null;
   context_after: string | null;
+  source_url: string | null;
+  // A Date from node-postgres; the string arm is for a driver that hands back the wire text.
+  source_modified_at: Date | string | null;
 }
 
 /**
@@ -547,7 +557,9 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
         c.content as content,
         c.chunk_index as chunk_index,
         ${neighbors(-1)} as context_before,
-        ${neighbors(1)} as context_after
+        ${neighbors(1)} as context_after,
+        doc.source_url as source_url,
+        doc.source_modified_at as source_modified_at
       from page p
       join chunks c on c.id = p.id
       join documents doc on doc.id = c.document_id
@@ -631,6 +643,8 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
     chunkIndex: row.chunk_index,
     contextBefore: row.context_before,
     contextAfter: row.context_after,
+    sourceUrl: row.source_url,
+    sourceModifiedAt: row.source_modified_at === null ? null : new Date(row.source_modified_at),
   }));
 }
 
@@ -897,16 +911,45 @@ export async function getDocument(db: Db, projectId: string, generation: number,
  * re-embed everything" is therefore a consequence of writing into a fresh generation rather than a
  * case anybody has to remember to special-case.
  */
-export async function getExistingDocuments(
-  db: Db,
-  projectId: string,
-  generation: number,
-): Promise<Map<string, { id: string; contentHash: string; sourceId: string | null }>> {
+export async function getExistingDocuments(db: Db, projectId: string, generation: number): Promise<Map<string, ExistingDocument>> {
   const rows = await db
-    .select({ id: documents.id, relativePath: documents.relativePath, contentHash: documents.contentHash, sourceId: documents.sourceId })
+    .select({
+      id: documents.id,
+      relativePath: documents.relativePath,
+      contentHash: documents.contentHash,
+      sourceId: documents.sourceId,
+      sourceUrl: documents.sourceUrl,
+      sourceModifiedAt: documents.sourceModifiedAt,
+    })
     .from(documents)
     .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation)));
-  return new Map(rows.map((r) => [r.relativePath, { id: r.id, contentHash: r.contentHash, sourceId: r.sourceId }]));
+  return new Map(
+    rows.map((r) => [
+      r.relativePath,
+      { id: r.id, contentHash: r.contentHash, sourceId: r.sourceId, sourceUrl: r.sourceUrl, sourceModifiedAt: r.sourceModifiedAt },
+    ]),
+  );
+}
+
+/** What `getExistingDocuments` knows about a stored document. */
+export interface ExistingDocument {
+  id: string;
+  contentHash: string;
+  sourceId: string | null;
+  sourceUrl: string | null;
+  sourceModifiedAt: Date | null;
+}
+
+/**
+ * Rewrites only a document's origin address and date, leaving its text, chunks and vectors alone
+ * ([ADR-0116](../../.ssot/ADR.md#adr-0116)).
+ *
+ * This is how a document that existed before the columns did — or whose page was edited at the origin
+ * without its text changing — gets its link without being re-chunked or re-embedded: the run that finds the
+ * hash current still compares the two values and calls this when they differ.
+ */
+export async function updateDocumentSourceMeta(db: Db, id: string, meta: { sourceUrl: string | null; sourceModifiedAt: Date | null }): Promise<void> {
+  await db.update(documents).set({ sourceUrl: meta.sourceUrl, sourceModifiedAt: meta.sourceModifiedAt }).where(eq(documents.id, id));
 }
 
 export interface NewChunk {
@@ -952,6 +995,14 @@ export interface DocumentInput {
    * deliberately, which is what "unversioned" is.
    */
   version: string;
+  /**
+   * Where the document lives at its origin, and when the origin last changed it
+   * ([ADR-0116](../../.ssot/ADR.md#adr-0116)). Optional because a caller with no origin to name — a test, the
+   * evaluation harness — has nothing to say, and `null` is what that means. The indexer always supplies
+   * both, `null` included.
+   */
+  sourceUrl?: string | null;
+  sourceModifiedAt?: Date | null;
 }
 
 /**
@@ -1031,6 +1082,10 @@ export async function replaceDocument(
           // changed re-indexes into the generation that is already live, so a row that is updated
           // rather than inserted has to take the new label ([ADR-0058](../../.ssot/ADR.md#adr-0058)).
           version: doc.version,
+          // In the `SET` for the reason `version` is: an incremental run re-writing a changed file has to
+          // replace the address and date it carried, or a document would point at the revision before.
+          sourceUrl: doc.sourceUrl ?? null,
+          sourceModifiedAt: doc.sourceModifiedAt ?? null,
         },
       })
       .returning({ id: documents.id });

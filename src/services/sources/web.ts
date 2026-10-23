@@ -4,7 +4,8 @@ import type { DocumentSourceRow } from '../../db/schema.js';
 import { sourceCurrentDir, sourceDir } from '../data-dir.js';
 import { ValidationError } from '../projects.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig, type WebConfig } from '../sources.js';
-import { registerDriver, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
+import { parseSourceDate } from '../source-url.js';
+import { registerDriver, type DocumentMeta, type DocumentMetaFile, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
 import { EgressRefusedError, webEgress, type EgressOptions } from './confluence-egress.js';
 import { HttpWebClient, WebBudgetExhaustedError, type WebClient, type WebResponse } from './web-client.js';
 import {
@@ -113,6 +114,26 @@ export class WebDriver implements SourceDriver {
    */
   private statePath(): string {
     return path.join(sourceDir(this.ctx.config.DATA_DIR, this.source.projectId, this.source.id), 'web-state.json');
+  }
+
+  /**
+   * The address and `Last-Modified` of each page this source holds, read from the state the last sync
+   * wrote — no request to the site ([ADR-0116](../../../.ssot/ADR.md#adr-0116)). The address is the final one
+   * after redirects, the date is the header as the site sent it, and a page whose response carried none
+   * has no date: a missing header is not replaced by the time the page was fetched, which would claim
+   * the site changed it today.
+   */
+  async documentMeta(files: readonly DocumentMetaFile[]): Promise<Map<string, DocumentMeta>> {
+    const state = await this.readState();
+    const byPath = new Map<string, { url: string; state: PageState }>();
+    for (const [url, page] of Object.entries(state.pages)) byPath.set(page.path, { url, state: page });
+    const out = new Map<string, DocumentMeta>();
+    for (const f of files) {
+      const hit = byPath.get(f.path);
+      if (!hit) continue;
+      out.set(f.path, { url: hit.state.finalUrl ?? hit.url, modifiedAt: parseSourceDate(hit.state.lastModified) });
+    }
+    return out;
   }
 
   private async readState(): Promise<WebState> {
@@ -496,6 +517,9 @@ export class WebDriver implements SourceDriver {
     const state: PageState = { path: relative };
     if (response.etag) state.etag = response.etag;
     if (response.lastModified) state.lastModified = response.lastModified;
+    // The address the host finally answered from, which is the one a reader should be sent to
+    // ([ADR-0116](../../../.ssot/ADR.md#adr-0116)). Only kept when it differs: the key is the other case.
+    if (response.url && response.url !== url) state.finalUrl = response.url;
     run.keep(relative, url, state);
     run.written++;
     return body;
@@ -571,6 +595,8 @@ interface PageState {
   path: string;
   etag?: string;
   lastModified?: string;
+  /** Where the request ended up after redirects, when that is not the URL that was asked for (ADR-0116). */
+  finalUrl?: string;
 }
 
 interface WebState {

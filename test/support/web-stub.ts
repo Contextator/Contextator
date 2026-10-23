@@ -20,6 +20,8 @@ export interface StubPage {
   body?: string;
   etag?: string;
   lastModified?: string;
+  /** The address the answer came from after redirects, when it is not the one asked for. */
+  redirectedTo?: string;
   /** Answer by throwing, the way a transport failure does. */
   error?: string;
 }
@@ -75,7 +77,7 @@ export class StubWeb implements WebClient {
       (page.etag === undefined && page.lastModified !== undefined && validators.lastModified === page.lastModified);
     if (matched) return { url, status: 304, contentType, ...headers };
 
-    return { url, status: page.status ?? 200, contentType, body: page.body ?? '', ...headers };
+    return { url: page.redirectedTo ?? url, status: page.status ?? 200, contentType, body: page.body ?? '', ...headers };
   }
 }
 
