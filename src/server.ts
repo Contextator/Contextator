@@ -213,7 +213,7 @@ async function main(): Promise<void> {
     // Upload sessions idle for 24 hours, so that what the upload quota counts and what is on disk agree
     // ([ADR-0117](../.ssot/ADR.md#adr-0117)). A directory walk of the staging roots, on the timer every other
     // forgetting here uses. Also before the query log's `return`.
-    void sweepExpiredUploadSessions(config.DATA_DIR)
+    void sweepExpiredUploadSessions(config.DATA_DIR, Date.now(), locks)
       .then((deleted) => {
         if (deleted > 0) log.info({ deleted }, 'swept idle upload sessions');
       })

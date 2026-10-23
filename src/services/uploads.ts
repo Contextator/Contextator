@@ -10,6 +10,7 @@ import { mergeDirectory, sourceCurrentDir, stagingDir, swapDirectory } from './d
 import { QuotaExceededError } from './errors.js';
 import { allowedExtensionsFor, type Flavor } from './flavors.js';
 import { isInside, normalizeRelativePath } from './fs-scan.js';
+import type { KeyedMutex } from './locks.js';
 import { NotFoundError, ValidationError } from './projects.js';
 import { directoryBytes, fileSize, overwrittenBytes, UPLOAD_SESSION_TTL_MS } from './quotas.js';
 
@@ -421,19 +422,33 @@ export class UploadService {
   }
 }
 
+/** The prefix a session directory gets while the sweep deletes it (`.trash-<session>`): never a session name. */
+const SWEPT_SESSION_PREFIX = '.trash-';
+
 /**
  * Deletes every upload session nobody has touched for `UPLOAD_SESSION_TTL_MS`, in every project, so that what the
  * quota counts (live sessions only, see `projectUploadUsage`) and what is on disk agree. A session is touched
  * by each `files` request and by its commit, so only an abandoned one is old. Returns how many it removed.
  *
- * The modification time is read again right before the delete: a request that renewed the session in between
- * keeps it. Nothing here throws on a path it cannot read; the next tick tries again.
+ * A commit must never import a tree that is half deleted, so a session leaves its place in one step: under
+ * the project lock (a project whose lock is held, by a commit or a scan, is skipped until the next tick) the
+ * modification time is read again and the directory is renamed to `.trash-<session>`; only then is it
+ * removed. A commit that arrives after the rename finds no session and answers 404. A removal that fails
+ * leaves the `.trash-` directory, which the next tick removes. Nothing here throws on a path it cannot read.
  */
-export async function sweepExpiredUploadSessions(dataDir: string, now: number = Date.now()): Promise<number> {
+export async function sweepExpiredUploadSessions(dataDir: string, now: number = Date.now(), locks?: KeyedMutex): Promise<number> {
   const entries = async (dir: string): Promise<string[]> => fs.readdir(dir).catch(() => []);
   const idleSince = async (dir: string): Promise<number | null> => {
     const stat = await fs.stat(dir).catch(() => null);
     return stat?.isDirectory() ? stat.mtimeMs : null;
+  };
+  const remove = async (dir: string): Promise<boolean> => {
+    try {
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 5 });
+      return true;
+    } catch {
+      return false; // Left for the next tick.
+    }
   };
   let removed = 0;
   const projectsRoot = path.join(dataDir, 'projects');
@@ -441,18 +456,28 @@ export async function sweepExpiredUploadSessions(dataDir: string, now: number = 
     const sourcesRoot = path.join(projectsRoot, projectId, 'sources');
     for (const sourceId of await entries(sourcesRoot)) {
       const stagingRoot = path.join(sourcesRoot, sourceId, '.staging');
-      for (const session of await entries(stagingRoot)) {
-        if (!/^[0-9a-f]{32}$/.test(session)) continue;
-        const dir = path.join(stagingRoot, session);
+      for (const name of await entries(stagingRoot)) {
+        const dir = path.join(stagingRoot, name);
+        if (name.startsWith(SWEPT_SESSION_PREFIX)) {
+          await remove(dir);
+          continue;
+        }
+        if (!/^[0-9a-f]{32}$/.test(name)) continue;
         const touched = await idleSince(dir);
         if (touched === null || now - touched <= UPLOAD_SESSION_TTL_MS) continue;
-        if ((await idleSince(dir)) !== touched) continue;
-        try {
-          await fs.rm(dir, { recursive: true, force: true, maxRetries: 5 });
-          removed++;
-        } catch {
-          // Left for the next tick.
-        }
+        if (locks?.isLocked(projectId)) continue;
+        const detach = async (): Promise<string | null> => {
+          if ((await idleSince(dir)) !== touched) return null;
+          const trash = path.join(stagingRoot, `${SWEPT_SESSION_PREFIX}${name}`);
+          try {
+            await fs.rename(dir, trash);
+            return trash;
+          } catch {
+            return null;
+          }
+        };
+        const trash = locks ? await locks.runExclusive(projectId, detach) : await detach();
+        if (trash !== null && (await remove(trash))) removed++;
       }
     }
   }

@@ -6,6 +6,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { QuotaExceededError, QuotaUsageUnavailableError } from '../src/services/errors.js';
 import { sourceCurrentDir, stagingDir } from '../src/services/data-dir.js';
+import { KeyedMutex } from '../src/services/locks.js';
+import { NotFoundError } from '../src/services/projects.js';
 import { directoryBytes, overwrittenBytes, resolveQuota, resolveQuotas, UPLOAD_SESSION_TTL_MS } from '../src/services/quotas.js';
 import { sweepExpiredUploadSessions, UploadRequestQuota, UploadService } from '../src/services/uploads.js';
 import type { DocumentSourceRow } from '../src/db/schema.js';
@@ -363,6 +365,42 @@ describe('UploadService against a quota', () => {
       expect(await exists(path.join(sourceCurrentDir(dataDir, src.projectId, src.id), 'kept.md'))).toBe(true);
       expect(await exists(stray)).toBe(true);
       expect(await sweepExpiredUploadSessions(path.join(dataDir, 'does-not-exist'))).toBe(0);
+    });
+
+    it('leaves no half-deleted tree for a commit: the session is gone from its place before it is removed', async () => {
+      const src = isolatedSource(15);
+      const session = await service.createSession(src);
+      await writeFile(stagedFile(src, session, 'a.md'), bytes(10));
+      await age(stagingDir(dataDir, src.projectId, src.id, session), UPLOAD_SESSION_TTL_MS + 60_000);
+      expect(await sweepExpiredUploadSessions(dataDir)).toBe(1);
+      await expect(service.commit(src, session, 'add', quota(100, 60, 60))).rejects.toBeInstanceOf(NotFoundError);
+      expect(await exists(path.join(stagingDir(dataDir, src.projectId, src.id, session), '..', `.trash-${session}`))).toBe(false);
+    });
+
+    it('removes a .trash- directory an earlier tick could not delete, without counting it as a session', async () => {
+      const src = isolatedSource(16);
+      const session = '1'.repeat(32);
+      const trash = path.join(stagingDir(dataDir, src.projectId, src.id, session), '..', `.trash-${session}`);
+      await mkdir(path.join(trash, 'files'), { recursive: true });
+      await writeFile(path.join(trash, 'files', 'a.md'), bytes(10));
+      expect(await sweepExpiredUploadSessions(dataDir)).toBe(0);
+      expect(await exists(trash)).toBe(false);
+    });
+
+    it('skips a project whose lock is held and takes the session on the next tick', async () => {
+      const src = isolatedSource(17);
+      const locks = new KeyedMutex();
+      const session = await service.createSession(src);
+      await writeFile(stagedFile(src, session, 'a.md'), bytes(10));
+      await age(stagingDir(dataDir, src.projectId, src.id, session), UPLOAD_SESSION_TTL_MS + 60_000);
+      let release!: () => void;
+      const held = locks.runExclusive(src.projectId, () => new Promise<void>((resolve) => (release = resolve)));
+      expect(await sweepExpiredUploadSessions(dataDir, Date.now(), locks)).toBe(0);
+      expect(await exists(stagedFile(src, session, 'a.md'))).toBe(true);
+      release();
+      await held;
+      expect(await sweepExpiredUploadSessions(dataDir, Date.now(), locks)).toBe(1);
+      expect(await exists(stagingDir(dataDir, src.projectId, src.id, session))).toBe(false);
     });
 
     it('sweeps by the clock it is given', async () => {
