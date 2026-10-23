@@ -141,8 +141,8 @@ database on behalf of everyone else:
 | `PROJECT_MAX_UPLOAD_BYTES` | bytes stored for the project's upload sources, staging included | per upload request and at commit |
 
 Each is an integer of at least `0`, and `0` (the default) is unlimited, so an upgrade changes nothing until you
-write a number. They are the instance default: an instance admin can give one project its own value on the
-project page (`PATCH /api/projects/:id/quotas`), which replaces the instance value for that project in both
+write a number. They are the instance default: an instance admin can give one project its own value through
+`PATCH /api/projects/:id/quotas`, which replaces the instance value for that project in both
 directions, and `0` there exempts the project even when the instance sets a cap. Clearing a project's value
 (`null`) makes it follow the instance again.
 
@@ -155,3 +155,15 @@ A breach never loses data that is already searchable:
   had finished writing in place and does not remove any. Either way the project stays searchable, and the run
   is retried like any other failed run once the cap is raised or content is removed.
 - If the size of an upload source cannot be measured, the upload is refused with `503` rather than let through.
+
+What the upload cap counts:
+
+- Everything the project's upload sources store: each source's `current/` tree plus the staging of every open
+  upload session, the requesting session's own staging included once. A file that overwrites a stored or
+  staged file of the same path counts once, as the difference.
+- A session that nobody has touched for 24 hours (no `files` request, no commit) stops counting, so an
+  abandoned upload does not hold the quota forever. Its files stay on disk until the session is aborted or
+  committed; the 24 hours only decide whether they count.
+- The cap is checked by walking the upload directories, so each `files` request pays one walk over the
+  project's upload trees before it writes. With many thousands of staged files this is noticeable per request;
+  an unlimited project (`0`) skips the walk entirely.

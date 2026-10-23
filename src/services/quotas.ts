@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import type { Config } from '../config.js';
 import type { Db } from '../db/client.js';
 import { projects, type ProjectRow } from '../db/schema.js';
-import { sourceCurrentDir } from './data-dir.js';
+import { sourceCurrentDir, stagingRootDir } from './data-dir.js';
 import { QuotaUsageUnavailableError } from './errors.js';
 import { listSources } from './sources.js';
 
@@ -79,16 +79,116 @@ export async function directoryBytes(dir: string): Promise<number> {
 }
 
 /**
- * The bytes stored for a project's upload sources: the sum over their `current/` trees. The filesystem is the
- * source of truth for it and a counter in the database could drift from it, so this is a directory scan
- * ([ADR-0117](../../.ssot/ADR.md#adr-0117)). Only `upload` sources count; a Notion source also keeps a
- * `current/` tree, but its size is bounded by what it fetches and not by what a person pushed.
+ * The ceiling of a stored quota. Row counts live in `integer` columns; the byte quota is a `bigint` column read
+ * as a JS number, hence `MAX_SAFE_INTEGER`. The PATCH body and an imported manifest are held to the same values.
  */
-export async function projectUploadBytes(db: Db, dataDir: string, projectId: string): Promise<number> {
-  const sources = (await listSources(db, projectId)).filter((s) => s.type === 'upload');
+export const QUOTA_ROW_COUNT_MAX = 2147483647;
+export const QUOTA_BYTES_MAX = Number.MAX_SAFE_INTEGER;
+
+/**
+ * How long an upload session may sit untouched before its staged bytes stop counting against the quota. An
+ * abandoned session (a closed tab, a client that crashed after its first request) is otherwise never
+ * cleaned up, and would hold part of the quota for good. Every request on a session renews it.
+ */
+export const UPLOAD_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** The bytes of the live upload sessions under one source's `.staging/`, leaving out `excludeSession` and expired ones. */
+async function stagingBytes(root: string, excludeSession: string | undefined, now: number): Promise<number> {
+  let names: string[];
+  try {
+    names = await fs.readdir(root);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    throw new QuotaUsageUnavailableError(root, err);
+  }
   let total = 0;
-  for (const source of sources) total += await directoryBytes(sourceCurrentDir(dataDir, projectId, source.id));
+  for (const name of names) {
+    if (name === excludeSession) continue;
+    const dir = path.join(root, name);
+    try {
+      const stat = await fs.stat(dir);
+      if (!stat.isDirectory() || now - stat.mtimeMs > UPLOAD_SESSION_TTL_MS) continue;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw new QuotaUsageUnavailableError(dir, err);
+    }
+    total += await directoryBytes(dir);
+  }
   return total;
+}
+
+export interface UploadUsageOptions {
+  /** A session left out of the total: the one a commit is about to move into `current/`, which counts as `staged` there. */
+  excludeSession?: string;
+  /** Which source's `current/` bytes to report separately (see `UploadUsage.sourceCurrent`). */
+  sourceId?: string;
+}
+
+export interface UploadUsage {
+  /** Stored bytes of the project's upload sources plus the staging of their live sessions. */
+  total: number;
+  /** The `current/` bytes of `UploadUsageOptions.sourceId`, `0` when none was named. */
+  sourceCurrent: number;
+}
+
+/**
+ * The bytes stored for a project's upload sources: the sum over their `current/` trees **and** over the
+ * `.staging/` trees of their live upload sessions ([ADR-0117](../../.ssot/ADR.md#adr-0117), "staging
+ * included"). A session counts while it was touched within `UPLOAD_SESSION_TTL_MS`. The filesystem is the
+ * source of truth for it and a counter in the database could drift from it, so this is a directory scan.
+ * Only `upload` sources count; a Notion source also keeps a `current/` tree, but its size is bounded by
+ * what it fetches and not by what a person pushed.
+ */
+export async function projectUploadUsage(db: Db, dataDir: string, projectId: string, options: UploadUsageOptions = {}): Promise<UploadUsage> {
+  const sources = (await listSources(db, projectId)).filter((s) => s.type === 'upload');
+  const now = Date.now();
+  let total = 0;
+  let sourceCurrent = 0;
+  for (const source of sources) {
+    const current = await directoryBytes(sourceCurrentDir(dataDir, projectId, source.id));
+    if (source.id === options.sourceId) sourceCurrent = current;
+    total += current + (await stagingBytes(stagingRootDir(dataDir, projectId, source.id), options.excludeSession, now));
+  }
+  return { total, sourceCurrent };
+}
+
+/** `projectUploadUsage(...).total`, for callers that only need the number. */
+export async function projectUploadBytes(db: Db, dataDir: string, projectId: string): Promise<number> {
+  return (await projectUploadUsage(db, dataDir, projectId)).total;
+}
+
+/**
+ * The bytes in `to` that copying the tree `from` over it would overwrite: for every file of `from`, the size of
+ * the file at the same relative path under `to`, if there is one. `add` mode replaces such files rather than
+ * adding to them, so they must not be counted twice.
+ */
+export async function overwrittenBytes(from: string, to: string): Promise<number> {
+  let entries;
+  try {
+    entries = await fs.readdir(from, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+    throw new QuotaUsageUnavailableError(from, err);
+  }
+  let total = 0;
+  for (const entry of entries) {
+    const src = path.join(from, entry.name);
+    const dst = path.join(to, entry.name);
+    if (entry.isDirectory()) total += await overwrittenBytes(src, dst);
+    else if (entry.isFile()) total += (await fileSize(dst)) ?? 0;
+  }
+  return total;
+}
+
+/** The size of one regular file, `null` when there is none at that path. */
+export async function fileSize(file: string): Promise<number | null> {
+  try {
+    const stat = await fs.stat(file);
+    return stat.isFile() ? stat.size : null;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new QuotaUsageUnavailableError(file, err);
+  }
 }
 
 export interface QuotaView {

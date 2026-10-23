@@ -11,30 +11,50 @@ import { QuotaExceededError } from './errors.js';
 import { allowedExtensionsFor, type Flavor } from './flavors.js';
 import { isInside, normalizeRelativePath } from './fs-scan.js';
 import { NotFoundError, ValidationError } from './projects.js';
-import { directoryBytes } from './quotas.js';
+import { directoryBytes, fileSize, overwrittenBytes } from './quotas.js';
 
 /**
  * The upload quota in force for one request ([ADR-0117](../../.ssot/ADR.md#adr-0117)). Only built when the
  * project's effective limit is above `0`, so an unlimited project never pays for the directory scan.
- * `used` is what the project's upload sources already store.
  */
 export interface UploadQuota {
   limit: number;
+  /**
+   * What the project's upload sources store, staging of every live session included. For a commit it leaves out
+   * the committing session, whose files are measured on their own.
+   */
   used: number;
+  /** The part of `used` that is the `current/` tree of the source being written to. */
+  sourceCurrent: number;
 }
 
 /**
- * Tracks one `.../files` request against the quota: what the session already held when the request began,
- * what the request has added so far, and which files those were, so a breach can take back exactly them.
+ * Tracks one `.../files` request against the quota. The request writes into a scratch directory of its own
+ * beside the session's `files/`, so that a request the quota refuses is taken back by deleting that one
+ * directory and cannot touch what earlier requests staged; `finishRequest` moves it into place.
  */
 export class UploadRequestQuota {
+  /** Bytes this request adds, net of the files it overwrites. */
   requestBytes = 0;
-  readonly paths: string[] = [];
   constructor(
     readonly limit: number,
-    /** Stored bytes plus this session's earlier staged bytes, when the request began. */
+    /** What the project stores when the request began, with the session's overwrites of `current/` counted once. */
     readonly baseUsed: number,
+    readonly scratchDir: string,
+    readonly filesDir: string,
+    readonly currentDir: string,
   ) {}
+}
+
+/** Moves every file of `from` into `to` (creating directories), overwriting what is there. */
+async function moveTree(from: string, to: string): Promise<void> {
+  await fs.mkdir(to, { recursive: true });
+  for (const entry of await fs.readdir(from, { withFileTypes: true })) {
+    const src = path.join(from, entry.name);
+    const dst = path.join(to, entry.name);
+    if (entry.isDirectory()) await moveTree(src, dst);
+    else if (entry.isFile()) await fs.rename(src, dst);
+  }
 }
 
 /**
@@ -84,20 +104,44 @@ export class UploadService {
     } catch {
       throw new NotFoundError('Upload session not found or already committed');
     }
+    // Any use of a session renews it: a session untouched for `UPLOAD_SESSION_TTL_MS` stops counting against
+    // the quota (see `projectUploadUsage`), and a person still uploading must not lose their share.
+    const now = new Date();
+    await fs.utimes(path.dirname(dir), now, now).catch(() => undefined);
     return dir;
   }
 
-  /** Starts quota tracking for a request on `session`; the session's earlier files count against the cap too. */
-  async beginRequest(source: DocumentSourceRow, session: string, quota: UploadQuota): Promise<UploadRequestQuota> {
-    const filesDir = await this.requireSession(source, session);
-    return new UploadRequestQuota(quota.limit, quota.used + (await directoryBytes(filesDir)));
+  /**
+   * Marks `session` as in use, so a request measures the quota with its own session counted even when it had
+   * been idle for longer than the expiry. Fails with `NotFoundError` for a session that does not exist.
+   */
+  async renew(source: DocumentSourceRow, session: string): Promise<void> {
+    await this.requireSession(source, session);
   }
 
-  /** Deletes the files a request added, after it went over the quota; the session's earlier files stay. */
+  /**
+   * Starts quota tracking for a request on `session`. The session's earlier files are already in `quota.used`;
+   * a file of them that overwrites one in `current/` is counted once, because that is what `add` leaves behind.
+   */
+  async beginRequest(source: DocumentSourceRow, session: string, quota: UploadQuota): Promise<UploadRequestQuota> {
+    const filesDir = await this.requireSession(source, session);
+    const currentDir = sourceCurrentDir(this.config.DATA_DIR, source.projectId, source.id);
+    const baseUsed = Math.max(0, quota.used - (await overwrittenBytes(filesDir, currentDir)));
+    const scratchDir = path.join(path.dirname(filesDir), `request-${randomBytes(8).toString('hex')}`);
+    await fs.mkdir(scratchDir, { recursive: true });
+    return new UploadRequestQuota(quota.limit, baseUsed, scratchDir, filesDir, currentDir);
+  }
+
+  /** Throws away everything a request wrote. The session's earlier files are untouched. */
   async rollbackRequest(tracker: UploadRequestQuota): Promise<void> {
-    await Promise.all(tracker.paths.map((p) => fs.rm(p, { force: true }).catch(() => undefined)));
-    tracker.paths.length = 0;
+    await fs.rm(tracker.scratchDir, { recursive: true, force: true, maxRetries: 5 }).catch(() => undefined);
     tracker.requestBytes = 0;
+  }
+
+  /** Puts what a request wrote into the session's `files/`, over any file of the same path, and drops the scratch directory. */
+  async finishRequest(tracker: UploadRequestQuota): Promise<void> {
+    await moveTree(tracker.scratchDir, tracker.filesDir);
+    await fs.rm(tracker.scratchDir, { recursive: true, force: true, maxRetries: 5 }).catch(() => undefined);
   }
 
   /**
@@ -111,7 +155,9 @@ export class UploadService {
     stream: NodeJS.ReadableStream,
     tracker?: UploadRequestQuota,
   ): Promise<ImportStats> {
-    const filesDir = await this.requireSession(source, session);
+    const sessionFilesDir = await this.requireSession(source, session);
+    // With a quota the request writes beside the session's files, not into them (see `UploadRequestQuota`).
+    const filesDir = tracker ? tracker.scratchDir : sessionFilesDir;
     const limits = this.limitsFor(source);
     const stats: ImportStats = { files: 0, skipped: 0, bytes: 0, ...(tracker ? { added: [] } : {}) };
     const normalized = normalizeRelativePath(relativePath);
@@ -141,14 +187,14 @@ export class UploadService {
       } finally {
         await fs.rm(target, { force: true }).catch(() => undefined);
       }
-      this.charge(tracker, stats);
+      await this.charge(tracker, stats);
       return stats;
     }
 
     const cleaned = cleanEntryPath(normalized, limits.pathFlavor);
     if (!cleaned) {
       // Drain and ignore (dotfiles, non-portable names).
-      await pipeline(stream, createWriteStream(path.join(filesDir, '..', 'discard')));
+      await pipeline(stream, createWriteStream(path.join(sessionFilesDir, '..', 'discard')));
       stats.skipped++;
       return stats;
     }
@@ -160,21 +206,28 @@ export class UploadService {
     stats.files++;
     stats.bytes += size;
     stats.added?.push(target);
-    this.charge(tracker, stats);
+    await this.charge(tracker, stats);
     return stats;
   }
 
   /**
    * Counts what `addFile` just stored against the request's quota, after the fact: the file or the unpacked
    * archive is already on disk by the time its size is known. The overshoot is at most one request, which
-   * `UPLOAD_MAX_*` already bounds, and the caller takes the request's files back when this throws.
+   * `UPLOAD_MAX_*` already bounds, and the caller takes the request back when this throws.
+   *
+   * A stored file that replaces one already staged in the session, or else one in `current/`, adds only the
+   * difference: `add` overwrites by path, so the old bytes are gone once the session is committed.
    */
-  private charge(tracker: UploadRequestQuota | undefined, stats: ImportStats): void {
+  private async charge(tracker: UploadRequestQuota | undefined, stats: ImportStats): Promise<void> {
     if (!tracker) return;
-    tracker.requestBytes += stats.bytes;
-    tracker.paths.push(...(stats.added ?? []));
+    let replaced = 0;
+    for (const written of stats.added ?? []) {
+      const relative = path.relative(tracker.scratchDir, written);
+      replaced += (await fileSize(path.join(tracker.filesDir, relative))) ?? (await fileSize(path.join(tracker.currentDir, relative))) ?? 0;
+    }
+    tracker.requestBytes += stats.bytes - replaced;
     if (tracker.baseUsed + tracker.requestBytes > tracker.limit) {
-      throw new QuotaExceededError('max_upload_bytes', tracker.limit, tracker.baseUsed, tracker.requestBytes);
+      throw new QuotaExceededError('max_upload_bytes', tracker.limit, tracker.baseUsed, Math.max(0, tracker.requestBytes));
     }
   }
 
@@ -183,14 +236,17 @@ export class UploadService {
    *
    * With a `quota`, this is the authoritative check ([ADR-0117](../../.ssot/ADR.md#adr-0117)): other sessions
    * may have committed since this one began. `replace` first subtracts what the source stores now, because
-   * that is what the swap removes. A refusal leaves `current/` and the session as they were.
+   * that is what the swap removes, and `add` what the staged files overwrite. `quota.used` leaves this session
+   * out, since its files are the `staged` bytes. A refusal leaves `current/` and the session as they were.
    */
   async commit(source: DocumentSourceRow, session: string, mode: 'add' | 'replace', quota?: UploadQuota): Promise<number> {
     const filesDir = await this.requireSession(source, session);
     const current = sourceCurrentDir(this.config.DATA_DIR, source.projectId, source.id);
     if (quota) {
       const staged = await directoryBytes(filesDir);
-      const kept = mode === 'replace' ? Math.max(0, quota.used - (await directoryBytes(current))) : quota.used;
+      // `replace` drops everything the source stores now; `add` drops only the files it overwrites.
+      const dropped = mode === 'replace' ? quota.sourceCurrent : await overwrittenBytes(filesDir, current);
+      const kept = Math.max(0, quota.used - dropped);
       if (kept + staged > quota.limit) throw new QuotaExceededError('max_upload_bytes', quota.limit, kept, staged);
     }
     // Files that were not archives may carry names the flavor should clean up; importTree re-validates everything.

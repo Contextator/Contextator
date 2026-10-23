@@ -35,9 +35,14 @@ export function sourceRepoDir(dataDir: string, projectId: string, sourceId: stri
   return path.join(sourceDir(dataDir, projectId, sourceId), 'repo');
 }
 
+/** The directory holding every upload session of one source. */
+export function stagingRootDir(dataDir: string, projectId: string, sourceId: string): string {
+  return path.join(sourceDir(dataDir, projectId, sourceId), '.staging');
+}
+
 export function stagingDir(dataDir: string, projectId: string, sourceId: string, session: string): string {
   if (!/^[0-9a-f]{32}$/.test(session)) throw new Error('Invalid upload session id');
-  return path.join(sourceDir(dataDir, projectId, sourceId), '.staging', session);
+  return path.join(stagingRootDir(dataDir, projectId, sourceId), session);
 }
 
 const RM_OPTS = { recursive: true, force: true, maxRetries: 5, retryDelay: 200 } as const;

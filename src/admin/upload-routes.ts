@@ -7,7 +7,7 @@ import type { ImportStats } from '../services/archives.js';
 import { assertDiskSpace } from '../services/disk-space.js';
 import { QuotaExceededError, QuotaUsageUnavailableError } from '../services/errors.js';
 import { ConflictError, NotFoundError, ValidationError, getProjectById } from '../services/projects.js';
-import { projectUploadBytes, resolveQuotas } from '../services/quotas.js';
+import { projectUploadUsage, resolveQuotas } from '../services/quotas.js';
 import { getSource } from '../services/sources.js';
 import type { UploadQuota, UploadRequestQuota } from '../services/uploads.js';
 
@@ -61,21 +61,23 @@ export const uploadRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
    * The upload quota that applies to this project right now, or `undefined` when it has none
    * ([ADR-0117](../../.ssot/ADR.md#adr-0117)). An unlimited project skips the directory scan entirely. When
    * the scan fails the error propagates and the request is refused with `503`: usage nobody could measure
-   * is not "under the limit".
+   * is not "under the limit". `used` includes the staging of every live session; a commit passes its own
+   * `excludeSession`, because it measures that session's files itself.
    */
-  const loadUploadQuota = async (projectId: string): Promise<UploadQuota | undefined> => {
+  const loadUploadQuota = async (projectId: string, sourceId: string, excludeSession?: string): Promise<UploadQuota | undefined> => {
     const project = await getProjectById(db, projectId);
     if (!project) throw new NotFoundError('Project not found');
     const { limit } = resolveQuotas(project, config).uploadBytes;
     if (limit === 0) return undefined;
-    return { limit, used: await projectUploadBytes(db, config.DATA_DIR, projectId) };
+    const usage = await projectUploadUsage(db, config.DATA_DIR, projectId, { excludeSession, sourceId });
+    return { limit, used: usage.total, sourceCurrent: usage.sourceCurrent };
   };
 
   app.post('/api/projects/:id/sources/:sid/uploads', async (req, reply) => {
     const { id, sid } = SourceParams.parse(req.params);
     const source = await requireUploadSource(id, sid);
     await assertDiskSpace(config.DATA_DIR, config.DATA_DIR_MIN_FREE_BYTES);
-    return reply.code(201).send({ session: await uploads.createSession(source, await loadUploadQuota(id)) });
+    return reply.code(201).send({ session: await uploads.createSession(source, await loadUploadQuota(id, sid)) });
   });
 
   app.post('/api/projects/:id/sources/:sid/uploads/:session/files', async (req) => {
@@ -84,25 +86,33 @@ export const uploadRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     // Checked per request and not only when the session opens: a folder upload is many requests, and the
     // disk can fill between the first and the last. Refused before a byte of this request is written.
     await assertDiskSpace(config.DATA_DIR, config.DATA_DIR_MIN_FREE_BYTES);
-    const quota = await loadUploadQuota(id);
+    // Renewed first: a session idle past the expiry is not counted, and this request revives it.
+    await uploads.renew(source, session);
+    const quota = await loadUploadQuota(id, sid);
     const tracker: UploadRequestQuota | undefined = quota ? await uploads.beginRequest(source, session, quota) : undefined;
     const totals: ImportStats = { files: 0, skipped: 0, bytes: 0 };
     const errors: string[] = [];
-    for await (const part of req.parts()) {
-      if (part.type !== 'file') continue;
-      try {
-        const s = await uploads.addFile(source, session, part.filename, part.file, tracker);
-        totals.files += s.files;
-        totals.skipped += s.skipped;
-        totals.bytes += s.bytes;
-      } catch (err) {
-        await drainPart(part.file);
-        // A quota refusal ends the request instead of joining `errors`: the caller must see 413, and the
-        // files this request already stored are taken back so a refused request leaves nothing behind.
-        if (err instanceof QuotaExceededError && tracker) await uploads.rollbackRequest(tracker);
-        if (err instanceof QuotaExceededError || err instanceof QuotaUsageUnavailableError) throw err;
-        errors.push(`${part.filename}: ${err instanceof Error ? err.message : String(err)}`);
+    let finished = false;
+    try {
+      for await (const part of req.parts()) {
+        if (part.type !== 'file') continue;
+        try {
+          const s = await uploads.addFile(source, session, part.filename, part.file, tracker);
+          totals.files += s.files;
+          totals.skipped += s.skipped;
+          totals.bytes += s.bytes;
+        } catch (err) {
+          await drainPart(part.file);
+          // A quota refusal ends the request instead of joining `errors`: the caller must see 413 (or 503).
+          if (err instanceof QuotaExceededError || err instanceof QuotaUsageUnavailableError) throw err;
+          errors.push(`${part.filename}: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
+      if (tracker) await uploads.finishRequest(tracker);
+      finished = true;
+    } finally {
+      // A request that ends in any error is taken back whole; what earlier requests staged stays.
+      if (tracker && !finished) await uploads.rollbackRequest(tracker);
     }
     return { ...totals, errors };
   });
@@ -112,7 +122,7 @@ export const uploadRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     const { mode } = CommitQuery.parse(req.query);
     const source = await requireUploadSource(id, sid);
     if (indexer.isBusy(id)) throw new ConflictError('Project is currently being indexed; commit the upload when it finishes');
-    const files = await locks.runExclusive(id, async () => uploads.commit(source, session, mode, await loadUploadQuota(id)));
+    const files = await locks.runExclusive(id, async () => uploads.commit(source, session, mode, await loadUploadQuota(id, sid, session)));
     const job = indexer.enqueue(id);
     return reply.code(202).send({ files, job });
   });

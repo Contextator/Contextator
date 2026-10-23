@@ -1,11 +1,12 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { QuotaExceededError, QuotaUsageUnavailableError } from '../src/services/errors.js';
-import { directoryBytes, resolveQuota, resolveQuotas } from '../src/services/quotas.js';
+import { sourceCurrentDir, stagingDir } from '../src/services/data-dir.js';
+import { directoryBytes, overwrittenBytes, resolveQuota, resolveQuotas } from '../src/services/quotas.js';
 import { UploadRequestQuota, UploadService } from '../src/services/uploads.js';
 import type { DocumentSourceRow } from '../src/db/schema.js';
 
@@ -126,7 +127,7 @@ describe('UploadService against a quota', () => {
   });
 
   it('opens no session for a project already at its cap', async () => {
-    await expect(service.createSession(source, { limit: 100, used: 100 })).rejects.toMatchObject({
+    await expect(service.createSession(source, { limit: 100, used: 100, sourceCurrent: 0 })).rejects.toMatchObject({
       code: 'quota_exceeded',
       quota: 'max_upload_bytes',
       limit: 100,
@@ -136,16 +137,31 @@ describe('UploadService against a quota', () => {
   });
 
   it('opens a session below the cap, and none is needed when the project is unlimited', async () => {
-    expect(await service.createSession(source, { limit: 100, used: 10 })).toMatch(/^[0-9a-f]{32}$/);
+    expect(await service.createSession(source, { limit: 100, used: 10, sourceCurrent: 0 })).toMatch(/^[0-9a-f]{32}$/);
     expect(await service.createSession(source)).toMatch(/^[0-9a-f]{32}$/);
   });
 
+  const bytes = (n: number) => Buffer.from('x'.repeat(n));
+  const stream = async (data: Buffer) => (await import('node:stream')).Readable.from([data]);
+  const quota = (limit: number, used: number, sourceCurrent = 0) => ({ limit, used, sourceCurrent });
+
+  /** A source of its own, so one test's files never count in another's. */
+  const freshSource = (n: number): DocumentSourceRow =>
+    ({ ...source, id: `22222222-2222-4222-8222-${String(n).padStart(12, '0')}` }) as unknown as DocumentSourceRow;
+  const putCurrent = async (src: DocumentSourceRow, rel: string, data: Buffer) => {
+    const file = path.join(sourceCurrentDir(dataDir, src.projectId, src.id), rel);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, data);
+  };
+  const stagedFile = (src: DocumentSourceRow, session: string, rel: string) =>
+    path.join(stagingDir(dataDir, src.projectId, src.id, session), 'files', rel);
+
   it('refuses a file that would cross the cap and reports what it had counted', async () => {
-    const { Readable } = await import('node:stream');
-    const session = await service.createSession(source, { limit: 100, used: 0 });
-    const tracker = await service.beginRequest(source, session, { limit: 100, used: 90 });
+    const src = freshSource(1);
+    const session = await service.createSession(src, quota(100, 0));
+    const tracker = await service.beginRequest(src, session, quota(100, 90));
     expect(tracker).toBeInstanceOf(UploadRequestQuota);
-    await expect(service.addFile(source, session, 'big.md', Readable.from([Buffer.from('x'.repeat(20))]), tracker)).rejects.toMatchObject({
+    await expect(service.addFile(src, session, 'big.md', await stream(bytes(20)), tracker)).rejects.toMatchObject({
       code: 'quota_exceeded',
       limit: 100,
       used: 90,
@@ -153,15 +169,130 @@ describe('UploadService against a quota', () => {
     });
     // The caller takes the request back; nothing of it is left once that has run.
     await service.rollbackRequest(tracker);
-    expect(await directoryBytes(dataDir)).toBe(0);
+    expect(await directoryBytes(path.join(stagingDir(dataDir, src.projectId, src.id, session), '..'))).toBe(0);
   });
 
   it('accepts a file that fits and tracks the bytes it took', async () => {
-    const { Readable } = await import('node:stream');
-    const session = await service.createSession(source, { limit: 100, used: 0 });
-    const tracker = await service.beginRequest(source, session, { limit: 100, used: 50 });
-    await service.addFile(source, session, 'ok.md', Readable.from([Buffer.from('x'.repeat(20))]), tracker);
+    const src = freshSource(2);
+    const session = await service.createSession(src, quota(100, 0));
+    const tracker = await service.beginRequest(src, session, quota(100, 50));
+    await service.addFile(src, session, 'ok.md', await stream(bytes(20)), tracker);
     expect(tracker.requestBytes).toBe(20);
-    expect(tracker.paths).toHaveLength(1);
+    await service.finishRequest(tracker);
+    expect((await stat(stagedFile(src, session, 'ok.md'))).size).toBe(20);
+  });
+
+  it('counts a re-uploaded file of an earlier request once', async () => {
+    const src = freshSource(3);
+    const session = await service.createSession(src, quota(100, 0));
+    const first = await service.beginRequest(src, session, quota(100, 0));
+    await service.addFile(src, session, 'a.md', await stream(bytes(60)), first);
+    await service.finishRequest(first);
+    // The session now stores 60 bytes; the same path again with 60 more bytes of content adds nothing.
+    const second = await service.beginRequest(src, session, quota(100, 60));
+    await service.addFile(src, session, 'a.md', await stream(bytes(60)), second);
+    expect(second.requestBytes).toBe(0);
+    await service.finishRequest(second);
+    expect((await stat(stagedFile(src, session, 'a.md'))).size).toBe(60);
+  });
+
+  it('counts a file that overwrites a stored one by the difference only', async () => {
+    const src = freshSource(4);
+    await putCurrent(src, 'a.md', bytes(60));
+    const session = await service.createSession(src, quota(100, 60));
+    const tracker = await service.beginRequest(src, session, quota(100, 60, 60));
+    await service.addFile(src, session, 'a.md', await stream(bytes(70)), tracker);
+    expect(tracker.requestBytes).toBe(10);
+  });
+
+  it('does not count a stored file twice once a staged file overwrites it', async () => {
+    const src = freshSource(5);
+    await putCurrent(src, 'a.md', bytes(60));
+    const session = await service.createSession(src, quota(200, 60));
+    const first = await service.beginRequest(src, session, quota(200, 60, 60));
+    await service.addFile(src, session, 'a.md', await stream(bytes(60)), first);
+    await service.finishRequest(first);
+    // Stored 60 + staged 60 = 120 on disk, of which the 60 stored bytes are going to be overwritten.
+    const second = await service.beginRequest(src, session, quota(200, 120, 60));
+    expect(second.baseUsed).toBe(60);
+  });
+
+  it('keeps what earlier requests staged when a later request over the same path is refused', async () => {
+    const src = freshSource(6);
+    const session = await service.createSession(src, quota(100, 0));
+    const first = await service.beginRequest(src, session, quota(100, 0));
+    await service.addFile(src, session, 'a.md', await stream(Buffer.from('old content')), first);
+    await service.finishRequest(first);
+    const second = await service.beginRequest(src, session, quota(100, 11));
+    await expect(service.addFile(src, session, 'a.md', await stream(bytes(150)), second)).rejects.toBeInstanceOf(QuotaExceededError);
+    await service.rollbackRequest(second);
+    expect(await readFile(stagedFile(src, session, 'a.md'), 'utf8')).toBe('old content');
+  });
+
+  it('measures the bytes of a tree that overwrite files of another', async () => {
+    const src = freshSource(7);
+    await putCurrent(src, 'a.md', bytes(5));
+    await putCurrent(src, 'sub/b.md', bytes(7));
+    const session = await service.createSession(src);
+    await mkdir(path.dirname(stagedFile(src, session, 'sub/b.md')), { recursive: true });
+    await writeFile(stagedFile(src, session, 'sub/b.md'), bytes(100));
+    await writeFile(stagedFile(src, session, 'c.md'), bytes(100));
+    expect(
+      await overwrittenBytes(
+        path.join(stagingDir(dataDir, src.projectId, src.id, session), 'files'),
+        sourceCurrentDir(dataDir, src.projectId, src.id),
+      ),
+    ).toBe(7);
+  });
+
+  describe('at commit', () => {
+    const stage = async (src: DocumentSourceRow, files: Record<string, number>) => {
+      const session = await service.createSession(src);
+      for (const [rel, size] of Object.entries(files)) {
+        await mkdir(path.dirname(stagedFile(src, session, rel)), { recursive: true });
+        await writeFile(stagedFile(src, session, rel), bytes(size));
+      }
+      return session;
+    };
+
+    it('lets an add over the same paths through when the tree fits once', async () => {
+      const src = freshSource(8);
+      await putCurrent(src, 'a.md', bytes(60));
+      const session = await stage(src, { 'a.md': 60 });
+      // `used` leaves the committing session out; the stored 60 bytes are what the add overwrites.
+      expect(await service.commit(src, session, 'add', quota(100, 60, 60))).toBe(1);
+    });
+
+    it('refuses an add that does not fit beside what stays', async () => {
+      const src = freshSource(9);
+      await putCurrent(src, 'a.md', bytes(60));
+      const session = await stage(src, { 'b.md': 60 });
+      await expect(service.commit(src, session, 'add', quota(100, 60, 60))).rejects.toMatchObject({
+        code: 'quota_exceeded',
+        used: 60,
+        requested: 60,
+      });
+      // The session is still there for a retry after room is made.
+      expect((await stat(stagedFile(src, session, 'b.md'))).size).toBe(60);
+    });
+
+    it('lets a replace through that fits once the stored tree is gone', async () => {
+      const src = freshSource(10);
+      await putCurrent(src, 'a.md', bytes(90));
+      const session = await stage(src, { 'b.md': 90 });
+      expect(await service.commit(src, session, 'replace', quota(100, 90, 90))).toBe(1);
+    });
+
+    it('counts other sources of the project in a replace', async () => {
+      const src = freshSource(11);
+      await putCurrent(src, 'a.md', bytes(40));
+      const session = await stage(src, { 'b.md': 40 });
+      // 30 more bytes live in another upload source: 40 + 30 stays after the swap, 70 > 60.
+      await expect(service.commit(src, session, 'replace', quota(60, 70, 40))).rejects.toMatchObject({
+        code: 'quota_exceeded',
+        used: 30,
+        requested: 40,
+      });
+    });
   });
 });
