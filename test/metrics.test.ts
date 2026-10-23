@@ -94,6 +94,27 @@ describe('the Prometheus exposition', () => {
     expect(samplesOf(down, 'contextator_db_pool_connections')).toEqual([]);
   });
 
+  it('carries source freshness as unlabeled gauges, because ADR-0105 allows no project or source label', () => {
+    const fresh = renderPrometheus({
+      ...SNAPSHOT,
+      sourceFreshness: { oldestSyncedAtSeconds: 1_699_990_000, lagSeconds: 10_000.5, neverSynced: 2 },
+    });
+    expect(samplesOf(fresh, 'contextator_source_last_sync_timestamp_seconds')).toEqual(['contextator_source_last_sync_timestamp_seconds 1699990000']);
+    expect(samplesOf(fresh, 'contextator_source_freshness_lag_seconds')).toEqual(['contextator_source_freshness_lag_seconds 10000.5']);
+    expect(samplesOf(fresh, 'contextator_sources_never_synced')).toEqual(['contextator_sources_never_synced 2']);
+    // Not one sample of the three names a project, a source or a path.
+    expect(fresh).not.toMatch(/contextator_source[a-z_]*\{/);
+  });
+
+  it('states no lag while no scheduled source has synced, rather than a 0 that reads as fresh', () => {
+    const none = renderPrometheus({ ...SNAPSHOT, sourceFreshness: { oldestSyncedAtSeconds: null, lagSeconds: null, neverSynced: 1 } });
+    expect(samplesOf(none, 'contextator_source_freshness_lag_seconds')).toEqual([]);
+    expect(samplesOf(none, 'contextator_source_last_sync_timestamp_seconds')).toEqual([]);
+    expect(samplesOf(none, 'contextator_sources_never_synced')).toEqual(['contextator_sources_never_synced 1']);
+    // And nothing at all while the database could not be read.
+    expect(renderPrometheus(SNAPSHOT)).not.toContain('contextator_source');
+  });
+
   it('escapes a label value rather than letting it end the line', () => {
     const awkward = renderPrometheus({ ...SNAPSHOT, embeddingId: 'local:a "quoted"\\model' });
     expect(awkward).toContain('embedding_id="local:a \\"quoted\\"\\\\model"');

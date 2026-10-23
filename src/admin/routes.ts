@@ -12,7 +12,7 @@ import { removeProjectDir } from '../services/data-dir.js';
 import { assertRebuildDiskSpace, InsufficientDiskError, readDiskSpace } from '../services/disk-space.js';
 import { ForbiddenError, PromotionRefusedError, RateLimitedError, SearchUnavailableError, UnauthorizedError } from '../services/errors.js';
 import { PathNotAllowedError } from '../services/fs-scan.js';
-import { latestIndexRun, listIndexRuns } from '../services/index-runs.js';
+import { latestIndexRun, listIndexRuns, sourceFreshness } from '../services/index-runs.js';
 import { type MetricsSnapshot, renderPrometheus } from '../services/metrics.js';
 import { PasswordPolicyError } from '../services/passwords.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
@@ -317,6 +317,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     // Skipped while the database is down rather than attempted and caught: one failing statement per
     // scrape, every fifteen seconds, is a log nobody can read past.
     const lastRun = dbUp ? await latestIndexRun(db).catch(() => undefined) : undefined;
+    const freshness = dbUp ? await sourceFreshness(db).catch(() => undefined) : undefined;
     const gauges = ctx.metrics.gauges();
     const snapshot: MetricsSnapshot = {
       version: ctx.version,
@@ -333,6 +334,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
             ok: lastRun.status === 'done',
           }
         : null,
+      sourceFreshness: freshness,
       searches: gauges.searches,
       audit: gauges.audit,
       // MCP messages by method, tool and era (`mcp/router.ts` counts them).

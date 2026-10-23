@@ -93,6 +93,24 @@ Changing `EMBEDDING_MODEL` (same dimension) triggers an automatic full re-index 
 needs `RESET_VECTORS=1` on one restart first. Full procedure for both cases, plus upgrading across a
 default-model change: [Embedding Models](https://contextator.com/en/docs/embedding-models/#changing-the-model).
 
+## Tracing (OpenTelemetry)
+
+Tracing is off by default and switches on with one variable. Nothing else changes: with it unset the
+OpenTelemetry packages are never loaded, so a server that does not trace pays nothing for the feature.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | unset (off) | Base URL of an OTLP/HTTP collector, for example `http://otel-collector:4318`. Spans go to `<endpoint>/v1/traces`. Must be an `http(s)` URL. |
+| `OTEL_SERVICE_NAME` | `contextator` | The `service.name` resource attribute on every span. Only read when tracing is on. |
+
+Contextator reads these two itself and hands the address to the exporter. The OpenTelemetry SDK also reads
+some `OTEL_*` variables from the environment on its own, which Contextator does not stop (headers, timeout,
+compression and TLS files for the exporter, batching, sampler and span limits): this is the one exception
+to "the environment is read only in `config.ts`", and a host-wide `OTEL_TRACES_SAMPLER=always_off` would
+silently record nothing. The list, checked against the pinned versions, is in
+[Observability](observability.md#variables-the-opentelemetry-sdk-reads-itself), which also describes the
+spans, the trace-context propagation and the dashboard that goes with `/metrics`.
+
 ## Source links and the "unchanged for a long time" mark
 
 Search and `read_document` answers carry the link to the original document (`sourceUrl`) and the date it last

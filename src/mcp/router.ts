@@ -15,6 +15,7 @@ import { resolveMcpCredential } from './identity.js';
 import { createModernMcpHandler } from './modern-handler.js';
 import { createProjectMcpServer } from './server-factory.js';
 import { toolLabel } from './tools.js';
+import { tracing } from '../services/tracing.js';
 
 /**
  * Counts every JSON-RPC message in a POST body for `contextator_mcp_requests_total`, by method, tool and
@@ -247,7 +248,8 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
       // Stateless: the SDK builds a server for this request alone and the registry never hears of it.
       // An `Mcp-Session-Id` the request may carry is ignored, as the 2026-07-28 revision does.
       reply.hijack();
-      await guarded(reply, () => modern.handle(project, req.raw, reply.raw, req.body));
+      // A 2026 client may send W3C Trace Context; the search spans below then join its trace.
+      await guarded(reply, () => tracing().withRemoteContext(req.headers, () => modern.handle(project, req.raw, reply.raw, req.body)));
       return;
     }
 
@@ -292,7 +294,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     }
 
     reply.hijack();
-    await guarded(reply, () => transport.handleRequest(req.raw, reply.raw, req.body));
+    await guarded(reply, () => tracing().withRemoteContext(req.headers, () => transport.handleRequest(req.raw, reply.raw, req.body)));
   });
 
   // ---- GET: Streamable HTTP server stream, or legacy SSE when no session header is present ----
@@ -357,7 +359,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     countMcpMessages(ctx.metrics, req.body, 'legacy');
 
     reply.hijack();
-    await guarded(reply, () => session.transport.handlePostMessage(req.raw, reply.raw, req.body));
+    await guarded(reply, () => tracing().withRemoteContext(req.headers, () => session.transport.handlePostMessage(req.raw, reply.raw, req.body)));
   });
 
   // ---- Streamable HTTP: explicit session termination ----
