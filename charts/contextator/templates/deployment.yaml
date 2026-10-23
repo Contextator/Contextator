@@ -90,6 +90,10 @@ spec:
             - name: MCP_STRUCTURED_OUTPUT
               value: "1"
             {{- end }}
+            {{- if .Values.config.reindexOnModelChange }}
+            - name: REINDEX_ON_MODEL_CHANGE
+              value: "1"
+            {{- end }}
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}

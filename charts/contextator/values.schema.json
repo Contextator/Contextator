@@ -415,6 +415,10 @@
         "mcpStructuredOutput": {
           "description": "MCP_STRUCTURED_OUTPUT: true adds structuredContent beside every MCP tool's text answer. Off by default; false leaves the variable unset.",
           "type": "boolean"
+        },
+        "reindexOnModelChange": {
+          "description": "REINDEX_ON_MODEL_CHANGE: true queues one re-index at start-up for every project indexed with a different embedding model than the server runs now and that has at least one source. Off by default; false leaves the variable unset.",
+          "type": "boolean"
         }
       }
     },

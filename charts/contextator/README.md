@@ -727,6 +727,9 @@ checks them:
   twice the new value.
 - `config.mcpStructuredOutput` — `true` sets `MCP_STRUCTURED_OUTPUT=1`. `false` (the default) leaves it
   unset.
+- `config.reindexOnModelChange` — `true` sets `REINDEX_ON_MODEL_CHANGE=1`: at start-up the server queues
+  one re-index for every project that was indexed with a different embedding model than it now runs and
+  that has at least one source. `false` (the default) leaves it unset.
 
 ## Publishing
 

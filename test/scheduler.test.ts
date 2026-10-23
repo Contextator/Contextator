@@ -5,6 +5,7 @@ import type { Db } from '../src/db/client.js';
 import type { DocumentSourceRow } from '../src/db/schema.js';
 import { pastMaxSkipAge, runSyncTick, type SchedulerDeps } from '../src/services/scheduler.js';
 import { firstSyncDueAt, PROBE_TOKEN_KEY } from '../src/services/sources.js';
+import { projectsNeedingModelReindex } from '../src/services/startup-maintenance.js';
 
 // The probe is the one outbound edge of a tick; here it answers whatever the test put in `probeAnswer`.
 const probeAnswer = vi.hoisted(() => ({ token: 'T1' as string | null, calls: 0 }));
@@ -217,5 +218,46 @@ describe('a due source whose probe token has not moved', () => {
     const { result, enqueued } = await tick(hoursAgo(25), 24, { claimed: true });
     expect(result).toMatchObject({ claimed: 1, stale: 0, probed: 0, enqueued: 1 });
     expect(enqueued).toEqual([{ projectId: 'project-1', trigger: 'webhook' }]);
+  });
+});
+
+describe('REINDEX_ON_MODEL_CHANGE (ADR-0113)', () => {
+  it('is off by default and reads the same flag spellings as the other switches', () => {
+    expect(EnvSchema.parse(env).REINDEX_ON_MODEL_CHANGE).toBe(false);
+    expect(EnvSchema.parse({ ...env, REINDEX_ON_MODEL_CHANGE: '1' }).REINDEX_ON_MODEL_CHANGE).toBe(true);
+    expect(EnvSchema.parse({ ...env, REINDEX_ON_MODEL_CHANGE: 'true' }).REINDEX_ON_MODEL_CHANGE).toBe(true);
+    expect(EnvSchema.parse({ ...env, REINDEX_ON_MODEL_CHANGE: '0' }).REINDEX_ON_MODEL_CHANGE).toBe(false);
+  });
+
+  const projects = [
+    { id: 'old-model', embeddingModel: 'local:old:fp32' },
+    { id: 'same-model', embeddingModel: 'local:new:fp32' },
+    { id: 'never-indexed', embeddingModel: null },
+    { id: 'no-source', embeddingModel: 'local:old:fp32' },
+    { id: 'unscheduled-source', embeddingModel: 'local:older:fp32' },
+  ];
+  const sources = [
+    { projectId: 'old-model' },
+    { projectId: 'old-model' },
+    { projectId: 'same-model' },
+    { projectId: 'never-indexed' },
+    { projectId: 'unscheduled-source' },
+  ];
+
+  it('selects a project once, when its stamp differs from the server and it has a source', () => {
+    expect(projectsNeedingModelReindex(projects, sources, 'local:new:fp32')).toEqual([
+      { id: 'old-model', indexedWith: 'local:old:fp32' },
+      { id: 'unscheduled-source', indexedWith: 'local:older:fp32' },
+    ]);
+  });
+
+  it('selects nothing when every stamp already matches', () => {
+    expect(
+      projectsNeedingModelReindex(
+        projects.filter((p) => p.id === 'same-model'),
+        sources,
+        'local:new:fp32',
+      ),
+    ).toEqual([]);
   });
 });

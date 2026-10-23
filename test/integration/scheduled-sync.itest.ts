@@ -16,6 +16,7 @@ import { getProjectById } from '../../src/services/projects.js';
 import { runSyncTick, type SchedulerIndexer, type SyncTickResult } from '../../src/services/scheduler.js';
 import { LocalDriver } from '../../src/services/sources/local.js';
 import { PROBE_TOKEN_KEY, createSource } from '../../src/services/sources.js';
+import { runStartupMaintenance } from '../../src/services/startup-maintenance.js';
 import { ensureSchema } from './fixtures/ensure-schema-v5.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 import { WEB_LIMIT_DEFAULTS } from '../../src/config.js';
@@ -559,4 +560,114 @@ describe('the migration that adds the columns', () => {
     expect(scheduled.nextSyncAt!.getTime()).toBeGreaterThanOrEqual(Date.now() - 1000);
     expect(scheduled.nextSyncAt!.getTime()).toBeLessThanOrEqual(Date.now() + 60 * 60_000);
   }, 60_000);
+});
+
+/**
+ * [ADR-0113](../../../.ssot/ADR.md#adr-0113): at start-up, with `REINDEX_ON_MODEL_CHANGE` on, one
+ * scheduled run for every project whose stamp differs from the server's and that has a source — and
+ * nothing for the others. The project is the unit, so the unscheduled-source project is in and the
+ * never-indexed and source-less ones are out.
+ *
+ * The indexer is real, so "a run" is a row in `index_runs` with `trigger = 'scheduled'` and not a call
+ * counted on a stub, and the stamp the run leaves behind is checked as well.
+ */
+describe('REINDEX_ON_MODEL_CHANGE at start-up', () => {
+  const OLD_MODEL = 'local:old-model:fp32';
+  const MARKERS = ['stalesched', 'staleunsched', 'nullstamp', 'nosource', 'current'] as const;
+  let fx: Fixture;
+
+  beforeAll(async () => {
+    fx = await buildFixture('reindex_model_change', [...MARKERS]);
+  });
+
+  afterAll(async () => {
+    for (const root of fx.roots.values()) await rm(root, { recursive: true, force: true }).catch(() => undefined);
+    await dropTestDatabase(baseUrl, fx.database);
+  });
+
+  const id = (marker: (typeof MARKERS)[number]): string => fx.projectIds.get(marker)!;
+
+  /** The state a model change leaves behind: every project stamped, and the server now running another model. */
+  async function arrange(): Promise<void> {
+    const db = fx.database.db;
+    await db.delete(indexRuns);
+    await db.update(projects).set({ embeddingModel: OLD_MODEL, status: 'idle' });
+    await db
+      .update(projects)
+      .set({ embeddingModel: null })
+      .where(eq(projects.id, id('nullstamp')));
+    await db
+      .update(projects)
+      .set({ embeddingModel: MODEL_ID })
+      .where(eq(projects.id, id('current')));
+    await db.delete(documentSources).where(eq(documentSources.projectId, id('nosource')));
+    // One of the two stale projects is on a timer and the other is not; the flag treats them alike.
+    await makeDue(db, fx.sourceIds.get('stalesched')!, 60);
+    await db
+      .update(documentSources)
+      .set({ syncIntervalMinutes: null, nextSyncAt: null })
+      .where(eq(documentSources.id, fx.sourceIds.get('staleunsched')!));
+  }
+
+  async function maintain(reindexOnModelChange: { embeddingModelId: string } | undefined): Promise<string[]> {
+    const queued: string[] = [];
+    const jobs: JobState[] = [];
+    await runStartupMaintenance({
+      db: fx.database.db,
+      dataDir: path.join(fx.schedulerConfig.DATA_DIR),
+      locks: new KeyedMutex(),
+      indexer: {
+        enqueue: (projectId, opts) => {
+          queued.push(projectId);
+          const job = fx.indexer.enqueue(projectId, opts);
+          jobs.push(job);
+          return job;
+        },
+      },
+      log: silentLogger,
+      reindexOnModelChange,
+    });
+    for (const job of jobs) await settle(fx.database.db, job);
+    return queued;
+  }
+
+  const scheduledRuns = async (): Promise<Map<string, number>> => {
+    const rows = await fx.database.db.select({ projectId: indexRuns.projectId, trigger: indexRuns.trigger }).from(indexRuns);
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      expect(row.trigger).toBe('scheduled');
+      counts.set(row.projectId, (counts.get(row.projectId) ?? 0) + 1);
+    }
+    return counts;
+  };
+
+  it('queues nothing when the flag is off, whatever the stamps say', async () => {
+    await arrange();
+    expect(await maintain(undefined)).toEqual([]);
+    expect((await scheduledRuns()).size).toBe(0);
+    expect((await getProjectById(fx.database.db, id('stalesched')))!.embeddingModel).toBe(OLD_MODEL);
+  });
+
+  it('queues exactly one scheduled run for each project with a differing stamp and a source, scheduled or not', async () => {
+    await arrange();
+    const queued = await maintain({ embeddingModelId: MODEL_ID });
+
+    expect([...queued].sort()).toEqual([id('stalesched'), id('staleunsched')].sort());
+    const runs = await scheduledRuns();
+    expect(runs.get(id('stalesched'))).toBe(1);
+    expect(runs.get(id('staleunsched'))).toBe(1);
+    // Null stamp, no source, and a stamp that already matches: no run.
+    expect(runs.has(id('nullstamp'))).toBe(false);
+    expect(runs.has(id('nosource'))).toBe(false);
+    expect(runs.has(id('current'))).toBe(false);
+    expect(runs.size).toBe(2);
+
+    // The run was the full rebuild the stamp asks for: the project now carries the server's model.
+    expect((await getProjectById(fx.database.db, id('stalesched')))!.embeddingModel).toBe(MODEL_ID);
+    expect((await getProjectById(fx.database.db, id('staleunsched')))!.embeddingModel).toBe(MODEL_ID);
+  }, 60_000);
+
+  it('queues nothing on the next start, because the stamps now match', async () => {
+    expect(await maintain({ embeddingModelId: MODEL_ID })).toEqual([]);
+  });
 });

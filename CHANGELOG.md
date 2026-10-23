@@ -12,6 +12,10 @@ ships, that stops.
 
 ### Added
 
+- **Re-index on embedding-model change.** With `REINDEX_ON_MODEL_CHANGE=1` (off by default; Helm
+  `config.reindexOnModelChange`), start-up queues one scheduled run for every project stamped with a different
+  model than the server runs and that has at least one source, scheduled or not. A project that was never
+  indexed or has no source is left alone, and the flag off behaves as before (ADR-0113).
 - **Default auth and bind address as product facts.** `public/product-facts.json` gains `defaultMcpAuth`
   (read from `DEFAULT_MCP_AUTH`) and `defaultBindAddress` (the address the compose files publish the port
   on). The bind address is read from `docker-compose.yml` and `docker-compose.slim.yml` with a YAML parser;

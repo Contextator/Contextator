@@ -221,7 +221,14 @@ async function main(): Promise<void> {
   // Data directory for materialised sources.
   await fs.mkdir(config.DATA_DIR, { recursive: true });
   // Orphan directories, abandoned generations and runs a restart cut short (see the function).
-  await runStartupMaintenance({ db, dataDir: config.DATA_DIR, locks, indexer, log });
+  await runStartupMaintenance({
+    db,
+    dataDir: config.DATA_DIR,
+    locks,
+    indexer,
+    log,
+    reindexOnModelChange: config.REINDEX_ON_MODEL_CHANGE ? { embeddingModelId: embeddings.id } : undefined,
+  });
 
   // Model download/load can take a while on first start; don't block the dashboard on it.
   void embeddings

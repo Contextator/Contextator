@@ -145,6 +145,10 @@ config:
   # model the structured part alone when both are present, so the guidance each answer carries
   # would reach it only as a JSON field. `false` leaves the variable unset (the app's default, 0).
   mcpStructuredOutput: false
+  # REINDEX_ON_MODEL_CHANGE: true makes the server queue one re-index at start-up for every project that
+  # was indexed with a different embedding model than the one it now runs (and that has a source).
+  # Off by default; `false` leaves the variable unset.
+  reindexOnModelChange: false
 
 # -----------------------------------------------------------------------------------------------
 # Persistence

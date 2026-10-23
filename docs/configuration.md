@@ -93,6 +93,14 @@ Changing `EMBEDDING_MODEL` (same dimension) triggers an automatic full re-index 
 needs `RESET_VECTORS=1` on one restart first. Full procedure for both cases, plus upgrading across a
 default-model change: [Embedding Models](https://contextator.com/en/docs/embedding-models/#changing-the-model).
 
+`REINDEX_ON_MODEL_CHANGE=1` (off by default) removes the button press. On start-up the server queues one
+re-index for every project that was indexed with a different model than the one it now runs and that has at
+least one source, scheduled or not. A project that was never indexed, or has no source, is left alone. The
+runs go through the normal queue, so the indexer's concurrency limit spreads them out, and each one is
+logged with the reason; a run refused for lack of disk space is recorded in the project's run history like
+any other. With the flag off, nothing changes: such a project answers `model_mismatch` until someone
+re-indexes it.
+
 ## Tracing (OpenTelemetry)
 
 Tracing is off by default and switches on with one variable. Nothing else changes: with it unset the
