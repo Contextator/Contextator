@@ -311,6 +311,37 @@ describe('the project quotas API and the upload quota', () => {
       expect(refused.json()).toMatchObject({ used: 60, requested: 60 });
     });
 
+    it('lets concurrent file requests see each other: three sessions of 40 bytes against a limit of 100', async () => {
+      const { project, source } = await newUploadProject('quota-concurrent', { maxUploadBytes: 100 });
+      const url = `/api/projects/${project.id}/sources/${source.id}/uploads`;
+      const sessions = await Promise.all(
+        [1, 2, 3].map(async () => (await api.app.inject({ method: 'POST', url, headers: ADMIN })).json().session as string),
+      );
+      const results = await Promise.all(
+        sessions.map((session, i) => {
+          const { payload, headers } = multipart([[`f${i}.md`, 'x'.repeat(40)]]);
+          return api.app.inject({ method: 'POST', url: `${url}/${session}/files`, headers: { ...ADMIN, ...headers }, payload });
+        }),
+      );
+      expect(results.map((r) => r.statusCode).sort()).toEqual([200, 200, 413]);
+      // What is on disk never exceeds the limit, whichever request lost.
+      expect(await directoryBytes(path.join(dataDir, 'projects', project.id))).toBeLessThanOrEqual(100);
+    });
+
+    it('does not renew, and so does not 404, for a project without a quota', async () => {
+      const { project, source } = await newUploadProject('quota-none-unknown-session');
+      const unknown = '0'.repeat(32);
+      const { payload, headers } = multipart([['a.md', 'hello']]);
+      const res = await api.app.inject({
+        method: 'POST',
+        url: `/api/projects/${project.id}/sources/${source.id}/uploads/${unknown}/files`,
+        headers: { ...ADMIN, ...headers },
+        payload,
+      });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().errors).toHaveLength(1);
+    });
+
     it('refuses to open a session once the project is at its limit', async () => {
       const { project, source } = await newUploadProject('quota-at-cap', { maxUploadBytes: 10 });
       const url = `/api/projects/${project.id}/sources/${source.id}/uploads`;

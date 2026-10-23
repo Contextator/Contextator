@@ -86,10 +86,16 @@ export const uploadRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     // Checked per request and not only when the session opens: a folder upload is many requests, and the
     // disk can fill between the first and the last. Refused before a byte of this request is written.
     await assertDiskSpace(config.DATA_DIR, config.DATA_DIR_MIN_FREE_BYTES);
-    // Renewed first: a session idle past the expiry is not counted, and this request revives it.
-    await uploads.renew(source, session);
-    const quota = await loadUploadQuota(id, sid);
-    const tracker: UploadRequestQuota | undefined = quota ? await uploads.beginRequest(source, session, quota) : undefined;
+    // Joins the project's reservation before the project is measured, so that requests running at the same
+    // time see each other's bytes. Renewing comes first and only when a quota applies: a session idle past the
+    // expiry is not counted and this request revives it, while a project without a quota behaves as it always has.
+    const tracker: UploadRequestQuota | undefined = await uploads.startRequest(source, session, async () => {
+      const project = await getProjectById(db, id);
+      if (!project) throw new NotFoundError('Project not found');
+      if (resolveQuotas(project, config).uploadBytes.limit === 0) return undefined;
+      await uploads.renew(source, session);
+      return loadUploadQuota(id, sid);
+    });
     const totals: ImportStats = { files: 0, skipped: 0, bytes: 0 };
     const errors: string[] = [];
     let finished = false;

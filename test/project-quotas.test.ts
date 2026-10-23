@@ -229,6 +229,64 @@ describe('UploadService against a quota', () => {
     await expect(service.addFile(src, session, 'new.md', await stream(bytes(1500)), tracker)).rejects.toBeInstanceOf(QuotaExceededError);
   });
 
+  /** A source in a project of its own: the reservation is per project, and the other tests leave trackers open in theirs. */
+  const isolatedSource = (n: number): DocumentSourceRow =>
+    ({ ...freshSource(n), projectId: `33333333-3333-4333-8333-${String(n).padStart(12, '0')}` }) as unknown as DocumentSourceRow;
+
+  it('lets concurrent requests of one project see each other, though each measured the project alone', async () => {
+    const src = isolatedSource(8);
+    const sessions = await Promise.all([1, 2, 3].map(() => service.createSession(src, quota(100, 0))));
+    // All three measured an empty project before any of them wrote.
+    const trackers = await Promise.all(sessions.map((s) => service.beginRequest(src, s, quota(100, 0))));
+    await service.addFile(src, sessions[0]!, 'a.md', await stream(bytes(40)), trackers[0]);
+    await service.addFile(src, sessions[1]!, 'b.md', await stream(bytes(40)), trackers[1]);
+    await expect(service.addFile(src, sessions[2]!, 'c.md', await stream(bytes(40)), trackers[2])).rejects.toMatchObject({
+      code: 'quota_exceeded',
+      limit: 100,
+      used: 80,
+      requested: 40,
+    });
+    await service.finishRequest(trackers[0]!);
+    await service.finishRequest(trackers[1]!);
+    await service.rollbackRequest(trackers[2]!);
+  });
+
+  it('gives the reservation back when a request is taken back, and keeps it while another request runs', async () => {
+    const src = isolatedSource(9);
+    const [s1, s2, s3, s4] = await Promise.all([1, 2, 3, 4].map(() => service.createSession(src, quota(100, 0))));
+    const a = await service.beginRequest(src, s1!, quota(100, 0));
+    const b = await service.beginRequest(src, s2!, quota(100, 0));
+    await service.addFile(src, s1!, 'a.md', await stream(bytes(60)), a);
+    await service.rollbackRequest(a);
+    // The taken-back 60 bytes are neither on disk nor reserved: b may use them.
+    await service.addFile(src, s2!, 'b.md', await stream(bytes(60)), b);
+    // b is still running, so its 60 bytes are in the reservation for a request that starts now. That request
+    // measures the disk after b wrote, so it does not count them a second time.
+    const c = await service.beginRequest(src, s3!, quota(100, 60));
+    expect(c.reservedAtStart).toBe(60);
+    expect(c.projectedUsed).toBe(60);
+    await service.finishRequest(b);
+    // b finishing leaves its bytes in the total for the requests still running (c measured the disk
+    // before it landed in `files/`): a later request of c's 40 bytes still fits exactly.
+    await service.addFile(src, s3!, 'c.md', await stream(bytes(40)), c);
+    await expect(service.addFile(src, s4!, 'd.md', await stream(bytes(1)), c)).rejects.toMatchObject({ code: 'quota_exceeded' });
+    await service.rollbackRequest(c);
+  });
+
+  it('starts no tracking when the project has no quota, and leaves the reservation when measuring fails', async () => {
+    const src = isolatedSource(10);
+    const session = await service.createSession(src);
+    expect(await service.startRequest(src, session, async () => undefined)).toBeUndefined();
+    await expect(
+      service.startRequest(src, session, async () => {
+        throw new Error('measure failed');
+      }),
+    ).rejects.toThrow('measure failed');
+    const tracker = await service.startRequest(src, session, async () => quota(100, 0));
+    expect(tracker?.reservedAtStart).toBe(0);
+    await service.rollbackRequest(tracker!);
+  });
+
   it('keeps what earlier requests staged when a later request over the same path is refused', async () => {
     const src = freshSource(6);
     const session = await service.createSession(src, quota(100, 0));

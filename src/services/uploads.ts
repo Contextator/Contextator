@@ -29,6 +29,19 @@ export interface UploadQuota {
 }
 
 /**
+ * What the requests of one project that are in flight right now have added, net of the files they overwrite.
+ * It exists so that concurrent `files` requests see each other: each measures the project from the disk when
+ * it starts, and none of them could otherwise know about the bytes the others write afterwards. It lives only
+ * while a request of the project does, and is dropped when the last one ends.
+ */
+interface ProjectReservation {
+  /** Requests that have joined and not yet finished or been taken back. */
+  active: number;
+  /** The sum of `requestBytes` over every request that joined since the first of the current ones, including those that finished. */
+  reserved: number;
+}
+
+/**
  * Tracks one `.../files` request against the quota. The request writes into a scratch directory of its own
  * beside the session's `files/`, so that a request the quota refuses is taken back by deleting that one
  * directory and cannot touch what earlier requests staged; `finishRequest` moves it into place.
@@ -38,6 +51,8 @@ export class UploadRequestQuota {
   requestBytes = 0;
   /** What the request has written so far, by path relative to the scratch directory: a path sent twice is charged for its growth only. */
   readonly written = new Map<string, number>();
+  /** Set once the request has finished or been taken back, so that it leaves the reservation once. */
+  left = false;
   constructor(
     readonly limit: number,
     /** What the project stores when the request began, with the session's overwrites of `current/` counted once. */
@@ -45,7 +60,16 @@ export class UploadRequestQuota {
     readonly scratchDir: string,
     readonly filesDir: string,
     readonly currentDir: string,
+    readonly reservation: ProjectReservation = { active: 1, reserved: 0 },
+    /** `reservation.reserved` when the request joined, taken before the project was measured: what came after is not in `baseUsed`. */
+    readonly reservedAtStart: number = 0,
+    readonly projectId: string = '',
   ) {}
+
+  /** What the project holds as far as this request can tell: the measurement plus everything requests have added since. */
+  get projectedUsed(): number {
+    return this.baseUsed + this.reservation.reserved - this.reservedAtStart;
+  }
 }
 
 /** Moves every file of `from` into `to` (creating directories), overwriting what is there. */
@@ -71,6 +95,24 @@ export class UploadService {
       'DATA_DIR' | 'UPLOAD_MAX_FILE_BYTES' | 'UPLOAD_MAX_ARCHIVE_BYTES' | 'ARCHIVE_MAX_ENTRIES' | 'ARCHIVE_MAX_TOTAL_BYTES'
     >,
   ) {}
+
+  /** Per project, the requests in flight (see `ProjectReservation`). */
+  private readonly reservations = new Map<string, ProjectReservation>();
+
+  private join(projectId: string): { reservation: ProjectReservation; reservedAtStart: number } {
+    let reservation = this.reservations.get(projectId);
+    if (!reservation) {
+      reservation = { active: 0, reserved: 0 };
+      this.reservations.set(projectId, reservation);
+    }
+    reservation.active++;
+    return { reservation, reservedAtStart: reservation.reserved };
+  }
+
+  private leave(projectId: string, reservation: ProjectReservation): void {
+    reservation.active--;
+    if (reservation.active <= 0 && this.reservations.get(projectId) === reservation) this.reservations.delete(projectId);
+  }
 
   private limitsFor(source: DocumentSourceRow): ImportLimits {
     const extensions = (source.config as { extensions?: string[] }).extensions ?? ['md', 'mdx', 'txt'];
@@ -126,24 +168,79 @@ export class UploadService {
    * a file of them that overwrites one in `current/` is counted once, because that is what `add` leaves behind.
    */
   async beginRequest(source: DocumentSourceRow, session: string, quota: UploadQuota): Promise<UploadRequestQuota> {
-    const filesDir = await this.requireSession(source, session);
-    const currentDir = sourceCurrentDir(this.config.DATA_DIR, source.projectId, source.id);
-    const baseUsed = Math.max(0, quota.used - (await overwrittenBytes(filesDir, currentDir)));
-    const scratchDir = path.join(path.dirname(filesDir), `request-${randomBytes(8).toString('hex')}`);
-    await fs.mkdir(scratchDir, { recursive: true });
-    return new UploadRequestQuota(quota.limit, baseUsed, scratchDir, filesDir, currentDir);
+    const { reservation, reservedAtStart } = this.join(source.projectId);
+    return this.openRequest(source, session, quota, reservation, reservedAtStart);
+  }
+
+  /**
+   * `beginRequest` for a request that has not measured the project yet. `measure` returns the quota in force, or
+   * `undefined` when there is none, and then no tracking happens. The request joins the project's reservation
+   * **before** `measure` runs: bytes another request writes while the project is being measured may be counted
+   * twice, never missed, so concurrent requests cannot together carry the project past the limit.
+   */
+  async startRequest(
+    source: DocumentSourceRow,
+    session: string,
+    measure: () => Promise<UploadQuota | undefined>,
+  ): Promise<UploadRequestQuota | undefined> {
+    const { reservation, reservedAtStart } = this.join(source.projectId);
+    try {
+      const quota = await measure();
+      if (!quota) {
+        this.leave(source.projectId, reservation);
+        return undefined;
+      }
+      return await this.openRequest(source, session, quota, reservation, reservedAtStart);
+    } catch (err) {
+      this.leave(source.projectId, reservation);
+      throw err;
+    }
+  }
+
+  private async openRequest(
+    source: DocumentSourceRow,
+    session: string,
+    quota: UploadQuota,
+    reservation: ProjectReservation,
+    reservedAtStart: number,
+  ): Promise<UploadRequestQuota> {
+    try {
+      const filesDir = await this.requireSession(source, session);
+      const currentDir = sourceCurrentDir(this.config.DATA_DIR, source.projectId, source.id);
+      const baseUsed = Math.max(0, quota.used - (await overwrittenBytes(filesDir, currentDir)));
+      const scratchDir = path.join(path.dirname(filesDir), `request-${randomBytes(8).toString('hex')}`);
+      await fs.mkdir(scratchDir, { recursive: true });
+      return new UploadRequestQuota(quota.limit, baseUsed, scratchDir, filesDir, currentDir, reservation, reservedAtStart, source.projectId);
+    } catch (err) {
+      this.leave(source.projectId, reservation);
+      throw err;
+    }
+  }
+
+  private release(tracker: UploadRequestQuota): void {
+    if (tracker.left) return;
+    tracker.left = true;
+    this.leave(tracker.projectId, tracker.reservation);
   }
 
   /** Throws away everything a request wrote. The session's earlier files are untouched. */
   async rollbackRequest(tracker: UploadRequestQuota): Promise<void> {
     await fs.rm(tracker.scratchDir, { recursive: true, force: true, maxRetries: 5 }).catch(() => undefined);
+    tracker.reservation.reserved -= tracker.requestBytes;
     tracker.requestBytes = 0;
+    this.release(tracker);
   }
 
   /** Puts what a request wrote into the session's `files/`, over any file of the same path, and drops the scratch directory. */
   async finishRequest(tracker: UploadRequestQuota): Promise<void> {
-    await moveTree(tracker.scratchDir, tracker.filesDir);
-    await fs.rm(tracker.scratchDir, { recursive: true, force: true, maxRetries: 5 }).catch(() => undefined);
+    try {
+      await moveTree(tracker.scratchDir, tracker.filesDir);
+      await fs.rm(tracker.scratchDir, { recursive: true, force: true, maxRetries: 5 }).catch(() => undefined);
+    } finally {
+      // A finished request stays in the reservation's total for the requests still running: its bytes are on disk
+      // now, but those requests measured the project before they got there.
+      this.release(tracker);
+    }
   }
 
   /**
@@ -234,10 +331,13 @@ export class UploadService {
         (await fileSize(path.join(tracker.currentDir, relative))) ??
         0;
       tracker.requestBytes += now - before;
+      tracker.reservation.reserved += now - before;
       tracker.written.set(relative, now);
     }
-    if (tracker.baseUsed + tracker.requestBytes > tracker.limit) {
-      throw new QuotaExceededError('max_upload_bytes', tracker.limit, tracker.baseUsed, Math.max(0, tracker.requestBytes));
+    if (tracker.projectedUsed > tracker.limit) {
+      // What the project held before this request wrote, as far as anyone could tell: the other requests' share included.
+      const requested = Math.max(0, tracker.requestBytes);
+      throw new QuotaExceededError('max_upload_bytes', tracker.limit, tracker.projectedUsed - tracker.requestBytes, requested);
     }
   }
 
