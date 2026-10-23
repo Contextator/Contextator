@@ -12,6 +12,22 @@ ships, that stops.
 
 ### Added
 
+- **Default auth and bind address as product facts.** `public/product-facts.json` gains `defaultMcpAuth`
+  (read from `DEFAULT_MCP_AUTH`) and `defaultBindAddress` (the address the compose files publish the port
+  on). The bind address is read from `docker-compose.yml` and `docker-compose.slim.yml` with a YAML parser;
+  `npm run build:facts` fails if they disagree or if the `${CONTEXTATOR_BIND:-…}` expression changes shape
+  (ADR-0114). The README claims about both are tested against the facts.
+- **Contributing a connector.** `docs/contributing-a-connector.md` lists every place a new source type touches,
+  in order, and `test/connector-guide.test.ts` registers a throwaway driver through those steps so the guide
+  cannot drift from the code. `CONTRIBUTING.md` links it. No plugin loader is added (ADR-0012).
+- **One-click deploy templates.** `deploy/railway/`, `deploy/render/` and `deploy/fly/` set up the `-slim` image
+  with a PostgreSQL and a volume on Railway, Render and Fly.io; `docs/deployment.md` has the steps for each.
+  Projects stay token-protected, the first-run page needs `SETUP_CODE`, and `test/deploy-templates.test.ts`
+  fails if a template carries a setting that opens authentication.
+- **Startup warning for open projects on a reachable address.** When the server listens on a non-loopback
+  address and at least one project has no MCP token, the log says which projects (ADR-0114). Said once at
+  start; nothing changes for a loopback bind or for token-protected projects.
+
 - **Source freshness metrics.** `/metrics` gains `contextator_source_last_sync_timestamp_seconds` and
   `contextator_source_freshness_lag_seconds`, which describe the scheduled source that has gone longest
   without a successful sync, and `contextator_sources_never_synced`. They are single, unlabeled series:
