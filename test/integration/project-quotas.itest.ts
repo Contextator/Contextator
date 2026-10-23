@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -12,7 +12,7 @@ import { SESSION_COOKIE } from '../../src/auth/cookies.js';
 import { WEB_LIMIT_DEFAULTS } from '../../src/config.js';
 import type { AppContext } from '../../src/context.js';
 import type { Db } from '../../src/db/client.js';
-import { auditEvents, documentSources, indexRuns, projects } from '../../src/db/schema.js';
+import { auditEvents, documentSources, documents, indexRuns, projects } from '../../src/db/schema.js';
 import { SessionRegistry } from '../../src/mcp/sessions.js';
 import { AuditWriter } from '../../src/services/audit.js';
 import { createSession } from '../../src/services/auth/sessions.js';
@@ -21,6 +21,7 @@ import { setMemberRole } from '../../src/services/auth/memberships.js';
 import { createUser } from '../../src/services/auth/users.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
 import { Indexer, type JobState } from '../../src/services/indexer.js';
+import { stagingDir } from '../../src/services/data-dir.js';
 import { KeyedMutex } from '../../src/services/locks.js';
 import { MetricsRegistry } from '../../src/services/metrics.js';
 import { createProject, getProjectById } from '../../src/services/projects.js';
@@ -345,6 +346,87 @@ describe('the project quotas API and the upload quota', () => {
       }
     });
 
+    it('lets a tree be uploaded again over the same paths when it is larger than half the limit', async () => {
+      const { project, source } = await newUploadProject('quota-reupload', { maxUploadBytes: 100 });
+      const url = `/api/projects/${project.id}/sources/${source.id}/uploads`;
+      const upload = async (mode: 'add' | 'replace', parts: Array<[string, string]>) => {
+        const session = (await api.app.inject({ method: 'POST', url, headers: ADMIN })).json().session as string;
+        const { payload, headers } = multipart(parts);
+        const put = await api.app.inject({ method: 'POST', url: `${url}/${session}/files`, headers: { ...ADMIN, ...headers }, payload });
+        const commit =
+          put.statusCode === 200 ? await api.app.inject({ method: 'POST', url: `${url}/${session}/commit?mode=${mode}`, headers: ADMIN }) : put;
+        return { put, commit };
+      };
+
+      expect((await upload('add', [['a.md', 'a'.repeat(60)]])).commit.statusCode).toBe(202);
+      // The same path again, 60 bytes: 60 stored + 60 staged only looks like 120 if the overwrite is counted twice.
+      const again = await upload('add', [['a.md', 'b'.repeat(60)]]);
+      expect(again.put.statusCode, again.put.body).toBe(200);
+      expect(again.commit.statusCode, again.commit.body).toBe(202);
+      // A different path is a real addition and is still refused.
+      expect((await upload('add', [['other.md', 'c'.repeat(60)]])).put.statusCode).toBe(413);
+      // A replace commits against what is kept after the old tree goes, so a smaller tree is accepted.
+      const replaced = await upload('replace', [['fresh.md', 'd'.repeat(40)]]);
+      expect(replaced.put.statusCode, replaced.put.body).toBe(200);
+      expect(replaced.commit.statusCode, replaced.commit.body).toBe(202);
+    });
+
+    it('counts the staging of other open sessions, its own once, and stops counting a session left idle for a day', async () => {
+      const { project, source } = await newUploadProject('quota-staging', { maxUploadBytes: 100 });
+      const url = `/api/projects/${project.id}/sources/${source.id}/uploads`;
+      const open = async () => (await api.app.inject({ method: 'POST', url, headers: ADMIN })).json().session as string;
+      const post = async (session: string, parts: Array<[string, string]>) => {
+        const { payload, headers } = multipart(parts);
+        return api.app.inject({ method: 'POST', url: `${url}/${session}/files`, headers: { ...ADMIN, ...headers }, payload });
+      };
+      const usedNow = async () =>
+        (await api.app.inject({ method: 'GET', url: `/api/projects/${project.id}`, headers: ADMIN })).json().quotas.uploadBytes.used as number;
+
+      const first = await open();
+      const second = await open();
+      expect((await post(first, [['one.md', 'x'.repeat(60)]])).statusCode).toBe(200);
+      // Only one session has staged anything, and its 60 bytes show once.
+      expect(await usedNow()).toBe(60);
+
+      // The second session does not fit beside the first one's staging, though nothing is committed yet.
+      const refused = await post(second, [['two.md', 'y'.repeat(60)]]);
+      expect(refused.statusCode).toBe(413);
+      expect(refused.json()).toMatchObject({ limit: 100, used: 60, requested: 60 });
+
+      // The first session is abandoned: after a day without a request it holds no quota.
+      const longAgo = new Date(Date.now() - 25 * 60 * 60 * 1000);
+      await utimes(stagingDir(dataDir, project.id, source.id, first), longAgo, longAgo);
+      expect(await usedNow()).toBe(0);
+      expect((await post(second, [['two.md', 'y'.repeat(60)]])).statusCode).toBe(200);
+
+      // A request on the idle session renews it (even one the quota then refuses), and its files count again.
+      expect((await post(first, [['one-more.md', 'z'.repeat(10)]])).statusCode).toBe(413);
+      expect(await usedNow()).toBe(120);
+    });
+
+    it('checks a commit against what other sessions and sources keep, with its own staging counted once', async () => {
+      const { project, source } = await newUploadProject('quota-commit-staging', { maxUploadBytes: 100 });
+      const url = `/api/projects/${project.id}/sources/${source.id}/uploads`;
+      const session = (await api.app.inject({ method: 'POST', url, headers: ADMIN })).json().session as string;
+      const { payload, headers } = multipart([['mine.md', 'm'.repeat(70)]]);
+      expect((await api.app.inject({ method: 'POST', url: `${url}/${session}/files`, headers: { ...ADMIN, ...headers }, payload })).statusCode).toBe(
+        200,
+      );
+      // 70 staged by this session alone: committing it must not be read as 140.
+      expect((await api.app.inject({ method: 'POST', url: `${url}/${session}/commit`, headers: ADMIN })).statusCode).toBe(202);
+    });
+
+    it('reports access and sourceCount on a single project as the list does', async () => {
+      const { project } = await newUploadProject('quota-single-read');
+      const memberId = (globalThis as { __memberId?: string }).__memberId!;
+      await setMemberRole(apiDb.db, project.id, memberId, 'viewer', null);
+      const asViewer = await api.app.inject({ method: 'GET', url: `/api/projects/${project.id}`, cookies: { [SESSION_COOKIE]: memberCookie } });
+      expect(asViewer.statusCode, asViewer.body).toBe(200);
+      expect(asViewer.json()).toMatchObject({ access: 'viewer', sourceCount: 1 });
+      const asAdmin = await api.app.inject({ method: 'GET', url: `/api/projects/${project.id}`, headers: ADMIN });
+      expect(asAdmin.json()).toMatchObject({ access: 'manager', sourceCount: 1 });
+    });
+
     it('answers 503 and refuses the request when the stored bytes cannot be measured, while GET still answers', async () => {
       const { project, source } = await newUploadProject('quota-unmeasurable', { maxUploadBytes: 1000 });
       const sourceDir = path.join(dataDir, 'projects', project.id, 'sources', source.id);
@@ -562,11 +644,34 @@ describe('document and chunk quotas in an indexing run', () => {
     expect(await hitsFor()).toEqual(baseline);
   });
 
+  it('lets an incremental run at the chunk limit rename a document, because the old name stops counting', async () => {
+    // 4 documents of 1 chunk each, and the limit is exactly that. A rename adds a document under the new path
+    // while the old one only leaves the index at the end of the run, so it fits only if the chunks of the
+    // document that is no longer on disk are not held against the run.
+    await setProjectQuotas(database.db, projectId, { maxDocuments: 0, maxChunks: FILES.length });
+    await rename(path.join(root, 'bravo.md'), path.join(root, 'bravo-renamed.md'));
+
+    const renamed = await run();
+    expect(renamed.phase, renamed.error).toBe('done');
+    expect(await getProjectById(database.db, projectId)).toMatchObject({ documentCount: FILES.length, chunkCount: FILES.length });
+    const paths = async () =>
+      (await database.db.select({ p: documents.relativePath }).from(documents).where(eq(documents.projectId, projectId))).map((r) => r.p).sort();
+    expect(await paths()).toEqual(['handbook/alpha.md', 'handbook/bravo-renamed.md', 'handbook/charlie.md', 'handbook/delta.md']);
+
+    await rename(path.join(root, 'bravo-renamed.md'), path.join(root, 'bravo.md'));
+    const back = await run();
+    expect(back.phase, back.error).toBe('done');
+    expect(await paths()).toEqual(FILES.map((f) => `handbook/${f}`).sort());
+  });
+
   it('keeps the documents an incremental run finished before the breach, deletes nothing, and recounts', async () => {
-    // Sorted order puts `aaa-new.md` first: it fits (5 chunks of 5), `zzz-big.md` is the one over.
+    // Sorted order puts `aaa-new.md` first: it fits once the chunk of the deleted `delta.md` is let go of,
+    // and `zzz-big.md` is the one over. `delta.md` is gone from disk, but a run that ended in error skips the
+    // removal pass, so its document and its chunks are still in the index and still searchable.
+    await rm(path.join(root, 'delta.md'));
     await writeFile(path.join(root, 'aaa-new.md'), body('fresh', 'aaa-new'), 'utf8');
     await writeFile(path.join(root, 'zzz-big.md'), body('fresh', 'zzz-big'), 'utf8');
-    await setProjectQuotas(database.db, projectId, { maxChunks: FILES.length + 1 });
+    await setProjectQuotas(database.db, projectId, { maxChunks: FILES.length });
 
     const job = await run();
     expect(job.phase).toBe('error');
@@ -575,12 +680,18 @@ describe('document and chunk quotas in an indexing run', () => {
     const after = await getProjectById(database.db, projectId);
     expect(after).toMatchObject({ status: 'error', documentCount: FILES.length + 1, chunkCount: FILES.length + 1 });
 
+    const rows = (await database.db.select({ p: documents.relativePath }).from(documents).where(eq(documents.projectId, projectId)))
+      .map((r) => r.p)
+      .sort();
+    expect(rows).toEqual(['handbook/aaa-new.md', 'handbook/alpha.md', 'handbook/bravo.md', 'handbook/charlie.md', 'handbook/delta.md']);
+
     const hits = await hitsFor('fresh aaa new secret rotate');
-    expect(hits.some((h) => h.startsWith('aaa-new.md|') || h.includes('aaa-new.md|'))).toBe(true);
+    expect(hits.some((h) => h.includes('aaa-new.md|'))).toBe(true);
     expect(hits.some((h) => h.includes('zzz-big.md|'))).toBe(false);
-    // Every document that was indexed before the run is still there.
-    const old = await hitsFor();
-    for (const file of FILES)
-      expect(old.concat(await hitsFor(`rotate the ${file.replace('.md', '')} secret`)).some((h) => h.includes(`${file}|`))).toBe(true);
+    // Every document that was indexed before the run is still there, the deleted one included, and nothing
+    // a search returns points at a document the index does not list.
+    const everything = (await Promise.all(FILES.map((f) => hitsFor(`rotate the ${f.replace('.md', '')} secret`)))).flat().concat(await hitsFor());
+    for (const file of FILES) expect(everything.some((h) => h.includes(`${file}|`))).toBe(true);
+    for (const hit of everything) expect(rows).toContain(hit.split('|')[0]);
   });
 });
