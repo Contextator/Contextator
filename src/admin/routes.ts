@@ -10,11 +10,20 @@ import type { ProjectRow } from '../db/schema.js';
 import { keyringOf, SecretDecryptError, SecretKeyMissingError } from '../services/crypto.js';
 import { removeProjectDir } from '../services/data-dir.js';
 import { assertRebuildDiskSpace, InsufficientDiskError, readDiskSpace } from '../services/disk-space.js';
-import { ForbiddenError, PromotionRefusedError, RateLimitedError, SearchUnavailableError, UnauthorizedError } from '../services/errors.js';
+import {
+  ForbiddenError,
+  PromotionRefusedError,
+  QuotaExceededError,
+  QuotaUsageUnavailableError,
+  RateLimitedError,
+  SearchUnavailableError,
+  UnauthorizedError,
+} from '../services/errors.js';
 import { PathNotAllowedError } from '../services/fs-scan.js';
 import { latestIndexRun, listIndexRuns, sourceFreshness } from '../services/index-runs.js';
 import { type MetricsSnapshot, renderPrometheus } from '../services/metrics.js';
 import { PasswordPolicyError } from '../services/passwords.js';
+import { describeQuotas, setProjectQuotas } from '../services/quotas.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { sourceFieldsOf } from '../services/source-url.js';
 import { listProjectsForUser, membershipMap } from '../services/auth/memberships.js';
@@ -144,6 +153,25 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     if (err instanceof InsufficientDiskError) {
       req.log.warn({ freeBytes: err.freeBytes, minFreeBytes: err.minFreeBytes }, 'refused for lack of disk space');
       return reply.code(507).send({ error: err.code, message: err.message });
+    }
+    // `413`, with the numbers: a project over one of its quotas ([ADR-0117](../../.ssot/ADR.md#adr-0117)).
+    // The request is well formed and the server is healthy; what the caller can act on is which limit, how
+    // much is used, and how much this request asked for.
+    if (err instanceof QuotaExceededError) {
+      req.log.warn({ quota: err.quota, limit: err.limit, used: err.used, requested: err.requested }, 'refused for a project quota');
+      return reply.code(413).send({
+        error: err.code,
+        quota: err.quota,
+        limit: err.limit,
+        used: err.used,
+        requested: err.requested,
+        message: err.message,
+      });
+    }
+    // `503`, because refusing is the safe answer when the upload usage cannot be measured; see `QuotaUsageUnavailableError`.
+    if (err instanceof QuotaUsageUnavailableError) {
+      req.log.error({ err }, 'could not measure project upload usage');
+      return reply.code(503).send({ error: err.code, message: err.message });
     }
     const e = err as { statusCode?: number; message?: string };
     const status = typeof e.statusCode === 'number' ? e.statusCode : 500;
@@ -362,6 +390,44 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
     ]);
     const names = new Map(rows.map((p) => [p.id, p.name]));
     return rows.map((p) => toView(req, p, names, sourceCounts, member ? (roles[p.id] ?? 'viewer') : 'manager'));
+  });
+
+  /**
+   * One project, with its quotas ([ADR-0117](../../.ssot/ADR.md#adr-0117)): each effective limit, what is used and
+   * whether the limit is the instance's. Additive over the list's shape. `used` for uploads is `null` when the
+   * disk could not be measured; the read does not fail for it.
+   */
+  app.get('/api/projects/:id', async (req) => {
+    const { id } = IdParams.parse(req.params);
+    const project = await getProjectById(db, id);
+    if (!project) throw new NotFoundError('Project not found');
+    return { ...toView(req, project), quotas: await describeQuotas(db, config.DATA_DIR, config, project) };
+  });
+
+  // Each field is a whole number or `null` (inherit the instance's value); `0` is unlimited. An absent key is
+  // left as it was. Row counts are `integer` columns, hence their ceiling; the byte quota is a `bigint`
+  // column read as a JS number, hence `MAX_SAFE_INTEGER`.
+  const QuotaValue = (max: number) => z.union([z.number().int().min(0).max(max), z.null()]);
+  const QuotasBody = z
+    .object({
+      maxDocuments: QuotaValue(2147483647).optional(),
+      maxChunks: QuotaValue(2147483647).optional(),
+      maxUploadBytes: QuotaValue(Number.MAX_SAFE_INTEGER).optional(),
+    })
+    .strict()
+    .refine((b) => Object.values(b).some((v) => v !== undefined), { message: 'Give at least one of maxDocuments, maxChunks, maxUploadBytes' });
+
+  /**
+   * Instance admins only, by the `manager` row in `PROJECT_ROUTE_OVERRIDES`: only an `admin`, `root` or
+   * `ADMIN_TOKEN` holds `manager`, a project membership never does. Raising a limit spends the operator's
+   * disk and database, which is why the person using the project does not set it.
+   */
+  app.patch('/api/projects/:id/quotas', async (req) => {
+    const { id } = IdParams.parse(req.params);
+    const body = QuotasBody.parse(req.body);
+    const row = await setProjectQuotas(db, id, body);
+    if (!row) throw new NotFoundError('Project not found');
+    return { quotas: await describeQuotas(db, config.DATA_DIR, config, row) };
   });
 
   app.get('/api/projects/:id/runs', async (req) => {

@@ -65,3 +65,49 @@ export class PromotionRefusedError extends Error {
     this.code = code;
   }
 }
+
+/** The three per-project quotas ([ADR-0117](../../.ssot/ADR.md#adr-0117)), named as the `quota` field of a refusal carries them. */
+export type QuotaName = 'max_documents' | 'max_chunks' | 'max_upload_bytes';
+
+const QUOTA_UNITS: Record<QuotaName, string> = { max_documents: 'documents', max_chunks: 'chunks', max_upload_bytes: 'bytes of uploads' };
+
+/**
+ * A project asked to hold more than its quota allows ([ADR-0117](../../.ssot/ADR.md#adr-0117)).
+ *
+ * One class for the three quotas, because what a caller does with it is the same: an upload request maps it
+ * to `413` and the indexer ends the run with `errorCode: 'quota_exceeded'`. `limit` is the effective value
+ * (the project's own or the instance's), `used` what the project holds before the refused work, and
+ * `requested` how much that work wanted to add, so a message and a script can both say by how much.
+ * The numbers travel as fields and not only in the text, for the same reason `InsufficientDiskError`'s do.
+ */
+export class QuotaExceededError extends Error {
+  readonly code = 'quota_exceeded';
+  constructor(
+    readonly quota: QuotaName,
+    readonly limit: number,
+    readonly used: number,
+    readonly requested: number,
+  ) {
+    super(
+      `This project would go over its limit of ${limit} ${QUOTA_UNITS[quota]} (${used} used, ${requested} more requested). ` +
+        'Ask an instance administrator to raise the limit, or remove content first.',
+    );
+    this.name = 'QuotaExceededError';
+  }
+}
+
+/**
+ * The bytes a project stores for its uploads could not be measured (the directory scan failed for a reason
+ * other than "there is nothing there"). `503` and not a pass: a quota is a limit, and a usage nobody could
+ * read is not "under the limit" ([ADR-0117](../../.ssot/ADR.md#adr-0117)).
+ */
+export class QuotaUsageUnavailableError extends Error {
+  readonly code = 'quota_usage_unavailable';
+  constructor(
+    readonly path: string,
+    cause?: unknown,
+  ) {
+    super('The storage used by this project could not be measured, so the upload quota cannot be checked. Try again shortly.', { cause });
+    this.name = 'QuotaUsageUnavailableError';
+  }
+}

@@ -7,9 +7,35 @@ import type { Config } from '../config.js';
 import type { DocumentSourceRow } from '../db/schema.js';
 import { cleanEntryPath, extractArchive, importTree, isArchiveName, type ImportLimits, type ImportStats } from './archives.js';
 import { mergeDirectory, sourceCurrentDir, stagingDir, swapDirectory } from './data-dir.js';
+import { QuotaExceededError } from './errors.js';
 import { allowedExtensionsFor, type Flavor } from './flavors.js';
 import { isInside, normalizeRelativePath } from './fs-scan.js';
 import { NotFoundError, ValidationError } from './projects.js';
+import { directoryBytes } from './quotas.js';
+
+/**
+ * The upload quota in force for one request ([ADR-0117](../../.ssot/ADR.md#adr-0117)). Only built when the
+ * project's effective limit is above `0`, so an unlimited project never pays for the directory scan.
+ * `used` is what the project's upload sources already store.
+ */
+export interface UploadQuota {
+  limit: number;
+  used: number;
+}
+
+/**
+ * Tracks one `.../files` request against the quota: what the session already held when the request began,
+ * what the request has added so far, and which files those were, so a breach can take back exactly them.
+ */
+export class UploadRequestQuota {
+  requestBytes = 0;
+  readonly paths: string[] = [];
+  constructor(
+    readonly limit: number,
+    /** Stored bytes plus this session's earlier staged bytes, when the request began. */
+    readonly baseUsed: number,
+  ) {}
+}
 
 /**
  * Upload sessions: files arrive in `.staging/<session>/files/` (any number of requests), then `commit`
@@ -42,7 +68,10 @@ export class UploadService {
     return path.join(stagingDir(this.config.DATA_DIR, source.projectId, source.id, session), 'files');
   }
 
-  async createSession(source: DocumentSourceRow): Promise<string> {
+  async createSession(source: DocumentSourceRow, quota?: UploadQuota): Promise<string> {
+    // A project already at its cap gets no session at all: the transfer that would follow is certain to be
+    // refused, and refusing now saves the sender the upload.
+    if (quota && quota.used >= quota.limit) throw new QuotaExceededError('max_upload_bytes', quota.limit, quota.used, 0);
     const session = randomBytes(16).toString('hex');
     await fs.mkdir(this.filesDir(source, session), { recursive: true });
     return session;
@@ -58,14 +87,33 @@ export class UploadService {
     return dir;
   }
 
+  /** Starts quota tracking for a request on `session`; the session's earlier files count against the cap too. */
+  async beginRequest(source: DocumentSourceRow, session: string, quota: UploadQuota): Promise<UploadRequestQuota> {
+    const filesDir = await this.requireSession(source, session);
+    return new UploadRequestQuota(quota.limit, quota.used + (await directoryBytes(filesDir)));
+  }
+
+  /** Deletes the files a request added, after it went over the quota; the session's earlier files stay. */
+  async rollbackRequest(tracker: UploadRequestQuota): Promise<void> {
+    await Promise.all(tracker.paths.map((p) => fs.rm(p, { force: true }).catch(() => undefined)));
+    tracker.paths.length = 0;
+    tracker.requestBytes = 0;
+  }
+
   /**
    * Stores one uploaded part. `relativePath` is the browser-supplied path (folder uploads keep their
    * structure). Archives are unpacked right away into the staging tree, next to where they were dropped.
    */
-  async addFile(source: DocumentSourceRow, session: string, relativePath: string, stream: NodeJS.ReadableStream): Promise<ImportStats> {
+  async addFile(
+    source: DocumentSourceRow,
+    session: string,
+    relativePath: string,
+    stream: NodeJS.ReadableStream,
+    tracker?: UploadRequestQuota,
+  ): Promise<ImportStats> {
     const filesDir = await this.requireSession(source, session);
     const limits = this.limitsFor(source);
-    const stats: ImportStats = { files: 0, skipped: 0, bytes: 0 };
+    const stats: ImportStats = { files: 0, skipped: 0, bytes: 0, ...(tracker ? { added: [] } : {}) };
     const normalized = normalizeRelativePath(relativePath);
     if (!normalized) throw new ValidationError(`Invalid file path "${relativePath}"`);
     const name = normalized.split('/').pop()!;
@@ -93,6 +141,7 @@ export class UploadService {
       } finally {
         await fs.rm(target, { force: true }).catch(() => undefined);
       }
+      this.charge(tracker, stats);
       return stats;
     }
 
@@ -110,13 +159,40 @@ export class UploadService {
     const { size } = await fs.stat(target);
     stats.files++;
     stats.bytes += size;
+    stats.added?.push(target);
+    this.charge(tracker, stats);
     return stats;
   }
 
-  /** Moves the staged tree into `current/`. Callers hold the project lock. Returns the number of files now staged in. */
-  async commit(source: DocumentSourceRow, session: string, mode: 'add' | 'replace'): Promise<number> {
+  /**
+   * Counts what `addFile` just stored against the request's quota, after the fact: the file or the unpacked
+   * archive is already on disk by the time its size is known. The overshoot is at most one request, which
+   * `UPLOAD_MAX_*` already bounds, and the caller takes the request's files back when this throws.
+   */
+  private charge(tracker: UploadRequestQuota | undefined, stats: ImportStats): void {
+    if (!tracker) return;
+    tracker.requestBytes += stats.bytes;
+    tracker.paths.push(...(stats.added ?? []));
+    if (tracker.baseUsed + tracker.requestBytes > tracker.limit) {
+      throw new QuotaExceededError('max_upload_bytes', tracker.limit, tracker.baseUsed, tracker.requestBytes);
+    }
+  }
+
+  /**
+   * Moves the staged tree into `current/`. Callers hold the project lock. Returns the number of files now staged in.
+   *
+   * With a `quota`, this is the authoritative check ([ADR-0117](../../.ssot/ADR.md#adr-0117)): other sessions
+   * may have committed since this one began. `replace` first subtracts what the source stores now, because
+   * that is what the swap removes. A refusal leaves `current/` and the session as they were.
+   */
+  async commit(source: DocumentSourceRow, session: string, mode: 'add' | 'replace', quota?: UploadQuota): Promise<number> {
     const filesDir = await this.requireSession(source, session);
     const current = sourceCurrentDir(this.config.DATA_DIR, source.projectId, source.id);
+    if (quota) {
+      const staged = await directoryBytes(filesDir);
+      const kept = mode === 'replace' ? Math.max(0, quota.used - (await directoryBytes(current))) : quota.used;
+      if (kept + staged > quota.limit) throw new QuotaExceededError('max_upload_bytes', quota.limit, kept, staged);
+    }
     // Files that were not archives may carry names the flavor should clean up; importTree re-validates everything.
     let count: number;
     if (mode === 'replace') {
