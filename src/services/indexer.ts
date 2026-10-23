@@ -612,6 +612,12 @@ export class Indexer {
         let chunksOfDocument = new Map<string, number>();
         /** Documents whose chunks are already out of `runningChunks`, so a document is only given back once. */
         const released = new Set<string>();
+        /**
+         * The documents `releaseVanishedOperations` gave back in advance, on the strength of an expansion that the
+         * loop has not yet confirmed. A specification the loop then refuses keeps them (see `reject`), and a
+         * document that is rewritten or emptied is no longer one of them.
+         */
+        const releasedInAdvance = new Set<string>();
         /** The stored documents of each specification file, by its path, for the operations it may stop producing. */
         const storedOfContainer = new Map<string, Array<[string, ExistingDocument]>>();
         /** A document that is leaving the index gives its chunks back to the quota, so it cannot lock the run out. */
@@ -689,7 +695,11 @@ export class Indexer {
               const produced = new Set<string>();
               for await (const doc of (await this.conversion.expand(file.relativePath, bytes, specLimits)).documents())
                 produced.add(doc.relativePath);
-              for (const [storedPath, doc] of stored) if (!produced.has(storedPath)) releaseChunks(doc.id);
+              for (const [storedPath, doc] of stored) {
+                if (produced.has(storedPath) || released.has(doc.id)) continue;
+                releaseChunks(doc.id);
+                releasedInAdvance.add(doc.id);
+              }
             } catch (err) {
               if (!(err instanceof DocumentExtractionError)) throw err;
             }
@@ -716,7 +726,15 @@ export class Indexer {
          * the source failed.
          */
         const reject = (file: SourceFile, err: DocumentExtractionError, spare: readonly string[]): void => {
-          for (const storedPath of spare) seen.add(storedPath);
+          for (const storedPath of spare) {
+            seen.add(storedPath);
+            // A document kept after its chunks were given back in advance counts against the quota again.
+            const kept = existing.get(storedPath);
+            if (kept && releasedInAdvance.delete(kept.id)) {
+              released.delete(kept.id);
+              runningChunks += chunksOfDocument.get(kept.id) ?? 0;
+            }
+          }
           const list = rejected.get(file.sourceId) ?? [];
           list.push(err.message);
           rejected.set(file.sourceId, list);
@@ -946,6 +964,7 @@ export class Indexer {
                 if (stale) {
                   await deleteDocuments(db, project.id, generation, [doc.relativePath]);
                   releaseChunks(stale.id);
+                  releasedInAdvance.delete(stale.id);
                 }
                 continue;
               }
@@ -972,6 +991,7 @@ export class Indexer {
                 }
                 if (after > chunkLimit) throw new QuotaExceededError('max_chunks', chunkLimit, runningChunks - given, chunks.length);
                 runningChunks = after;
+                releasedInAdvance.delete(storedId);
               }
 
               const rows: NewChunk[] = [];

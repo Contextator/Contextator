@@ -20,6 +20,8 @@ import { SetupGate } from '../../src/services/auth/setup.js';
 import { setMemberRole } from '../../src/services/auth/memberships.js';
 import { createUser } from '../../src/services/auth/users.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
+import { ConversionService } from '../../src/services/conversion/client.js';
+import { DocumentExtractionError } from '../../src/services/doc-types/index.js';
 import { Indexer, type JobState } from '../../src/services/indexer.js';
 import { stagingDir } from '../../src/services/data-dir.js';
 import { KeyedMutex } from '../../src/services/locks.js';
@@ -755,17 +757,18 @@ describe('chunk quota and the operations of a specification that no longer exist
     },
   };
 
-  const makeIndexer = (): Indexer =>
+  const makeIndexer = (conversion?: ConversionService): Indexer =>
     new Indexer({
       db: database.db,
       embeddings: counting,
       config: { ...indexerConfig, ALLOWED_DOC_ROOTS: [path.dirname(root)], DATA_DIR: path.join(root, '.data') },
       log: silentLogger,
       locks: new KeyedMutex(),
+      conversion,
     });
 
-  const run = async (): Promise<JobState> => {
-    const indexer = makeIndexer();
+  const run = async (conversion?: ConversionService): Promise<JobState> => {
+    const indexer = makeIndexer(conversion);
     const job = await settle(database.db, indexer.enqueue(projectId));
     indexer.forget(projectId);
     return job;
@@ -843,5 +846,47 @@ describe('chunk quota and the operations of a specification that no longer exist
     expect(job.errorCode).toBe('quota_exceeded');
     expect(embeddedTexts).toBe(0);
     expect(await getProjectById(database.db, projectId)).toMatchObject({ chunkCount: before?.chunkCount });
+  });
+
+  it('counts the operations again when the specification that gave them back in advance is then refused', async () => {
+    // Four operations stored, no limit.
+    await setProjectQuotas(database.db, projectId, { maxChunks: null });
+    await writeFile(path.join(root, 'api.yaml'), specWith(['trucks', 'coaches', 'vans', 'buses']), 'utf8');
+    expect((await run()).phase).toBe('done');
+    const before = await getProjectById(database.db, projectId);
+    const limit = before?.chunkCount ?? 0;
+    await setProjectQuotas(database.db, projectId, { maxChunks: limit });
+
+    // The introduction grows by a section, so it is the first file to cross the limit and the specification's three
+    // vanished operations are found and given back. The specification is then refused on its second expansion, as
+    // a worker that died would refuse it, and the three operations stay stored.
+    await writeFile(
+      path.join(root, 'aaa-intro.md'),
+      '# Intro\n\nThis handbook introduces the fleet interface.\n\n## Reading\n\nHow to read the records of the fleet and what each field means.\n',
+      'utf8',
+    );
+    await writeFile(path.join(root, 'api.yaml'), specWith(['trucks']), 'utf8');
+    await writeFile(path.join(root, 'zzz-outro.md'), '# Outro\n\nThis closing page adds a chunk after the specification.\n', 'utf8');
+    const conversion = new ConversionService({ timeoutMs: 120_000, idleMs: 60_000, log: silentLogger });
+    let expansions = 0;
+    const expand = conversion.expand.bind(conversion);
+    conversion.expand = async (relativePath, bytes, limits) => {
+      if (relativePath.endsWith('api.yaml') && ++expansions > 1) throw new DocumentExtractionError('the worker died');
+      return expand(relativePath, bytes, limits);
+    };
+
+    try {
+      const job = await run(conversion);
+      expect(expansions).toBe(2);
+      // The three operations are kept, so they count: the closing page, which comes after the specification, has no
+      // room. Had they stayed out of the count it would have been written and the project left over its limit.
+      expect(job.phase).toBe('error');
+      expect(job.errorCode).toBe('quota_exceeded');
+      const paths = await storedPaths();
+      expect(paths.filter((p) => p.startsWith('fleet/api.yaml/'))).toHaveLength(4);
+      expect(paths).not.toContain('fleet/zzz-outro.md');
+    } finally {
+      await conversion.stop();
+    }
   });
 });
