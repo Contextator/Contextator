@@ -257,6 +257,17 @@ describe('an open project', () => {
     expect((await counters()).map((c) => c.key).sort()).toEqual([`ip:${open.id}:198.51.100.20`, `ip:${open.id}:198.51.100.21`]);
   });
 
+  it('is limited to 60 requests a minute per address when no anonymous ceiling is configured (the 0.4 default)', async () => {
+    // `proxied` sets no MCP_RATE_LIMIT_ANON_PER_MINUTE, so this exercises the default end to end.
+    expect(proxied.ctx.config.MCP_RATE_LIMIT_ANON_PER_MINUTE).toBe(60);
+    const ip = { 'x-forwarded-for': '198.51.100.70' };
+    for (let i = 1; i <= 60; i++) expect((await post(proxied, open, TOPICS(i), ip)).status).toBe(200);
+    const refused = await post(proxied, open, TOPICS(61), ip);
+    expect(refused.status).toBe(429);
+    expect(refused.json.error?.data?.scope).toBe('anonymous');
+    expect(await counters()).toEqual([{ key: `ip:${open.id}:198.51.100.70`, count: 61 }]);
+  });
+
   it('folds an IPv4-mapped address onto the IPv4 one, and an IPv6 address onto its /64', async () => {
     await post(limited, open, SEARCH(1), { 'x-forwarded-for': '::ffff:198.51.100.30' });
     await post(limited, open, SEARCH(2), { 'x-forwarded-for': '198.51.100.30' });
