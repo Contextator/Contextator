@@ -150,6 +150,15 @@ export interface IndexerDeps {
    * nothing — the tests and the CLI build an indexer without one.
    */
   metrics?: IndexerObserver;
+  /**
+   * Told once for each project whose index was **rebuilt because the embedding model changed** and
+   * finished without a source error — the moment the project's relevance floor stops describing the
+   * vectors it serves (a cosine similarity is a number about one encoder, ADR-0037).
+   *
+   * Optional, and unset it does nothing. It is not awaited and its failure is logged and swallowed: it
+   * runs after the swap has been committed, so nothing it does can fail the run or hold the queue.
+   */
+  onModelChangeRebuilt?: (projectId: string) => Promise<void>;
 }
 
 const ACTIVE_PHASES: ReadonlySet<JobPhase> = new Set(['queued', 'syncing', 'scanning', 'embedding', 'finalizing']);
@@ -355,6 +364,15 @@ export class Indexer {
     } finally {
       this.running = false;
     }
+  }
+
+  /** Fire and forget: see {@link IndexerDeps.onModelChangeRebuilt}. */
+  private notifyModelChangeRebuilt(projectId: string, log: Logger): void {
+    const hook = this.deps.onModelChangeRebuilt;
+    if (!hook) return;
+    void Promise.resolve()
+      .then(() => hook(projectId))
+      .catch((err: unknown) => log.warn({ err, projectId }, 'post-rebuild hook failed'));
   }
 
   /** Persists a finished job to `index_runs`; failures are logged and never affect the indexing result. */
@@ -1160,6 +1178,7 @@ export class Indexer {
           error ? 'indexing finished with source errors' : 'indexing finished',
         );
         await this.recordRun(job, log);
+        if (modelChanged && !error) this.notifyModelChangeRebuilt(project.id, log);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         job.phase = 'error';

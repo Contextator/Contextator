@@ -164,6 +164,14 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'GET', url: '/api/projects/:id/score-floor/preview', actor: as('member'), membership: 'viewer', allowed: true },
   { method: 'GET', url: '/api/projects/:id/score-floor/preview', actor: as('member'), membership: null, allowed: false },
   { method: 'GET', url: '/api/projects/:id/score-floor/preview', actor: as('admin'), membership: null, allowed: true },
+  { method: 'POST', url: '/api/projects/:id/score-floor/suggestions', actor: as('member'), membership: 'viewer', allowed: false },
+  { method: 'POST', url: '/api/projects/:id/score-floor/suggestions', actor: as('member'), membership: 'editor', allowed: false },
+  { method: 'POST', url: '/api/projects/:id/score-floor/suggestions', actor: as('admin'), membership: null, allowed: true },
+  { method: 'POST', url: '/api/projects/:id/score-floor/suggestions/:suggestionId/apply', actor: as('member'), membership: 'viewer', allowed: false },
+  { method: 'POST', url: '/api/projects/:id/score-floor/suggestions/:suggestionId/apply', actor: as('member'), membership: 'editor', allowed: false },
+  { method: 'POST', url: '/api/projects/:id/score-floor/suggestions/:suggestionId/apply', actor: as('admin'), membership: null, allowed: true },
+  { method: 'GET', url: '/api/projects/:id/score-floor/suggestions', actor: as('member'), membership: 'viewer', allowed: true },
+  { method: 'GET', url: '/api/projects/:id/score-floor/suggestions', actor: as('member'), membership: null, allowed: false },
 
   // Export and import ([ADR-0051](../.ssot/ADR.md#adr-0051)). Neither is an editor's act.
   //

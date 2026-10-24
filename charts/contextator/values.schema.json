@@ -449,6 +449,10 @@
         "mcpRateLimitFailOpen": {
           "description": "MCP_RATE_LIMIT_FAIL_OPEN: true (default) serves a request when the rate-limit counter is unreachable; false answers 503 instead (sets the variable to 0).",
           "type": "boolean"
+        },
+        "reindexOnModelChange": {
+          "description": "REINDEX_ON_MODEL_CHANGE: true queues one re-index at start-up for every project indexed with a different embedding model than the server runs now and that has at least one source. Off by default; false leaves the variable unset.",
+          "type": "boolean"
         }
       }
     },

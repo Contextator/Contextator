@@ -97,6 +97,11 @@ const PROJECT_ROUTE_OVERRIDES: ReadonlyArray<{ method: string; url: string; need
   // `admin`, `root` or `ADMIN_TOKEN`; memberships stop at `editor`. A limit spends the operator's disk and
   // database, so the people using the project do not set it. Reading them is the default `viewer`.
   { method: 'PATCH', url: '/api/projects/:id/quotas', need: 'manager' },
+  // A measured suggestion for that floor, and its adoption. Generating one spends an embedding and a search per
+  // probe and applying one is the `PATCH` above by another route, so both are a manager's; reading the stored
+  // suggestions is the `GET` default's (a viewer's).
+  { method: 'POST', url: '/api/projects/:id/score-floor/suggestions', need: 'manager' },
+  { method: 'POST', url: '/api/projects/:id/score-floor/suggestions/:suggestionId/apply', need: 'manager' },
   // The project export ([ADR-0051](../../.ssot/ADR.md#adr-0051)). **A `GET`, and deliberately not a
   // viewer's.** A viewer can already read any one document, any excerpt and every source's settings
   // through the dashboard, which is the argument the `GET` default makes — and what the default cannot

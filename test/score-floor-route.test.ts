@@ -33,7 +33,12 @@ interface Stub {
   written: Array<number | null>;
 }
 
-const rows = <T>(value: T[]) => Object.assign(Promise.resolve(value), { limit: async () => value });
+const rows = <T>(value: T[]) =>
+  Object.assign(Promise.resolve(value), {
+    limit: async () => value,
+    // The suggestion list is `where … order by … limit`; the stub keeps no suggestions.
+    orderBy: () => ({ limit: async () => [] }),
+  });
 
 function stubDb(stub: Stub): Db {
   return {
@@ -254,5 +259,44 @@ describe('the price of a floor, before it is set', () => {
       requiredProjectAccess('GET', '/api/projects/:id/queries/summary'),
     );
     expect(requiredProjectAccess('PATCH', '/api/projects/:id/score-floor')).toBe('manager');
+  });
+});
+
+describe('floor suggestions', () => {
+  const suggestions = `/api/projects/${PROJECT_ID}/score-floor/suggestions`;
+
+  it('are asked for and adopted by a manager, and read by a viewer', () => {
+    expect(requiredProjectAccess('POST', '/api/projects/:id/score-floor/suggestions')).toBe('manager');
+    expect(requiredProjectAccess('POST', '/api/projects/:id/score-floor/suggestions/:suggestionId/apply')).toBe('manager');
+    expect(requiredProjectAccess('GET', '/api/projects/:id/score-floor/suggestions')).toBe('viewer');
+  });
+
+  it('are listed with the project’s current floor and index', async () => {
+    const res = await call(newStub(0.8), 'GET', suggestions);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().current).toEqual({ project: 0.8, embeddingModel: 'local:stub:fp32', liveGeneration: 3 });
+  });
+
+  it('are not listed for a project that is not there', async () => {
+    const stub = newStub();
+    const db = stubDb(stub);
+    (db as unknown as { select: () => unknown }).select = () => ({ from: () => ({ where: () => rows([]) }) });
+    const app = await buildApi(db, INSTANCE_FLOOR);
+    const res = await app.inject({ method: 'GET', url: suggestions, headers: { authorization: `Bearer ${ADMIN_TOKEN}` } });
+    await app.close();
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('are refused with a 400 for an id that is not a uuid, before the database is asked', async () => {
+    const stub = newStub();
+    const res = await call(stub, 'GET', `/api/projects/not-a-uuid/score-floor/suggestions`);
+    expect(res.statusCode).toBe(400);
+    expect(stub.written).toEqual([]);
+  });
+
+  it('are never written to the project by asking for one', async () => {
+    const stub = newStub();
+    await call(stub, 'GET', suggestions);
+    expect(stub.written).toEqual([]);
   });
 });

@@ -44,6 +44,8 @@ const EXPECTED_TABLES = [
   'chunks',
   'document_sources',
   'documents',
+  // Measured relevance-floor advice, applied only on a manager's say ([ADR-0083](../../../.ssot/ADR.md#adr-0083)).
+  'floor_suggestions',
   'index_runs',
   // The MCP rate limiter's fixed-window counters ([ADR-0112](../../../.ssot/ADR.md#adr-0112)).
   'mcp_rate_limits',
@@ -258,7 +260,8 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     // ([ADR-0117](../../../.ssot/ADR.md#adr-0117)), three nullable columns on `projects` and the CHECK on each
     // (`projects \| \d+ \| max_* \|`, `projects_max_*_check`); and `0023_rate_limit_allowlist`
     // ([ADR-0112](../../../.ssot/ADR.md#adr-0112), [ADR-0118](../../../.ssot/ADR.md#adr-0118)), one whole new table
-    // anchored by `^mcp_rate_limits` and one nullable column on `mcp_tokens`. So
+    // anchored by `^mcp_rate_limits` and one nullable column on `mcp_tokens`; and `0024_floor_suggestions`
+    // ([ADR-0083](../../../.ssot/ADR.md#adr-0083)), one whole new table anchored by `^floor_suggestions`. So
     // the claim is no longer "nothing changed": it is that nothing changed *except* what those
     // migrations say they change, and the lines that moved are checked by name rather than counted.
     await applySchema(database);
@@ -267,7 +270,7 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     expect(
       changed.filter(
         (line) =>
-          !/chunks_embedding_hnsw|index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config|^user_federated_identities|user_sessions \| \d+ \| auth_method \||user_sessions_auth_method_check|projects \| \d+ \| score_floor \||projects_score_floor_check|mcp_credentials_epoch|last_legacy_sse_at|documents \| \d+ \| source_(url|modified_at) \||projects \| \d+ \| max_(documents|chunks|upload_bytes) \||projects_max_(documents|chunks|upload_bytes)_check|^mcp_rate_limits|mcp_tokens \| \d+ \| allowed_cidrs \|/.test(
+          !/chunks_embedding_hnsw|index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config|^user_federated_identities|user_sessions \| \d+ \| auth_method \||user_sessions_auth_method_check|projects \| \d+ \| score_floor \||projects_score_floor_check|mcp_credentials_epoch|last_legacy_sse_at|documents \| \d+ \| source_(url|modified_at) \||projects \| \d+ \| max_(documents|chunks|upload_bytes) \||projects_max_(documents|chunks|upload_bytes)_check|^mcp_rate_limits|mcp_tokens \| \d+ \| allowed_cidrs \||^floor_suggestions/.test(
             line,
           ),
       ),

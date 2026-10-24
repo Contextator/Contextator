@@ -118,6 +118,10 @@ spec:
             - name: MCP_RATE_LIMIT_FAIL_OPEN
               value: "0"
             {{- end }}
+            {{- if .Values.config.reindexOnModelChange }}
+            - name: REINDEX_ON_MODEL_CHANGE
+              value: "1"
+            {{- end }}
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}

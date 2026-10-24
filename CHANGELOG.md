@@ -30,6 +30,23 @@ ships, that stops.
   `config.mcpRateLimitAnonPerMinute`, `config.mcpRateLimitTools` and `config.mcpRateLimitFailOpen`.
 - **Query log by token.** The query log summary and export take `token` (an MCP token id) and show only what
   that token asked.
+- **Relevance floor suggestions.** After a re-index caused by an embedding-model change, and on request
+  (`POST /api/projects/:id/score-floor/suggestions`, manager), the server measures the project with the floor
+  off and stores the highest floor that still answers a fragment of each of up to 100 of its own chunks (the
+  last eight words of a sentence, or the tail of a Chinese or Japanese sentence weighing 16, a character counting 1 and a Latin word 2, never the heading; Thai, Lao, Khmer and Burmese are not recognised). The suggestion is mostly an upper bound, not a guarantee: on the four
+  reference corpora it came out within 0.013 of the floor fitted from labelled questions, on either side of it, on
+  two (prose documentation) and 0.027 to 0.045 above it on the other two (XQuAD); two runs on one project can differ
+  by 0.018. Check it with `GET .../score-floor/preview` in both directions before applying it. Suggestions are
+  listed (`GET`, viewer) and adopted only by `POST .../suggestions/:suggestionId/apply` (manager); the project's
+  floor is never changed automatically, and a suggestion from an earlier model or index generation is refused.
+  One measurement runs per project and at most two across the server; a further request from an operator gets `409`,
+  while the one the server makes after a model change waits its turn.
+  The fit is shared with `scripts/floor-calibration.ts`. Migration `0024` adds the `floor_suggestions` table
+  (ADR-0083).
+- **Re-index on embedding-model change.** With `REINDEX_ON_MODEL_CHANGE=1` (off by default; Helm chart 1.7.0
+  `config.reindexOnModelChange`), start-up queues one scheduled run for every project stamped with a different
+  model than the server runs and that has at least one source, scheduled or not. A project that was never
+  indexed or has no source is left alone, and the flag off behaves as before (ADR-0113).
 - **Default auth and bind address as product facts.** `public/product-facts.json` gains `defaultMcpAuth`
   (read from `DEFAULT_MCP_AUTH`) and `defaultBindAddress` (the address the compose files publish the port
   on). The bind address is read from `docker-compose.yml` and `docker-compose.slim.yml` with a YAML parser;

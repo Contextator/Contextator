@@ -741,6 +741,9 @@ checks them:
   set as `MCP_RATE_LIMIT_TOOLS`: a per-tool limit per minute and token. Empty (the default) leaves it unset.
 - `config.mcpRateLimitFailOpen` — `true` (the default) leaves `MCP_RATE_LIMIT_FAIL_OPEN` unset, so a request
   is served when the counter table cannot be reached; `false` sets it to `0` and answers 503 instead.
+- `config.reindexOnModelChange` — `true` sets `REINDEX_ON_MODEL_CHANGE=1`: at start-up the server queues
+  one re-index for every project that was indexed with a different embedding model than it now runs and
+  that has at least one source. `false` (the default) leaves it unset.
 
 ## Publishing
 

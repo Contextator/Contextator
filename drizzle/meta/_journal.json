@@ -169,6 +169,13 @@
       "when": 1792841495440,
       "tag": "0023_rate_limit_allowlist",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1792841496440,
+      "tag": "0024_floor_suggestions",
+      "breakpoints": true
     }
   ]
 }

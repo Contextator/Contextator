@@ -749,6 +749,44 @@ export const searchQueryHits = pgTable(
   ],
 );
 
+/**
+ * A relevance floor an operator may adopt for one project ([ADR-0083](../../.ssot/ADR.md#adr-0083),
+ * Faz 08 of 0.4.0): the highest floor that would still have answered a fragment of each of the project's
+ * own chunks, measured with the encoder and the live generation named on the row.
+ *
+ * **A suggestion is never applied by writing it.** `projects.score_floor` changes only when a manager
+ * posts the apply route, and that route refuses a suggestion whose `embedding_model` or
+ * `live_generation` is no longer the project's — a floor measured against another encoder is a number
+ * about something else (ADR-0037).
+ */
+export const floorSuggestions = pgTable(
+  'floor_suggestions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** What asked for it: the model-change rebuild, or an operator. */
+    trigger: text('trigger').notNull(),
+    /** The provider-qualified encoder id the measurement used, spelled as `projects.embedding_model` spells it. */
+    embeddingModel: text('embedding_model').notNull(),
+    /** The generation the probes were searched in. */
+    liveGeneration: integer('live_generation').notNull(),
+    suggestedFloor: doublePrecision('suggested_floor').notNull(),
+    /** The project's own `score_floor` when this was measured; NULL when it followed the instance's. */
+    previousFloor: doublePrecision('previous_floor'),
+    /** How the number was reached: the method, probe count and the distribution of top scores. */
+    basis: jsonb('basis').notNull(),
+    /** Set once, by the apply route. */
+    appliedAt: timestamp('applied_at', { withTimezone: true }),
+  },
+  (t) => [
+    foreignKey({ name: 'floor_suggestions_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    check('floor_suggestions_trigger_check', sql`${t.trigger} in ('model_change', 'operator')`),
+    check('floor_suggestions_floor_check', sql`${t.suggestedFloor} > 0 and ${t.suggestedFloor} <= 1`),
+    index('floor_suggestions_project_created_idx').on(t.projectId, t.createdAt.desc().nullsFirst()),
+  ],
+);
+
 /** Dashboard accounts. `root` and `admin` reach every project; a `member` only its memberships. */
 export const users = pgTable(
   'users',
@@ -1080,6 +1118,7 @@ export type UserRow = typeof users.$inferSelect;
 export type UserSessionRow = typeof userSessions.$inferSelect;
 export type ProjectMemberRow = typeof projectMembers.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
+export type FloorSuggestionRow = typeof floorSuggestions.$inferSelect;
 export type McpTokenRow = typeof mcpTokens.$inferSelect;
 export type ApiTokenRow = typeof apiTokens.$inferSelect;
 export type UserFederatedIdentityRow = typeof userFederatedIdentities.$inferSelect;

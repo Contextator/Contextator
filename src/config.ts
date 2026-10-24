@@ -1325,6 +1325,22 @@ export const EnvSchema = z
      * debounce is a limit the instance imposes rather than a schedule somebody chose per source.
      */
     WEBHOOK_MIN_INTERVAL_MINUTES: z.coerce.number().int().min(0).max(SYNC_MAX_INTERVAL_MINUTES).default(5),
+    /**
+     * Whether start-up queues a re-index for every project whose stored vectors were made by a different
+     * embedding model than this server runs ([ADR-0113](../.ssot/ADR.md#adr-0113)). Off by default.
+     *
+     * Without it a model change leaves each such project answering `model_mismatch` until somebody
+     * triggers a run, or until a scheduled source happens to come due. With it, the start-up maintenance
+     * (after the orphan sweep and the recovery of interrupted runs) queues exactly one run per project
+     * that has a stamped model, differs from the server's, and has at least one source of any kind,
+     * scheduled or not. The unit is the project, because the rebuild is a project-wide re-embed; the
+     * indexer's own concurrency limit throttles the queue, and a refusal for disk space (ADR-0106) stays
+     * in the run's record like any other.
+     *
+     * The stamp (ADR-0007) remains the guard that makes the run a full rebuild, and
+     * `SYNC_MAX_SKIP_HOURS` (ADR-0095) is untouched.
+     */
+    REINDEX_ON_MODEL_CHANGE: z.string().default('0').transform(flag),
   })
   .superRefine((c, ctx) => {
     // The legacy name is only read when the new one is empty; a stale value left for another tool is

@@ -93,6 +93,42 @@ Changing `EMBEDDING_MODEL` (same dimension) triggers an automatic full re-index 
 needs `RESET_VECTORS=1` on one restart first. Full procedure for both cases, plus upgrading across a
 default-model change: [Embedding Models](https://contextator.com/en/docs/embedding-models/#changing-the-model).
 
+`REINDEX_ON_MODEL_CHANGE=1` (off by default) removes the button press. On start-up the server queues one
+re-index for every project that was indexed with a different model than the one it now runs and that has at
+least one source, scheduled or not. A project that was never indexed, or has no source, is left alone. The
+runs go through the normal queue, so the indexer's concurrency limit spreads them out, and each one is
+logged with the reason; a run refused for lack of disk space is recorded in the project's run history like
+any other. With the flag off, nothing changes: such a project answers `model_mismatch` until someone
+re-indexes it.
+
+A relevance floor is a number about one encoder, so a project's own floor (`PATCH
+/api/projects/:id/score-floor`) stops meaning anything once its index is rebuilt with another model. When a
+re-index finishes because the model changed, the server measures the project against its new index and
+stores a **floor suggestion**: the highest floor, on a 0.001 grid from 0.6 to 0.99, that still answers
+every probe, where a probe is the last eight words of a sentence (for Chinese and Japanese text, which has no spaces between words, the tail of the sentence that weighs 16, a character counting 1 and a Latin word 2, cut at a word boundary; other scripts written without spaces, such as Thai, Lao, Khmer and Burmese, are not recognised and give `insufficient_data`) taken from one of up to 100 of the
+project's own chunks (never the chunk's heading, which the chunk is embedded with and would match too well).
+A manager can also ask for one at any
+time with `POST /api/projects/:id/score-floor/suggestions`, read them with `GET` on the same path, and adopt
+one with `POST .../suggestions/:suggestionId/apply`. Nothing is applied automatically: the project keeps
+the floor it had until a manager applies a suggestion, and a suggestion measured against an earlier model
+or index generation is refused. A project that yields fewer than 20 probes (little prose, or little content)
+is not measured and gets no suggestion; the response says so. The same arithmetic is what
+`scripts/floor-calibration.ts` runs against labelled question sets.
+
+**Treat a suggestion as an upper bound in most corpora, not as a guarantee.** A probe is a fragment of the
+text it should find, which scores higher than a question a person would write about it, so the suggested
+floor usually sits above the one that real questions would justify, and a floor set too high refuses
+questions the project does answer. It is not always above: measured against the floor fitted from labelled
+questions on the four reference corpora, prose documentation landed on either side of it, within 0.013
+(the repository's synthetic documentation 0.791 and 0.804 against 0.804, in two runs; the product's user
+wiki 0.805 and 0.817 against 0.811), while XQuAD stayed 0.027 to 0.045 above it (Turkish 0.820 and 0.802
+against 0.775, English 0.782 and 0.774 against 0.738). Two runs over the same project differ as well,
+because each samples other chunks: 0.018 on XQuAD Turkish, so a single run says less than its third
+decimal suggests. Before applying one, look at what it would have refused among your logged searches with `GET
+/api/projects/:id/score-floor/preview?floor=<n>`, and check it in both directions: lower it by a few
+hundredths when it refuses something the project answers, and raise it when it lets through questions the
+project cannot answer.
+
 ## Tracing (OpenTelemetry)
 
 Tracing is off by default and switches on with one variable. Nothing else changes: with it unset the

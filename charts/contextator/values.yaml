@@ -169,6 +169,10 @@ config:
   # reached (a warning and the contextator_mcp_rate_limit_errors_total metric record it); false sets
   # MCP_RATE_LIMIT_FAIL_OPEN=0 and answers 503 instead.
   mcpRateLimitFailOpen: true
+  # REINDEX_ON_MODEL_CHANGE: true makes the server queue one re-index at start-up for every project that
+  # was indexed with a different embedding model than the one it now runs (and that has a source).
+  # Off by default; `false` leaves the variable unset.
+  reindexOnModelChange: false
 
 # -----------------------------------------------------------------------------------------------
 # Persistence
