@@ -60,7 +60,9 @@ export function warnAboutProxyConfiguration(app: FastifyInstance, config: Config
     warn(
       'TRUST_PROXY=1 trusts every proxy, so req.ip and req.protocol come from X-Forwarded-* headers ' +
         'whoever opened the socket wrote. That is only safe when nothing but your proxy can reach this ' +
-        'port; if the port is reachable directly, a caller chooses its own rate-limit key. Prefer naming ' +
+        'port; if the port is reachable directly, a caller chooses its own rate-limit key. A static MCP token ' +
+        'bound to a network allowlist is refused outright under this setting, because the address it would ' +
+        'be matched against is not a fact. Prefer naming ' +
         'the proxy: TRUST_PROXY=loopback, or its address or CIDR block — and name the proxy rather than ' +
         'the network your clients are on, because the list is applied to every hop.',
     );

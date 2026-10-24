@@ -14,8 +14,8 @@ import { recordLegacySseActivity } from '../src/services/projects.js';
  */
 describe('POST /api/projects/:id/mcp-tokens body', () => {
   it('defaults to a token that never expires', () => {
-    expect(CreateBody.parse({})).toEqual({ name: '', expiresInDays: null });
-    expect(CreateBody.parse({ name: 'ci', expiresInDays: null })).toEqual({ name: 'ci', expiresInDays: null });
+    expect(CreateBody.parse({})).toEqual({ name: '', expiresInDays: null, allowedCidrs: null });
+    expect(CreateBody.parse({ name: 'ci', expiresInDays: null })).toEqual({ name: 'ci', expiresInDays: null, allowedCidrs: null });
   });
 
   it('accepts exactly the lifetimes the panel offers: 30, 90 and 365 days', () => {

@@ -188,6 +188,11 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
   // Who may reach a project
   'PATCH /api/projects/:id/mcp-auth': { verb: 'changed who may reach the MCP endpoint', prep: 'of' },
   'POST /api/projects/:id/mcp-tokens': { verb: 'issued an MCP credential', prep: 'for', target: 'credential' },
+  'PATCH /api/projects/:id/mcp-tokens/:tokenId': {
+    verb: 'changed the networks an MCP credential may be used from',
+    prep: 'of',
+    target: 'credential',
+  },
   'DELETE /api/projects/:id/mcp-tokens/:tokenId': { verb: 'revoked an MCP credential', prep: 'of', target: 'credential' },
   'PUT /api/projects/:id/members/:userId': { verb: 'granted access', prep: 'to', target: 'account' },
   'DELETE /api/projects/:id/members/:userId': { verb: 'revoked access', prep: 'to', target: 'account' },
