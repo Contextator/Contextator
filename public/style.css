@@ -2924,7 +2924,7 @@ a.btn.ghost.small {
 .golden-list {
   display: grid;
   gap: 8px;
-  margin: 0 0 10px;
+  margin: 12px 20px 10px;
   padding: 0;
   list-style: none;
 }
@@ -2942,6 +2942,16 @@ a.btn.ghost.small {
 
 .golden-item .source-actions {
   margin-top: 8px;
+}
+
+/* Three header buttons do not fit beside the text on a phone: let the head and the buttons wrap. */
+#golden-panel > .sources-head {
+  flex-wrap: wrap;
+}
+
+#golden-panel > .sources-head .source-actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
 }
 
 .golden-head {
@@ -2971,9 +2981,14 @@ a.btn.ghost.small {
 }
 
 .golden-eval {
-  margin-top: 14px;
-  padding-top: 12px;
+  padding: 12px 20px 16px;
   border-top: 1px solid var(--neutral-tint);
+}
+
+#golden-panel > .hint,
+#golden-panel > div > .hint,
+#golden-panel > .form-error {
+  padding: 12px 20px;
 }
 
 .golden-command {

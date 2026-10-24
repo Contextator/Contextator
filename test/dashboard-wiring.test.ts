@@ -223,7 +223,9 @@ describe('the dashboard markup and its modules agree', () => {
       expect(ids).toContain(id);
     // Drawn in the project view, loaded on selection, and its dialog handlers attached once at boot.
     expect(app).toMatch(/main\.append\(renderGolden\(p\)\)/);
-    expect(app).toMatch(/void loadGolden\(\)/);
+    // Twice: select() and the poll. A page opened on a project hash never runs select(), so without the
+    // poll's call the panel would read "Reading the questions…" for good.
+    expect(app.match(/void loadGolden\(\)/g)).toHaveLength(2);
     expect(app).toMatch(/initGoldenUi\(\)/);
   });
 

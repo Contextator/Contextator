@@ -954,6 +954,9 @@ async function refresh() {
     void loadQuerySummary();
     // Quiet unless the selection or the project's counts moved, like the two above.
     void loadQuotas();
+    // A no-op once the selected project's set is read: the first poll is what loads it when the page
+    // opens straight on a project hash, where select() never runs.
+    void loadGolden();
   }
   // The account list is not part of a project poll; refresh it only while it is on screen.
   if (state.view === 'users') void loadUsers();
