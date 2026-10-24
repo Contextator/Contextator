@@ -2903,3 +2903,10 @@ body.auth .gate-card a {
   align-items: center;
   gap: 4px 10px;
 }
+
+/* ---------- source freshness ---------- */
+
+.source-fresh {
+  align-items: flex-start;
+  gap: 4px;
+}

@@ -156,10 +156,10 @@ function suggestionRow(project, suggestion, current, mayManage, onApplied) {
   const applied = suggestion.appliedAt !== null;
   const stale = !applied && !isCurrent(suggestion, current);
   const status = applied
-    ? el('span', { class: 'pill small ok', text: `applied ${relativeTime(suggestion.appliedAt)}` })
+    ? el('span', { class: 'pill small idle', text: `applied ${relativeTime(suggestion.appliedAt)}` })
     : stale
       ? el('span', { class: 'pill small stale', text: 'measured on an older index' })
-      : el('span', { class: 'pill small', text: 'not applied' });
+      : el('span', { class: 'pill small queued', text: 'not applied' });
 
   return el('li', { class: 'floor-suggestion' }, [
     el('div', { class: 'floor-suggestion-head' }, [

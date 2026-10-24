@@ -29,6 +29,7 @@ import { canCreateProject, canDeleteProject, canEdit, initAuthUi, loadMe, render
 import { authHeaderFor, authModeBadge, initMcpUi, loadMcpTokens, renderMcpAccess, showMcpSecret } from './mcp.js';
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
 import { loadQuerySummary, renderQueries } from './queries.js';
+import { renderSourceFreshness } from './freshness.js';
 import { describeApiError, initQuotasUi, loadQuotas, renderQuotas } from './quotas.js';
 import { captureSearchFocus, renderSearch } from './search.js';
 import { initTokensUi, loadApiTokens, renderTokensView } from './tokens.js';
@@ -836,11 +837,7 @@ function renderSources(project, busy) {
       ]),
       el('span', { class: 'sub', text: s.flavor === 'plain' ? '—' : s.flavor, title: 'Content type' }),
       el('span', { class: 'sub', text: `${fmt(s.documentCount)} docs` }),
-      el('span', {
-        class: 'sub',
-        text: relativeTime(s.lastSyncedAt),
-        title: s.lastSyncedAt ? new Date(s.lastSyncedAt).toLocaleString() : 'never synced',
-      }),
+      renderSourceFreshness(s),
       el('span', { class: 'source-actions' }, actions),
     ]);
   });
