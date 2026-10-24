@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { parseArgs } from '../scripts/eval.js';
+import { invocationDirectory, parseArgs } from '../scripts/eval.js';
 
 /**
  * `npm run eval`'s command line. The default invocation has to stay exactly the repository's own set —
@@ -75,5 +75,30 @@ describe('eval command line', () => {
     expect(o.floors.recall5).toBe(0.8);
     expect(() => parseArgs(['--min-recall5=80'], CWD)).toThrow(/between 0 and 1/);
     expect(() => parseArgs(['--nope'], CWD)).toThrow(/Unknown option/);
+  });
+});
+
+describe('the directory relative paths are read from', () => {
+  // `npm run` chdirs into the package root and records where the person was in INIT_CWD.
+  it('is INIT_CWD when npm set it, so a path typed from a subdirectory is not looked for at the root', () => {
+    expect(invocationDirectory({ INIT_CWD: '/work/docs' })).toBe('/work/docs');
+  });
+
+  it('is the process directory when run without npm, or when INIT_CWD is empty', () => {
+    expect(invocationDirectory({})).toBe(process.cwd());
+    expect(invocationDirectory({ INIT_CWD: '' })).toBe(process.cwd());
+  });
+
+  it('is what parseArgs resolves against when no directory is passed', () => {
+    const previous = process.env.INIT_CWD;
+    process.env.INIT_CWD = '/work/docs';
+    try {
+      const o = parseArgs(['--corpus', 'pages', '--golden=q.jsonl']);
+      expect(o.corpusDir).toBe('/work/docs/pages');
+      expect(o.goldenPath).toBe('/work/docs/q.jsonl');
+    } finally {
+      if (previous === undefined) delete process.env.INIT_CWD;
+      else process.env.INIT_CWD = previous;
+    }
   });
 });

@@ -218,7 +218,7 @@ const USAGE = `Usage: npm run eval [-- <options>]
   -h, --help               This.
 
   A value flag takes its value as "--corpus <dir>" or "--corpus=<dir>". Relative paths are read from
-  the directory the command is run in. With none of the four, the run is the repository's own set and
+  the directory "npm run eval" was typed in, not from the repository root. With none of the four, the run is the repository's own set and
   its numbers are the ones in eval/BASELINE.md.
 
   With a floor, a completed run whose numbers are short exits 2; without one it exits 0 whatever it
@@ -262,7 +262,18 @@ function takeValue(flag: string, inline: string | null, argv: readonly string[],
   return { value: next, consumed: 1 };
 }
 
-export function parseArgs(argv: readonly string[], cwd: string = process.cwd()): Options {
+/**
+ * The directory a relative path on the command line means. `npm run` moves the process into the package
+ * root and leaves the directory the person typed it in as `INIT_CWD`, so `npm run eval -- --golden q.jsonl`
+ * from `docs/` reads `docs/q.jsonl` rather than looking for it beside `package.json`. Run without npm there
+ * is no `INIT_CWD` and the process directory is the one the person is in.
+ */
+export function invocationDirectory(env: NodeJS.ProcessEnv = process.env): string {
+  const initCwd = env.INIT_CWD;
+  return initCwd !== undefined && initCwd !== '' ? initCwd : process.cwd();
+}
+
+export function parseArgs(argv: readonly string[], cwd: string = invocationDirectory()): Options {
   const outputs: OutputTarget[] = [];
   const floors: Floors = { ...NO_FLOORS };
   let quietText = false;
@@ -626,7 +637,7 @@ function labelFor(absolute: string): string {
   if (absolute === DEFAULT_CORPUS_DIR) return 'eval/corpus';
   if (absolute === DEFAULT_GOLDEN_PATH) return 'golden.jsonl';
   if (absolute === DEFAULT_NEGATIVE_PATH) return 'negative.jsonl';
-  const relative = path.relative(process.cwd(), absolute);
+  const relative = path.relative(invocationDirectory(), absolute);
   return relative !== '' && !relative.startsWith('..') ? relative.split(path.sep).join('/') : absolute;
 }
 
