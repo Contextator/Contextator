@@ -302,6 +302,18 @@ describe('the prose the tarball carries', () => {
     ).not.toContain('golden question');
   });
 
+  it('keeps a blank line between the paragraphs, with golden questions or without', () => {
+    const counts = { sources: 1, documents: 3, chunks: 40, uploadFiles: 0, uploadBytes: 0 };
+    const without = readmeFor(manifest({ counts: { ...counts, goldenQuestions: 0 } }));
+    expect(without).toContain('renumbers this corpus to 0.\n\nThe vectors were produced');
+    // The paragraph a project with no questions has always had: nothing between the two but the blank line.
+    expect(without).toBe(readmeFor(manifest({ counts })));
+    const withQuestions = readmeFor(manifest({ counts: { ...counts, goldenQuestions: 12 } }));
+    expect(withQuestions).toContain(
+      'renumbers this corpus to 0.\n\nIt also carries 12 golden question(s), in golden-questions.ndjson, in the shape of eval/golden.jsonl.\n\nThe vectors were produced',
+    );
+  });
+
   it('says what each source needs here, in words', () => {
     expect(text).toContain('handbook (git): re-enter its access token');
     expect(text).toContain('paste it into the provider');

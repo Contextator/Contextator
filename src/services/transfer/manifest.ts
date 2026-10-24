@@ -265,6 +265,7 @@ export function readmeFor(manifest: Manifest): string {
     `It carries ${manifest.counts.documents} documents and ${manifest.counts.chunks} chunks, with their vectors, from ` +
       `generation ${manifest.project.exportedGeneration} of that instance. The generation number does not travel: it is ` +
       'local to the instance that produced it, and the import renumbers this corpus to 0.',
+    '',
     ...((manifest.counts.goldenQuestions ?? 0) > 0
       ? [`It also carries ${manifest.counts.goldenQuestions} golden question(s), in golden-questions.ndjson, in the shape of eval/golden.jsonl.`, '']
       : []),
