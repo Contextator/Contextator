@@ -337,7 +337,8 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
    *
    * `201` with the suggestion; `200` with `suggestion: null` and the reason when the project has too few
    * passages to measure from or no floor on the grid would answer them all (an outcome, not an error);
-   * `409` when the project is not indexed with the encoder this server runs.
+   * `409` when the project is not indexed with the encoder this server runs, or when a measurement of it
+   * (or of `MAX_CONCURRENT_MEASUREMENTS` other projects) is already running.
    */
   app.post('/api/projects/:id/score-floor/suggestions', async (req, reply) => {
     const { id } = ProjectParams.parse(req.params);
@@ -349,6 +350,12 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
     switch (outcome.status) {
       case 'project_gone':
         throw new NotFoundError('Project not found');
+      case 'busy':
+        throw new ConflictError(
+          outcome.reason === 'project'
+            ? 'A measurement of this project is already running; wait for it to finish'
+            : 'The server is already measuring other projects; try again shortly',
+        );
       case 'not_indexed':
         throw new ConflictError('Project has no indexed content yet; index it before asking for a floor');
       case 'model_mismatch':

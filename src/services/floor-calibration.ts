@@ -211,7 +211,14 @@ export type FloorSuggestionOutcome =
   | { status: 'no_fit'; probes: number }
   /** The project's chunks and this server's encoder are not in one space; the next run re-embeds them. */
   | { status: 'model_mismatch'; indexedWith: string; serverUses: string }
-  | { status: 'not_indexed' };
+  | { status: 'not_indexed' }
+  /** A measurement of this project is already running, or the server is already running its share of them. */
+  | { status: 'busy'; reason: 'project' | 'server' };
+
+/** How many projects may be measured at once: each probe is an embedding and a search, a hundred of them per run. */
+export const MAX_CONCURRENT_MEASUREMENTS = 2;
+
+const measuring = new Set<string>();
 
 /**
  * Measures the project with the floor off and stores the floor that would have answered every probe.
@@ -220,6 +227,23 @@ export type FloorSuggestionOutcome =
  * {@link SearchDeps}: the probes are the product asking itself, not an agent asking a question.
  */
 export async function generateFloorSuggestion(
+  deps: Pick<SearchDeps, 'db' | 'embeddings' | 'scan' | 'selection' | 'rerank'>,
+  projectId: string,
+  trigger: 'model_change' | 'operator',
+): Promise<FloorSuggestionOutcome> {
+  // A run is a hundred sequential searches; one per project and a few per server keeps a repeated
+  // request, or a re-index finishing under an operator's, from queueing them up behind the search path.
+  if (measuring.has(projectId)) return { status: 'busy', reason: 'project' };
+  if (measuring.size >= MAX_CONCURRENT_MEASUREMENTS) return { status: 'busy', reason: 'server' };
+  measuring.add(projectId);
+  try {
+    return await measureProject(deps, projectId, trigger);
+  } finally {
+    measuring.delete(projectId);
+  }
+}
+
+async function measureProject(
   deps: Pick<SearchDeps, 'db' | 'embeddings' | 'scan' | 'selection' | 'rerank'>,
   projectId: string,
   trigger: 'model_change' | 'operator',

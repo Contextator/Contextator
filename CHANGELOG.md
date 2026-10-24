@@ -20,6 +20,7 @@ ships, that stops.
   on the other two. Suggestions are
   listed (`GET`, viewer) and adopted only by `POST .../suggestions/:suggestionId/apply` (manager); the project's
   floor is never changed automatically, and a suggestion from an earlier model or index generation is refused.
+  One measurement runs per project and at most two across the server; a further request gets `409`.
   The fit is shared with `scripts/floor-calibration.ts`. Migration `0024` adds the `floor_suggestions` table
   (ADR-0083).
 - **Re-index on embedding-model change.** With `REINDEX_ON_MODEL_CHANGE=1` (off by default; Helm

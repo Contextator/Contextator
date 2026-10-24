@@ -10,6 +10,7 @@ import {
   calibrationQueries,
   generateFloorSuggestion,
   listFloorSuggestions,
+  MAX_CONCURRENT_MEASUREMENTS,
   MAX_KEPT_SUGGESTIONS,
   MIN_CALIBRATION_PROBES,
 } from '../../src/services/floor-calibration.js';
@@ -232,6 +233,42 @@ describe('a suggestion for a project with enough sections', () => {
       expect(query).not.toMatch(/Topic|Pipeline guide/);
     }
     expect(new Set(queries).size).toBe(queries.length);
+  });
+});
+
+describe('measurements that overlap', () => {
+  it('runs one measurement per project at a time, and stores a single suggestion', async () => {
+    const projectId = await seedProject(TOPICS);
+    const outcomes = await Promise.all([
+      generateFloorSuggestion(deps(), projectId, 'operator'),
+      generateFloorSuggestion(deps(), projectId, 'operator'),
+    ]);
+    expect(outcomes.map((o) => o.status).sort()).toEqual(['busy', 'created']);
+    expect(outcomes.find((o) => o.status === 'busy')).toEqual({ status: 'busy', reason: 'project' });
+    expect(await listFloorSuggestions(db, projectId)).toHaveLength(1);
+
+    // The guard is released: the next request is measured.
+    expect((await generateFloorSuggestion(deps(), projectId, 'operator')).status).toBe('created');
+  });
+
+  it('measures only a few projects at once across the server', async () => {
+    const ids = [];
+    for (let i = 0; i < MAX_CONCURRENT_MEASUREMENTS + 1; i++) ids.push(await seedProject(TOPICS));
+    const outcomes = await Promise.all(ids.map((id) => generateFloorSuggestion(deps(), id, 'operator')));
+    expect(outcomes.filter((o) => o.status === 'created')).toHaveLength(MAX_CONCURRENT_MEASUREMENTS);
+    expect(outcomes.filter((o) => o.status === 'busy')).toEqual([{ status: 'busy', reason: 'server' }]);
+  });
+
+  it('releases the project when the measurement fails', async () => {
+    const projectId = await seedProject(TOPICS);
+    const broken: EmbeddingProvider = {
+      ...embeddings,
+      embedQuery: async () => {
+        throw new Error('encoder down');
+      },
+    };
+    await expect(generateFloorSuggestion({ db, embeddings: broken }, projectId, 'operator')).rejects.toThrow('encoder down');
+    expect((await generateFloorSuggestion(deps(), projectId, 'operator')).status).toBe('created');
   });
 });
 
