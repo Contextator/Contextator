@@ -13,7 +13,7 @@ import { oauthRoutes } from '../../../src/mcp/oauth-routes.js';
 import { mcpRoutes } from '../../../src/mcp/router.js';
 import { SessionRegistry } from '../../../src/mcp/sessions.js';
 import { KeyedMutex } from '../../../src/services/locks.js';
-import { SlidingWindow } from '../../../src/services/rate-limit.js';
+import { McpRateLimiter, SlidingWindow } from '../../../src/services/rate-limit.js';
 import { chunkMarkdown, embeddingText, estimateTokens } from '../../../src/services/chunker.js';
 import type { EmbeddingProvider } from '../../../src/services/embeddings/provider.js';
 import { replaceDocument, storedDocumentContent, type NewChunk } from '../../../src/services/vector-store.js';
@@ -214,6 +214,7 @@ export async function startMcpInstance(
     sessions: new SessionRegistry(silentLogger),
     setup: { needsSetup: false },
     loginLimiter: new SlidingWindow(100, 60_000),
+    mcpRateLimiter: new McpRateLimiter(database.db),
     // The process counters `/metrics` reports ([ADR-0055](../../.ssot/ADR.md#adr-0055)). Real rather
     // than stubbed — it is a handful of integers, and the pool it was handed is the one the test
     // database opened, so the pool gauges are real too.

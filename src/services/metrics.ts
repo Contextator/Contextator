@@ -208,6 +208,20 @@ export interface McpRequestCounter {
   countMcpRequest(method: string, tool: string, era: McpRequestEra): void;
 }
 
+/** Why the MCP rate limiter refused a request; a closed set, so the counter's label cannot grow (ADR-0112). */
+export type RateLimitScope = 'token' | 'anonymous' | 'tool';
+
+/** Why a credential was refused before its access decision; a closed set (ADR-0118). */
+export type AccessDeniedReason = 'network';
+
+/** The two things the MCP rate limiter and the token allowlist report, and nothing that identifies a caller. */
+export interface McpGuardCounter {
+  countRateLimited(scope: RateLimitScope): void;
+  /** The counter statement failed; the request was served or refused according to `MCP_RATE_LIMIT_FAIL_OPEN`. */
+  countRateLimitError(): void;
+  countAccessDenied(reason: AccessDeniedReason): void;
+}
+
 /** Times one tool call, handler start to answer. */
 export interface McpToolObserver {
   observeToolDuration(tool: string, seconds: number): void;
@@ -219,6 +233,13 @@ export interface McpRequestSample {
   tool: string;
   era: McpRequestEra;
   count: number;
+}
+
+/** The `contextator_mcp_rate_limited_total`, `contextator_mcp_rate_limit_errors_total` and `contextator_mcp_access_denied_total` values. */
+export interface McpGuardSample {
+  rateLimited: Record<RateLimitScope, number>;
+  rateLimitErrors: number;
+  accessDenied: Record<AccessDeniedReason, number>;
 }
 
 /** node-postgres's own pool gauges, named as it names them. */
@@ -266,6 +287,8 @@ export interface MetricsSnapshot {
   sourceFreshness?: SourceFreshnessSample;
   searches: Record<QueryActor, number>;
   audit: { written: number; failed: number };
+  /** Rate-limited MCP requests by scope, access denials by reason, and counter failures. Optional like `mcpRequests`. */
+  mcpGuard?: McpGuardSample;
   /** MCP messages by method, tool and era. Optional so a snapshot built before it existed is still one. */
   mcpRequests?: McpRequestSample[];
   /** Rendered after the gauges and counters, in the order given. Optional so a snapshot without any is still one. */
@@ -279,9 +302,12 @@ export interface MetricsSnapshot {
  * read at scrape time by the route, which already has the composition root, and a registry that
  * reached for them would be a second place that knows how this application is wired.
  */
-export class MetricsRegistry implements SearchCounter, SearchObserver, IndexerObserver, McpRequestCounter, McpToolObserver {
+export class MetricsRegistry implements SearchCounter, SearchObserver, IndexerObserver, McpRequestCounter, McpToolObserver, McpGuardCounter {
   private readonly searches: Record<QueryActor, number> = { mcp: 0, dashboard: 0 };
   private readonly mcpRequestCounts = new Map<string, McpRequestSample>();
+  private readonly rateLimited: Record<RateLimitScope, number> = { token: 0, anonymous: 0, tool: 0 };
+  private rateLimitErrors = 0;
+  private readonly accessDenied: Record<AccessDeniedReason, number> = { network: 0 };
   private auditWritten = 0;
   private auditFailed = 0;
   private readonly histogramFamilies = new Map<string, Histogram>();
@@ -389,6 +415,23 @@ export class MetricsRegistry implements SearchCounter, SearchObserver, IndexerOb
 
   observeToolDuration(tool: string, seconds: number): void {
     this.toolDuration.observe(seconds, { tool });
+  }
+
+  countRateLimited(scope: RateLimitScope): void {
+    this.rateLimited[scope]++;
+  }
+
+  countRateLimitError(): void {
+    this.rateLimitErrors++;
+  }
+
+  countAccessDenied(reason: AccessDeniedReason): void {
+    this.accessDenied[reason]++;
+  }
+
+  /** The guard counters as they stand; copied, so a caller cannot move them. */
+  mcpGuard(): McpGuardSample {
+    return { rateLimited: { ...this.rateLimited }, rateLimitErrors: this.rateLimitErrors, accessDenied: { ...this.accessDenied } };
   }
 
   /** The `contextator_mcp_requests_total` series seen so far, in the order they first appeared. */
@@ -527,6 +570,22 @@ export function renderPrometheus(snapshot: MetricsSnapshot): string {
         sample.count,
       ]),
     );
+  }
+
+  // The MCP guards. Labels are closed sets and carry neither a token id nor an address (ADR-0112, ADR-0118):
+  // who was limited is in the `info` log line, how often is here.
+  if (snapshot.mcpGuard) {
+    const guard = snapshot.mcpGuard;
+    family('contextator_mcp_rate_limited_total', 'MCP requests refused with 429 by the rate limiter, by the limit that was hit.', 'counter', [
+      ['{scope="token"}', guard.rateLimited.token],
+      ['{scope="anonymous"}', guard.rateLimited.anonymous],
+      ['{scope="tool"}', guard.rateLimited.tool],
+    ]);
+    // Non-zero means the limiter could not count and (by default) let requests through: the limit is not being enforced.
+    family('contextator_mcp_rate_limit_errors_total', 'Rate limit checks whose counter statement failed.', 'counter', [['', guard.rateLimitErrors]]);
+    family('contextator_mcp_access_denied_total', 'MCP requests refused before the access decision, by reason.', 'counter', [
+      ['{reason="network"}', guard.accessDenied.network],
+    ]);
   }
 
   // Histograms: `_bucket` per bound with `le` last, then `+Inf`, `_sum` and `_count` per label set. A
