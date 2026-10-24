@@ -157,7 +157,7 @@ const UNSPACED_CHAR = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]
 /**
  * The units a sentence with such text is measured in: each Han/Kana character, and each run of anything else
  * (a command, a product name, a number) as one unit that is never split. The East Asian punctuation that
- * stands between them is not a unit.
+ * stands between them is not a unit, except `‘’`, which doubles as the Latin apostrophe.
  */
 const SENTENCE_UNIT =
   /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]|[^\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー、，；：（）「」『』【】《》〈〉・。！？“”—…]+/gu;
