@@ -1,5 +1,5 @@
 import { eq } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import type { Db } from '../../src/db/client.js';
 import { documentSources, floorSuggestions, projects } from '../../src/db/schema.js';
@@ -305,19 +305,45 @@ describe('measurements that overlap', () => {
     for (const id of ids) expect(await listFloorSuggestions(db, id)).toHaveLength(1);
   });
 
-  it('keeps `busy` for the operator while a model-change measurement waits for the server', async () => {
+  it('keeps `busy` for the operator when a slot frees up while a model-change measurement waits for it', async () => {
     const ids = [];
     for (let i = 0; i < MAX_CONCURRENT_MEASUREMENTS + 2; i++) ids.push(await seedProject(TOPICS));
     const holders = ids.slice(0, MAX_CONCURRENT_MEASUREMENTS);
     const [waiting, refused] = ids.slice(MAX_CONCURRENT_MEASUREMENTS);
-    const outcomes = await Promise.all([
-      ...holders.map((id) => generateFloorSuggestion(deps(), id, 'operator')),
-      generateFloorSuggestion(deps(), waiting, 'model_change'),
-      generateFloorSuggestion(deps(), refused, 'operator'),
-    ]);
-    expect(outcomes.slice(0, MAX_CONCURRENT_MEASUREMENTS).map((o) => o.status)).toEqual(holders.map(() => 'created'));
-    expect(outcomes[MAX_CONCURRENT_MEASUREMENTS].status).toBe('created');
-    expect(outcomes[MAX_CONCURRENT_MEASUREMENTS + 1]).toEqual({ status: 'busy', reason: 'server' });
+    // Each measurement stops at its first embedding until its gate opens, so the slots stay held for as long as the test needs them.
+    const gates = new Map<string, () => void>();
+    const entered: string[] = [];
+    const gated = (projectId: string): EmbeddingProvider => {
+      const open = new Promise<void>((resolve) => gates.set(projectId, resolve));
+      let reached = false;
+      return {
+        ...embeddings,
+        embedQuery: async (text: string) => {
+          if (!reached) {
+            reached = true;
+            entered.push(projectId);
+            await open;
+          }
+          return embeddings.embedQuery(text);
+        },
+      };
+    };
+    const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+    const holding = holders.map((id) => generateFloorSuggestion({ db, embeddings: gated(id) }, id, 'operator'));
+    await vi.waitFor(() => expect(entered).toHaveLength(holders.length));
+    const waitingFor = generateFloorSuggestion({ db, embeddings: gated(waiting) }, waiting, 'model_change');
+    for (let i = 0; i < 5; i++) await flush();
+    expect(entered).not.toContain(waiting);
+
+    // A slot frees up: it goes to the measurement that waited, so the operator's request still finds the server full.
+    gates.get(holders[0])?.();
+    expect((await holding[0]).status).toBe('created');
+    expect(await generateFloorSuggestion(deps(), refused, 'operator')).toEqual({ status: 'busy', reason: 'server' });
+    await vi.waitFor(() => expect(entered).toContain(waiting));
+
+    for (const open of gates.values()) open();
+    expect((await Promise.all([...holding.slice(1), waitingFor])).map((o) => o.status)).toEqual(['created', 'created']);
   });
 
   it('releases the project when the measurement fails', async () => {
