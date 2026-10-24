@@ -43,9 +43,9 @@ export const PROBE_WORDS = 8;
 /** A sentence shorter than this carries no topic of its own (a caption, a list stub). */
 export const MIN_PROBE_SENTENCE_WORDS = 6;
 /**
- * The same two limits for text written without spaces between words (Chinese, Japanese), where a sentence is
- * one whitespace-separated "word" and counting words would reject every sentence: characters stand in, at
- * about two characters to a word.
+ * The same two limits for sentences with Han or Kana characters (Chinese, Japanese), where a sentence can be
+ * one whitespace-separated "word" and counting words would reject it: weight stands in, a character
+ * weighing 1 and a word of another script 2 (see `sentenceUnits`).
  */
 export const PROBE_CHARS = 16;
 export const MIN_PROBE_SENTENCE_CHARS = 12;
@@ -148,26 +148,61 @@ function toView(row: FloorSuggestionRow): FloorSuggestionView {
   };
 }
 
-/** Scripts whose words are not separated by spaces; Hangul is written with spaces and is counted in words. */
-const UNSPACED_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu;
+/**
+ * Scripts whose words are not separated by spaces; Hangul is written with spaces and is counted in words. `ー`
+ * (the long-vowel mark) belongs to Katakana words but has the Common script, so it is listed on its own.
+ */
+const UNSPACED_CHAR = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]/u;
 
-/** A sentence is measured in characters when at least half of its letters are in a script written without spaces. */
-function isUnspaced(sentence: string): boolean {
-  const letters = sentence.replace(/\s+/g, '');
-  if (letters === '') return false;
-  const unspaced = letters.match(UNSPACED_SCRIPT)?.length ?? 0;
-  return unspaced * 2 >= Array.from(letters).length;
+/**
+ * The units a sentence with such text is measured in: each Han/Kana character, and each run of anything else
+ * (a command, a product name, a number) as one unit that is never split. The East Asian punctuation that
+ * stands between them is not a unit.
+ */
+const SENTENCE_UNIT =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]|[^\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー、，；：（）「」『』【】《》〈〉・。！？]+/gu;
+
+interface SentenceUnit {
+  /** Where the unit starts in the sentence. */
+  index: number;
+  /** A Han/Kana character weighs 1, a whole word of another script 2: two characters to a word, as the limits assume. */
+  weight: number;
+}
+
+/**
+ * A sentence with any Han or Kana character is measured by unit weight instead of by whitespace-separated words:
+ * technical text in these languages is full of Latin names glued to the characters around them
+ * ("npm run migrateを実行して"), so the share of characters cannot decide which way to count, and a sentence
+ * of three whitespace-separated "words" is not short. Hangul and the Latin script have spaces and keep the word count.
+ * Other scripts written without spaces (Thai, Lao, Khmer, Burmese) are not recognised: such a sentence is one
+ * "word" and is dropped, so a project written in them gets `insufficient_data`.
+ */
+function sentenceUnits(sentence: string): SentenceUnit[] | null {
+  if (!UNSPACED_CHAR.test(sentence)) return null;
+  return Array.from(sentence.matchAll(SENTENCE_UNIT), (match) => ({ index: match.index, weight: UNSPACED_CHAR.test(match[0]) ? 1 : 2 }));
 }
 
 function hasTopicOfItsOwn(sentence: string): boolean {
-  if (isUnspaced(sentence)) return Array.from(sentence.replace(/\s+/g, '')).length >= MIN_PROBE_SENTENCE_CHARS;
+  const units = sentenceUnits(sentence);
+  if (units) return units.reduce((total, unit) => total + unit.weight, 0) >= MIN_PROBE_SENTENCE_CHARS;
   return sentence.split(/\s+/).length >= MIN_PROBE_SENTENCE_WORDS;
+}
+
+/** The tail of a sentence measured in units: whole units from the end until they weigh {@link PROBE_CHARS}, so a word is never cut. */
+function tailByWeight(sentence: string, units: readonly SentenceUnit[]): string {
+  let weight = 0;
+  let start = units.length;
+  while (start > 0 && weight < PROBE_CHARS) {
+    start--;
+    weight += units[start].weight;
+  }
+  return sentence.slice(units[start].index).trim();
 }
 
 /**
  * The prose of a chunk as sentences: code fences, tables, headings, quotes and list markers are dropped,
  * links keep their text. Only sentences with a topic of their own stay ({@link MIN_PROBE_SENTENCE_WORDS}
- * words, or {@link MIN_PROBE_SENTENCE_CHARS} characters where words are not separated). A sentence ends at
+ * words, or {@link MIN_PROBE_SENTENCE_CHARS} units of weight where the sentence has Han or Kana characters). A sentence ends at
  * `.`, `!` or `?` before whitespace, and at `。`, `！` or `？` wherever they stand: that text has no space to
  * look for.
  */
@@ -198,7 +233,7 @@ function proseSentences(content: string): string[] {
 
 /**
  * One probe from one chunk: the last {@link PROBE_WORDS} words of the chunk's middle sentence (the last
- * {@link PROBE_CHARS} characters where words are not separated by spaces), or `null` when the chunk has no
+ * {@link PROBE_CHARS} units of weight where the sentence has Han or Kana characters), or `null` when the chunk has no
  * prose (a table, a code listing).
  *
  * The probe must not carry the chunk's breadcrumb. A chunk is embedded as "breadcrumb, blank line,
@@ -210,7 +245,8 @@ export function probeFromChunk(content: string): string | null {
   const sentences = proseSentences(content);
   if (sentences.length === 0) return null;
   const middle = sentences[Math.floor((sentences.length - 1) / 2)];
-  if (isUnspaced(middle)) return Array.from(middle.replace(/\s+/g, '')).slice(-PROBE_CHARS).join('');
+  const units = sentenceUnits(middle);
+  if (units) return tailByWeight(middle, units);
   return middle.split(/\s+/).slice(-PROBE_WORDS).join(' ');
 }
 

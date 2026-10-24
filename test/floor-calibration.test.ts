@@ -132,29 +132,57 @@ describe('probeFromChunk', () => {
 
     it('ends a Japanese sentence at 。 and takes the last characters of the middle one', () => {
       const probe = probeFromChunk(japanese);
-      expect(probe).toBe('ーカーに各ジョブを割り当てます。');
-      expect(Array.from(probe as string)).toHaveLength(PROBE_CHARS);
+      expect(probe).toBe('ワーカーに各ジョブを割り当てます。');
+      expect(Array.from((probe as string).replace('。', ''))).toHaveLength(PROBE_CHARS);
     });
 
     it('ends a Chinese sentence at 。 and takes the last characters of the middle one', () => {
-      expect(probeFromChunk(chinese)).toBe('每个任务分配给最空闲的工作进程。');
+      expect(probeFromChunk(chinese)).toBe('把每个任务分配给最空闲的工作进程。');
     });
 
     it('ends a sentence at ！ and ？ as well', () => {
       expect(probeFromChunk('ジョブはいつ実行されますか？キューに入れられたらすぐに実行されます！ワーカーが空いていれば待ちません。')).toBe(
-        '入れられたらすぐに実行されます！',
+        'に入れられたらすぐに実行されます！',
       );
     });
 
-    it('measures a short sentence in characters rather than counting it as one word', () => {
+    it('measures a short sentence by weight rather than counting it as one word', () => {
       expect(Array.from('ジョブを実行します。')).toHaveLength(MIN_PROBE_SENTENCE_CHARS - 2);
       expect(probeFromChunk('ジョブを実行します。')).toBeNull();
       expect(probeFromChunk('任务按顺序执行。')).toBeNull();
-      expect(probeFromChunk('キューに入ったジョブを順番に実行します。')).toBe('キューに入ったジョブを順番に実行します。'.slice(-PROBE_CHARS));
+      expect(probeFromChunk('キューに入ったジョブを順番に実行します。')).toBe('に入ったジョブを順番に実行します。');
     });
 
     it('drops a sentence that is not prose, whatever the script', () => {
       expect(probeFromChunk('| 名前 | 値 |\n| - | - |\n```\nジョブを順番に実行してキューを空にします。\n```')).toBeNull();
+    });
+
+    it('keeps a Japanese sentence that is mostly Latin names and measures it as prose', () => {
+      const content =
+        'docker composeでPostgreSQLとpgvectorを起動します。次にnpm run migrateを実行してschemaを作成します。最後にnpm startでserverを起動します。';
+      expect(probeFromChunk(content)).toBe('run migrateを実行してschemaを作成します。');
+    });
+
+    it('takes the middle sentence of a mixed Japanese passage, not the first', () => {
+      const content =
+        'このAPIはPOSTリクエストでJSONを受け取ります。Contextatorのworkerはqueueからjobを取り出してembeddingを計算します。結果はdatabaseに保存されます。';
+      expect(probeFromChunk(content)).toBe('jobを取り出してembeddingを計算します。');
+    });
+
+    it('does not cut a Latin word when the probe starts mid-sentence in Chinese', () => {
+      const content = '先安装依赖。然后运行npm run migrate命令来创建所有的表结构。最后启动服务。';
+      const probe = probeFromChunk(content) as string;
+      expect(probe).toBe('npm run migrate命令来创建所有的表结构。');
+      expect(probe.startsWith('rate')).toBe(false);
+    });
+
+    it('keeps a mixed sentence whole when it is no longer than the probe', () => {
+      expect(probeFromChunk('用npm start启动服务。')).toBeNull();
+      expect(probeFromChunk('用npm start启动服务器进程。')).toBe('用npm start启动服务器进程。');
+    });
+
+    it('drops a sentence in a script written without spaces that is not recognised', () => {
+      expect(probeFromChunk('เซิร์ฟเวอร์จะดึงงานจากคิวแล้วประมวลผลทีละงานตามลำดับ')).toBeNull();
     });
 
     it('still reads a spaced script in words, and a mostly Latin sentence with a Han word as words too', () => {
