@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import type { Config } from '../config.js';
 import type { Db } from '../db/client.js';
 import { projects, type ProjectRow } from '../db/schema.js';
-import { sourceCurrentDir, stagingRootDir } from './data-dir.js';
+import { isSessionName, sourceCurrentDir, stagingRootDir } from './data-dir.js';
 import { QuotaUsageUnavailableError } from './errors.js';
 import { listSources } from './sources.js';
 
@@ -91,11 +91,6 @@ export const QUOTA_BYTES_MAX = Number.MAX_SAFE_INTEGER;
  * cleaned up, and would hold part of the quota for good. Every request on a session renews it.
  */
 export const UPLOAD_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-
-/** What a session directory under `.staging/` is called: 32 hex digits. Nothing else there is a session. */
-export function isSessionName(name: string): boolean {
-  return /^[0-9a-f]{32}$/.test(name);
-}
 
 /** The prefix a session directory gets while the sweep deletes it (`.trash-<session>`): never a session name, never counted. */
 export const SWEPT_SESSION_PREFIX = '.trash-';

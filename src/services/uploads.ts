@@ -6,13 +6,13 @@ import { pipeline } from 'node:stream/promises';
 import type { Config } from '../config.js';
 import type { DocumentSourceRow } from '../db/schema.js';
 import { cleanEntryPath, extractArchive, importTree, isArchiveName, type ImportLimits, type ImportStats } from './archives.js';
-import { mergeDirectory, sourceCurrentDir, stagingDir, swapDirectory } from './data-dir.js';
+import { isSessionName, mergeDirectory, sourceCurrentDir, stagingDir, swapDirectory } from './data-dir.js';
 import { QuotaExceededError } from './errors.js';
 import { allowedExtensionsFor, type Flavor } from './flavors.js';
 import { isInside, normalizeRelativePath } from './fs-scan.js';
 import type { KeyedMutex } from './locks.js';
 import { NotFoundError, ValidationError } from './projects.js';
-import { directoryBytes, fileSize, isSessionName, overwrittenBytes, SWEPT_SESSION_PREFIX, UPLOAD_SESSION_TTL_MS } from './quotas.js';
+import { directoryBytes, fileSize, overwrittenBytes, SWEPT_SESSION_PREFIX, UPLOAD_SESSION_TTL_MS } from './quotas.js';
 
 /**
  * The upload quota in force for one request ([ADR-0117](../../.ssot/ADR.md#adr-0117)). Only built when the

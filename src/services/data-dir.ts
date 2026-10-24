@@ -40,8 +40,16 @@ export function stagingRootDir(dataDir: string, projectId: string, sourceId: str
   return path.join(sourceDir(dataDir, projectId, sourceId), '.staging');
 }
 
+/** What an upload session is called, and so its directory under `.staging/`: 32 hex digits. */
+export const SESSION_NAME_PATTERN = /^[0-9a-f]{32}$/;
+
+/** Whether `name` is an upload session name. Nothing else under `.staging/` is a session. */
+export function isSessionName(name: string): boolean {
+  return SESSION_NAME_PATTERN.test(name);
+}
+
 export function stagingDir(dataDir: string, projectId: string, sourceId: string, session: string): string {
-  if (!/^[0-9a-f]{32}$/.test(session)) throw new Error('Invalid upload session id');
+  if (!isSessionName(session)) throw new Error('Invalid upload session id');
   return path.join(stagingRootDir(dataDir, projectId, sourceId), session);
 }
 

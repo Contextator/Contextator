@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import type { DocumentSourceRow } from '../db/schema.js';
 import type { ImportStats } from '../services/archives.js';
+import { SESSION_NAME_PATTERN } from '../services/data-dir.js';
 import { assertDiskSpace } from '../services/disk-space.js';
 import { QuotaExceededError, QuotaUsageUnavailableError } from '../services/errors.js';
 import { ConflictError, NotFoundError, ValidationError, getProjectById } from '../services/projects.js';
@@ -28,7 +29,7 @@ export async function drainPart(file: NodeJS.ReadableStream): Promise<void> {
 }
 
 const SourceParams = z.object({ id: z.uuid(), sid: z.uuid() });
-const SessionParams = SourceParams.extend({ session: z.string().regex(/^[0-9a-f]{32}$/) });
+const SessionParams = SourceParams.extend({ session: z.string().regex(SESSION_NAME_PATTERN) });
 const CommitQuery = z.object({ mode: z.enum(['add', 'replace']).default('add') });
 const FileQuery = z.object({ path: z.string().min(1).max(2048) });
 
