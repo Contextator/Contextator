@@ -97,6 +97,8 @@ export const state = {
     tab: 'questions', // 'questions' | 'documents' | 'chunks' | 'volume'
     days: 7,
     actor: 'mcp',
+    /** An MCP token id (0.4-06): only that token's searches are read. null is every token. */
+    token: null,
     /** `<model>@<generation>@<floor|none>`, or null for whichever configuration the server picked. */
     configKey: null,
     /** The request the data in hand answers; a change of any part of it is what refetches. */

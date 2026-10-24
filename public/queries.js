@@ -56,12 +56,13 @@ const score = (value) => (value === null || value === undefined ? '—' : value.
 /** Everything that decides which request to send; a change of any part of it refetches. */
 const requestKey = (projectId) => {
   const q = state.queries;
-  return [projectId, q.days, q.actor, q.configKey ?? ''].join('|');
+  return [projectId, q.days, q.actor, q.token ?? '', q.configKey ?? ''].join('|');
 };
 
 function params(limit) {
   const q = state.queries;
   const search = new URLSearchParams({ days: String(q.days), actor: q.actor, limit: String(limit) });
+  if (q.token) search.set('token', q.token);
   if (q.configKey) {
     const floorAt = q.configKey.lastIndexOf('@');
     const rest = q.configKey.slice(0, floorAt);
@@ -120,10 +121,11 @@ export async function loadQuerySummary(force = false) {
   }
 }
 
-/** The chosen configuration is the one thing that must not survive a change of project. */
+/** The chosen configuration and token are the things that must not survive a change of project. */
 function reset(projectId) {
   Object.assign(state.queries, {
     projectId,
+    token: null,
     configKey: null,
     loadedKey: null,
     loadedAt: null,
@@ -199,6 +201,7 @@ function controls(project) {
       ACTORS.map((a) => el('option', { value: a.value, selected: q.actor === a.value || undefined, text: `asked by ${a.label}` })),
       'Whose searches',
     ),
+    tokenPicker(project),
     el('button', {
       type: 'button',
       class: 'ghost small',
@@ -216,6 +219,36 @@ function controls(project) {
     }),
     q.loadedAt ? el('span', { class: 'field-hint', text: `read ${relativeTime(q.loadedAt)}` }) : null,
   ]);
+}
+
+/**
+ * Narrows the log to one MCP token's searches. The options are the project's live tokens; a token chosen
+ * and revoked since stays listed under its id, because the log still holds what it asked and silently
+ * dropping the selection would show every token's searches under a heading that says one.
+ */
+function tokenPicker(project) {
+  const q = state.queries;
+  const tokens = state.mcpTokensFor === project.id ? state.mcpTokens : [];
+  const chosenMissing = q.token && !tokens.some((t) => t.id === q.token);
+  return el(
+    'select',
+    {
+      class: 'search-limit',
+      'aria-label': 'Whose token',
+      title: 'Show only the searches made with one MCP token',
+      onchange: (event) => {
+        q.token = event.target.value || null;
+        // The floor preview reads every token's searches (the route takes no token), so it stays as it is.
+        void loadQuerySummary();
+        emit('render');
+      },
+    },
+    [
+      el('option', { value: '', selected: !q.token || undefined, text: 'any token' }),
+      ...tokens.map((t) => el('option', { value: t.id, selected: q.token === t.id || undefined, text: `token ${t.name}` })),
+      chosenMissing ? el('option', { value: q.token, selected: true, text: `token ${q.token.slice(0, 8)}… (revoked)` }) : null,
+    ],
+  );
 }
 
 /**
