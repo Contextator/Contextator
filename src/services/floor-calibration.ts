@@ -20,7 +20,7 @@ import type { SearchHit } from './vector-store.js';
  * **A suggestion is advice, and mostly an upper bound.** A probe is a fragment of the text it should find, so
  * it usually scores higher than a question a person writes about the same passage; measured against the floor
  * fitted from labelled questions, the product path came out within 0.013 of it on either side on the two prose
- * reference corpora and 0.03 to 0.045 above it on the two XQuAD ones, and two runs over one project can differ by
+ * reference corpora and 0.027 to 0.045 above it on the two XQuAD ones, and two runs over one project can differ by
  * 0.018 because each samples other chunks (`scripts/floor-calibration.ts` prints the table). Check it with the
  * preview in both directions before applying it. Nothing here writes `projects.score_floor` except
  * {@link applyFloorSuggestion}, which only a manager's request reaches and which refuses a suggestion

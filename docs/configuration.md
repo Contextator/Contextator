@@ -121,7 +121,7 @@ floor usually sits above the one that real questions would justify, and a floor 
 questions the project does answer. It is not always above: measured against the floor fitted from labelled
 questions on the four reference corpora, prose documentation landed on either side of it, within 0.013
 (the repository's synthetic documentation 0.791 and 0.804 against 0.804, in two runs; the product's user
-wiki 0.805 and 0.817 against 0.811), while XQuAD stayed 0.03 to 0.045 above it (Turkish 0.820 and 0.802
+wiki 0.805 and 0.817 against 0.811), while XQuAD stayed 0.027 to 0.045 above it (Turkish 0.820 and 0.802
 against 0.775, English 0.782 and 0.774 against 0.738). Two runs over the same project differ as well,
 because each samples other chunks: 0.018 on XQuAD Turkish, so a single run says less than its third
 decimal suggests. Before applying one, look at what it would have refused among your logged searches with `GET

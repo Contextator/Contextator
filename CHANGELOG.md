@@ -17,7 +17,7 @@ ships, that stops.
   off and stores the highest floor that still answers a fragment of each of up to 100 of its own chunks (the
   last eight words of a sentence, or the tail of a Chinese or Japanese sentence weighing 16, a character counting 1 and a Latin word 2, never the heading; Thai, Lao, Khmer and Burmese are not recognised). The suggestion is mostly an upper bound, not a guarantee: on the four
   reference corpora it came out within 0.013 of the floor fitted from labelled questions, on either side of it, on
-  two (prose documentation) and 0.03 to 0.045 above it on the other two (XQuAD); two runs on one project can differ
+  two (prose documentation) and 0.027 to 0.045 above it on the other two (XQuAD); two runs on one project can differ
   by 0.018. Check it with `GET .../score-floor/preview` in both directions before applying it. Suggestions are
   listed (`GET`, viewer) and adopted only by `POST .../suggestions/:suggestionId/apply` (manager); the project's
   floor is never changed automatically, and a suggestion from an earlier model or index generation is refused.
