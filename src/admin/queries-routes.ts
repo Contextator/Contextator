@@ -332,7 +332,7 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
 
   /**
    * Measures the project and stores the floor that would have answered a fragment of each of up to 100 of
-   * its own chunks — advice, an upper bound on what real questions would justify, never applied here. `manager`, by its row in `PROJECT_ROUTE_OVERRIDES`: it spends
+   * its own chunks — advice, mostly an upper bound on what real questions would justify (check it with the preview in both directions), never applied here. `manager`, by its row in `PROJECT_ROUTE_OVERRIDES`: it spends
    * an embedding and a search per probe.
    *
    * `201` with the suggestion; `200` with `suggestion: null` and the reason when the project has too few

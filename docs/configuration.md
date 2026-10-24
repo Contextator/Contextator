@@ -115,17 +115,19 @@ or index generation is refused. A project that yields fewer than 20 probes (litt
 is not measured and gets no suggestion; the response says so. The same arithmetic is what
 `scripts/floor-calibration.ts` runs against labelled question sets.
 
-**Treat a suggestion as an upper bound.** A probe is a fragment of the text it should find, which scores
-higher than a question a person would write about it, so the suggested floor can sit above the one that
-real questions would justify, and a floor set too high refuses questions the project does answer. Measured
-against the floor fitted from labelled questions on the four reference corpora, the suggestion landed
-within 0.013 of it for the repository's synthetic documentation (0.791 and 0.804 against 0.804, in two runs)
-and for the product's user wiki (0.805 and 0.817 against 0.811), and 0.03 to 0.045 above it for XQuAD in
-Turkish (0.820 and 0.802 against 0.775) and in English (0.782 and 0.774 against 0.738). The runs differ
-because each samples other chunks. Before applying one,
-look at what it would have refused among your logged searches with `GET
-/api/projects/:id/score-floor/preview?floor=<n>`, and lower it by a few hundredths when it refuses
-something the project answers.
+**Treat a suggestion as an upper bound in most corpora, not as a guarantee.** A probe is a fragment of the
+text it should find, which scores higher than a question a person would write about it, so the suggested
+floor usually sits above the one that real questions would justify, and a floor set too high refuses
+questions the project does answer. It is not always above: measured against the floor fitted from labelled
+questions on the four reference corpora, prose documentation landed on either side of it, within 0.013
+(the repository's synthetic documentation 0.791 and 0.804 against 0.804, in two runs; the product's user
+wiki 0.805 and 0.817 against 0.811), while XQuAD stayed 0.03 to 0.045 above it (Turkish 0.820 and 0.802
+against 0.775, English 0.782 and 0.774 against 0.738). Two runs over the same project differ as well,
+because each samples other chunks: 0.018 on XQuAD Turkish, so a single run says less than its third
+decimal suggests. Before applying one, look at what it would have refused among your logged searches with `GET
+/api/projects/:id/score-floor/preview?floor=<n>`, and check it in both directions: lower it by a few
+hundredths when it refuses something the project answers, and raise it when it lets through questions the
+project cannot answer.
 
 ## Tracing (OpenTelemetry)
 

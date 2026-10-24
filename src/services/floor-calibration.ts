@@ -16,10 +16,12 @@ import type { SearchHit } from './vector-store.js';
  * can ask for that number for their own project — in particular right after a model change, when the
  * old floor means nothing (a cosine similarity is a number about one encoder, ADR-0037).
  *
- * **A suggestion is advice, and an upper bound.** A probe is a fragment of the text it should find, so it
- * scores higher than a question a person writes about the same passage; measured against the floor fitted
- * from labelled questions, the product path came out within 0.013 of it on two of the four reference corpora and 0.03 to 0.045
- * above it on the other two (`scripts/floor-calibration.ts` prints the table; each run samples other chunks). Nothing here writes `projects.score_floor` except
+ * **A suggestion is advice, and mostly an upper bound.** A probe is a fragment of the text it should find, so
+ * it usually scores higher than a question a person writes about the same passage; measured against the floor
+ * fitted from labelled questions, the product path came out within 0.013 of it on either side on the two prose
+ * reference corpora and 0.03 to 0.045 above it on the two XQuAD ones, and two runs over one project can differ by
+ * 0.018 because each samples other chunks (`scripts/floor-calibration.ts` prints the table). Check it with the
+ * preview in both directions before applying it. Nothing here writes `projects.score_floor` except
  * {@link applyFloorSuggestion}, which only a manager's request reaches and which refuses a suggestion
  * measured against a different encoder or generation than the project now has.
  */
