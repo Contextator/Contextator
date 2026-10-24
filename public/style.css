@@ -1348,6 +1348,50 @@ button:focus-visible {
   color: var(--accent);
 }
 
+/* Provenance of the excerpt's document: the link it came from, when it last changed there, and the
+   server's "long unchanged" verdict. A line of its own so a long URL truncates instead of pushing the score. */
+.hit-source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.hit-source-link {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hit-source-link:hover {
+  color: var(--accent-hover);
+}
+
+.hit-source-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.hit-source-date {
+  white-space: nowrap;
+}
+
+.pill.stale {
+  background: var(--warn-tint);
+  color: var(--warn-text);
+}
+
+.pill.stale::before {
+  background: var(--warn);
+}
+
 /* The chunks either side of the excerpt. Dimmed rather than separated, because they are the same
    page continuing and they carry neither a rank nor a score of their own (ADR-0042). */
 .hit-context {
