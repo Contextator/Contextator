@@ -29,6 +29,7 @@ import { canCreateProject, canDeleteProject, canEdit, initAuthUi, loadMe, render
 import { authHeaderFor, authModeBadge, initMcpUi, loadMcpTokens, renderMcpAccess, showMcpSecret } from './mcp.js';
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
 import { loadQuerySummary, renderQueries } from './queries.js';
+import { describeApiError, initQuotasUi, loadQuotas, renderQuotas } from './quotas.js';
 import { captureSearchFocus, renderSearch } from './search.js';
 import { initTokensUi, loadApiTokens, renderTokensView } from './tokens.js';
 import { initUsersUi, renderUsersView } from './users.js';
@@ -268,6 +269,7 @@ function select(id) {
   void loadMembers();
   void loadMcpTokens();
   void loadQuerySummary();
+  void loadQuotas();
 }
 
 /** Fetches the selected project's run history when the selection or the newest job changes. */
@@ -669,6 +671,7 @@ function renderDetail() {
   // been failing to answer for a week.
   main.append(renderQueries(p));
   main.append(renderSources(p, busy));
+  main.append(renderQuotas(p));
   main.append(renderMembers(p));
   main.append(renderMcpAccess(p));
 
@@ -949,6 +952,8 @@ async function refresh() {
     // aggregate queries every two seconds against the table the searches are writing into is not a
     // panel, it is a load generator. The panel carries its own Refresh.
     void loadQuerySummary();
+    // Quiet unless the selection or the project's counts moved, like the two above.
+    void loadQuotas();
   }
   // The account list is not part of a project poll; refresh it only while it is on screen.
   if (state.view === 'users') void loadUsers();
@@ -1864,7 +1869,7 @@ srcForm.addEventListener('submit', async (event) => {
     await refresh();
     await loadSources(true);
   } catch (err) {
-    errorNode.textContent = err.message;
+    errorNode.textContent = describeApiError(err);
     errorNode.hidden = false;
   } finally {
     srcUi.busy = false;
@@ -1916,6 +1921,7 @@ async function boot() {
   initUsersUi();
   initMembersUi();
   initMcpUi();
+  initQuotasUi();
   initTokensUi();
   await loadMe();
   applyHash();

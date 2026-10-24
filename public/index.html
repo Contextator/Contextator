@@ -542,6 +542,48 @@
       </form>
     </dialog>
 
+    <dialog id="quota-dialog" class="dialog">
+      <form id="quota-form" method="dialog" novalidate>
+        <div class="dialog-head">
+          <h2>Project quotas</h2>
+          <p class="muted">Leave a field empty to follow the instance default. Enter <code>0</code> for no limit. Only the fields you change are saved.</p>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span class="field-label">Documents</span>
+            <input name="documents" inputmode="numeric" autocomplete="off" placeholder="instance default" />
+            <span class="field-hint" id="quota-documents-now"></span>
+          </label>
+          <label class="field">
+            <span class="field-label">Chunks</span>
+            <input name="chunks" inputmode="numeric" autocomplete="off" placeholder="instance default" />
+            <span class="field-hint" id="quota-chunks-now"></span>
+          </label>
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">Upload storage</span>
+              <input name="uploadBytes" inputmode="numeric" autocomplete="off" placeholder="instance default" />
+              <span class="field-hint" id="quota-uploadBytes-now"></span>
+            </label>
+            <label class="field">
+              <span class="field-label">Unit</span>
+              <select name="uploadBytesUnit">
+                <option value="bytes">bytes</option>
+                <option value="KiB">KiB</option>
+                <option value="MiB" selected>MiB</option>
+                <option value="GiB">GiB</option>
+              </select>
+            </label>
+          </div>
+          <p id="quota-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-foot">
+          <button type="button" class="ghost" id="quota-cancel">Cancel</button>
+          <button type="submit" class="primary" id="quota-submit">Save limits</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="token-secret-dialog" class="dialog dialog-wide">
       <div class="dialog-head">
         <h2>Your MCP token</h2>

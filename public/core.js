@@ -50,6 +50,16 @@ export const state = {
   membersFor: null,
   mcpTokens: [], // MCP tokens of the selected project
   mcpTokensFor: null,
+  /** The quota panel (quotas.js): limits and usage of the selected project, from its detail route (ADR-0117). */
+  quotas: {
+    projectId: null,
+    /** `{ documents, chunks, uploadBytes }`, each `{ limit, used, inherited }`; null until read. */
+    data: null,
+    /** The project and its counts the data answers; a change of either refetches. */
+    loadedKey: null,
+    status: 'idle', // 'idle' | 'loading' | 'done' | 'error'
+    error: '',
+  },
   users: [], // the account list, only while the users view is open
   usersLoaded: false,
   apiTokens: [], // the signed-in account's own bearer API tokens (ADR-0076), only while ~tokens is open

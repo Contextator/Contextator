@@ -2764,3 +2764,82 @@ body.auth .gate-card a {
   padding-left: 18px;
   font-size: 13px;
 }
+
+/* ---------- quotas panel ---------- */
+
+.quota-list {
+  display: grid;
+}
+
+.quota-row {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr) minmax(120px, 220px) auto;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--neutral-tint);
+}
+
+.quota-row:last-child {
+  border-bottom: 0;
+}
+
+.quota-label {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.quota-figures {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.quota-meter {
+  display: block;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--neutral-tint);
+  overflow: hidden;
+}
+
+.quota-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--ok);
+}
+
+.quota-meter.near .quota-meter-fill {
+  background: var(--warn);
+}
+
+.quota-meter.full .quota-meter-fill {
+  background: var(--err);
+}
+
+#quotas-panel > .hint,
+#quotas-panel > .form-error,
+#quotas-panel > .field-hint {
+  padding: 12px 20px;
+}
+
+@media (max-width: 720px) {
+  .quota-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .quota-label {
+    grid-column: 1 / -1;
+  }
+
+  .quota-meter {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+}
+
+.quota-meter.none {
+  opacity: 0.45;
+}
