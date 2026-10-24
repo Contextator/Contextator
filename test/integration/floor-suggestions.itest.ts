@@ -260,6 +260,66 @@ describe('measurements that overlap', () => {
     expect(outcomes.filter((o) => o.status === 'busy')).toEqual([{ status: 'busy', reason: 'server' }]);
   });
 
+  /** A model-change measurement that records how many are between their first embedding and their end. */
+  function tracked(counter: { active: number; peak: number }) {
+    return async (projectId: string) => {
+      let started = false;
+      const encoder: EmbeddingProvider = {
+        ...embeddings,
+        embedQuery: async (text: string) => {
+          if (!started) {
+            started = true;
+            counter.active++;
+            counter.peak = Math.max(counter.peak, counter.active);
+          }
+          return embeddings.embedQuery(text);
+        },
+      };
+      try {
+        return await generateFloorSuggestion({ db, embeddings: encoder }, projectId, 'model_change');
+      } finally {
+        if (started) counter.active--;
+      }
+    };
+  }
+
+  it("lets a model-change measurement wait behind an operator's on the same project instead of dropping it", async () => {
+    const projectId = await seedProject(TOPICS);
+    const [byOperator, byModelChange] = await Promise.all([
+      generateFloorSuggestion(deps(), projectId, 'operator'),
+      generateFloorSuggestion(deps(), projectId, 'model_change'),
+    ]);
+    expect(byOperator.status).toBe('created');
+    expect(byModelChange.status).toBe('created');
+    expect((await listFloorSuggestions(db, projectId)).map((s) => s.trigger).sort()).toEqual(['model_change', 'operator']);
+  });
+
+  it('lets model-change measurements queue for a server slot, never exceeding the limit and never returning busy', async () => {
+    const ids = [];
+    for (let i = 0; i < MAX_CONCURRENT_MEASUREMENTS * 2 + 1; i++) ids.push(await seedProject(TOPICS));
+    const counter = { active: 0, peak: 0 };
+    const outcomes = await Promise.all(ids.map(tracked(counter)));
+    expect(outcomes.map((o) => o.status)).toEqual(ids.map(() => 'created'));
+    expect(counter.peak).toBe(MAX_CONCURRENT_MEASUREMENTS);
+    expect(counter.active).toBe(0);
+    for (const id of ids) expect(await listFloorSuggestions(db, id)).toHaveLength(1);
+  });
+
+  it('keeps `busy` for the operator while a model-change measurement waits for the server', async () => {
+    const ids = [];
+    for (let i = 0; i < MAX_CONCURRENT_MEASUREMENTS + 2; i++) ids.push(await seedProject(TOPICS));
+    const holders = ids.slice(0, MAX_CONCURRENT_MEASUREMENTS);
+    const [waiting, refused] = ids.slice(MAX_CONCURRENT_MEASUREMENTS);
+    const outcomes = await Promise.all([
+      ...holders.map((id) => generateFloorSuggestion(deps(), id, 'operator')),
+      generateFloorSuggestion(deps(), waiting, 'model_change'),
+      generateFloorSuggestion(deps(), refused, 'operator'),
+    ]);
+    expect(outcomes.slice(0, MAX_CONCURRENT_MEASUREMENTS).map((o) => o.status)).toEqual(holders.map(() => 'created'));
+    expect(outcomes[MAX_CONCURRENT_MEASUREMENTS].status).toBe('created');
+    expect(outcomes[MAX_CONCURRENT_MEASUREMENTS + 1]).toEqual({ status: 'busy', reason: 'server' });
+  });
+
   it('releases the project when the measurement fails', async () => {
     const projectId = await seedProject(TOPICS);
     const broken: EmbeddingProvider = {

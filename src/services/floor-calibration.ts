@@ -1,6 +1,7 @@
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { chunks, floorSuggestions, projects, type FloorSuggestionRow } from '../db/schema.js';
+import { KeyedMutex, Semaphore } from './locks.js';
 import { ConflictError, NotFoundError } from './projects.js';
 import { belowRelevanceFloor } from './relevance.js';
 import { type SearchDeps, searchProject } from './search.js';
@@ -223,10 +224,19 @@ export type FloorSuggestionOutcome =
 /** How many projects may be measured at once: each probe is an embedding and a search, a hundred of them per run. */
 export const MAX_CONCURRENT_MEASUREMENTS = 2;
 
-const measuring = new Set<string>();
+/** One measurement per project (also a queue for the ones that wait), and a few across the server. */
+const projectLocks = new KeyedMutex();
+const serverSlots = new Semaphore(MAX_CONCURRENT_MEASUREMENTS);
 
 /**
  * Measures the project with the floor off and stores the floor that would have answered every probe.
+ *
+ * A run is a hundred sequential searches, so an operator's request is refused (`busy`) rather than queued
+ * when the project is already being measured or the server is already measuring its share: a repeated click
+ * must not stack runs up behind the search path. The `model_change` trigger is the server's own, with nobody
+ * to retry, and it fires once per project when its re-index ends; it waits its turn instead (the project's
+ * lock, then a server slot) and so never returns `busy`. Otherwise a small project finishing behind two large
+ * ones would be left with no suggestion at all.
  *
  * `deps.scoreFloor`, the query log and the metrics are deliberately left unset by the caller's
  * {@link SearchDeps}: the probes are the product asking itself, not an agent asking a question.
@@ -236,15 +246,23 @@ export async function generateFloorSuggestion(
   projectId: string,
   trigger: 'model_change' | 'operator',
 ): Promise<FloorSuggestionOutcome> {
-  // A run is a hundred sequential searches; one per project and a few per server keeps a repeated
-  // request, or a re-index finishing under an operator's, from queueing them up behind the search path.
-  if (measuring.has(projectId)) return { status: 'busy', reason: 'project' };
-  if (measuring.size >= MAX_CONCURRENT_MEASUREMENTS) return { status: 'busy', reason: 'server' };
-  measuring.add(projectId);
+  if (trigger === 'model_change') {
+    return projectLocks.runExclusive(projectId, async () => {
+      await serverSlots.acquire();
+      try {
+        return await measureProject(deps, projectId, trigger);
+      } finally {
+        serverSlots.release();
+      }
+    });
+  }
+  // Checked and entered with no `await` between, so two requests cannot both pass the check.
+  if (projectLocks.isLocked(projectId)) return { status: 'busy', reason: 'project' };
+  if (!serverSlots.tryAcquire()) return { status: 'busy', reason: 'server' };
   try {
-    return await measureProject(deps, projectId, trigger);
+    return await projectLocks.runExclusive(projectId, () => measureProject(deps, projectId, trigger));
   } finally {
-    measuring.delete(projectId);
+    serverSlots.release();
   }
 }
 
