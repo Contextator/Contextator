@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { GOLDEN_ID_MESSAGE, GOLDEN_ID_RE, type GoldenRow, GoldenRowSchema } from '../src/services/golden-row.js';
 
 /**
  * The scoring half of `npm run eval`, with nothing in it that touches a database, a model or a clock.
@@ -10,28 +11,9 @@ import { z } from 'zod';
  * ([ADR-0034](../../.ssot/ADR.md#adr-0034)).
  */
 
-const ID_RE = /^[a-z0-9][a-z0-9-]*$/;
-
-export const GoldenRowSchema = z.strictObject({
-  /** Stable and unique; it appears in the miss list and in diffs, so it is never renumbered. */
-  id: z.string().regex(ID_RE, 'must be lowercase letters, digits and hyphens'),
-  /** The language of the *question*. A Turkish question about an English page is `tr`. */
-  lang: z.enum(['en', 'tr']),
-  query: z.string().min(1),
-  /** Relative to `eval/corpus/`, exactly as the file is spelled on disk. */
-  expectFile: z.string().min(1),
-  /**
-   * Matched as a breadcrumb suffix and scored apart from the file-level metrics — never folded into
-   * them. ADR-0034 said it gates nothing; since [ADR-0044](../../.ssot/ADR.md#adr-0044) it has a floor
-   * of its own, which is still not the same thing as being folded in.
-   */
-  expectHeading: z.string().min(1).optional(),
-  tags: z.array(z.string().min(1)).default([]),
-  /** Why this question is here, when that is not obvious. Ignored by the scorer. */
-  note: z.string().optional(),
-});
-
-export type GoldenRow = z.infer<typeof GoldenRowSchema>;
+// The golden row's schema is shared with the project question set (`src/services/golden-row.ts`,
+// FR-347), so a set exported from a project is a file this harness reads. Re-exported unchanged.
+export { type GoldenRow, GoldenRowSchema };
 
 /**
  * The two kinds of question whose right answer is "nothing"
@@ -51,7 +33,7 @@ export type NegativeKind = (typeof NEGATIVE_KINDS)[number];
 /** The three fields both kinds carry. Spread into each arm so the discriminator can stay a literal. */
 const negativeFields = {
   /** Stable and unique within `negative.jsonl`, under the same rule as a golden id. */
-  id: z.string().regex(ID_RE, 'must be lowercase letters, digits and hyphens'),
+  id: z.string().regex(GOLDEN_ID_RE, GOLDEN_ID_MESSAGE),
   /** The language of the *question*, as in the golden set — it is what the per-language split groups by. */
   lang: z.enum(['en', 'tr']),
   query: z.string().min(1),
@@ -97,12 +79,28 @@ export class NegativeSetError extends Error {
 }
 
 /**
+ * How a parse failure names the file and the corpus it is about. The defaults are the repository's own
+ * set; `--golden <file>` and `--corpus <dir>` pass the paths the operator gave, because an error that
+ * says `golden.jsonl:3` about a file with another name sends the reader to the wrong place.
+ */
+export interface SetLabels {
+  /** The question file, as the failure should spell it. */
+  file: string;
+  /** The corpus directory, as the failure should spell it (with a trailing slash). */
+  corpus: string;
+}
+
+/**
  * Parses `golden.jsonl`. Every failure here is fatal rather than a skipped line: a question set that
  * silently shrinks is a `recall@5` that silently improves, which is the one failure mode a measurement
  * must not have. `corpusFiles` is passed in so that a question pointing at a file nobody has written —
  * or at one that has since been renamed — fails the run instead of scoring zero forever.
  */
-export function parseGoldenSet(text: string, corpusFiles: ReadonlySet<string>): GoldenRow[] {
+export function parseGoldenSet(
+  text: string,
+  corpusFiles: ReadonlySet<string>,
+  labels: SetLabels = { file: 'golden.jsonl', corpus: 'eval/corpus/' },
+): GoldenRow[] {
   const rows: GoldenRow[] = [];
   const seen = new Set<string>();
   const lines = text.split('\n');
@@ -110,7 +108,7 @@ export function parseGoldenSet(text: string, corpusFiles: ReadonlySet<string>): 
   for (const [index, raw] of lines.entries()) {
     const line = raw.trim();
     if (line === '') continue;
-    const where = `golden.jsonl:${index + 1}`;
+    const where = `${labels.file}:${index + 1}`;
 
     let json: unknown;
     try {
@@ -127,12 +125,12 @@ export function parseGoldenSet(text: string, corpusFiles: ReadonlySet<string>): 
     seen.add(row.id);
 
     if (!corpusFiles.has(row.expectFile)) {
-      throw new GoldenSetError(`${where}: expectFile ${JSON.stringify(row.expectFile)} is not a file under eval/corpus/`);
+      throw new GoldenSetError(`${where}: expectFile ${JSON.stringify(row.expectFile)} is not a file under ${labels.corpus}`);
     }
     rows.push(row);
   }
 
-  if (rows.length === 0) throw new GoldenSetError('golden.jsonl holds no questions');
+  if (rows.length === 0) throw new GoldenSetError(`${labels.file} holds no questions`);
   return rows;
 }
 
@@ -149,14 +147,14 @@ export function parseGoldenSet(text: string, corpusFiles: ReadonlySet<string>): 
  * makes it a negative question. Everything else is `parseGoldenSet`'s discipline: a malformed line, an
  * unknown field or a duplicate id fails the run rather than shrinking the set quietly.
  */
-export function parseNegativeSet(text: string): NegativeRow[] {
+export function parseNegativeSet(text: string, file = 'negative.jsonl'): NegativeRow[] {
   const rows: NegativeRow[] = [];
   const seen = new Set<string>();
 
   for (const [index, raw] of text.split('\n').entries()) {
     const line = raw.trim();
     if (line === '') continue;
-    const where = `negative.jsonl:${index + 1}`;
+    const where = `${file}:${index + 1}`;
 
     let json: unknown;
     try {
@@ -174,7 +172,7 @@ export function parseNegativeSet(text: string): NegativeRow[] {
     rows.push(row);
   }
 
-  if (rows.length === 0) throw new NegativeSetError('negative.jsonl holds no questions');
+  if (rows.length === 0) throw new NegativeSetError(`${file} holds no questions`);
   return rows;
 }
 
