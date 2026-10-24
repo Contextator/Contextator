@@ -26,6 +26,10 @@ describe('eval command line', () => {
     const named = parseArgs(['--corpus', none.corpusDir, '--golden', none.goldenPath], CWD);
     expect(named.corpusDir).toBe(none.corpusDir);
     expect(named.goldenPath).toBe(none.goldenPath);
+    // It is the same run, so it keeps the refusal set and the report title too.
+    expect(named.negativePath).toBe(none.negativePath);
+    expect(named.customSet).toBe(false);
+    expect(parseArgs(['--corpus', none.corpusDir], CWD).customSet).toBe(false);
   });
 
   it('takes a value as "--flag value" or "--flag=value" and resolves it against the working directory', () => {

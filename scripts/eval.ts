@@ -319,16 +319,19 @@ export function parseArgs(argv: readonly string[], cwd: string = process.cwd()):
   }
   if (!quietText) outputs.unshift({ format: 'text', file: null });
 
-  const customCorpus = corpus !== null;
+  const corpusDir = corpus === null ? DEFAULT_CORPUS_DIR : path.resolve(cwd, corpus);
+  const goldenPath = golden === null ? DEFAULT_GOLDEN_PATH : path.resolve(cwd, golden);
+  // Naming the repository's own files is the same run as naming nothing: flags that resolve to the
+  // defaults keep the refusal set and the report title, so the explicit form reports the same figures.
+  const customSet = project !== null || corpusDir !== DEFAULT_CORPUS_DIR || goldenPath !== DEFAULT_GOLDEN_PATH;
   return {
     outputs,
     floors,
-    corpusDir: corpus === null ? DEFAULT_CORPUS_DIR : path.resolve(cwd, corpus),
-    goldenPath: golden === null ? DEFAULT_GOLDEN_PATH : path.resolve(cwd, golden),
-    negativePath:
-      negative !== null ? path.resolve(cwd, negative) : customCorpus || golden !== null || project !== null ? null : DEFAULT_NEGATIVE_PATH,
+    corpusDir,
+    goldenPath,
+    negativePath: negative !== null ? path.resolve(cwd, negative) : customSet ? null : DEFAULT_NEGATIVE_PATH,
     project,
-    customSet: customCorpus || golden !== null || project !== null,
+    customSet,
   };
 }
 
