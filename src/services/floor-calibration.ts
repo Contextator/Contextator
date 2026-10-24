@@ -18,8 +18,8 @@ import type { SearchHit } from './vector-store.js';
  *
  * **A suggestion is advice, and an upper bound.** A probe is a fragment of the text it should find, so it
  * scores higher than a question a person writes about the same passage; measured against the floor fitted
- * from labelled questions, the product path came out +0.004, -0.006, +0.027 and +0.037 on the four reference
- * corpora (`scripts/floor-calibration.ts` prints the table). Nothing here writes `projects.score_floor` except
+ * from labelled questions, the product path came out within 0.013 of it on two of the four reference corpora and 0.03 to 0.045
+ * above it on the other two (`scripts/floor-calibration.ts` prints the table; each run samples other chunks). Nothing here writes `projects.score_floor` except
  * {@link applyFloorSuggestion}, which only a manager's request reaches and which refuses a suggestion
  * measured against a different encoder or generation than the project now has.
  */
@@ -32,6 +32,9 @@ export const FLOOR_GRID_MAX_MILLI = 990;
 export const MIN_CALIBRATION_PROBES = 20;
 /** The most probes one suggestion asks; each is an embedding and a search. */
 export const MAX_CALIBRATION_PROBES = 100;
+
+/** The page a probe is searched with — the page `scripts/eval.ts` and the calibration harnesses score, so their figures describe the same hits. */
+export const CALIBRATION_SEARCH_LIMIT = 10;
 /** Words kept from the end of the sampled sentence: enough to name a topic, too few to repeat the passage. */
 export const PROBE_WORDS = 8;
 /** A sentence shorter than this carries no topic of its own (a caption, a list stub). */
@@ -261,7 +264,10 @@ async function measureProject(
 
   const samples: CalibrationSample[] = [];
   for (const query of queries) {
-    const outcome = await searchProject({ ...deps, scoreFloor: undefined, queryLog: undefined, metrics: undefined }, { projectId, query, limit: 5 });
+    const outcome = await searchProject(
+      { ...deps, scoreFloor: undefined, queryLog: undefined, metrics: undefined },
+      { projectId, query, limit: CALIBRATION_SEARCH_LIMIT },
+    );
     if (outcome.status === 'project_gone') return { status: 'project_gone' };
     if (outcome.status === 'model_mismatch') return { status: 'model_mismatch', indexedWith: outcome.indexedWith, serverUses: outcome.serverUses };
     if (outcome.status !== 'ok') return { status: 'not_indexed' };

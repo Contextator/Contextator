@@ -118,9 +118,11 @@ is not measured and gets no suggestion; the response says so. The same arithmeti
 **Treat a suggestion as an upper bound.** A probe is a fragment of the text it should find, which scores
 higher than a question a person would write about it, so the suggested floor can sit above the one that
 real questions would justify, and a floor set too high refuses questions the project does answer. Measured
-against the floor fitted from labelled questions on the four reference corpora, the suggestion was 0.808
-against 0.804 (the repository's synthetic documentation), 0.805 against 0.811 (the product's user wiki),
-0.802 against 0.775 (XQuAD, Turkish) and 0.775 against 0.738 (XQuAD, English). Before applying one,
+against the floor fitted from labelled questions on the four reference corpora, the suggestion landed
+within 0.013 of it for the repository's synthetic documentation (0.791 and 0.804 against 0.804, in two runs)
+and for the product's user wiki (0.805 and 0.817 against 0.811), and 0.03 to 0.045 above it for XQuAD in
+Turkish (0.820 and 0.802 against 0.775) and in English (0.782 and 0.774 against 0.738). The runs differ
+because each samples other chunks. Before applying one,
 look at what it would have refused among your logged searches with `GET
 /api/projects/:id/score-floor/preview?floor=<n>`, and lower it by a few hundredths when it refuses
 something the project answers.

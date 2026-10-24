@@ -7,6 +7,7 @@ import { chunkMarkdown, embeddingText, estimateTokens } from '../../src/services
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
 import {
   applyFloorSuggestion,
+  CALIBRATION_SEARCH_LIMIT,
   calibrationQueries,
   generateFloorSuggestion,
   listFloorSuggestions,
@@ -182,7 +183,7 @@ describe('a suggestion for a project with enough sections', () => {
     const queries = await calibrationQueries(db, projectId, 0);
     const samples = [];
     for (const query of queries) {
-      const outcome = await searchProject({ db, embeddings }, { projectId, query, limit: 5 });
+      const outcome = await searchProject({ db, embeddings }, { projectId, query, limit: CALIBRATION_SEARCH_LIMIT });
       if (outcome.status !== 'ok') throw new Error(outcome.status);
       samples.push({ query, hits: outcome.hits });
     }
@@ -318,7 +319,7 @@ describe('adopting a suggestion', () => {
     const suggestion = await created(projectId);
     await applyFloorSuggestion(db, projectId, suggestion.id);
     for (const query of await calibrationQueries(db, projectId, 0)) {
-      const outcome = await searchProject({ db, embeddings }, { projectId, query, limit: 5 });
+      const outcome = await searchProject({ db, embeddings }, { projectId, query, limit: CALIBRATION_SEARCH_LIMIT });
       if (outcome.status !== 'ok') throw new Error(outcome.status);
       expect(belowRelevanceFloor(query, outcome.hits, suggestion.suggestedFloor)).toBe(false);
     }

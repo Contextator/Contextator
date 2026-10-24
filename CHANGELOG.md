@@ -16,7 +16,7 @@ ships, that stops.
   (`POST /api/projects/:id/score-floor/suggestions`, manager), the server measures the project with the floor
   off and stores the highest floor that still answers a fragment of each of up to 100 of its own chunks (the
   last eight words of a sentence, never the heading). The suggestion is an upper bound: on the four reference
-  corpora it came out within 0.006 of the floor fitted from labelled questions on two and 0.03 to 0.04 above it
+  corpora it came out within 0.013 of the floor fitted from labelled questions on two and 0.03 to 0.045 above it
   on the other two. Suggestions are
   listed (`GET`, viewer) and adopted only by `POST .../suggestions/:suggestionId/apply` (manager); the project's
   floor is never changed automatically, and a suggestion from an earlier model or index generation is refused.

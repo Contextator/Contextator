@@ -11,6 +11,7 @@ import type { Db } from '../src/db/client.js';
 import { projects } from '../src/db/schema.js';
 import { chunkReserveTokens } from '../src/services/chunk-budget.js';
 import { chunkMarkdown, embeddingText } from '../src/services/chunker.js';
+import { CALIBRATION_SEARCH_LIMIT } from '../src/services/floor-calibration.js';
 import type { EmbeddingProvider } from '../src/services/embeddings/index.js';
 import { extractDocument } from '../src/services/doc-types/index.js';
 import type { Reranker } from '../src/services/reranker.js';
@@ -215,8 +216,8 @@ export async function openDatabaseServer(config: Config, label: string): Promise
   };
 }
 
-/** `eval.ts`'s page size: every figure these harnesses print is about the same ten hits it scores. */
-export const SEARCH_LIMIT = 10;
+/** `eval.ts`'s page size, and the page the product's own floor measurement asks for: every figure these harnesses print is about the same ten hits it scores. */
+export const SEARCH_LIMIT = CALIBRATION_SEARCH_LIMIT;
 
 /**
  * One question through `searchProject` — the product's one search path — with the server's own scan
