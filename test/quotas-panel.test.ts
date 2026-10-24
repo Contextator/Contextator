@@ -131,6 +131,13 @@ describe('a refused upload', () => {
     expect(text).toContain('add 3.0 MB');
   });
 
+  it('does not claim an upload "would add 0" when the project is already over its limit', () => {
+    const err = new ApiError(413, { error: 'quota_exceeded', quota: 'max_upload_bytes', limit: 150, used: 198, requested: 0, message: 'raw' });
+    const text = describeApiError(err);
+    expect(text).toContain('already holds 198 B');
+    expect(text).not.toContain('would add');
+  });
+
   it('explains a quota that could not be checked, and leaves every other error alone', () => {
     expect(describeApiError(new ApiError(503, { error: 'quota_usage_unavailable', message: 'x' }))).toContain('could not be measured');
     expect(describeApiError(new ApiError(400, { message: 'Bad file' }))).toBe('Bad file');

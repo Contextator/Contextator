@@ -1871,6 +1871,8 @@ srcForm.addEventListener('submit', async (event) => {
   } catch (err) {
     errorNode.textContent = describeApiError(err);
     errorNode.hidden = false;
+    // The form is long and the message sits under it: bring it into view or a refused upload looks like nothing happened.
+    errorNode.scrollIntoView({ block: 'nearest' });
   } finally {
     srcUi.busy = false;
     submit.disabled = false;

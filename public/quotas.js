@@ -84,10 +84,11 @@ export function describeApiError(err) {
     }[body.quota];
     if (meta && [body.limit, body.used, body.requested].every(Number.isFinite)) {
       const show = (n) => (meta.bytes ? formatBytes(n) : fmt(n));
-      return (
-        `Upload refused: this project is limited to ${show(body.limit)} ${meta.noun}, holds ${show(body.used)} and this upload would add ${show(body.requested)}. ` +
-        'Ask an instance administrator to raise the limit, or remove content first.'
-      );
+      const advice = 'Ask an instance administrator to raise the limit, or remove content first.';
+      // Refused before any file was sized (the project is already at or over its limit): "would add 0" misleads.
+      if (body.requested === 0)
+        return `Upload refused: this project is limited to ${show(body.limit)} ${meta.noun} and already holds ${show(body.used)}. ${advice}`;
+      return `Upload refused: this project is limited to ${show(body.limit)} ${meta.noun}, holds ${show(body.used)} and this upload would add ${show(body.requested)}. ${advice}`;
     }
   }
   if (err.status === 503 && body.error === 'quota_usage_unavailable') {
