@@ -237,6 +237,8 @@ DATABASE_URL=postgres://… npm run eval -- --project my-project   # a project's
   the server's database from `DATABASE_URL`, writes nothing, and refuses to run, rather than print a number
   that means nothing, if the project has nothing indexed, was indexed with a different embedding model than
   this process would use, has no questions, or has questions that expect a file its index does not hold.
+  A project question's `expectFile` is the indexed document's path with its source name in front
+  (`<source>/<path>`, e.g. `docs/guide/intro.md`), not a path inside the source.
   It cannot be combined with `--corpus` or `--golden`. A project's own relevance floor, when the instance
   has one, decides what counts as a refusal ([ADR-0083](../../.ssot/ADR.md#adr-0083)). The run records
   no query log; if the count of the project's logged queries moves while it runs (a live server answering
