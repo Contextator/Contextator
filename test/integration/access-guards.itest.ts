@@ -53,7 +53,7 @@ let database: TestDatabase;
 let root: string;
 /** TRUST_PROXY=1, every limit on. The address a request comes from is whatever `X-Forwarded-For` says. */
 let limited: LiveInstance;
-/** TRUST_PROXY=loopback, no limit. The address is read from `X-Forwarded-For` because the peer is trusted. */
+/** TRUST_PROXY=loopback, no token or tool limit; the default anonymous limit (60/min) applies. The address is read from `X-Forwarded-For` because the peer is trusted. */
 let proxied: LiveInstance;
 /** TRUST_PROXY=1, a token ceiling, and `MCP_RATE_LIMIT_FAIL_OPEN=0`. */
 let strict: LiveInstance;
