@@ -35,7 +35,8 @@ ships, that stops.
   whether it is inherited. An upload that would go over the cap is refused with `413 quota_exceeded` and
   nothing from it is kept; an indexing run that would go over the document or chunk cap ends in `error` with
   `quota_exceeded` (a rebuild keeps serving the previous generation, an incremental run keeps the documents it
-  had finished). Quotas travel in a project export. Migration `0022_project_quotas`.
+  had finished). Quotas travel in a project export. Migration `0022_project_quotas`. Helm chart 1.5.0 exposes
+  the three defaults as `config.projectMaxDocuments`, `config.projectMaxChunks` and `config.projectMaxUploadBytes`.
 - **Idle upload sessions are swept.** An upload session that has had no `files` request and no commit for 24
   hours is deleted, with its staged files, by a sweep that runs every quarter of an hour, so the upload quota
   and the disk agree. Uploads that were not committed within 24 idle hours are lost. This applies to every
