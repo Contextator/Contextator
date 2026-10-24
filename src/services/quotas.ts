@@ -92,7 +92,19 @@ export const QUOTA_BYTES_MAX = Number.MAX_SAFE_INTEGER;
  */
 export const UPLOAD_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
 
-/** The bytes of the live upload sessions under one source's `.staging/`, leaving out `excludeSession` and expired ones. */
+/** What a session directory under `.staging/` is called: 32 hex digits. Nothing else there is a session. */
+export function isSessionName(name: string): boolean {
+  return /^[0-9a-f]{32}$/.test(name);
+}
+
+/** The prefix a session directory gets while the sweep deletes it (`.trash-<session>`): never a session name, never counted. */
+export const SWEPT_SESSION_PREFIX = '.trash-';
+
+/**
+ * The bytes of the live upload sessions under one source's `.staging/`, leaving out `excludeSession`, expired ones
+ * and every entry that is not a session (a `.trash-` directory the sweep is deleting: removing its children
+ * renews its modification time, so the time alone would call it live).
+ */
 async function stagingBytes(root: string, excludeSession: string | undefined, now: number): Promise<number> {
   let names: string[];
   try {
@@ -103,7 +115,7 @@ async function stagingBytes(root: string, excludeSession: string | undefined, no
   }
   let total = 0;
   for (const name of names) {
-    if (name === excludeSession) continue;
+    if (name === excludeSession || !isSessionName(name)) continue;
     const dir = path.join(root, name);
     try {
       const stat = await fs.stat(dir);

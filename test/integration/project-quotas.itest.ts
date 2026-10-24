@@ -27,7 +27,7 @@ import { stagingDir } from '../../src/services/data-dir.js';
 import { KeyedMutex } from '../../src/services/locks.js';
 import { MetricsRegistry } from '../../src/services/metrics.js';
 import { createProject, getProjectById } from '../../src/services/projects.js';
-import { directoryBytes, setProjectQuotas } from '../../src/services/quotas.js';
+import { directoryBytes, projectUploadBytes, setProjectQuotas } from '../../src/services/quotas.js';
 import { SlidingWindow } from '../../src/services/rate-limit.js';
 import { searchProject } from '../../src/services/search.js';
 import { createSource } from '../../src/services/sources.js';
@@ -435,6 +435,25 @@ describe('the project quotas API and the upload quota', () => {
       // A request on the idle session renews it (even one the quota then refuses), and its files count again.
       expect((await post(first, [['one-more.md', 'z'.repeat(10)]])).statusCode).toBe(413);
       expect(await usedNow()).toBe(120);
+    });
+
+    it('does not count a .trash- directory or any other entry of .staging that is not a session, whatever its age', async () => {
+      const { project, source } = await newUploadProject('quota-trash', { maxUploadBytes: 100 });
+      const root = path.join(stagingDir(dataDir, project.id, source.id, '0'.repeat(32)), '..');
+      for (const name of [`.trash-${'1'.repeat(32)}`, '.trash-x', 'not-a-session']) {
+        await mkdir(path.join(root, name, 'files'), { recursive: true });
+        await writeFile(path.join(root, name, 'files', 'a.md'), 'x'.repeat(40));
+      }
+      expect(await projectUploadBytes(apiDb.db, dataDir, project.id)).toBe(0);
+
+      // A live session beside them is the only thing counted.
+      const url = `/api/projects/${project.id}/sources/${source.id}/uploads`;
+      const session = (await api.app.inject({ method: 'POST', url, headers: ADMIN })).json().session as string;
+      const { payload, headers } = multipart([['one.md', 'y'.repeat(30)]]);
+      expect((await api.app.inject({ method: 'POST', url: `${url}/${session}/files`, headers: { ...ADMIN, ...headers }, payload })).statusCode).toBe(
+        200,
+      );
+      expect(await projectUploadBytes(apiDb.db, dataDir, project.id)).toBe(30);
     });
 
     it('checks a commit against what other sessions and sources keep, with its own staging counted once', async () => {

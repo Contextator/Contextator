@@ -12,7 +12,7 @@ import { allowedExtensionsFor, type Flavor } from './flavors.js';
 import { isInside, normalizeRelativePath } from './fs-scan.js';
 import type { KeyedMutex } from './locks.js';
 import { NotFoundError, ValidationError } from './projects.js';
-import { directoryBytes, fileSize, overwrittenBytes, UPLOAD_SESSION_TTL_MS } from './quotas.js';
+import { directoryBytes, fileSize, isSessionName, overwrittenBytes, SWEPT_SESSION_PREFIX, UPLOAD_SESSION_TTL_MS } from './quotas.js';
 
 /**
  * The upload quota in force for one request ([ADR-0117](../../.ssot/ADR.md#adr-0117)). Only built when the
@@ -422,12 +422,10 @@ export class UploadService {
   }
 }
 
-/** The prefix a session directory gets while the sweep deletes it (`.trash-<session>`): never a session name. */
-const SWEPT_SESSION_PREFIX = '.trash-';
-
 /**
  * Deletes every upload session nobody has touched for `UPLOAD_SESSION_TTL_MS`, in every project, so that what the
- * quota counts (live sessions only, see `projectUploadUsage`) and what is on disk agree. A session is touched
+ * quota counts (live sessions only, see `projectUploadUsage`; a `.trash-` directory is never counted, whatever its
+ * modification time) and what is on disk agree. A session is touched
  * by each `files` request and by its commit, so only an abandoned one is old. Returns how many it removed.
  *
  * A commit must never import a tree that is half deleted, so a session leaves its place in one step: under
@@ -462,7 +460,7 @@ export async function sweepExpiredUploadSessions(dataDir: string, now: number = 
           await remove(dir);
           continue;
         }
-        if (!/^[0-9a-f]{32}$/.test(name)) continue;
+        if (!isSessionName(name)) continue;
         const touched = await idleSince(dir);
         if (touched === null || now - touched <= UPLOAD_SESSION_TTL_MS) continue;
         if (locks?.isLocked(projectId)) continue;
