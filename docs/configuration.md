@@ -105,7 +105,7 @@ A relevance floor is a number about one encoder, so a project's own floor (`PATC
 /api/projects/:id/score-floor`) stops meaning anything once its index is rebuilt with another model. When a
 re-index finishes because the model changed, the server measures the project against its new index and
 stores a **floor suggestion**: the highest floor, on a 0.001 grid from 0.6 to 0.99, that still answers
-every probe, where a probe is the last eight words of a sentence taken from one of up to 100 of the
+every probe, where a probe is the last eight words of a sentence (the last 16 characters for Chinese and Japanese, which have no spaces between words) taken from one of up to 100 of the
 project's own chunks (never the chunk's heading, which the chunk is embedded with and would match too well).
 A manager can also ask for one at any
 time with `POST /api/projects/:id/score-floor/suggestions`, read them with `GET` on the same path, and adopt

@@ -42,6 +42,13 @@ export const CALIBRATION_SEARCH_LIMIT = 10;
 export const PROBE_WORDS = 8;
 /** A sentence shorter than this carries no topic of its own (a caption, a list stub). */
 export const MIN_PROBE_SENTENCE_WORDS = 6;
+/**
+ * The same two limits for text written without spaces between words (Chinese, Japanese), where a sentence is
+ * one whitespace-separated "word" and counting words would reject every sentence: characters stand in, at
+ * about two characters to a word.
+ */
+export const PROBE_CHARS = 16;
+export const MIN_PROBE_SENTENCE_CHARS = 12;
 /** Chunks read to find {@link MAX_CALIBRATION_PROBES} usable probes; tables and code leave some without a sentence. */
 const PROBE_CANDIDATE_CHUNKS = MAX_CALIBRATION_PROBES * 3;
 /** Suggestions kept per project; the oldest are dropped when a new one is written. */
@@ -141,9 +148,28 @@ function toView(row: FloorSuggestionRow): FloorSuggestionView {
   };
 }
 
+/** Scripts whose words are not separated by spaces; Hangul is written with spaces and is counted in words. */
+const UNSPACED_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu;
+
+/** A sentence is measured in characters when at least half of its letters are in a script written without spaces. */
+function isUnspaced(sentence: string): boolean {
+  const letters = sentence.replace(/\s+/g, '');
+  if (letters === '') return false;
+  const unspaced = letters.match(UNSPACED_SCRIPT)?.length ?? 0;
+  return unspaced * 2 >= Array.from(letters).length;
+}
+
+function hasTopicOfItsOwn(sentence: string): boolean {
+  if (isUnspaced(sentence)) return Array.from(sentence.replace(/\s+/g, '')).length >= MIN_PROBE_SENTENCE_CHARS;
+  return sentence.split(/\s+/).length >= MIN_PROBE_SENTENCE_WORDS;
+}
+
 /**
  * The prose of a chunk as sentences: code fences, tables, headings, quotes and list markers are dropped,
- * links keep their text. Only sentences with a topic of their own ({@link MIN_PROBE_SENTENCE_WORDS}) stay.
+ * links keep their text. Only sentences with a topic of their own stay ({@link MIN_PROBE_SENTENCE_WORDS}
+ * words, or {@link MIN_PROBE_SENTENCE_CHARS} characters where words are not separated). A sentence ends at
+ * `.`, `!` or `?` before whitespace, and at `。`, `！` or `？` wherever they stand: that text has no space to
+ * look for.
  */
 function proseSentences(content: string): string[] {
   const lines: string[] = [];
@@ -165,14 +191,15 @@ function proseSentences(content: string): string[] {
   }
   return lines
     .join(' ')
-    .split(/(?<=[.!?])\s+/)
+    .split(/(?<=[.!?])\s+|(?<=[。！？])\s*/u)
     .map((sentence) => sentence.trim())
-    .filter((sentence) => sentence.split(/\s+/).length >= MIN_PROBE_SENTENCE_WORDS);
+    .filter(hasTopicOfItsOwn);
 }
 
 /**
- * One probe from one chunk: the last {@link PROBE_WORDS} words of the chunk's middle sentence, or `null`
- * when the chunk has no prose (a table, a code listing).
+ * One probe from one chunk: the last {@link PROBE_WORDS} words of the chunk's middle sentence (the last
+ * {@link PROBE_CHARS} characters where words are not separated by spaces), or `null` when the chunk has no
+ * prose (a table, a code listing).
  *
  * The probe must not carry the chunk's breadcrumb. A chunk is embedded as "breadcrumb, blank line,
  * content", so a query built from the breadcrumb asks for the chunk's own prefix and scores far above
@@ -183,6 +210,7 @@ export function probeFromChunk(content: string): string | null {
   const sentences = proseSentences(content);
   if (sentences.length === 0) return null;
   const middle = sentences[Math.floor((sentences.length - 1) / 2)];
+  if (isUnspaced(middle)) return Array.from(middle.replace(/\s+/g, '')).slice(-PROBE_CHARS).join('');
   return middle.split(/\s+/).slice(-PROBE_WORDS).join(' ');
 }
 

@@ -4,6 +4,8 @@ import {
   FLOOR_GRID_MAX_MILLI,
   FLOOR_GRID_MIN_MILLI,
   fitFloor,
+  MIN_PROBE_SENTENCE_CHARS,
+  PROBE_CHARS,
   PROBE_WORDS,
   probeFromChunk,
   refusedCount,
@@ -121,5 +123,44 @@ describe('probeFromChunk', () => {
 
   it('shortens a sentence only from the front', () => {
     expect(probeFromChunk('One two three four five six.')).toBe('One two three four five six.');
+  });
+
+  describe('text written without spaces between words', () => {
+    const japanese =
+      'ワーカーはキューからジョブを取得します。スケジューラは最も空いているワーカーに各ジョブを割り当てます。待機中のワーカーは十分後に停止します。';
+    const chinese = '工作进程从队列中拉取任务。调度器会把每个任务分配给最空闲的工作进程。空闲的工作进程会在十分钟后停止！';
+
+    it('ends a Japanese sentence at 。 and takes the last characters of the middle one', () => {
+      const probe = probeFromChunk(japanese);
+      expect(probe).toBe('ーカーに各ジョブを割り当てます。');
+      expect(Array.from(probe as string)).toHaveLength(PROBE_CHARS);
+    });
+
+    it('ends a Chinese sentence at 。 and takes the last characters of the middle one', () => {
+      expect(probeFromChunk(chinese)).toBe('每个任务分配给最空闲的工作进程。');
+    });
+
+    it('ends a sentence at ！ and ？ as well', () => {
+      expect(probeFromChunk('ジョブはいつ実行されますか？キューに入れられたらすぐに実行されます！ワーカーが空いていれば待ちません。')).toBe(
+        '入れられたらすぐに実行されます！',
+      );
+    });
+
+    it('measures a short sentence in characters rather than counting it as one word', () => {
+      expect(Array.from('ジョブを実行します。')).toHaveLength(MIN_PROBE_SENTENCE_CHARS - 2);
+      expect(probeFromChunk('ジョブを実行します。')).toBeNull();
+      expect(probeFromChunk('任务按顺序执行。')).toBeNull();
+      expect(probeFromChunk('キューに入ったジョブを順番に実行します。')).toBe('キューに入ったジョブを順番に実行します。'.slice(-PROBE_CHARS));
+    });
+
+    it('drops a sentence that is not prose, whatever the script', () => {
+      expect(probeFromChunk('| 名前 | 値 |\n| - | - |\n```\nジョブを順番に実行してキューを空にします。\n```')).toBeNull();
+    });
+
+    it('still reads a spaced script in words, and a mostly Latin sentence with a Han word as words too', () => {
+      expect(probeFromChunk('Workers pull jobs from the queue and run the 任务 one after another.')).toBe(
+        'the queue and run the 任务 one after another.'.split(' ').slice(-PROBE_WORDS).join(' '),
+      );
+    });
   });
 });
