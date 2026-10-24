@@ -35,6 +35,8 @@ const baseUrl = inject('postgresBaseUrl');
 const DIMS = TEST_EMBEDDING_DIMENSIONS;
 const MODEL_ID = 'local:stub-bag-of-words:fp32';
 const OTHER_MODEL_ID = 'local:another-encoder:fp32';
+/** `vi.waitFor` gives up after one second by default, which a loaded machine can exceed before a queued measurement even starts. */
+const WAIT_FOR = { timeout: 15_000, interval: 10 };
 
 function stubVector(text: string): number[] {
   const v = new Array<number>(DIMS).fill(0);
@@ -331,7 +333,7 @@ describe('measurements that overlap', () => {
     const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
     const holding = holders.map((id) => generateFloorSuggestion({ db, embeddings: gated(id) }, id, 'operator'));
-    await vi.waitFor(() => expect(entered).toHaveLength(holders.length));
+    await vi.waitFor(() => expect(entered).toHaveLength(holders.length), WAIT_FOR);
     const waitingFor = generateFloorSuggestion({ db, embeddings: gated(waiting) }, waiting, 'model_change');
     for (let i = 0; i < 5; i++) await flush();
     expect(entered).not.toContain(waiting);
@@ -340,7 +342,7 @@ describe('measurements that overlap', () => {
     gates.get(holders[0])?.();
     expect((await holding[0]).status).toBe('created');
     expect(await generateFloorSuggestion(deps(), refused, 'operator')).toEqual({ status: 'busy', reason: 'server' });
-    await vi.waitFor(() => expect(entered).toContain(waiting));
+    await vi.waitFor(() => expect(entered).toContain(waiting), WAIT_FOR);
 
     for (const open of gates.values()) open();
     expect((await Promise.all([...holding.slice(1), waitingFor])).map((o) => o.status)).toEqual(['created', 'created']);
