@@ -587,6 +587,39 @@ export async function askQuestions(
   return { results, negativeResults, searchMs: Date.now() - searchStart };
 }
 
+/** Question ids in plain code-unit order: the same on every machine, which a collation is not. */
+const byQuestionId = <T extends { row: { id: string } }>(a: T, b: T): number => (a.row.id < b.row.id ? -1 : a.row.id > b.row.id ? 1 : 0);
+
+/**
+ * The report for a set of results, whatever order they were asked in.
+ *
+ * The corpus run asks in file order and a project run asks in key order, and a mean is not
+ * associative: the same questions summed in two orders can differ in the last digit, which `--json`
+ * prints. Both runs are put in id order here, so the same set of questions yields the same report,
+ * byte for byte, from either source.
+ *
+ * The negative results reach the report here and only here — as their own argument, never merged
+ * into `results` (ADR-0045). `test/eval-scoring.test.ts` asserts what that buys: the golden
+ * denominators are the same number with the negative set loaded and without it. A run with no
+ * negative file has no refusal report at all rather than one over an empty set.
+ */
+export function assembleReport(
+  results: readonly RowResult[],
+  negativeResults: readonly NegativeResult[],
+  context: RunContext,
+  floors: Floors,
+  refusalFloor: number,
+  hasNegatives: boolean,
+): Report {
+  const golden = [...results].sort(byQuestionId);
+  return buildReport(
+    golden,
+    context,
+    floors,
+    hasNegatives ? buildRefusalReport(golden, [...negativeResults].sort(byQuestionId), refusalFloor) : null,
+  );
+}
+
 /** Builds the report, judges the gate, and writes every requested output. */
 async function emitReport(
   options: Options,
@@ -596,16 +629,7 @@ async function emitReport(
   refusalFloor: number,
   hasNegatives: boolean,
 ): Promise<GateVerdict> {
-  // The negative results reach the report here and only here — as their own argument, never merged
-  // into `results` (ADR-0045). `test/eval-scoring.test.ts` asserts what that buys: the golden
-  // denominators are the same number with the negative set loaded and without it. A run with no
-  // negative file has no refusal report at all rather than one over an empty set.
-  const report: Report = buildReport(
-    results,
-    context,
-    options.floors,
-    hasNegatives ? buildRefusalReport(results, negativeResults, refusalFloor) : null,
-  );
+  const report = assembleReport(results, negativeResults, context, options.floors, refusalFloor, hasNegatives);
   // The verdict is computed before anything is written, so a floor that cannot be judged — a
   // `--min-heading5` over a question set carrying no headings — fails the run rather than being
   // rendered into a summary as a pass.

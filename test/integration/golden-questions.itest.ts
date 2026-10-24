@@ -33,8 +33,8 @@ import { UploadService } from '../../src/services/uploads.js';
 import { ImportRefusedError } from '../../src/services/transfer/manifest.js';
 import { exportProject } from '../../src/services/transfer/export.js';
 import { importProject } from '../../src/services/transfer/import.js';
-import { aggregate, buildRefusalReport, buildReport, NO_FLOORS, parseGoldenSet, parseNegativeSet } from '../../scripts/eval-scoring.js';
-import { askQuestions, corpusFiles, evalTextSearchConfigs, indexCorpus, makeAsk, measureProject } from '../../scripts/eval.js';
+import { aggregate, type NegativeResult, NO_FLOORS, parseGoldenSet, parseNegativeSet, type RowResult } from '../../scripts/eval-scoring.js';
+import { askQuestions, assembleReport, corpusFiles, evalTextSearchConfigs, indexCorpus, makeAsk, measureProject } from '../../scripts/eval.js';
 import { seedProject, STUB_MODEL_ID, stubEmbeddings } from './support/mcp-instance.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 
@@ -62,6 +62,8 @@ const SAME_SITE = { 'sec-fetch-site': 'same-origin' };
 const CORPUS_DIR = 'eval/corpus';
 const GOLDEN_PATH = 'eval/golden.jsonl';
 const NEGATIVE_PATH = 'eval/negative.jsonl';
+// A floor on the stub embeddings' cosine scale that refuses some questions and lets others through.
+const REFUSING_FLOOR = 0.5;
 
 let database: TestDatabase;
 let dataDir: string;
@@ -194,59 +196,82 @@ function asInputs(rows: Awaited<ReturnType<typeof goldenFromFile>>) {
   }));
 }
 
+const REPORT_CONTEXT = {
+  commit: 'test',
+  providerId: stubEmbeddings.id,
+  embeddingModel: stubEmbeddings.model,
+  embeddingDtype: 'fp32',
+  dimensions: DIMS,
+  chunkMaxTokens: 400,
+  chunkOverlapTokens: 0,
+  searchLimit: 10,
+  hnswScan: 'test',
+  startedAt: '2026-01-01T00:00:00.000Z',
+} as unknown as Parameters<typeof assembleReport>[2];
+
+/**
+ * The repository file asked in file order, and the same rows out of the table asked in key order, both
+ * at one relevance floor — and the two reports side by side, as `--json` would print them.
+ */
+async function bothWays(floor: number) {
+  const golden = await goldenFromFile();
+  const negative = await negativeFromFile();
+  expect(golden.length).toBeGreaterThan(50);
+  const floored = loadConfig(envFor(database.url, { SEARCH_SCORE_FLOOR: String(floor) }));
+
+  // The corpus path: the file, asked in file order.
+  const ask = makeAsk({
+    db: database.db,
+    embeddings: stubEmbeddings,
+    config: floored,
+    reranker: null,
+    projectId: corpusProjectId,
+    refusalFloor: floor,
+  });
+  const viaFile = await askQuestions(ask, golden, negative);
+
+  // The project path: the same rows out of the table, asked in key order.
+  await replaceGoldenQuestions(database.db, corpusProjectId, asInputs(golden));
+  const measured = await measureProject(database.db, floored, stubEmbeddings, null, 'halyard', negative);
+  expect(measured.refusalFloor).toBe(floor);
+  expect(measured.results).toHaveLength(golden.length);
+
+  const reportOf = (r: { results: RowResult[]; negativeResults: NegativeResult[] }, refusalFloor: number) =>
+    assembleReport(r.results, r.negativeResults, REPORT_CONTEXT, NO_FLOORS, refusalFloor, true);
+  return { golden, viaFile, measured, fileReport: reportOf(viaFile, floor), tableReport: reportOf(measured, measured.refusalFloor) };
+}
+
 describe('a project question set scores like the repository file (diff 0)', () => {
   it('gives the same rows, the same report and the same refusal figures', async () => {
-    const golden = await goldenFromFile();
-    const negative = await negativeFromFile();
-    expect(golden.length).toBeGreaterThan(50);
+    const { viaFile, measured, fileReport, tableReport } = await bothWays(0);
 
-    // The corpus path: the file, asked in file order.
-    const ask = makeAsk({
-      db: database.db,
-      embeddings: stubEmbeddings,
-      config,
-      reranker: null,
-      projectId: corpusProjectId,
-      refusalFloor: config.SEARCH_SCORE_FLOOR,
-    });
-    const viaFile = await askQuestions(ask, golden, negative);
-
-    // The project path: the same rows out of the table, asked in key order.
-    await replaceGoldenQuestions(database.db, corpusProjectId, asInputs(golden));
-    const measured = await measureProject(database.db, config, stubEmbeddings, null, 'halyard', negative);
-
-    const byId = <T extends { row: { id: string } }>(rows: readonly T[]) => [...rows].sort((a, b) => a.row.id.localeCompare(b.row.id));
-    expect(measured.results).toHaveLength(golden.length);
+    const byId = <T extends { row: { id: string } }>(rows: readonly T[]) => [...rows].sort((a, b) => (a.row.id < b.row.id ? -1 : 1));
     expect(byId(measured.results)).toEqual(byId(viaFile.results));
     expect(byId(measured.negativeResults)).toEqual(byId(viaFile.negativeResults));
 
-    // The figures: the order the questions were asked in must not matter to any of them.
-    // Summation order moves the last digit of a mean, so the totals are compared over the same order;
-    // asked in file order the means still agree to twelve places.
-    expect(aggregate(byId(measured.results))).toEqual(aggregate(byId(viaFile.results)));
-    const unsorted = aggregate(measured.results);
-    const reference = aggregate(viaFile.results);
-    expect(unsorted.mrr).toBeCloseTo(reference.mrr as number, 12);
-    expect(unsorted.meanCorrectScore).toBeCloseTo(reference.meanCorrectScore as number, 12);
-    const context = {
-      commit: 'test',
-      providerId: stubEmbeddings.id,
-      embeddingModel: stubEmbeddings.model,
-      embeddingDtype: 'fp32',
-      dimensions: DIMS,
-      chunkMaxTokens: 400,
-      chunkOverlapTokens: 0,
-      searchLimit: 10,
-      hnswScan: 'test',
-      startedAt: '2026-01-01T00:00:00.000Z',
-    } as unknown as Parameters<typeof buildReport>[1];
-    const floors = NO_FLOORS;
-    const refusalsFile = buildRefusalReport(viaFile.results, viaFile.negativeResults, 0);
-    const refusalsTable = buildRefusalReport(measured.results, measured.negativeResults, measured.refusalFloor);
-    expect(refusalsTable).toEqual(refusalsFile);
-    expect(buildReport(byId(measured.results), context, floors, refusalsTable)).toEqual(
-      buildReport(byId(viaFile.results), context, floors, refusalsFile),
-    );
+    // The whole report, to the last digit of every mean: the order the questions were asked in does not show.
+    expect(tableReport).toEqual(fileReport);
+    expect(JSON.stringify(tableReport, null, 2)).toBe(JSON.stringify(fileReport, null, 2));
+  });
+
+  // At floor 0 nothing is ever refused, so the test above cannot tell a floor applied correctly from one
+  // never applied. Here the floor is high enough to refuse some golden and some negative questions.
+  it('refuses the same questions on both paths at a floor that refuses some (ADR-0083)', async () => {
+    const { viaFile, measured, fileReport, tableReport } = await bothWays(REFUSING_FLOOR);
+
+    const refusedIds = (rows: readonly { row: { id: string }; refused?: boolean; belowFloor?: boolean }[], key: 'refused' | 'belowFloor') =>
+      rows
+        .filter((r) => r[key])
+        .map((r) => r.row.id)
+        .sort();
+    expect(refusedIds(measured.results, 'belowFloor')).toEqual(refusedIds(viaFile.results, 'belowFloor'));
+    expect(refusedIds(measured.negativeResults, 'refused')).toEqual(refusedIds(viaFile.negativeResults, 'refused'));
+
+    expect(fileReport.refusals?.floor).toBe(REFUSING_FLOOR);
+    expect(fileReport.refusals?.falseRefusal.refused).toBeGreaterThan(0);
+    expect((fileReport.refusals?.absentFeature.refused ?? 0) + (fileReport.refusals?.offDomain.refused ?? 0)).toBeGreaterThan(0);
+    expect(tableReport).toEqual(fileReport);
+    expect(JSON.stringify(tableReport, null, 2)).toBe(JSON.stringify(fileReport, null, 2));
   });
 
   it('keeps the negative questions out of the table and out of the golden denominator (ADR-0045)', async () => {
