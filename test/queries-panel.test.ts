@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error - public/ is untyped ES modules the browser loads directly (ADR-0022); see audit-panel.test.ts.
 import { state } from '../public/core.js';
 // @ts-expect-error - see above.
-import { floorBehind, loadQuerySummary, otherFloorSearches } from '../public/queries.js';
+import { floorBehind, loadQuerySummary, otherFloorSearches, renderQueries } from '../public/queries.js';
+import { descendants, fakeDocument } from './helpers/fake-dom.js';
 
 /**
  * **The panel names the relevance floor it wants figures for.** The log keeps the floor each search
@@ -99,6 +100,18 @@ describe('the query panel narrowed to one MCP token', () => {
     expect(sent()).toHaveLength(3);
     expect(sent()[1].searchParams.get('token')).toBe(TOKEN);
     expect(sent()[2].searchParams.has('token')).toBe(false);
+  });
+
+  it('puts the chosen token on the export link as well, and none on it before one is chosen', () => {
+    vi.stubGlobal('document', fakeDocument());
+    const exportHref = () => {
+      const link = descendants(renderQueries(PROJECT)).find((n) => n.tag === 'a' && n.textContent === 'Export questions');
+      return new URL(link?.getAttribute('href') ?? '', 'http://panel.test');
+    };
+    expect(exportHref().pathname).toBe('/api/projects/p1/queries/export');
+    expect(exportHref().searchParams.has('token')).toBe(false);
+    state.queries.token = TOKEN;
+    expect(exportHref().searchParams.get('token')).toBe(TOKEN);
   });
 
   it('does not carry the token over to another project', async () => {
