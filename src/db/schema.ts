@@ -787,6 +787,44 @@ export const floorSuggestions = pgTable(
   ],
 );
 
+/**
+ * One question of a project's own golden set (Faz 09 of 0.4.0, FR-347): what an operator expects the
+ * project's documentation to answer, and the page that answers it. The columns are `eval/golden.jsonl`'s
+ * row, so a set exported from here is a file `npm run eval -- --golden` reads and the other way round;
+ * `key` is that row's `id`, the stable name a miss list and a diff cite.
+ *
+ * **Only golden questions live here.** A question whose right answer is nothing is a different kind of
+ * row with a different parser and never joins a golden denominator ([ADR-0045](../../.ssot/ADR.md#adr-0045)).
+ * `expect_file` is a document's `relative_path` as `search_docs` prints it (a `<source>/` prefix for a
+ * sourced document) and is deliberately not a foreign key: a re-index that renames a page must not
+ * silently delete the question that now fails, a failing question being exactly what the set is for.
+ */
+export const goldenQuestions = pgTable(
+  'golden_questions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id').notNull(),
+    /** The row's stable name within the project, `^[a-z0-9][a-z0-9-]*$`; `golden.jsonl`'s `id`. */
+    key: text('key').notNull(),
+    /** The language of the question, not of the answer. */
+    lang: text('lang').notNull(),
+    query: text('query').notNull(),
+    expectFile: text('expect_file').notNull(),
+    /** A suffix of the answering chunk's heading breadcrumb; scored apart from the file-level metrics. */
+    expectHeading: text('expect_heading'),
+    tags: text('tags').array().notNull().default(sql`'{}'::text[]`),
+    note: text('note'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({ name: 'golden_questions_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    // Also the index for "this project's questions": `project_id` leads it.
+    unique('golden_questions_project_key_uq').on(t.projectId, t.key),
+    check('golden_questions_lang_check', sql`${t.lang} in ('en', 'tr')`),
+  ],
+);
+
 /** Dashboard accounts. `root` and `admin` reach every project; a `member` only its memberships. */
 export const users = pgTable(
   'users',
@@ -1119,6 +1157,7 @@ export type UserSessionRow = typeof userSessions.$inferSelect;
 export type ProjectMemberRow = typeof projectMembers.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 export type FloorSuggestionRow = typeof floorSuggestions.$inferSelect;
+export type GoldenQuestionRow = typeof goldenQuestions.$inferSelect;
 export type McpTokenRow = typeof mcpTokens.$inferSelect;
 export type ApiTokenRow = typeof apiTokens.$inferSelect;
 export type UserFederatedIdentityRow = typeof userFederatedIdentities.$inferSelect;

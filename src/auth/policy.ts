@@ -256,6 +256,7 @@ const AUDIT_CREATED: ReadonlyArray<{ method: string; url: string; type: string; 
   { method: 'POST', url: '/api/projects', type: 'projectId', path: ['id'] },
   { method: 'POST', url: '/api/projects/import', type: 'projectId', path: ['projectId'] },
   { method: 'POST', url: '/api/projects/:id/sources', type: 'sid', path: ['id'] },
+  { method: 'POST', url: '/api/projects/:id/golden-questions', type: 'questionId', path: ['id'] },
   { method: 'POST', url: '/api/projects/:id/mcp-tokens', type: 'tokenId', path: ['token', 'id'] },
   { method: 'POST', url: '/api/tokens', type: 'tokenId', path: ['token', 'id'] },
   { method: 'POST', url: '/api/users', type: 'userId', path: ['user', 'id'] },
