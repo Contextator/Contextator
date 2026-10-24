@@ -226,6 +226,9 @@ async function landProject(
       mcpAuth: manifest.project.mcpAuth,
       queryLogEnabled: manifest.project.queryLogEnabled,
       scoreFloor: manifest.project.scoreFloor ?? null,
+      maxDocuments: manifest.project.maxDocuments ?? null,
+      maxChunks: manifest.project.maxChunks ?? null,
+      maxUploadBytes: manifest.project.maxUploadBytes ?? null,
       // A true statement about the corpus: this text was indexed then, on another machine.
       lastIndexedAt: manifest.project.lastIndexedAt ? new Date(manifest.project.lastIndexedAt) : null,
       status: 'idle',

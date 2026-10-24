@@ -86,6 +86,18 @@ spec:
             - name: GIT_MAX_PACK_BYTES
               value: {{ . | int64 | quote }}
             {{- end }}
+            {{- with .Values.config.projectMaxDocuments }}
+            - name: PROJECT_MAX_DOCUMENTS
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.projectMaxChunks }}
+            - name: PROJECT_MAX_CHUNKS
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.projectMaxUploadBytes }}
+            - name: PROJECT_MAX_UPLOAD_BYTES
+              value: {{ . | int64 | quote }}
+            {{- end }}
             {{- if .Values.config.mcpStructuredOutput }}
             - name: MCP_STRUCTURED_OUTPUT
               value: "1"

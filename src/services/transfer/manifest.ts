@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { QUOTA_BYTES_MAX, QUOTA_ROW_COUNT_MAX } from '../quotas.js';
 
 /**
  * The manifest of a project export, and the refusals that are decided from it
@@ -109,6 +110,15 @@ export const Manifest = z.object({
      * an older importer ignores the key rather than refusing the file.
      */
     scoreFloor: z.number().min(0).max(1).nullable().optional(),
+    /**
+     * The project's own quotas ([ADR-0117](../../../.ssot/ADR.md#adr-0117)); `null` means "follow the instance".
+     * They are a decision about this project and travel with it, like `scoreFloor`. Optional, and
+     * `manifestVersion` did not move, for the reason given on `mcpAuth`: an export taken before the columns
+     * existed reads as "follow the instance", and an older importer ignores the keys.
+     */
+    maxDocuments: z.number().int().min(0).max(QUOTA_ROW_COUNT_MAX).nullable().optional(),
+    maxChunks: z.number().int().min(0).max(QUOTA_ROW_COUNT_MAX).nullable().optional(),
+    maxUploadBytes: z.number().int().min(0).max(QUOTA_BYTES_MAX).nullable().optional(),
     lastIndexedAt: z.string().nullable(),
   }),
   counts: z.object({

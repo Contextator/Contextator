@@ -44,6 +44,12 @@ export interface ImportStats {
   files: number;
   skipped: number;
   bytes: number;
+  /**
+   * When present, the absolute path of every file `importTree` writes is appended to it. An upload request
+   * that goes over its quota uses it to take back exactly the files that request added
+   * ([ADR-0117](../../.ssot/ADR.md#adr-0117)); nothing else sets it.
+   */
+  added?: string[];
 }
 
 const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
@@ -124,6 +130,7 @@ export async function importTree(
       if (!isInside(destReal, target)) throw new ArchiveLimitError(`"${relRaw}" escapes the destination directory`);
       await fs.mkdir(path.dirname(target), { recursive: true });
       await fs.copyFile(abs, target);
+      stats.added?.push(target);
       stats.files++;
       stats.bytes += size;
     }

@@ -28,7 +28,19 @@ ships, that stops.
   address and at least one project has no MCP token, the log says which projects (ADR-0065). Said once at
   start; nothing changes for a loopback bind or for token-protected projects. It cannot see how a container's port is
   published, so it says that a loopback-only publish makes it safe to ignore.
-
+- **Per-project quotas.** A project can be capped on documents, chunks and upload bytes. `PROJECT_MAX_DOCUMENTS`,
+  `PROJECT_MAX_CHUNKS` and `PROJECT_MAX_UPLOAD_BYTES` set the instance default (`0`, the default, is unlimited);
+  `PATCH /api/projects/:id/quotas` gives one project its own value, `0` to exempt it or `null` to follow the
+  instance again, and is audited. `GET /api/projects/:id` is new and shows each quota's limit, current use and
+  whether it is inherited. An upload that would go over the cap is refused with `413 quota_exceeded` and
+  nothing from it is kept; an indexing run that would go over the document or chunk cap ends in `error` with
+  `quota_exceeded` (a rebuild keeps serving the previous generation, an incremental run keeps the documents it
+  had finished). Quotas travel in a project export. Migration `0022_project_quotas`. Helm chart 1.5.0 exposes
+  the three defaults as `config.projectMaxDocuments`, `config.projectMaxChunks` and `config.projectMaxUploadBytes`.
+- **Idle upload sessions are swept.** An upload session that has had no `files` request and no commit for 24
+  hours is deleted, with its staged files, by a sweep that runs every quarter of an hour, so the upload quota
+  and the disk agree. Uploads that were not committed within 24 idle hours are lost. This applies to every
+  project, with or without an upload quota.
 - **Source freshness metrics.** `/metrics` gains `contextator_source_last_sync_timestamp_seconds` and
   `contextator_source_freshness_lag_seconds`, which describe the scheduled source that has gone longest
   without a successful sync, and `contextator_sources_never_synced`. They are single, unlabeled series:

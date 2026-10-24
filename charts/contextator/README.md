@@ -725,6 +725,10 @@ checks them:
   on top of what the process already uses. For repositories whose pack is larger, raise
   `config.gitMaxPackBytes` together with `resources.limits.memory` and keep the memory limit well above
   twice the new value.
+- `config.projectMaxDocuments`, `config.projectMaxChunks`, `config.projectMaxUploadBytes` — integers, at
+  least `0`, set as `PROJECT_MAX_DOCUMENTS`, `PROJECT_MAX_CHUNKS` and `PROJECT_MAX_UPLOAD_BYTES`: the
+  instance-wide default caps on what one project may hold. A project the instance admin gave its own
+  value uses that instead. `null` (the default) and `0` leave a cap off.
 - `config.mcpStructuredOutput` — `true` sets `MCP_STRUCTURED_OUTPUT=1`. `false` (the default) leaves it
   unset.
 

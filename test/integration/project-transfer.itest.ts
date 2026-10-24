@@ -155,6 +155,8 @@ async function seedOrigin(db: Db): Promise<void> {
       mcpAuth: 'token',
       queryLogEnabled: false,
       scoreFloor: 0.78,
+      maxDocuments: 40,
+      maxChunks: 0,
       lastIndexedAt: new Date('2026-09-10T08:00:00Z'),
       status: 'idle',
     })
@@ -465,6 +467,10 @@ describe('importing it into a second instance', () => {
     expect(landed.mcpAuth).toBe('token');
     expect(landed.queryLogEnabled).toBe(false);
     expect(landed.scoreFloor).toBe(0.78);
+    // Quotas are the project's own too: a limit, an exemption, and "follow the instance" all survive.
+    expect(landed.maxDocuments).toBe(40);
+    expect(landed.maxChunks).toBe(0);
+    expect(landed.maxUploadBytes).toBeNull();
 
     const rows = await destination.db.select().from(documents).where(eq(documents.projectId, report.projectId));
     expect(rows.every((r) => r.indexGeneration === 0)).toBe(true);

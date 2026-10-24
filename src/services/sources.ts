@@ -750,11 +750,12 @@ export async function recountSources(db: Db, projectId: string, generation: numb
     WHERE s.project_id = ${projectId}`);
 }
 
-/** Number of sources per project, for the project list. */
-export async function countSourcesByProject(db: Db): Promise<Map<string, number>> {
+/** Number of sources per project, for the project list. With `onlyProject` the count is read for that one project. */
+export async function countSourcesByProject(db: Db, onlyProject?: string): Promise<Map<string, number>> {
   const rows = await db
     .select({ projectId: documentSources.projectId, n: sql<number>`count(*)::int` })
     .from(documentSources)
+    .where(onlyProject === undefined ? undefined : eq(documentSources.projectId, onlyProject))
     .groupBy(documentSources.projectId);
   return new Map(rows.map((r) => [r.projectId, r.n]));
 }

@@ -8,6 +8,8 @@ import { chunkMarkdown, embeddingText } from './chunker.js';
 import { ConversionService } from './conversion/client.js';
 import { checkFileSize, DocumentExtractionError, readFailure } from './doc-types/index.js';
 import { assertRebuildDiskSpace, InsufficientDiskError } from './disk-space.js';
+import { QuotaExceededError } from './errors.js';
+import { resolveQuota } from './quotas.js';
 import type { EmbeddingProvider } from './embeddings/provider.js';
 import { expandsToManyDocuments, allowedExtensionsFor, type Flavor } from './flavors.js';
 import { readAndHash, walkMarkdown } from './fs-scan.js';
@@ -22,6 +24,8 @@ import { listSources, recountSources, setSourceStatus, sourceVersion } from './s
 import { textSearchConfigFor, type TextSearchConfig } from './text-search.js';
 import {
   deleteDocuments,
+  chunkCountsByDocument,
+  type ExistingDocument,
   getExistingDocuments,
   recountProject,
   replaceDocument,
@@ -113,6 +117,8 @@ export interface IndexerDeps {
     | 'MAX_DOCX_UNPACKED_BYTES'
     | 'CONVERSION_TIMEOUT_MS'
     | 'CONVERSION_IDLE_MS'
+    | 'PROJECT_MAX_DOCUMENTS'
+    | 'PROJECT_MAX_CHUNKS'
   > &
     Partial<
       Pick<
@@ -569,6 +575,73 @@ export class Indexer {
         const liveBeforeRebuild = rebuild ? await getExistingDocuments(db, project.id, live) : undefined;
         job.filesTotal = files.length;
 
+        // Project quotas ([ADR-0117](../../.ssot/ADR.md#adr-0117)). `0` is unlimited, and an unlimited quota costs
+        // nothing here: no count query, no comparison. A breach throws `QuotaExceededError` into this `try`, so
+        // the run ends through the same `catch` as any failed run. A rebuild publishes nothing then (the
+        // previous generation keeps serving, ADR-0039); an incremental run leaves the documents it had
+        // already finished in place, and the removal pass below never runs.
+        const documentLimit = resolveQuota(current.maxDocuments, config.PROJECT_MAX_DOCUMENTS).limit;
+        const chunkLimit = resolveQuota(current.maxChunks, config.PROJECT_MAX_CHUNKS).limit;
+        /** Documents the run is on course to leave behind; grows as a specification turns out to hold more. */
+        let projectedDocuments = 0;
+        // What the scan can already say about the stored documents: a file that is not a specification is
+        // exactly one document, so those are known from the scan; what a specification expands to is only known
+        // once it is rendered, so its stored documents are assumed to stay and any new ones are counted as they
+        // come. A stored document the scan does not account for at all is certain to be removed.
+        const plain = new Set<string>();
+        const containers = new Set<string>();
+        if (documentLimit > 0 || chunkLimit > 0) {
+          for (const f of files) (expandsToManyDocuments(f.flavor, f.relativePath) ? containers : plain).add(f.relativePath);
+        }
+        const containerOf = (storedPath: string): string => storedPath.slice(0, Math.max(0, storedPath.lastIndexOf('/')));
+        const staysInRun = (storedPath: string, doc: ExistingDocument): boolean =>
+          plain.has(storedPath) || containers.has(containerOf(storedPath)) || Boolean(doc.sourceId && protectedSources.has(doc.sourceId));
+        if (documentLimit > 0) {
+          // After the scan and before any write. The count is an upper bound: a file that later turns out
+          // unreadable or empty is still counted, and a document that is about to be removed is still counted
+          // until the removal pass.
+          let kept = 0;
+          for (const [storedPath, doc] of existing) if (staysInRun(storedPath, doc)) kept++;
+          let added = 0;
+          for (const p of plain) if (!existing.has(p)) added++;
+          projectedDocuments = kept + added;
+          if (projectedDocuments > documentLimit) throw new QuotaExceededError('max_documents', documentLimit, kept, added);
+        }
+        /** Chunks stored in the generation this run writes to, kept current as documents are written or released. */
+        let runningChunks = 0;
+        let chunksOfDocument = new Map<string, number>();
+        /** Documents whose chunks are already out of `runningChunks`, so a document is only given back once. */
+        const released = new Set<string>();
+        /**
+         * The documents `releaseVanishedOperations` gave back in advance, on the strength of an expansion that the
+         * loop has not yet confirmed. A specification the loop then refuses keeps them (see `reject`), and a
+         * document that is rewritten or emptied is no longer one of them.
+         */
+        const releasedInAdvance = new Set<string>();
+        /** The stored documents of each specification file, by its path, for the operations it may stop producing. */
+        const storedOfContainer = new Map<string, Array<[string, ExistingDocument]>>();
+        /** A document that is leaving the index gives its chunks back to the quota, so it cannot lock the run out. */
+        const releaseChunks = (docId: string): void => {
+          if (released.has(docId)) return;
+          released.add(docId);
+          runningChunks -= chunksOfDocument.get(docId) ?? 0;
+        };
+        if (chunkLimit > 0 && !rebuild) {
+          runningChunks = (await recountProject(db, project.id, generation)).chunkCount;
+          chunksOfDocument = await chunkCountsByDocument(db, project.id, generation);
+          // The removal pass runs only after the loop, and never after a breach. A document no file accounts for
+          // would otherwise hold its chunks against the limit for a pass that is skipped by the very breach they
+          // cause: a project near its limit that renamed a file could never index again.
+          for (const [storedPath, doc] of existing) {
+            if (!staysInRun(storedPath, doc)) releaseChunks(doc.id);
+            else if (containers.has(containerOf(storedPath))) {
+              const list = storedOfContainer.get(containerOf(storedPath)) ?? [];
+              list.push([storedPath, doc]);
+              storedOfContainer.set(containerOf(storedPath), list);
+            }
+          }
+        }
+
         // The chunker counts with the model's own tokenizer (ADR-0036) and chunking happens before the
         // first `embed`, so the model has to be loaded before the loop rather than by it — otherwise the
         // first document of a run that beat the background warmup would be chunked against the estimate.
@@ -597,6 +670,42 @@ export class Indexer {
         /** What a specification may weigh before it is parsed ([ADR-0057](../../.ssot/ADR.md#adr-0057)). */
         const specLimits = { maxSpecBytes: config.MAX_SPEC_FILE_BYTES };
 
+        let vanishedOperationsReleased = false;
+        /**
+         * Gives back the chunks of every stored operation that a specification in this run no longer produces.
+         * Run on the first would-be breach and not up front, so a run under its limit pays nothing: it reads each
+         * specification that has stored documents once more and expands it, rendering paths only. Nothing is
+         * chunked or embedded here. A specification that cannot be read or expanded releases nothing, which is
+         * the conservative side, and its refusal is reported by the loop below as it always was.
+         */
+        const releaseVanishedOperations = async (): Promise<void> => {
+          if (vanishedOperationsReleased) return;
+          vanishedOperationsReleased = true;
+          for (const file of files) {
+            const stored = storedOfContainer.get(file.relativePath);
+            if (!stored || !expandsToManyDocuments(file.flavor, file.relativePath)) continue;
+            try {
+              checkSpecSize(file.relativePath, file.sizeBytes, specLimits);
+              let bytes: Awaited<ReturnType<typeof readAndHash>>['bytes'];
+              try {
+                ({ bytes } = await readAndHash(file.absolutePath));
+              } catch (err) {
+                throw readFailure(err, file.relativePath);
+              }
+              const produced = new Set<string>();
+              for await (const doc of (await this.conversion.expand(file.relativePath, bytes, specLimits)).documents())
+                produced.add(doc.relativePath);
+              for (const [storedPath, doc] of stored) {
+                if (produced.has(storedPath) || released.has(doc.id)) continue;
+                releaseChunks(doc.id);
+                releasedInAdvance.add(doc.id);
+              }
+            } catch (err) {
+              if (!(err instanceof DocumentExtractionError)) throw err;
+            }
+          }
+        };
+
         /**
          * One file refused, recorded against its source. Returns nothing: every caller `continue`s.
          *
@@ -617,7 +726,15 @@ export class Indexer {
          * the source failed.
          */
         const reject = (file: SourceFile, err: DocumentExtractionError, spare: readonly string[]): void => {
-          for (const storedPath of spare) seen.add(storedPath);
+          for (const storedPath of spare) {
+            seen.add(storedPath);
+            // A document kept after its chunks were given back in advance counts against the quota again.
+            const kept = existing.get(storedPath);
+            if (kept && releasedInAdvance.delete(kept.id)) {
+              released.delete(kept.id);
+              runningChunks += chunksOfDocument.get(kept.id) ?? 0;
+            }
+          }
           const list = rejected.get(file.sourceId) ?? [];
           list.push(err.message);
           rejected.set(file.sourceId, list);
@@ -843,8 +960,38 @@ export class Indexer {
                 // Empty document: make sure no stale row lingers. Leaving the path out of `seen` is what
                 // makes it count as removed below, which is also how an operation deleted from a
                 // specification loses its document — nothing here has to know it was ever there.
-                if (existing.has(doc.relativePath)) await deleteDocuments(db, project.id, generation, [doc.relativePath]);
+                const stale = existing.get(doc.relativePath);
+                if (stale) {
+                  await deleteDocuments(db, project.id, generation, [doc.relativePath]);
+                  releaseChunks(stale.id);
+                  releasedInAdvance.delete(stale.id);
+                }
                 continue;
+              }
+
+              // A document of a specification that no earlier run stored is a new one the scan could not count.
+              if (documentLimit > 0 && expands && !existing.has(doc.relativePath)) {
+                projectedDocuments++;
+                if (projectedDocuments > documentLimit) throw new QuotaExceededError('max_documents', documentLimit, projectedDocuments - 1, 1);
+              }
+              // Per document, before the first `embedPassages`: a breach costs no embedding work. The document
+              // being rewritten gives its old chunks back, so editing a document at the limit is not refused.
+              if (chunkLimit > 0) {
+                const storedId = existing.get(doc.relativePath)?.id ?? '';
+                const projected = (): { given: number; after: number } => {
+                  const given = released.has(storedId) ? 0 : (chunksOfDocument.get(storedId) ?? 0);
+                  return { given, after: runningChunks - given + chunks.length };
+                };
+                let { given, after } = projected();
+                if (after > chunkLimit) {
+                  // The operations a specification no longer has are only known once it is expanded. Find out before
+                  // refusing, so a rename inside a specification at the limit does not lock the project out.
+                  await releaseVanishedOperations();
+                  ({ given, after } = projected());
+                }
+                if (after > chunkLimit) throw new QuotaExceededError('max_chunks', chunkLimit, runningChunks - given, chunks.length);
+                runningChunks = after;
+                releasedInAdvance.delete(storedId);
               }
 
               const rows: NewChunk[] = [];
@@ -901,6 +1048,8 @@ export class Indexer {
             reject(file, renderFailure, claimed);
             continue;
           }
+          // An operation the specification no longer has is removed by the pass below; its chunks leave the quota now.
+          for (const [storedPath, doc] of storedOfContainer.get(file.relativePath) ?? []) if (!seen.has(storedPath)) releaseChunks(doc.id);
           // **A file every one of whose documents was already current is a skipped file** — and only
           // then. A document that chunked to nothing was neither written nor unchanged, so a one-document
           // file that has just been emptied no longer reports itself to the dashboard as "unchanged"
@@ -1015,15 +1164,27 @@ export class Indexer {
         const message = err instanceof Error ? err.message : String(err);
         job.phase = 'error';
         job.error = message;
-        if (err instanceof InsufficientDiskError) job.errorCode = err.code;
+        if (err instanceof InsufficientDiskError || err instanceof QuotaExceededError) job.errorCode = err.code;
         job.finishedAt = new Date().toISOString();
         log.error({ err, project: project.name, rebuild, generation }, 'indexing failed');
+        // An incremental run that hit a quota has already written the documents it finished, straight into
+        // the live generation, so the project's counters are brought up to date with them. A rebuild wrote
+        // beside the live generation and published nothing, so its counters are already right.
+        const counted =
+          err instanceof QuotaExceededError && generation === live
+            ? await recountProject(db, project.id, generation).catch((countErr: unknown) => {
+                log.error({ err: countErr }, 'failed to recount after a quota breach');
+                return undefined;
+              })
+            : undefined;
+        if (counted)
+          await recountSources(db, project.id, generation).catch((countErr: unknown) => log.error({ err: countErr }, 'failed to recount sources'));
         // `live_generation` is deliberately not in this `SET`. A rebuild that failed leaves the
         // generation it was building behind and the previous one live, so every client connected to
         // the project keeps being served the index it was being served before the run started.
         await db
           .update(projects)
-          .set({ status: 'error', lastError: message.slice(0, 2000) })
+          .set({ status: 'error', lastError: message.slice(0, 2000), ...(counted ?? {}) })
           .where(eq(projects.id, project.id))
           .catch((updateErr: unknown) => log.error({ err: updateErr }, 'failed to record indexing error'));
         // Drop the half-built generation now rather than leaving it for the next run's sweep. Same

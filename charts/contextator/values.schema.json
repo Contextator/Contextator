@@ -412,6 +412,21 @@
           "type": ["integer", "null"],
           "minimum": 1048576
         },
+        "projectMaxDocuments": {
+          "description": "PROJECT_MAX_DOCUMENTS: the instance-wide default for how many documents one project may hold. A project's own cap overrides it; 0 on a project means unlimited. Null, unset or 0 leaves it off.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "projectMaxChunks": {
+          "description": "PROJECT_MAX_CHUNKS: the instance-wide default for how many chunks one project may hold. A project's own cap overrides it; 0 on a project means unlimited. Null, unset or 0 leaves it off.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "projectMaxUploadBytes": {
+          "description": "PROJECT_MAX_UPLOAD_BYTES: the instance-wide default for the bytes stored for one project's upload sources. A project's own cap overrides it; 0 on a project means unlimited. Null, unset or 0 leaves it off.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
         "mcpStructuredOutput": {
           "description": "MCP_STRUCTURED_OUTPUT: true adds structuredContent beside every MCP tool's text answer. Off by default; false leaves the variable unset.",
           "type": "boolean"

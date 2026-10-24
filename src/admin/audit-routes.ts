@@ -210,6 +210,7 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
   'DELETE /api/projects/:id/query-log': { verb: 'purged the query log', prep: 'of' },
   // The number itself is not recorded: `AUDIT_DETAIL` holds closed sets of values only.
   'PATCH /api/projects/:id/score-floor': { verb: 'changed the relevance floor', prep: 'of' },
+  'PATCH /api/projects/:id/quotas': { verb: 'changed the quotas', prep: 'of' },
   // Accounts
   'POST /api/users': { verb: 'created an account', target: 'account' },
   'PATCH /api/users/:id': { verb: 'changed an account', target: 'account' },

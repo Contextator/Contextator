@@ -129,6 +129,49 @@ answer marks the passage as unchanged for a long time (`stale: true`). It is a h
 
 Documents indexed before this feature have neither value until their source runs again.
 
+## Project quotas
+
+Three caps limit how much one project may hold, so a runaway source or upload cannot fill the disk or the
+database on behalf of everyone else:
+
+| Variable | Caps | Checked |
+| --- | --- | --- |
+| `PROJECT_MAX_DOCUMENTS` | documents in the project | before a run writes anything |
+| `PROJECT_MAX_CHUNKS` | chunks in the project | per document, before it is embedded |
+| `PROJECT_MAX_UPLOAD_BYTES` | bytes stored for the project's upload sources, staging included | per upload request and at commit |
+
+Each is an integer of at least `0`, and `0` (the default) is unlimited, so an upgrade changes nothing until you
+write a number. They are the instance default: an instance admin can give one project its own value through
+`PATCH /api/projects/:id/quotas`, which replaces the instance value for that project in both
+directions, and `0` there exempts the project even when the instance sets a cap. Clearing a project's value
+(`null`) makes it follow the instance again.
+
+A breach never loses data that is already searchable:
+
+- An upload that would go over the cap is refused with `413` and `quota_exceeded`; the files of that request
+  are removed from staging and the files of the session's earlier requests stay.
+- A run that would go over the document or chunk cap stops with the error `quota_exceeded`. A re-index
+  (rebuild) publishes nothing, so the previous generation keeps answering; a normal run leaves the documents it
+  had finished writing in place and does not remove any. Either way the project stays searchable, and the run
+  is retried like any other failed run once the cap is raised or content is removed.
+- If the size of an upload source cannot be measured, the upload is refused with `503` rather than let through.
+
+What the upload cap counts:
+
+- Everything the project's upload sources store: each source's `current/` tree plus the staging of every open
+  upload session, the requesting session's own staging included once. A file that overwrites a stored or
+  staged file of the same path counts once, as the difference.
+- A session that nobody has touched for 24 hours (no `files` request, no commit) stops counting, and the
+  server deletes it: a sweep that runs every quarter of an hour removes the session's staged files, so what the
+  quota counts and what is on disk agree to within about a quarter of an hour. A removal that fails, or a project
+  that is busy indexing or committing at that moment, is retried on the next tick; the quota ignores an expired
+  session meanwhile. **An upload that was not committed within 24 hours of its
+  last request is lost** and has to be uploaded again. This applies to every project, whether or not it has an
+  upload quota.
+- The cap is checked by walking the upload directories, so each `files` request pays one walk over the
+  project's upload trees before it writes. With many thousands of staged files this is noticeable per request;
+  an unlimited project (`0`) skips the walk entirely.
+
 ## Limits on converted files
 
 `MAX_CONVERTED_FILE_BYTES` (default `33554432`, 32 MiB) bounds two things for every type that is converted
