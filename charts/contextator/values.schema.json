@@ -430,6 +430,25 @@
         "mcpStructuredOutput": {
           "description": "MCP_STRUCTURED_OUTPUT: true adds structuredContent beside every MCP tool's text answer. Off by default; false leaves the variable unset.",
           "type": "boolean"
+        },
+        "mcpRateLimitPerMinute": {
+          "description": "MCP_RATE_LIMIT_PER_MINUTE (ADR-0112): requests per minute one MCP token may send. Null or unset leaves the application default, 0 (no limit); 0 is no limit too.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "mcpRateLimitAnonPerMinute": {
+          "description": "MCP_RATE_LIMIT_ANON_PER_MINUTE: requests per minute one client address may send to an open project without a valid token. Null or unset leaves the application default, 60; 0 turns the limit off.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "mcpRateLimitTools": {
+          "description": "MCP_RATE_LIMIT_TOOLS: per-tool limits per minute and token as name=count pairs joined by commas, e.g. search_docs=30,read_document=60. Empty leaves it unset.",
+          "type": "string",
+          "pattern": "^$|^[a-z_]+=[0-9]+(,[a-z_]+=[0-9]+)*$"
+        },
+        "mcpRateLimitFailOpen": {
+          "description": "MCP_RATE_LIMIT_FAIL_OPEN: true (default) serves a request when the rate-limit counter is unreachable; false answers 503 instead (sets the variable to 0).",
+          "type": "boolean"
         }
       }
     },
