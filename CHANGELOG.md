@@ -12,6 +12,16 @@ ships, that stops.
 
 ### Added
 
+- **Evaluate your own corpus and questions.** `npm run eval -- --corpus <dir> --golden <file>` indexes a directory
+  of yours and asks a question file of yours with the scoring `npm run eval` already uses; `--negative <file>`
+  adds refusal questions (never defaulted for a custom set, ADR-0045). A project now keeps a question set of
+  its own: `GET`, `POST` and `PUT` on `/api/projects/:id/golden-questions`, `GET`, `PATCH` and `DELETE` on
+  `.../:questionId`, and `GET .../export` returning it as a `golden.jsonl` (viewer reads, editor writes, at most
+  1000 questions). `npm run eval -- --project <name>` asks those questions of the project's live index and
+  refuses a project that has nothing indexed, was indexed with another model, or has no questions. A project
+  export carries the set as an optional `golden-questions.ndjson`; older exports still import and the manifest
+  version does not move (ADR-0051). Without the new flags `npm run eval` prints the figures it did before.
+  Migration `0025_golden_questions`.
 - **MCP rate limits.** `MCP_RATE_LIMIT_PER_MINUTE` (per token, default `0`), `MCP_RATE_LIMIT_ANON_PER_MINUTE`
   (per address on an open project, default `60`) and `MCP_RATE_LIMIT_TOOLS` (`name=count`) limit MCP requests in a
   fixed one-minute window kept in the new `mcp_rate_limits` table. A request over a limit is answered `429` with

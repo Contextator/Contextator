@@ -211,6 +211,42 @@ the one defect Phase 1 left behind ([ROADMAP.md](../../.ssot/ROADMAP.md) Item 12
 whenever the demo needs to look better — which would move `recall@5` for reasons that have nothing to do
 with retrieval.
 
+## Your own corpus and questions
+
+The same harness measures a corpus and a question set of your own. Nothing in `eval/` is touched, and the
+scoring is the one module `scripts/eval-scoring.ts`, so a figure from your set means the same thing as one
+from ours.
+
+```bash
+npm run eval -- --corpus ./docs --golden ./my-questions.jsonl
+npm run eval -- --corpus ./docs --golden ./my-questions.jsonl --negative ./my-negatives.jsonl
+DATABASE_URL=postgres://… npm run eval -- --project my-project   # a project's stored questions
+```
+
+- `--corpus <dir>` is indexed instead of `eval/corpus/`; `--golden <file>` replaces `eval/golden.jsonl`.
+  Each row has the shape described in [Adding a question](#adding-a-question), and every `expectFile` must
+  be a path relative to the corpus directory. A malformed row or a file the corpus does not hold stops the
+  run with the file and line, exit `1`. Without either flag the run is exactly the one above; the two
+  defaults and `--corpus eval/corpus --golden eval/golden.jsonl` print the same figures.
+- **Refusal questions are never defaulted.** `negative.jsonl` describes *our* corpus, so it is read only
+  when you name one with `--negative <file>` (parsed by its own reader, as in
+  [ADR-0045](../../.ssot/ADR.md#adr-0045)). Without it the report has no refusal rates, and a question
+  that expects nothing never enters a golden denominator.
+- `--project <name-or-id>` asks the questions stored for a project (admin API, `/api/projects/:id/golden-questions`)
+  of that project's **live index**, through the same search path, instead of building a corpus. It reads
+  the server's database from `DATABASE_URL`, writes nothing, and refuses to run, rather than print a number
+  that means nothing, if the project has nothing indexed, was indexed with a different embedding model than
+  this process would use, has no questions, or has questions that expect a file its index does not hold.
+  It cannot be combined with `--corpus` or `--golden`. A project's own relevance floor, when the instance
+  has one, decides what counts as a refusal ([ADR-0083](../../.ssot/ADR.md#adr-0083)). The run records
+  no query log; if the count of the project's logged queries moves while it runs (a live server answering
+  someone else), the run says so.
+- To start from a project's questions on disk, `GET /api/projects/:id/golden-questions/export` returns them
+  as a `golden.jsonl` that `--golden` reads, and a project export carries them in `golden-questions.ndjson`.
+
+The report names what was measured in its title, so a result from a custom set cannot be mistaken for a
+number from `BASELINE.md`.
+
 ## Changing the corpus
 
 Changing a page can invalidate a question that depends on it, and nothing will tell you except the
