@@ -181,6 +181,10 @@ describe('probeFromChunk', () => {
       expect(probeFromChunk('用npm start启动服务器进程。')).toBe('用npm start启动服务器进程。');
     });
 
+    it('keeps an apostrophe inside a Latin word in a sentence with Han text', () => {
+      expect(probeFromChunk('Workers say they don’t run 任务 one after another in order.')).toBe('don’t run 任务 one after another in order.');
+    });
+
     it('drops a sentence in a script written without spaces that is not recognised', () => {
       expect(probeFromChunk('เซิร์ฟเวอร์จะดึงงานจากคิวแล้วประมวลผลทีละงานตามลำดับ')).toBeNull();
     });
