@@ -71,6 +71,8 @@ export interface SummaryScope {
   from: Date;
   to: Date;
   actor: SummaryActor;
+  /** Only the searches one MCP token made; absent means every token and the unattributed rows too. */
+  mcpTokenId?: string;
   embeddingModel: string;
   liveGeneration: number;
   /** `null` selects the rows that were logged before the floor was recorded. */
@@ -207,6 +209,9 @@ function denseCompetitionRank<T extends { queryNorm: string }>(rows: readonly T[
 /** `actor = 'mcp'`, or nothing at all for `all`. Spelled once; every figure below takes it. */
 const actorFilter = (actor: SummaryActor) => (actor === 'all' ? sql`` : sql` and q.actor = ${actor}`);
 
+/** One MCP token's searches, or nothing at all when no token is named. */
+const tokenFilter = (mcpTokenId: string | undefined) => (mcpTokenId === undefined ? sql`` : sql` and q.mcp_token_id = ${mcpTokenId}`);
+
 /**
  * The window and the one retrieval configuration, on `search_queries q`. Every figure carries it.
  * `is not distinct from` so that a `null` floor selects the unrecorded rows instead of none.
@@ -224,7 +229,7 @@ const modelFilter = (scope: ModelScope) =>
       and q.created_at >= ${scope.from.toISOString()}::timestamptz
       and q.created_at < ${scope.to.toISOString()}::timestamptz
       and q.embedding_model = ${scope.embeddingModel}
-      and q.live_generation = ${scope.liveGeneration}${actorFilter(scope.actor)}`;
+      and q.live_generation = ${scope.liveGeneration}${actorFilter(scope.actor)}${tokenFilter(scope.mcpTokenId)}`;
 
 interface ConfigurationRow extends Record<string, unknown> {
   embedding_model: string;
@@ -242,14 +247,21 @@ interface ConfigurationRow extends Record<string, unknown> {
  * other three honest: the panel names the configuration its figures describe and says how many
  * searches in the window are outside it, rather than implying the numbers are timeless.
  */
-export async function listQueryConfigurations(db: Db, projectId: string, from: Date, to: Date, actor: SummaryActor): Promise<QueryConfiguration[]> {
+export async function listQueryConfigurations(
+  db: Db,
+  projectId: string,
+  from: Date,
+  to: Date,
+  actor: SummaryActor,
+  mcpTokenId?: string,
+): Promise<QueryConfiguration[]> {
   const result = await db.execute<ConfigurationRow>(sql`
     select q.embedding_model, q.live_generation, q.score_floor, count(*)::int as queries,
            min(q.created_at) as first_at, max(q.created_at) as last_at
     from search_queries q
     where q.project_id = ${projectId}
       and q.created_at >= ${from.toISOString()}::timestamptz
-      and q.created_at < ${to.toISOString()}::timestamptz${actorFilter(actor)}
+      and q.created_at < ${to.toISOString()}::timestamptz${actorFilter(actor)}${tokenFilter(mcpTokenId)}
     group by 1, 2, 3
     order by queries desc, last_at desc`);
   return result.rows.map((row) => ({
