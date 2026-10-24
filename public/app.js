@@ -1757,6 +1757,19 @@ async function runUpload(project, source, mode) {
   }
 }
 
+/**
+ * Keeps the source dialog open on a source that now exists, in edit mode: a second submit patches it
+ * instead of colliding with its name.
+ */
+function holdDialogOnSource(project, source) {
+  srcUi.editing = source;
+  for (const tab of srcTabs) tab.disabled = true;
+  srcForm.elements.name.disabled = true;
+  setKind(kindOfSource(source));
+  void loadSourceFiles(project, source);
+  renderQueue();
+}
+
 // ---------- source dialog wiring ----------
 
 for (const tab of srcTabs)
@@ -1817,13 +1830,14 @@ srcForm.addEventListener('submit', async (event) => {
   errorNode.hidden = true;
   srcUi.busy = true;
   submit.disabled = true;
+  // Set once the server has created or patched the source, so the catch below knows whether it exists.
+  let source;
   try {
     const config = configForKind(kind);
     const secretPatch = secretPatchForKind(kind);
     const flavor = meta.flavor ?? srcForm.elements.flavor.value;
     const label = srcForm.elements.label.value.trim();
     const pending = srcUi.queue.filter((i) => i.status === 'queued').length;
-    let source;
 
     if (editing) {
       source = await api(`/api/projects/${project.id}/sources/${editing.id}`, {
@@ -1855,12 +1869,8 @@ srcForm.addEventListener('submit', async (event) => {
     if (rejected.length > 0) {
       // The source and the files that did go up are saved; keep the dialog open on the ones that did
       // not, in edit mode so a second submit patches the source instead of colliding with its name.
-      srcUi.editing = source;
       srcUi.queue = srcUi.queue.filter((i) => i.status === 'fail');
-      for (const tab of srcTabs) tab.disabled = true;
-      srcForm.elements.name.disabled = true;
-      setKind(kindOfSource(source));
-      void loadSourceFiles(project, source);
+      holdDialogOnSource(project, source);
       errorNode.textContent = `Saved, but ${rejected.length} file${rejected.length === 1 ? '' : 's'} could not be read — ${rejected.join(' · ')}`;
       errorNode.hidden = false;
       await refresh();
@@ -1873,6 +1883,16 @@ srcForm.addEventListener('submit', async (event) => {
     await loadSources(true);
   } catch (err) {
     errorNode.textContent = describeApiError(err);
+    if (source && !editing) {
+      // The source was created and only its upload failed (a quota refusal, say). Say so, and move the
+      // dialog to edit mode: a second submit with the same name would answer 409.
+      // The aborted session committed nothing, so every file is still to be sent.
+      for (const item of srcUi.queue) item.status = 'queued';
+      holdDialogOnSource(project, source);
+      errorNode.textContent = `Source saved; upload refused — ${errorNode.textContent}`;
+      void refresh();
+      void loadSources(true);
+    }
     errorNode.hidden = false;
     // The form is long and the message sits under it: bring it into view or a refused upload looks like nothing happened.
     errorNode.scrollIntoView({ block: 'nearest' });

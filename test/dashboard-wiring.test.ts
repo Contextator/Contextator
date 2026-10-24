@@ -229,6 +229,16 @@ describe('the dashboard markup and its modules agree', () => {
     expect(app).toMatch(/initGoldenUi\(\)/);
   });
 
+  it('moves the source dialog to edit mode when a new source was created but its upload failed', async () => {
+    const app = await readFile(new URL('app.js', PUBLIC), 'utf8');
+    // The helper is the one place that locks the name; both the per-file-failure path and the thrown
+    // path (a 413 quota refusal) use it, or a second submit posts the same name again and gets a 409.
+    expect(app.match(/^\s+holdDialogOnSource\(project, source\);/gm)).toHaveLength(2);
+    // `source` outlives the try block so the catch can tell a created source from a failed create.
+    expect(app).toMatch(/let source;\s*try \{\s*const config = configForKind\(kind\);/);
+    expect(app).toContain('Source saved; upload refused');
+  });
+
   it('loads every module index.html needs through the one entry point', async () => {
     const html = await readFile(new URL('index.html', PUBLIC), 'utf8');
     const scripts = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1]);
