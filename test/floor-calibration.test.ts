@@ -185,7 +185,7 @@ describe('probeFromChunk', () => {
       expect(probeFromChunk('เซิร์ฟเวอร์จะดึงงานจากคิวแล้วประมวลผลทีละงานตามลำดับ')).toBeNull();
     });
 
-    it('still reads a spaced script in words, and a mostly Latin sentence with a Han word as words too', () => {
+    it('still reads a spaced script in words, and weighs a mostly Latin sentence with a Han word two units to a word', () => {
       expect(probeFromChunk('Workers pull jobs from the queue and run the 任务 one after another.')).toBe(
         'the queue and run the 任务 one after another.'.split(' ').slice(-PROBE_WORDS).join(' '),
       );

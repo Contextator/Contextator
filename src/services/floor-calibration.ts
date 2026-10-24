@@ -160,7 +160,7 @@ const UNSPACED_CHAR = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]
  * stands between them is not a unit.
  */
 const SENTENCE_UNIT =
-  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]|[^\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー、，；：（）「」『』【】《》〈〉・。！？]+/gu;
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー]|[^\s\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}ー、，；：（）「」『』【】《》〈〉・。！？“”‘’—…]+/gu;
 
 interface SentenceUnit {
   /** Where the unit starts in the sentence. */
