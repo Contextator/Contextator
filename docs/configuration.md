@@ -231,4 +231,9 @@ documents and the host has the memory.
 `.pptx`, `.xlsx`) may unpack to. The sizes the archive declares are checked before anything is inflated, and
 each part is inflated through a counter, so an archive that lies about its sizes is still stopped at this limit.
 
+`CONVERSION_WORKER_MAX_HEAP_MB` is unset by default, which means the conversion thread's heap has no cap of its own
+and grows up to Node's default. Set it, in MiB, when Contextator runs in a memory-limited container: a file whose
+conversion needs more becomes one refused document whose reason names the heap limit, the thread is replaced, and
+the run carries on, instead of the kernel OOM-killing the whole process. Size it well below the container's limit.
+
 [File types](file-types.md) lists what each type keeps and drops.
