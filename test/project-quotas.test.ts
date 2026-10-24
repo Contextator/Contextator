@@ -367,7 +367,7 @@ describe('UploadService against a quota', () => {
       expect(await sweepExpiredUploadSessions(path.join(dataDir, 'does-not-exist'))).toBe(0);
     });
 
-    it('leaves no half-deleted tree for a commit: the session is gone from its place before it is removed', async () => {
+    it('after the sweep a commit finds no session, and no .trash- directory is left behind', async () => {
       const src = isolatedSource(15);
       const session = await service.createSession(src);
       await writeFile(stagedFile(src, session, 'a.md'), bytes(10));
