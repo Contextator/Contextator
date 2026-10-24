@@ -129,6 +129,16 @@ answer marks the passage as unchanged for a long time (`stale: true`). It is a h
 
 Documents indexed before this feature have neither value until their source runs again.
 
+## MCP rate limits and token networks
+
+`MCP_RATE_LIMIT_PER_MINUTE` (default `0`, off), `MCP_RATE_LIMIT_ANON_PER_MINUTE` (default `60`),
+`MCP_RATE_LIMIT_TOOLS` (`name=count` pairs, default none) and `MCP_RATE_LIMIT_FAIL_OPEN` (default `1`; `0`
+answers `503` when the counter is unreachable) limit how often a token, an anonymous address or a tool may be
+called. How they count, what the `429` looks like and what an upgrade changes are in
+[MCP access](mcp-access.md#limiting-how-much-a-client-may-ask-for). A per-token network allowlist depends on
+`TRUST_PROXY` being exact: [the table](mcp-access.md#restricting-a-static-token-to-a-network) says what each value
+trusts, and `TRUST_PROXY=1` refuses to save a list.
+
 ## Project quotas
 
 Three caps limit how much one project may hold, so a runaway source or upload cannot fill the disk or the
