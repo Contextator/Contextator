@@ -367,6 +367,8 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       audit: gauges.audit,
       // MCP messages by method, tool and era (`mcp/router.ts` counts them).
       mcpRequests: ctx.metrics.mcpRequests(),
+      // Rate-limited requests, counter failures and network denials (`mcp/router.ts`, `services/rate-limit.ts`).
+      mcpGuard: ctx.metrics.mcpGuard(),
       // Search phases, embedding batches and queue waits (`services/metrics.ts`), observed in the process.
       histograms: ctx.metrics.histograms(),
     };

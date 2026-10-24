@@ -6,12 +6,14 @@ import { SSEServerTransport } from '@modelcontextprotocol/server-legacy/sse';
 import type { FastifyError, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { AppContext } from '../context.js';
 import type { ProjectRow } from '../db/schema.js';
+import { isAddressAllowed } from '../services/token-networks.js';
 import { isOriginAllowed } from '../services/origin.js';
 import { getProjectByName, recordLegacySseActivity } from '../services/projects.js';
-import { mcpAccessDecision, mcpAccessMessage, mcpAccessStatus, readMcpBearer } from './access.js';
+import { type McpCredential, mcpAccessDecision, mcpAccessMessage, mcpAccessStatus, readMcpBearer } from './access.js';
 import type { McpRequestCounter } from '../services/metrics.js';
 import { detectEra, type McpEra } from './era.js';
 import { resolveMcpCredential } from './identity.js';
+import { messageCost, rateLimitChecks, rateLimitMessage } from './rate-limit.js';
 import { createModernMcpHandler } from './modern-handler.js';
 import { createProjectMcpServer } from './server-factory.js';
 import { toolLabel } from './tools.js';
@@ -67,6 +69,8 @@ declare module 'fastify' {
      * ([ADR-0047](../../.ssot/ADR.md#adr-0047), [ADR-0099](../../.ssot/ADR.md#adr-0099)).
      */
     mcpTokenId: string | null;
+    /** The credential the hook resolved, so the rate limiter can tell a token or account from an anonymous caller. */
+    mcpCredential: McpCredential | null;
   }
 }
 
@@ -104,7 +108,7 @@ const requestIdOf = (body: unknown): string | number | null => {
  * Response headers a cross-origin browser MCP client may read (CORS `exposedHeaders`, src/server.ts).
  * `deprecation` is there so a browser client of the legacy SSE transport sees the ADR-0096 signal too.
  */
-export const MCP_EXPOSED_HEADERS = ['mcp-session-id', 'mcp-protocol-version', 'deprecation'];
+export const MCP_EXPOSED_HEADERS = ['mcp-session-id', 'mcp-protocol-version', 'deprecation', 'retry-after'];
 
 export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
   const { config, sessions, log } = ctx;
@@ -115,6 +119,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
   // Primitive defaults: an object default would be shared between requests.
   app.decorateRequest('mcpProject', null);
   app.decorateRequest('mcpTokenId', null);
+  app.decorateRequest('mcpCredential', null);
 
   /**
    * Origin validation (DNS-rebinding protection), then the project and its MCP access rule.
@@ -153,8 +158,29 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     // ([ADR-0047](../../.ssot/ADR.md#adr-0047)); the *account* behind it is what the decision now turns
     // on ([ADR-0054](../../.ssot/ADR.md#adr-0054)). An `open` project answered without a credential
     // still verifies nothing and still records nothing, which is what it means for it to be open.
-    const { credential, tokenId } = await resolveMcpCredential(ctx.db, project.id, bearer);
+    const { credential, tokenId, allowedCidrs } = await resolveMcpCredential(ctx.db, project.id, bearer);
     req.mcpTokenId = tokenId;
+    req.mcpCredential = credential;
+
+    // A static token bound to networks ([ADR-0118](../../.ssot/ADR.md#adr-0118)): checked before the access
+    // verdict, wherever the token is presented, an `open` project included, because a token that carried a
+    // list and was waved through on another network would be a way round it. The answer names neither the
+    // address nor the ranges; the log names the address.
+    if (allowedCidrs && allowedCidrs.length > 0) {
+      // `X-Forwarded-For` is only a fact when the proxy in front of us is the one writing it. `TRUST_PROXY=1`
+      // takes the left-most entry, which the client chooses, so no address is worth comparing.
+      const untrusted = config.TRUST_PROXY === true;
+      if (untrusted || !isAddressAllowed(allowedCidrs, req.ip)) {
+        ctx.metrics.countAccessDenied('network');
+        log.warn(
+          { project: project.name, tokenId, address: req.ip },
+          untrusted
+            ? 'mcp token with a network allowlist refused: TRUST_PROXY=1 makes the client address untrustworthy, point TRUST_PROXY at the proxy address'
+            : 'mcp token refused: client address is outside its network allowlist',
+        );
+        return reply.code(403).send(rpcError(-32000, 'This token is not allowed from this network address.'));
+      }
+    }
     const verdict = mcpAccessDecision(project.mcpAuth, credential);
     if (verdict === 'ok') {
       // The credential as the SDK carries it ([ADR-0099](../../.ssot/ADR.md#adr-0099)): every transport,
@@ -202,6 +228,53 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     return reply.code(404).send(rpcError(-32602, message, requestIdOf(req.body)));
   }
 
+  /**
+   * The rate limit ([ADR-0112](../../.ssot/ADR.md#adr-0112)) for one POST, after the caller has been accepted
+   * and the messages counted. Answers the request itself and returns `true` when it refuses; `false` means
+   * go on. A request that costs nothing (notifications, `initialize`, `ping`, nothing configured) never
+   * touches the database. A counter that cannot be reached serves the request and says so, unless
+   * `MCP_RATE_LIMIT_FAIL_OPEN=0`.
+   */
+  async function rateLimited(req: FastifyRequest, reply: FastifyReply, project: ProjectRow, era: McpEra): Promise<boolean> {
+    const checks = rateLimitChecks({
+      config,
+      projectId: project.id,
+      mcpAuth: project.mcpAuth,
+      credential: req.mcpCredential ?? { kind: 'anonymous' },
+      tokenId: req.mcpTokenId,
+      ip: req.ip,
+      cost: messageCost(req.body),
+    });
+    if (checks.length === 0) return false;
+    // The modern era echoes the request id; a legacy client, and a batch, get none.
+    const id = era === 'modern' ? requestIdOf(req.body) : null;
+    try {
+      const denial = await ctx.mcpRateLimiter.hit(checks);
+      if (denial === 0) return false;
+      ctx.metrics.countRateLimited(denial.scope);
+      log.info({ project: project.id, tokenId: req.mcpTokenId, address: req.ip, scope: denial.scope }, 'mcp request rate limited');
+      reply
+        .code(429)
+        .header('retry-after', String(denial.retryAfterSec))
+        .send({
+          jsonrpc: '2.0',
+          error: {
+            code: -32000,
+            message: rateLimitMessage(denial),
+            data: { error: 'rate_limited', retryAfterSec: denial.retryAfterSec, scope: denial.scope },
+          },
+          id,
+        });
+      return true;
+    } catch (err) {
+      ctx.metrics.countRateLimitError();
+      log.warn({ err, project: project.id }, 'mcp rate limit counter failed');
+      if (config.MCP_RATE_LIMIT_FAIL_OPEN) return false;
+      reply.code(503).send(rpcError(-32000, 'Rate limiting is unavailable. Try again shortly.', id));
+      return true;
+    }
+  }
+
   /** After `reply.hijack()` Fastify no longer answers for us, so transport failures are written by hand. */
   async function guarded(reply: FastifyReply, fn: () => Promise<void>): Promise<void> {
     try {
@@ -243,6 +316,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     // message, so a request the SDK turns away for a header that disagrees with its body is still one
     // somebody sent.
     countMcpMessages(ctx.metrics, req.body, era);
+    if (await rateLimited(req, reply, project, era)) return reply;
 
     if (era === 'modern') {
       // Stateless: the SDK builds a server for this request alone and the registry never hears of it.
@@ -357,6 +431,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     sessions.touch(session.id);
     recordLegacySseActivity(ctx.db, project.id);
     countMcpMessages(ctx.metrics, req.body, 'legacy');
+    if (await rateLimited(req, reply, project, 'legacy')) return reply;
 
     reply.hijack();
     await guarded(reply, () => tracing().withRemoteContext(req.headers, () => session.transport.handlePostMessage(req.raw, reply.raw, req.body)));

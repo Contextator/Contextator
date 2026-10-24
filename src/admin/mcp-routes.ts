@@ -2,7 +2,9 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import { requirePrincipal } from '../auth/plugin.js';
-import { createMcpToken, listMcpTokens, revokeMcpToken, setProjectMcpAuth } from '../services/auth/mcp-tokens.js';
+import { createMcpToken, listMcpTokens, revokeMcpToken, setProjectMcpAuth, updateMcpTokenNetworks } from '../services/auth/mcp-tokens.js';
+import { ValidationError } from '../services/projects.js';
+import { parseAllowedCidrs } from '../services/token-networks.js';
 
 const ProjectParams = z.object({ id: z.uuid() });
 const TokenParams = ProjectParams.extend({ tokenId: z.uuid() });
@@ -17,7 +19,12 @@ export const TOKEN_LIFETIME_DAYS = [30, 90, 365] as const;
 export const CreateBody = z.object({
   name: z.string().max(100).default(''),
   expiresInDays: z.literal(TOKEN_LIFETIME_DAYS).nullable().default(null),
+  /** Client networks allowed to present the token ([ADR-0118](../../.ssot/ADR.md#adr-0118)); `null`, absent or empty means anywhere. */
+  allowedCidrs: z.array(z.string().max(64)).max(32).nullable().default(null),
 });
+
+/** `PATCH .../mcp-tokens/:tokenId`: replaces the token's network list; `null` or `[]` removes the restriction. */
+export const UpdateNetworksBody = z.object({ allowedCidrs: z.array(z.string().max(64)).max(32).nullable() });
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -31,7 +38,22 @@ export const expiryFromDays = (days: number | null, now: Date = new Date()): Dat
  * an editor's. Turning the requirement on and off is a manager's, and lives on the project itself.
  */
 export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
-  const { db, sessions } = ctx;
+  const { db, sessions, config } = ctx;
+
+  /**
+   * Validates a network list and refuses a non-empty one under `TRUST_PROXY=1`: there the client address
+   * is whatever the caller wrote in `X-Forwarded-For`, so a list could only ever fail closed.
+   */
+  const networksFrom = (input: readonly string[] | null): string[] | null => {
+    const cidrs = parseAllowedCidrs(input);
+    if (cidrs && config.TRUST_PROXY === true) {
+      throw new ValidationError(
+        'A network allowlist cannot be saved while TRUST_PROXY=1: the client address would come from a header the caller writes. ' +
+          "Point TRUST_PROXY at the reverse proxy's address or CIDR block first.",
+      );
+    }
+    return cidrs;
+  };
 
   app.get('/api/projects/:id/mcp-tokens', async (req) => {
     const { id } = ProjectParams.parse(req.params);
@@ -41,10 +63,19 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
   app.post('/api/projects/:id/mcp-tokens', async (req, reply) => {
     const principal = requirePrincipal(req);
     const { id } = ProjectParams.parse(req.params);
-    const { name, expiresInDays } = CreateBody.parse(req.body ?? {});
-    const { token, view } = await createMcpToken(db, id, name, principal.userId, expiryFromDays(expiresInDays));
+    const { name, expiresInDays, allowedCidrs } = CreateBody.parse(req.body ?? {});
+    const cidrs = networksFrom(allowedCidrs);
+    const { token, view } = await createMcpToken(db, id, name, principal.userId, expiryFromDays(expiresInDays), cidrs);
     // Returned once and never again: the database holds only its hash.
     return reply.code(201).send({ token: view, secret: token });
+  });
+
+  // Which networks may present one token. The list itself is not written to the audit trail: the event
+  // says that it changed, and the token it changed, not what it now allows.
+  app.patch('/api/projects/:id/mcp-tokens/:tokenId', async (req) => {
+    const { id, tokenId } = TokenParams.parse(req.params);
+    const { allowedCidrs } = UpdateNetworksBody.parse(req.body ?? {});
+    return updateMcpTokenNetworks(db, id, tokenId, networksFrom(allowedCidrs));
   });
 
   app.delete('/api/projects/:id/mcp-tokens/:tokenId', async (req, reply) => {

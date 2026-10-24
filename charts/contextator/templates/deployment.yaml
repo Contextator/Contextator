@@ -102,6 +102,22 @@ spec:
             - name: MCP_STRUCTURED_OUTPUT
               value: "1"
             {{- end }}
+            {{- if not (kindIs "invalid" .Values.config.mcpRateLimitPerMinute) }}
+            - name: MCP_RATE_LIMIT_PER_MINUTE
+              value: {{ .Values.config.mcpRateLimitPerMinute | int64 | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.config.mcpRateLimitAnonPerMinute) }}
+            - name: MCP_RATE_LIMIT_ANON_PER_MINUTE
+              value: {{ .Values.config.mcpRateLimitAnonPerMinute | int64 | quote }}
+            {{- end }}
+            {{- if .Values.config.mcpRateLimitTools }}
+            - name: MCP_RATE_LIMIT_TOOLS
+              value: {{ .Values.config.mcpRateLimitTools | quote }}
+            {{- end }}
+            {{- if eq (toString .Values.config.mcpRateLimitFailOpen) "false" }}
+            - name: MCP_RATE_LIMIT_FAIL_OPEN
+              value: "0"
+            {{- end }}
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}

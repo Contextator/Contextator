@@ -6,6 +6,14 @@ import { resolveProjectAccess } from '../services/auth/memberships.js';
 import { verifyMcpToken } from '../services/auth/mcp-tokens.js';
 import type { McpCredential } from './access.js';
 
+/** What `resolveMcpCredential` found; `allowedCidrs` is set only for a static token that carries a network allowlist. */
+export interface ResolvedMcpCredential {
+  credential: McpCredential;
+  tokenId: string | null;
+  /** [ADR-0118](../../.ssot/ADR.md#adr-0118): the networks the static token may be presented from, or `null`. */
+  allowedCidrs: string[] | null;
+}
+
 /**
  * Turns the `Authorization` header of an MCP request into the thing `mcpAccessDecision` judges
  * ([ADR-0054](../../.ssot/ADR.md#adr-0054)).
@@ -20,16 +28,12 @@ import type { McpCredential } from './access.js';
  * membership has to take effect on the next request and not at the next sign-in. An OAuth access token
  * lives for an hour; an hour is far too long for "we removed their access" to mean nothing.
  */
-export async function resolveMcpCredential(
-  db: Db,
-  projectId: string,
-  bearer: string,
-): Promise<{ credential: McpCredential; tokenId: string | null }> {
-  if (!bearer) return { credential: { kind: 'anonymous' }, tokenId: null };
+export async function resolveMcpCredential(db: Db, projectId: string, bearer: string): Promise<ResolvedMcpCredential> {
+  if (!bearer) return { credential: { kind: 'anonymous' }, tokenId: null, allowedCidrs: null };
 
   const token = await verifyMcpToken(db, projectId, bearer);
-  if (!token) return { credential: { kind: 'unknown' }, tokenId: null };
-  if (!token.userId) return { credential: { kind: 'bearer' }, tokenId: token.id };
+  if (!token) return { credential: { kind: 'unknown' }, tokenId: null, allowedCidrs: null };
+  if (!token.userId) return { credential: { kind: 'bearer' }, tokenId: token.id, allowedCidrs: token.allowedCidrs };
 
   const [account] = await db
     .select({
@@ -50,7 +54,7 @@ export async function resolveMcpCredential(
   // that matters most — a person changing their own password because they think it leaked — clears
   // `mustChangePassword` and would have walked straight through a check that was the only gate. What
   // is left for this line to catch is a credential minted while a temporary password stands.
-  if (!account?.isActive || account.mustChangePassword) return { credential: { kind: 'unknown' }, tokenId: token.id };
+  if (!account?.isActive || account.mustChangePassword) return { credential: { kind: 'unknown' }, tokenId: token.id, allowedCidrs: null };
 
   const principal: Principal = {
     kind: 'session',
@@ -63,5 +67,5 @@ export async function resolveMcpCredential(
     mustChangePassword: false,
   };
   const access = await resolveProjectAccess(db, principal, projectId);
-  return { credential: { kind: 'account', access }, tokenId: token.id };
+  return { credential: { kind: 'account', access }, tokenId: token.id, allowedCidrs: null };
 }

@@ -731,6 +731,16 @@ checks them:
   value uses that instead. `null` (the default) and `0` leave a cap off.
 - `config.mcpStructuredOutput` — `true` sets `MCP_STRUCTURED_OUTPUT=1`. `false` (the default) leaves it
   unset.
+- `config.mcpRateLimitPerMinute`, `config.mcpRateLimitAnonPerMinute` — integers, at least `0`, set as
+  `MCP_RATE_LIMIT_PER_MINUTE` and `MCP_RATE_LIMIT_ANON_PER_MINUTE`: how many MCP requests per minute one
+  token, and one client address on an `open` project without a valid token, may send. `null` (the default)
+  leaves the variable unset, so the application defaults apply (`0`, no limit, per token; `60` per
+  address); `0` turns a limit off. The window is fixed, so a client can send up to twice the limit across
+  a minute boundary. Behind a proxy the address is right only when `config.trustProxy` is.
+- `config.mcpRateLimitTools` — `name=count` pairs joined by commas (`search_docs=30,read_document=60`),
+  set as `MCP_RATE_LIMIT_TOOLS`: a per-tool limit per minute and token. Empty (the default) leaves it unset.
+- `config.mcpRateLimitFailOpen` — `true` (the default) leaves `MCP_RATE_LIMIT_FAIL_OPEN` unset, so a request
+  is served when the counter table cannot be reached; `false` sets it to `0` and answers 503 instead.
 
 ## Publishing
 

@@ -3,6 +3,7 @@ import {
   bigint,
   boolean,
   check,
+  cidr,
   customType,
   doublePrecision,
   foreignKey,
@@ -269,6 +270,13 @@ export const mcpTokens = pgTable(
     clientId: text('client_id'),
     /** When this credential stops being accepted. NULL — never — is what a static token carries. */
     expiresAt: timestamp('expires_at', { withTimezone: true }),
+    /**
+     * The networks this **static** token may be presented from ([ADR-0118](../../.ssot/ADR.md#adr-0118)).
+     * NULL or empty — unrestricted — is every row that existed before the column did, so the migration
+     * changes what no token reaches. `cidr`, so PostgreSQL validates and normalises each entry; a single
+     * address is stored as `/32` or `/128`. Meaningless on the two OAuth kinds, which never carry one.
+     */
+    allowedCidrs: cidr('allowed_cidrs').array(),
   },
   (t) => [
     foreignKey({ name: 'mcp_tokens_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
@@ -1018,6 +1026,26 @@ export const auditEvents = pgTable(
     index('audit_events_actor_label_created_idx').on(t.actorLabel, t.createdAt.desc().nullsFirst()),
     index('audit_events_action_created_idx').on(t.action, t.createdAt.desc().nullsFirst()),
   ],
+);
+
+/**
+ * The MCP rate limiter's counters ([ADR-0112](../../.ssot/ADR.md#adr-0112)): one row per key, a fixed
+ * window, one `INSERT … ON CONFLICT DO UPDATE … RETURNING count` per check.
+ *
+ * `key` is `tok:<tokenId>` or `ip:<projectId>:<ip>`, optionally with `:tool:<name>` appended. It is not
+ * a foreign key: a counter outlives nothing that matters and the scheduler sweeps rows whose window
+ * ended ten minutes ago. An ordinary table and not UNLOGGED, because an unlogged table is emptied by a
+ * crash and replicated nowhere — a limit that resets on failover is a limit an attacker can wait out.
+ */
+export const mcpRateLimits = pgTable(
+  'mcp_rate_limits',
+  {
+    key: text('key').primaryKey(),
+    /** When the current window opened, taken from the application's clock, not the database's. */
+    windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+    count: integer('count').notNull(),
+  },
+  (t) => [index('mcp_rate_limits_window_idx').on(t.windowStart)],
 );
 
 export const settings = pgTable('settings', {

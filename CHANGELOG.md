@@ -12,6 +12,24 @@ ships, that stops.
 
 ### Added
 
+- **MCP rate limits.** `MCP_RATE_LIMIT_PER_MINUTE` (per token, default `0`), `MCP_RATE_LIMIT_ANON_PER_MINUTE`
+  (per address on an open project, default `60`) and `MCP_RATE_LIMIT_TOOLS` (`name=count`) limit MCP requests in a
+  fixed one-minute window kept in the new `mcp_rate_limits` table. A request over a limit is answered `429` with
+  `Retry-After` and a JSON-RPC `-32000` error (`rate_limited`, with `retryAfterSec` and `scope`). Notifications,
+  `initialize`, `ping`, event streams and failed authentication are not counted. If the counter cannot be
+  reached the request is served and `contextator_mcp_rate_limit_errors_total` rises; `MCP_RATE_LIMIT_FAIL_OPEN=0`
+  answers `503`. New metric `contextator_mcp_rate_limited_total{scope}` (ADR-0112). Migration `0023_rate_limit_allowlist`.
+  **Upgrade note:** an open project now answers at most 60 requests a minute per client address; set
+  `MCP_RATE_LIMIT_ANON_PER_MINUTE=0` to keep the old behaviour. Nothing else changes until a limit is set.
+- **Network allowlist for a static MCP token.** A token can carry up to 32 addresses or CIDR ranges
+  (`allowedCidrs` on `POST /api/projects/:id/mcp-tokens` and the new `PATCH /api/projects/:id/mcp-tokens/:tokenId`).
+  A request from elsewhere is answered `403` without naming the address or the ranges, logged with the token id
+  and the address, and counted in `contextator_mcp_access_denied_total{reason="network"}`. A list cannot be saved
+  under `TRUST_PROXY=1`, where the address is client-controlled (ADR-0118). `docs/mcp-access.md` has the
+  `TRUST_PROXY` table. Helm chart 1.6.0 exposes the rate limits as `config.mcpRateLimitPerMinute`,
+  `config.mcpRateLimitAnonPerMinute`, `config.mcpRateLimitTools` and `config.mcpRateLimitFailOpen`.
+- **Query log by token.** The query log summary and export take `token` (an MCP token id) and show only what
+  that token asked.
 - **Default auth and bind address as product facts.** `public/product-facts.json` gains `defaultMcpAuth`
   (read from `DEFAULT_MCP_AUTH`) and `defaultBindAddress` (the address the compose files publish the port
   on). The bind address is read from `docker-compose.yml` and `docker-compose.slim.yml` with a YAML parser;

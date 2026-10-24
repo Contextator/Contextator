@@ -11,7 +11,7 @@ import type { SetupGate } from './services/auth/setup.js';
 import type { AuditWriter } from './services/audit.js';
 import type { MetricsRegistry } from './services/metrics.js';
 import type { QueryLog } from './services/query-log.js';
-import type { SlidingWindow } from './services/rate-limit.js';
+import type { McpRateLimiter, SlidingWindow } from './services/rate-limit.js';
 
 /** pino-compatible logger (Fastify's). Services receive it instead of importing a global. */
 export type Logger = FastifyBaseLogger;
@@ -33,6 +33,8 @@ export interface AppContext {
   setup: SetupGate;
   /** Per-IP budget for sign-in and setup attempts. */
   loginLimiter: SlidingWindow;
+  /** Postgres-backed fixed-window counters for MCP requests ([ADR-0112](../.ssot/ADR.md#adr-0112)). */
+  mcpRateLimiter: McpRateLimiter;
   /**
    * Where searches are written down ([ADR-0047](../../.ssot/ADR.md#adr-0047)), or **undefined**, which
    * is what `SEARCH_QUERY_LOG=0` produces: there is then no sink for a caller to pass, so nothing in

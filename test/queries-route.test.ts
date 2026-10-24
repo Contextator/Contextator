@@ -125,6 +125,14 @@ describe('the bounds on the query summary', () => {
     expect((await summary('?model=local%3Astub%3Afp32&generation=2')).statusCode).toBe(200);
   });
 
+  it('takes a token filter that is a UUID, on the summary and the export alike', async () => {
+    const token = '2f6a1c0e-5d1b-4a39-9d2e-0a7b6c5d4e3f';
+    expect((await summary(`?token=${token}`)).statusCode).toBe(200);
+    expect((await call('GET', `/api/projects/${PROJECT_ID}/queries/export?token=${token}`)).statusCode).toBe(200);
+    expect((await summary('?token=not-a-uuid')).statusCode).toBe(400);
+    expect((await call('GET', `/api/projects/${PROJECT_ID}/queries/export?token=not-a-uuid`)).statusCode).toBe(400);
+  });
+
   it('bounds the export by its own, larger page size', async () => {
     expect((await call('GET', `/api/projects/${PROJECT_ID}/queries/export?limit=500`)).statusCode).toBe(200);
     expect((await call('GET', `/api/projects/${PROJECT_ID}/queries/export?limit=501`)).statusCode).toBe(400);

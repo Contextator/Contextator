@@ -153,6 +153,22 @@ config:
   # model the structured part alone when both are present, so the guidance each answer carries
   # would reach it only as a JSON field. `false` leaves the variable unset (the app's default, 0).
   mcpStructuredOutput: false
+  # MCP_RATE_LIMIT_PER_MINUTE (ADR-0112): requests per minute one MCP token (or OAuth access token)
+  # may send, counted in a fixed one-minute window shared by every replica of the database. Null leaves
+  # the variable unset (the application default, 0 = no limit); 0 also means no limit.
+  mcpRateLimitPerMinute: null
+  # MCP_RATE_LIMIT_ANON_PER_MINUTE: the same per client address (IPv6 folded to its /64) for requests
+  # to a project whose MCP access is `open` and that carry no valid token. Null leaves the variable
+  # unset (the application default, 60); 0 turns the anonymous limit off. Behind a proxy the address is
+  # only right when `trustProxy` is set correctly.
+  mcpRateLimitAnonPerMinute: null
+  # MCP_RATE_LIMIT_TOOLS: a per-tool limit per minute and token, `name=count` pairs joined by commas,
+  # e.g. "search_docs=30,read_document=60". Empty leaves the variable unset (no per-tool limit).
+  mcpRateLimitTools: ""
+  # MCP_RATE_LIMIT_FAIL_OPEN: true (the default) serves a request when the counter table cannot be
+  # reached (a warning and the contextator_mcp_rate_limit_errors_total metric record it); false sets
+  # MCP_RATE_LIMIT_FAIL_OPEN=0 and answers 503 instead.
+  mcpRateLimitFailOpen: true
 
 # -----------------------------------------------------------------------------------------------
 # Persistence
