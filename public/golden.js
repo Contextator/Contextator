@@ -106,8 +106,9 @@ export function evalCommand(projectName) {
 // ---------- loading ----------
 
 /**
- * The set is read when a project is selected and after each change the panel makes; the poll leaves it
- * alone (somebody else's edit shows on Refresh), because a set can be a thousand rows long.
+ * The set is read when a project is selected and after each change the panel makes. The poll calls this
+ * too (a project opened by its hash is selected without `select()`), but once the set is loaded that call
+ * is a no-op: somebody else's edit shows on Refresh, because a set can be a thousand rows long.
  */
 export async function loadGolden(force = false) {
   const project = state.projects.find((p) => p.id === state.selectedId);
