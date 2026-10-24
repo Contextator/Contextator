@@ -20,7 +20,7 @@ import { type NewChunk, replaceDocument, storedDocumentContent } from '../../src
 import { applySchema, createTestDatabase, dropTestDatabase, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 
 /**
- * Floor suggestions ([ADR-0113](../../.ssot/ADR.md#adr-0113), 0.4-16): measured from the project's own
+ * Floor suggestions ([ADR-0083](../../.ssot/ADR.md#adr-0083), 0.4-16): measured from the project's own
  * index, stored as advice, and adopted only by an explicit apply.
  *
  * The property the whole feature rests on is the one asserted last in the first block: **a suggestion

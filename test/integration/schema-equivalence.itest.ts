@@ -122,7 +122,7 @@ const opened: TestDatabase[] = [];
  * `0021_document_source_url` ([ADR-0116](../../.ssot/ADR.md#adr-0116)) is two nullable columns on
  * `documents` with no default and no constraint: the origin address (`source_url`) and the origin's own
  * last-change date (`source_modified_at`). Matched by their names, which turn up nowhere else.
- * `0024_floor_suggestions` ([ADR-0113](../../.ssot/ADR.md#adr-0113)) is one whole new table, the same
+ * `0024_floor_suggestions` ([ADR-0083](../../.ssot/ADR.md#adr-0083)) is one whole new table, the same
  * shape as `0014_api_tokens`: `^floor_suggestions` anchors its columns, indexes, CHECKs and foreign key.
  */
 const POST_BASELINE_MARKERS =

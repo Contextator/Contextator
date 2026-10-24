@@ -44,7 +44,7 @@ const EXPECTED_TABLES = [
   'chunks',
   'document_sources',
   'documents',
-  // Measured relevance-floor advice, applied only on a manager's say ([ADR-0113](../../../.ssot/ADR.md#adr-0113)).
+  // Measured relevance-floor advice, applied only on a manager's say ([ADR-0083](../../../.ssot/ADR.md#adr-0083)).
   'floor_suggestions',
   'index_runs',
   'mcp_tokens',
@@ -255,7 +255,7 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     // `last_legacy_sse_at` alone for the same reason; and `0021_document_source_url`
     // ([ADR-0116](../../../.ssot/ADR.md#adr-0116)), two nullable columns on `documents`, matched by
     // their names `source_url` and `source_modified_at` alone; and `0024_floor_suggestions`
-    // ([ADR-0113](../../../.ssot/ADR.md#adr-0113)), one whole new table anchored by `^floor_suggestions`. So
+    // ([ADR-0083](../../../.ssot/ADR.md#adr-0083)), one whole new table anchored by `^floor_suggestions`. So
     // the claim is no longer "nothing changed": it is that nothing changed *except* what those
     // migrations say they change, and the lines that moved are checked by name rather than counted.
     await applySchema(database);

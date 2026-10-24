@@ -723,8 +723,8 @@ export const searchQueryHits = pgTable(
 
 /**
  * A relevance floor an operator may adopt for one project ([ADR-0083](../../.ssot/ADR.md#adr-0083),
- * Faz 08 of 0.4.0): the highest floor that would still have answered every question the project's own
- * headings ask, measured with the encoder and the live generation named on the row.
+ * Faz 08 of 0.4.0): the highest floor that would still have answered a fragment of each of the project's
+ * own chunks, measured with the encoder and the live generation named on the row.
  *
  * **A suggestion is never applied by writing it.** `projects.score_floor` changes only when a manager
  * posts the apply route, and that route refuses a suggestion whose `embedding_model` or

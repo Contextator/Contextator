@@ -81,7 +81,7 @@ async function main(): Promise<void> {
   const metrics = new MetricsRegistry(pool);
   // The indexer registers its "run in progress" probe with the registry itself (`indexing` label).
   // After a re-index forced by a model change the project's floor describes the old encoder: measure the new
-  // one and store a suggestion beside it. It is never applied from here (ADR-0113); a manager adopts it.
+  // one and store a suggestion beside it. It is never applied from here (ADR-0083); a manager adopts it.
   const onModelChangeRebuilt = async (projectId: string): Promise<void> => {
     const outcome = await generateFloorSuggestion(
       { db, embeddings, scan: scanFrom(config), selection: selectionFrom(config) },
