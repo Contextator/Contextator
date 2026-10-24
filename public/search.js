@@ -262,9 +262,7 @@ function sourceLine(hit) {
   const day = modifiedDay(hit.sourceModifiedAt);
   if (!href && !day) return null;
   return el('div', { class: 'hit-source' }, [
-    href
-      ? el('a', { class: 'hit-source-link', href, target: '_blank', rel: 'noopener noreferrer', title: href, text: href })
-      : null,
+    href ? el('a', { class: 'hit-source-link', href, target: '_blank', rel: 'noopener noreferrer', title: href, text: href }) : null,
     day ? el('span', { class: 'hit-source-date', text: `modified ${day}`, title: new Date(hit.sourceModifiedAt).toLocaleString() }) : null,
     hit.stale === true
       ? el('span', {

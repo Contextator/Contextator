@@ -81,7 +81,7 @@ describe('the query panel narrowed to one MCP token', () => {
     expect(sent()[0].searchParams.has('token')).toBe(false);
   });
 
-  it('asks for only the chosen token\'s queries', async () => {
+  it("asks for only the chosen token's queries", async () => {
     state.queries.token = TOKEN;
     await loadQuerySummary();
     expect(sent()).toHaveLength(1);
