@@ -217,9 +217,10 @@ const USAGE = `Usage: npm run eval [-- <options>]
   --min-heading5=<0..1>    The same for heading@5 — the right chunk of the right file, not just the file.
   -h, --help               This.
 
-  A value flag takes its value as "--corpus <dir>" or "--corpus=<dir>". Relative paths are read from
-  the directory "npm run eval" was typed in, not from the repository root. With none of the four, the run is the repository's own set and
-  its numbers are the ones in eval/BASELINE.md.
+  A value flag takes its value as "--corpus <dir>" or "--corpus=<dir>". Relative paths, read and
+  written alike, are taken from the directory "npm run eval" was typed in, not from the repository
+  root. With none of the four, the run is the repository's own set and its numbers are the ones in
+  eval/BASELINE.md.
 
   With a floor, a completed run whose numbers are short exits 2; without one it exits 0 whatever it
   finds. A harness failure — a malformed question, a skipped corpus file — is exit 1 either way, and
@@ -306,7 +307,7 @@ export function parseArgs(argv: readonly string[], cwd: string = invocationDirec
       case '--markdown':
       case '--json': {
         const format = flag === '--json' ? 'json' : 'markdown';
-        outputs.push({ format, file: value });
+        outputs.push({ format, file: value === null ? null : path.resolve(cwd, value) });
         // Without a path the chosen format replaces the human report on stdout; with one it is written
         // to the file and the text report still goes to the terminal, which is what CI wants.
         if (value === null) quietText = true;

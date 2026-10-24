@@ -69,7 +69,7 @@ describe('eval command line', () => {
   it('keeps the output and gate flags as they were', () => {
     const o = parseArgs(['--json=out.json', '--markdown', '--min-recall5=0.8'], CWD);
     expect(o.outputs).toEqual([
-      { format: 'json', file: 'out.json' },
+      { format: 'json', file: '/work/docs/out.json' },
       { format: 'markdown', file: null },
     ]);
     expect(o.floors.recall5).toBe(0.8);
