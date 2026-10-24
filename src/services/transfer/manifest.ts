@@ -30,6 +30,12 @@ export const MANIFEST_ENTRY = 'manifest.json';
 export const SOURCES_ENTRY = 'sources.ndjson';
 /** One JSON object per line: a document and its chunks, in document order. */
 export const DOCUMENTS_ENTRY = 'documents.ndjson';
+/**
+ * One JSON object per line, in `eval/golden.jsonl`'s own shape: the project's golden questions
+ * ([ADR-0034](../../../.ssot/ADR.md#adr-0034)). **Optional**: it is written only when the project has questions,
+ * and an export taken before they existed simply lacks it, which reads as "no questions".
+ */
+export const GOLDEN_QUESTIONS_ENTRY = 'golden-questions.ndjson';
 /** The prose half of the manifest, for the operator who opens the tarball rather than the importer. */
 export const README_ENTRY = 'README.txt';
 /** Upload sources' materialised trees, keyed by source **name** — see `dataPrefixFor`. */
@@ -127,6 +133,11 @@ export const Manifest = z.object({
     chunks: z.number().int().min(0),
     uploadFiles: z.number().int().min(0),
     uploadBytes: z.number().int().min(0),
+    /**
+     * The project's golden questions. Optional, and `manifestVersion` did not move, for the reason given on
+     * `mcpAuth`: an export taken before the table existed reads as zero, and an older importer ignores the key.
+     */
+    goldenQuestions: z.number().int().min(0).optional(),
   }),
   /**
    * What the source instance held and this file deliberately does not, so that the absence is a
@@ -254,7 +265,9 @@ export function readmeFor(manifest: Manifest): string {
     `It carries ${manifest.counts.documents} documents and ${manifest.counts.chunks} chunks, with their vectors, from ` +
       `generation ${manifest.project.exportedGeneration} of that instance. The generation number does not travel: it is ` +
       'local to the instance that produced it, and the import renumbers this corpus to 0.',
-    '',
+    ...((manifest.counts.goldenQuestions ?? 0) > 0
+      ? [`It also carries ${manifest.counts.goldenQuestions} golden question(s), in golden-questions.ndjson, in the shape of eval/golden.jsonl.`, '']
+      : []),
     manifest.embedding
       ? `The vectors were produced by "${manifest.embedding.id}" at ${manifest.embedding.dimensions} dimensions. An instance ` +
         'running any other model will refuse this file rather than accept vectors it cannot compare.'

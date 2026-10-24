@@ -11,6 +11,8 @@ import { dropProjectVectorIndex } from '../../db/vector-indexes.js';
 import { type ImportLimits, importTree, unpackTar, withScratch } from '../archives.js';
 import { assertImportDiskSpace, type DiskSpace } from '../disk-space.js';
 import { removeProjectDir, sourceCurrentDir } from '../data-dir.js';
+import { GoldenQuestionInputSchema, MAX_GOLDEN_QUESTIONS, type GoldenQuestionInput, replaceGoldenQuestions } from '../golden-questions.js';
+import { GoldenRowSchema } from '../golden-row.js';
 import { allowedExtensionsFor, FLAVORS, type Flavor } from '../flavors.js';
 import { createProject } from '../projects.js';
 import { normalizeSourceUrl, parseSourceDate } from '../source-url.js';
@@ -19,6 +21,7 @@ import { textSearchConfigFor } from '../text-search.js';
 import { recountProject, replaceDocument } from '../vector-store.js';
 import {
   DOCUMENTS_ENTRY,
+  GOLDEN_QUESTIONS_ENTRY,
   ImportRefusedError,
   MANIFEST_ENTRY,
   Manifest,
@@ -105,6 +108,8 @@ export interface ImportReport {
   manifest: Manifest;
   documents: number;
   chunks: number;
+  /** Golden questions that arrived with the project; 0 for an export that carried none. */
+  goldenQuestions: number;
   sources: Array<{ name: string; type: SourceType; files: number; needs: string }>;
   /**
    * The memberships question, answered out loud rather than left to be discovered by an operator
@@ -173,13 +178,16 @@ export async function importProject(deps: ImportDeps, archivePath: string, name?
     // Every document names the source it belongs to by the prefix of its own path, so a tarball whose
     // two halves disagree is refused before a project exists rather than landing documents with no source.
     const byName = new Map(sources.map((s) => [s.name, s]));
+    // Read and validated before a project exists, like the sources: a bad question file is a refusal
+    // that writes nothing.
+    const goldenQuestions = await readGoldenQuestions(path.join(scratch, GOLDEN_QUESTIONS_ENTRY));
 
     // Everything from here on writes. `createProject` is deliberately outside the unwind: a name
     // collision throws from inside it, having written nothing, and there is no project id to unwind.
     const project = await createProject(db, { name: name ?? manifest.project.name }, config.ALLOWED_DOC_ROOTS);
 
     try {
-      return await landProject(deps, { scratch, manifest, sources, byName, project, name });
+      return await landProject(deps, { scratch, manifest, sources, byName, goldenQuestions, project, name });
     } catch (err) {
       await discardPartialImport(deps, project.id, err);
       throw err;
@@ -195,12 +203,13 @@ async function landProject(
     manifest: Manifest;
     sources: Array<z.infer<typeof ImportedSource>>;
     byName: Map<string, z.infer<typeof ImportedSource>>;
+    goldenQuestions: GoldenQuestionInput[];
     project: { id: string; name: string };
     name?: string;
   },
 ): Promise<ImportReport> {
   const { db } = deps;
-  const { scratch, manifest, sources, byName, project } = ctx;
+  const { scratch, manifest, sources, byName, goldenQuestions, project } = ctx;
 
   const created = new Map<string, { id: string; type: SourceType; config: Record<string, unknown> }>();
   for (const source of sources) {
@@ -210,6 +219,8 @@ async function landProject(
 
   const carried = await carryUploadTrees(deps, scratch, project.id, sources, created);
   const written = await writeDocuments(deps, project.id, path.join(scratch, DOCUMENTS_ENTRY), byName, created);
+
+  await replaceGoldenQuestions(db, project.id, goldenQuestions);
 
   const counts = await recountProject(db, project.id, 0);
   await db
@@ -252,6 +263,7 @@ async function landProject(
     manifest,
     documents: written.documents,
     chunks: written.chunks,
+    goldenQuestions: goldenQuestions.length,
     sources: sources.map((s) => ({
       name: s.name,
       type: s.type,
@@ -372,6 +384,37 @@ async function readSources(file: string): Promise<Array<z.infer<typeof ImportedS
     if (seen.has(result.data.name)) throw new ImportRefusedError('bad_source', `${SOURCES_ENTRY}: two sources named "${result.data.name}".`);
     seen.add(result.data.name);
     out.push(result.data);
+  }
+  return out;
+}
+
+/**
+ * The project's golden questions, or none when the export carries no such entry (every export taken
+ * before the table existed). Each line is `golden.jsonl`'s row, held to the same rules the admin API
+ * holds a client to, so a question that could not have been stored here cannot arrive through a file.
+ */
+async function readGoldenQuestions(file: string): Promise<GoldenQuestionInput[]> {
+  const out: GoldenQuestionInput[] = [];
+  const seen = new Set<string>();
+  let lineNumber = 0;
+  for await (const line of lines(file)) {
+    lineNumber++;
+    const row = GoldenRowSchema.safeParse(parseLine(GOLDEN_QUESTIONS_ENTRY, lineNumber, line));
+    if (!row.success) throw new ImportRefusedError('bad_golden_question', `${GOLDEN_QUESTIONS_ENTRY}:${lineNumber}: ${z.prettifyError(row.error)}`);
+    const { id, ...fields } = row.data;
+    const input = GoldenQuestionInputSchema.safeParse({ key: id, ...fields });
+    if (!input.success)
+      throw new ImportRefusedError('bad_golden_question', `${GOLDEN_QUESTIONS_ENTRY}:${lineNumber}: ${z.prettifyError(input.error)}`);
+    if (seen.has(input.data.key))
+      throw new ImportRefusedError('bad_golden_question', `${GOLDEN_QUESTIONS_ENTRY}: two questions with id "${input.data.key}".`);
+    seen.add(input.data.key);
+    out.push(input.data);
+  }
+  if (out.length > MAX_GOLDEN_QUESTIONS) {
+    throw new ImportRefusedError(
+      'bad_golden_question',
+      `${GOLDEN_QUESTIONS_ENTRY} holds ${out.length} questions; a project keeps at most ${MAX_GOLDEN_QUESTIONS}.`,
+    );
   }
   return out;
 }

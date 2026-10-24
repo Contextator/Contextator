@@ -291,6 +291,17 @@ describe('the prose the tarball carries', () => {
     expect(text).toContain('3 viewer and 1 editor membership(s)');
   });
 
+  it('mentions golden questions only when the export carries some', () => {
+    expect(text).not.toContain('golden question');
+    const withQuestions = readmeFor(
+      manifest({ counts: { sources: 1, documents: 3, chunks: 40, uploadFiles: 0, uploadBytes: 0, goldenQuestions: 12 } }),
+    );
+    expect(withQuestions).toContain('12 golden question(s), in golden-questions.ndjson');
+    expect(
+      readmeFor(manifest({ counts: { sources: 1, documents: 3, chunks: 40, uploadFiles: 0, uploadBytes: 0, goldenQuestions: 0 } })),
+    ).not.toContain('golden question');
+  });
+
   it('says what each source needs here, in words', () => {
     expect(text).toContain('handbook (git): re-enter its access token');
     expect(text).toContain('paste it into the provider');
