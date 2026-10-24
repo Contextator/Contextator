@@ -134,6 +134,15 @@ export const state = {
     busy: false,
     showAll: false,
   },
+  /** The golden questions of the open project (golden.js): the stored set, how much of it is drawn, and which row awaits a delete confirmation. */
+  golden: {
+    projectId: null,
+    status: 'idle', // 'idle' | 'loading' | 'done' | 'error'
+    error: '',
+    questions: [],
+    shown: 25,
+    confirmDelete: null,
+  },
   /**
    * The audit panel (audit.js), whole, and here for the reason state.search and state.queries are:
    * app.js rebuilds #detail on every poll, so a chosen filter, the page somebody has paged to, and

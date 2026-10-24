@@ -206,6 +206,27 @@ describe('the dashboard markup and its modules agree', () => {
     expect(html.match(/name="allowedCidrs"/g)).toHaveLength(2); // create dialog + edit dialog
   });
 
+  /**
+   * The golden questions panel opens a dialog, reads its fields by name and registers itself in the
+   * project view: any one missing fails only when someone clicks Add question.
+   */
+  it('wires the golden questions panel into the project view and its dialog', async () => {
+    const html = await readFile(new URL('index.html', PUBLIC), 'utf8');
+    const golden = await readFile(new URL('golden.js', PUBLIC), 'utf8');
+    const app = await readFile(new URL('app.js', PUBLIC), 'utf8');
+    for (const name of ['key', 'lang', 'query', 'expectFile', 'expectHeading', 'tags', 'note']) {
+      expect(golden).toContain(name);
+      expect(html).toContain(`name="${name}"`);
+    }
+    const ids = idsIn(html);
+    for (const id of ['golden-dialog', 'golden-form', 'golden-title', 'golden-error', 'golden-cancel', 'golden-submit', 'golden-key-hint'])
+      expect(ids).toContain(id);
+    // Drawn in the project view, loaded on selection, and its dialog handlers attached once at boot.
+    expect(app).toMatch(/main\.append\(renderGolden\(p\)\)/);
+    expect(app).toMatch(/void loadGolden\(\)/);
+    expect(app).toMatch(/initGoldenUi\(\)/);
+  });
+
   it('loads every module index.html needs through the one entry point', async () => {
     const html = await readFile(new URL('index.html', PUBLIC), 'utf8');
     const scripts = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1]);

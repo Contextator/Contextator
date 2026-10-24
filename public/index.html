@@ -547,6 +547,58 @@
       </form>
     </dialog>
 
+    <dialog id="golden-dialog" class="dialog" aria-labelledby="golden-title">
+      <form id="golden-form" method="dialog" novalidate>
+        <div class="dialog-head">
+          <h2 id="golden-title">Add a golden question</h2>
+          <p class="muted">A question an agent would ask, and the file (and heading) that is the right answer.</p>
+        </div>
+        <div class="dialog-body">
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">Key</span>
+              <input name="key" autocomplete="off" spellcheck="false" maxlength="100" placeholder="reset-password" />
+              <span class="field-hint" id="golden-key-hint"></span>
+            </label>
+            <label class="field">
+              <span class="field-label">Language</span>
+              <select name="lang">
+                <option value="en" selected>English</option>
+                <option value="tr">Turkish</option>
+              </select>
+            </label>
+          </div>
+          <label class="field">
+            <span class="field-label">Question</span>
+            <textarea name="query" rows="3" maxlength="4000" placeholder="How do I reset my password?"></textarea>
+          </label>
+          <label class="field">
+            <span class="field-label">Expected file</span>
+            <input name="expectFile" autocomplete="off" spellcheck="false" maxlength="1024" placeholder="guides/account.md" />
+            <span class="field-hint">The path as it appears in search results.</span>
+          </label>
+          <label class="field">
+            <span class="field-label">Expected heading (optional)</span>
+            <input name="expectHeading" autocomplete="off" maxlength="1024" placeholder="Resetting a password" />
+          </label>
+          <label class="field">
+            <span class="field-label">Tags (optional)</span>
+            <input name="tags" autocomplete="off" placeholder="account, how-to" />
+            <span class="field-hint">Separate tags with commas.</span>
+          </label>
+          <label class="field">
+            <span class="field-label">Note (optional)</span>
+            <textarea name="note" rows="2" maxlength="4000"></textarea>
+          </label>
+          <p id="golden-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-foot">
+          <button type="button" class="ghost" id="golden-cancel">Cancel</button>
+          <button type="submit" class="primary" id="golden-submit">Add question</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="quota-dialog" class="dialog">
       <form id="quota-form" method="dialog" novalidate>
         <div class="dialog-head">

@@ -30,6 +30,7 @@ import { authHeaderFor, authModeBadge, initMcpUi, loadMcpTokens, renderMcpAccess
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
 import { loadQuerySummary, renderQueries } from './queries.js';
 import { renderSourceFreshness } from './freshness.js';
+import { initGoldenUi, loadGolden, renderGolden } from './golden.js';
 import { describeApiError, initQuotasUi, loadQuotas, renderQuotas } from './quotas.js';
 import { captureSearchFocus, renderSearch } from './search.js';
 import { initTokensUi, loadApiTokens, renderTokensView } from './tokens.js';
@@ -271,6 +272,7 @@ function select(id) {
   void loadMcpTokens();
   void loadQuerySummary();
   void loadQuotas();
+  void loadGolden();
 }
 
 /** Fetches the selected project's run history when the selection or the newest job changes. */
@@ -673,6 +675,7 @@ function renderDetail() {
   main.append(renderQueries(p));
   main.append(renderSources(p, busy));
   main.append(renderQuotas(p));
+  main.append(renderGolden(p));
   main.append(renderMembers(p));
   main.append(renderMcpAccess(p));
 
@@ -1919,6 +1922,7 @@ async function boot() {
   initMembersUi();
   initMcpUi();
   initQuotasUi();
+  initGoldenUi();
   initTokensUi();
   await loadMe();
   applyHash();
