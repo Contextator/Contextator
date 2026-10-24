@@ -2866,3 +2866,40 @@ body.auth .gate-card a {
   font-size: 11.5px;
   overflow-wrap: anywhere;
 }
+
+/* ---------- suggested relevance floor ---------- */
+
+.floor-suggestions {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--neutral-tint);
+}
+
+.floor-suggestion-list {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.floor-suggestion {
+  padding: 10px 12px;
+  border: 1px solid var(--neutral-tint);
+  border-radius: 7px;
+}
+
+.floor-suggestion p {
+  margin: 4px 0 0;
+}
+
+.floor-suggestion .field-hint.warn {
+  color: var(--warn-text);
+}
+
+.floor-suggestion-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}

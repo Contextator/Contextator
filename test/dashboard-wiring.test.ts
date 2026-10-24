@@ -212,11 +212,18 @@ describe('the dashboard markup and its modules agree', () => {
     // One module graph, not a pile of script tags: app.js imports the rest.
     expect(scripts).toEqual(['/app.js?v={{version}}']);
 
-    const app = await readFile(new URL('app.js', PUBLIC), 'utf8');
-    const imported = new Set([...app.matchAll(/from '\.\/([a-z-]+)\.js'/g)].map((m) => `${m[1]}.js`));
+    // Reachable from app.js, directly or through another module (floor-suggestions.js is queries.js's).
+    const reached = new Set<string>();
+    const walk = async (file: string) => {
+      if (reached.has(file)) return;
+      reached.add(file);
+      const source = await readFile(new URL(file, PUBLIC), 'utf8');
+      for (const m of source.matchAll(/from '\.\/([a-z-]+)\.js'/g)) await walk(`${m[1]}.js`);
+    };
+    await walk('app.js');
     for (const file of await dashboardModules()) {
-      if (file === 'app.js') continue;
-      expect(imported.has(file) || file === 'core.js').toBe(true);
+      if (file === 'auth-page.js') continue;
+      expect(reached.has(file), `${file} is imported by the app`).toBe(true);
     }
   });
 });

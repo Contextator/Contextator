@@ -22,6 +22,7 @@
 // poll, and a tab or a window length held in the DOM would vanish while somebody was reading it.
 
 import { ApiError, api, el, emit, fmt, relativeTime, state, toast } from './core.js';
+import { renderFloorSuggestions } from './floor-suggestions.js';
 
 const WINDOWS = [
   { days: 1, label: '24 hours' },
@@ -167,6 +168,7 @@ export function renderQueries(project) {
       body(data, q),
       foot(project, data, mayManage),
       floorLine(project, data, mayManage),
+      data?.scoreFloor ? renderFloorSuggestions(project, mayManage, () => loadQuerySummary(true)) : null,
     ]),
   ]);
 }

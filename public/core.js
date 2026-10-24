@@ -123,6 +123,17 @@ export const state = {
     /** What floorPending would have done to the window: { key, status, data, error }. */
     floorPreview: null,
   },
+  /** The suggested relevance floors of the open project (floor-suggestions.js): `data` is the route's `{ current, suggestions }`. */
+  floorSuggestions: {
+    projectId: null,
+    status: 'idle', // 'idle' | 'loading' | 'done' | 'error'
+    error: '',
+    data: null,
+    /** What the last measure/apply said, when it was an outcome rather than a result (too little data, busy, …). */
+    notice: '',
+    busy: false,
+    showAll: false,
+  },
   /**
    * The audit panel (audit.js), whole, and here for the reason state.search and state.queries are:
    * app.js rebuilds #detail on every poll, so a chosen filter, the page somebody has paged to, and
