@@ -44,6 +44,11 @@ export interface McpTokenView {
    * list until it is revoked, so the panel can say "expired" instead of letting it vanish.
    */
   expiresAt: Date | null;
+  /**
+   * The client networks this token may be presented from, as stored (`10.0.0.0/8`, `2001:db8::/32`), or
+   * `null` for unrestricted ([ADR-0118](../../../.ssot/ADR.md#adr-0118)).
+   */
+  allowedCidrs: string[] | null;
 }
 
 export const toMcpTokenView = (row: McpTokenRow): McpTokenView => ({
@@ -53,6 +58,7 @@ export const toMcpTokenView = (row: McpTokenRow): McpTokenView => ({
   createdAt: row.createdAt,
   lastUsedAt: row.lastUsedAt,
   expiresAt: row.expiresAt,
+  allowedCidrs: row.allowedCidrs && row.allowedCidrs.length > 0 ? row.allowedCidrs : null,
 });
 
 /**
@@ -76,6 +82,7 @@ export async function createMcpToken(
   name: string,
   createdBy: string | null,
   expiresAt: Date | null = null,
+  allowedCidrs: string[] | null = null,
 ): Promise<{ token: string; view: McpTokenView }> {
   const token = newMcpToken('static');
   const [row] = await db
@@ -88,9 +95,25 @@ export async function createMcpToken(
       createdBy,
       kind: 'static',
       expiresAt,
+      allowedCidrs,
     })
     .returning();
   return { token, view: toMcpTokenView(row) };
+}
+
+/**
+ * Replaces the network allowlist of one live **static** token; `null` removes the restriction. The list
+ * is expected to have been through `parseAllowedCidrs`. Only static tokens carry one: an OAuth credential
+ * is judged by its account, and a revoked token has nothing left to restrict.
+ */
+export async function updateMcpTokenNetworks(db: Db, projectId: string, tokenId: string, allowedCidrs: string[] | null): Promise<McpTokenView> {
+  const [row] = await db
+    .update(mcpTokens)
+    .set({ allowedCidrs })
+    .where(and(eq(mcpTokens.id, tokenId), eq(mcpTokens.projectId, projectId), eq(mcpTokens.kind, 'static'), isNull(mcpTokens.revokedAt)))
+    .returning();
+  if (!row) throw new NotFoundError('Token not found');
+  return toMcpTokenView(row);
 }
 
 /**
@@ -288,6 +311,8 @@ export interface McpTokenIdentity {
   kind: McpTokenKind;
   /** The account this credential acts as, or `null` for a static token that acts as nobody. */
   userId: string | null;
+  /** The network allowlist of a static token (`null`: unrestricted); always `null` for an OAuth credential. */
+  allowedCidrs: string[] | null;
 }
 
 /**
@@ -307,7 +332,7 @@ export interface McpTokenIdentity {
 export async function verifyMcpToken(db: Db, projectId: string, raw: string): Promise<McpTokenIdentity | null> {
   if (!looksLikeOneOfOurs(raw)) return null;
   const rows = await db
-    .select({ id: mcpTokens.id, kind: mcpTokens.kind, userId: mcpTokens.userId })
+    .select({ id: mcpTokens.id, kind: mcpTokens.kind, userId: mcpTokens.userId, allowedCidrs: mcpTokens.allowedCidrs })
     .from(mcpTokens)
     .where(
       and(
@@ -330,7 +355,12 @@ export async function verifyMcpToken(db: Db, projectId: string, raw: string): Pr
     .set({ lastUsedAt: new Date() })
     .where(and(eq(mcpTokens.id, row.id), sql`(${mcpTokens.lastUsedAt} is null or ${mcpTokens.lastUsedAt} < now() - interval '60 seconds')`))
     .catch(() => undefined);
-  return row;
+  return {
+    id: row.id,
+    kind: row.kind,
+    userId: row.userId,
+    allowedCidrs: row.kind === 'static' && row.allowedCidrs?.length ? row.allowedCidrs : null,
+  };
 }
 
 /**

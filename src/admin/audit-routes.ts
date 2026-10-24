@@ -188,6 +188,11 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
   // Who may reach a project
   'PATCH /api/projects/:id/mcp-auth': { verb: 'changed who may reach the MCP endpoint', prep: 'of' },
   'POST /api/projects/:id/mcp-tokens': { verb: 'issued an MCP credential', prep: 'for', target: 'credential' },
+  'PATCH /api/projects/:id/mcp-tokens/:tokenId': {
+    verb: 'changed the networks an MCP credential may be used from',
+    prep: 'of',
+    target: 'credential',
+  },
   'DELETE /api/projects/:id/mcp-tokens/:tokenId': { verb: 'revoked an MCP credential', prep: 'of', target: 'credential' },
   'PUT /api/projects/:id/members/:userId': { verb: 'granted access', prep: 'to', target: 'account' },
   'DELETE /api/projects/:id/members/:userId': { verb: 'revoked access', prep: 'to', target: 'account' },
@@ -210,6 +215,7 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
   'DELETE /api/projects/:id/query-log': { verb: 'purged the query log', prep: 'of' },
   // The number itself is not recorded: `AUDIT_DETAIL` holds closed sets of values only.
   'PATCH /api/projects/:id/score-floor': { verb: 'changed the relevance floor', prep: 'of' },
+  'PATCH /api/projects/:id/quotas': { verb: 'changed the quotas', prep: 'of' },
   'POST /api/projects/:id/score-floor/suggestions': { verb: 'asked for a relevance floor suggestion', prep: 'for' },
   'POST /api/projects/:id/score-floor/suggestions/:suggestionId/apply': {
     verb: 'applied a relevance floor suggestion',

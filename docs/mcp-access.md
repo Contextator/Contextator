@@ -41,6 +41,60 @@ endpoint was public does not outlive the moment it stopped being.
 Deciding whether a project's documents are readable by anything that can reach the URL is the same class of decision
 as creating the project in the first place, which is why it sits with `admin` rather than `editor`.
 
+## Limiting how much a client may ask for
+
+Three optional limits sit in front of the tools, all counted per minute in a fixed one-minute window kept in the
+database, so they hold across restarts and across replicas that share it:
+
+| Variable | Counts | Default |
+|----------|--------|---------|
+| `MCP_RATE_LIMIT_PER_MINUTE` | requests per token (a static token, or the account behind an OAuth credential) | `0`, no limit |
+| `MCP_RATE_LIMIT_ANON_PER_MINUTE` | requests per client address to an **open** project that arrive without a valid token | `60` |
+| `MCP_RATE_LIMIT_TOOLS` | requests per token for one tool, e.g. `search_docs=30,read_document=60` | none |
+
+Every JSON-RPC request message is one hit, so a batch of three costs three. Notifications, responses, `initialize`
+and `ping` are free, and so is opening the event stream. The tool is the one named in the **body**, whatever the
+`Mcp-Name` header says. A request over a limit is answered `429` with a `Retry-After` header (the seconds left in the
+window) and a JSON-RPC `-32000` error whose `data` is `{ "error": "rate_limited", "retryAfterSec": 12, "scope": "token" }`;
+`scope` is `token`, `anonymous` or `tool`.
+
+- A request that fails authentication is not counted. A wrong or unknown token on a **token required** project is
+  refused with `401` before any limit is looked at.
+- An **open** project serves a request whatever its Bearer says, so a request with a token that means nothing is
+  counted in the anonymous bucket of its address. A junk header is not a way round the address limit.
+- IPv4-mapped IPv6 addresses are folded onto the IPv4 address, and an IPv6 address onto its `/64`.
+- If the counter cannot be reached, the request is **served**, a warning is logged and
+  `contextator_mcp_rate_limit_errors_total` is incremented. `MCP_RATE_LIMIT_FAIL_OPEN=0` answers `503` instead.
+- The window is fixed, not sliding: a client can send up to twice the limit across a minute boundary.
+- Counters are in the `mcp_rate_limits` table; rows older than ten minutes are removed by the maintenance sweep.
+- Metrics: `contextator_mcp_rate_limited_total{scope}`.
+
+Upgrading: with nothing set, token requests behave exactly as before. The one default that moves is the anonymous
+limit of 60 requests a minute per address on an open project; `MCP_RATE_LIMIT_ANON_PER_MINUTE=0` restores the old
+behaviour.
+
+## Restricting a static token to a network
+
+A static `ctxm_…` token can carry an allowlist of up to 32 addresses or CIDR ranges (`allowedCidrs`, set when the
+token is created or later with `PATCH /api/projects/:id/mcp-tokens/:tokenId`). An empty or absent list means the token
+works from anywhere, as before. `/0` is refused, and so is a CIDR with host bits set (`203.0.113.5/24`).
+
+A request from outside the list is answered `403` with a JSON-RPC `-32000` error that names neither the address nor the
+ranges; the server log names the token id and the address, and `contextator_mcp_access_denied_total{reason="network"}`
+counts it. The check runs after the token is recognised and before the project's access mode is applied, so a token
+that carries a list is bound on an open project too. Nothing is checked for OAuth access tokens, for an open project's
+anonymous callers, or for a token with no list.
+
+The address checked is the one the server believes the client has, which depends on `TRUST_PROXY`:
+
+| `TRUST_PROXY` | Address checked | Use an allowlist? |
+|---------------|-----------------|-------------------|
+| `0` (default) | The socket's peer. `X-Forwarded-For` is ignored. | Yes, when clients connect directly. Behind a proxy every request appears to come from the proxy. |
+| A list of proxy addresses or CIDRs | `X-Forwarded-For`, read right to left, skipping the listed proxies. A header sent by any other peer is ignored. | Yes. This is the setting meant for it: name the proxy, not your clients' network. |
+| `loopback`, `linklocal` | As a list, for the proxy on the same host or link. | Yes. |
+| `uniquelocal` | As a list, trusting every private (LAN) address as a proxy. | Only if no untrusted host can reach the server from those ranges, because any of them can write the header. |
+| `1` | Every hop of `X-Forwarded-For` is believed, so the **leftmost** value, which the client writes, becomes the address. | **No.** The server refuses to save a non-empty list while `TRUST_PROXY=1`, and answers `403` (and logs it) to a token that already carries one. |
+
 ## Account required, and connecting a browser-based client
 
 **account required** is the mode where this dashboard's memberships reach `/mcp/*`. A client has to act as somebody,

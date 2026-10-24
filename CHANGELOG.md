@@ -12,6 +12,24 @@ ships, that stops.
 
 ### Added
 
+- **MCP rate limits.** `MCP_RATE_LIMIT_PER_MINUTE` (per token, default `0`), `MCP_RATE_LIMIT_ANON_PER_MINUTE`
+  (per address on an open project, default `60`) and `MCP_RATE_LIMIT_TOOLS` (`name=count`) limit MCP requests in a
+  fixed one-minute window kept in the new `mcp_rate_limits` table. A request over a limit is answered `429` with
+  `Retry-After` and a JSON-RPC `-32000` error (`rate_limited`, with `retryAfterSec` and `scope`). Notifications,
+  `initialize`, `ping`, event streams and failed authentication are not counted. If the counter cannot be
+  reached the request is served and `contextator_mcp_rate_limit_errors_total` rises; `MCP_RATE_LIMIT_FAIL_OPEN=0`
+  answers `503`. New metric `contextator_mcp_rate_limited_total{scope}` (ADR-0112). Migration `0023_rate_limit_allowlist`.
+  **Upgrade note:** an open project now answers at most 60 requests a minute per client address; set
+  `MCP_RATE_LIMIT_ANON_PER_MINUTE=0` to keep the old behaviour. Nothing else changes until a limit is set.
+- **Network allowlist for a static MCP token.** A token can carry up to 32 addresses or CIDR ranges
+  (`allowedCidrs` on `POST /api/projects/:id/mcp-tokens` and the new `PATCH /api/projects/:id/mcp-tokens/:tokenId`).
+  A request from elsewhere is answered `403` without naming the address or the ranges, logged with the token id
+  and the address, and counted in `contextator_mcp_access_denied_total{reason="network"}`. A list cannot be saved
+  under `TRUST_PROXY=1`, where the address is client-controlled (ADR-0118). `docs/mcp-access.md` has the
+  `TRUST_PROXY` table. Helm chart 1.6.0 exposes the rate limits as `config.mcpRateLimitPerMinute`,
+  `config.mcpRateLimitAnonPerMinute`, `config.mcpRateLimitTools` and `config.mcpRateLimitFailOpen`.
+- **Query log by token.** The query log summary and export take `token` (an MCP token id) and show only what
+  that token asked.
 - **Relevance floor suggestions.** After a re-index caused by an embedding-model change, and on request
   (`POST /api/projects/:id/score-floor/suggestions`, manager), the server measures the project with the floor
   off and stores the highest floor that still answers a fragment of each of up to 100 of its own chunks (the
@@ -25,7 +43,7 @@ ships, that stops.
   while the one the server makes after a model change waits its turn.
   The fit is shared with `scripts/floor-calibration.ts`. Migration `0024` adds the `floor_suggestions` table
   (ADR-0083).
-- **Re-index on embedding-model change.** With `REINDEX_ON_MODEL_CHANGE=1` (off by default; Helm
+- **Re-index on embedding-model change.** With `REINDEX_ON_MODEL_CHANGE=1` (off by default; Helm chart 1.7.0
   `config.reindexOnModelChange`), start-up queues one scheduled run for every project stamped with a different
   model than the server runs and that has at least one source, scheduled or not. A project that was never
   indexed or has no source is left alone, and the flag off behaves as before (ADR-0113).
@@ -45,7 +63,19 @@ ships, that stops.
   address and at least one project has no MCP token, the log says which projects (ADR-0065). Said once at
   start; nothing changes for a loopback bind or for token-protected projects. It cannot see how a container's port is
   published, so it says that a loopback-only publish makes it safe to ignore.
-
+- **Per-project quotas.** A project can be capped on documents, chunks and upload bytes. `PROJECT_MAX_DOCUMENTS`,
+  `PROJECT_MAX_CHUNKS` and `PROJECT_MAX_UPLOAD_BYTES` set the instance default (`0`, the default, is unlimited);
+  `PATCH /api/projects/:id/quotas` gives one project its own value, `0` to exempt it or `null` to follow the
+  instance again, and is audited. `GET /api/projects/:id` is new and shows each quota's limit, current use and
+  whether it is inherited. An upload that would go over the cap is refused with `413 quota_exceeded` and
+  nothing from it is kept; an indexing run that would go over the document or chunk cap ends in `error` with
+  `quota_exceeded` (a rebuild keeps serving the previous generation, an incremental run keeps the documents it
+  had finished). Quotas travel in a project export. Migration `0022_project_quotas`. Helm chart 1.5.0 exposes
+  the three defaults as `config.projectMaxDocuments`, `config.projectMaxChunks` and `config.projectMaxUploadBytes`.
+- **Idle upload sessions are swept.** An upload session that has had no `files` request and no commit for 24
+  hours is deleted, with its staged files, by a sweep that runs every quarter of an hour, so the upload quota
+  and the disk agree. Uploads that were not committed within 24 idle hours are lost. This applies to every
+  project, with or without an upload quota.
 - **Source freshness metrics.** `/metrics` gains `contextator_source_last_sync_timestamp_seconds` and
   `contextator_source_freshness_lag_seconds`, which describe the scheduled source that has gone longest
   without a successful sync, and `contextator_sources_never_synced`. They are single, unlabeled series:

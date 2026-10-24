@@ -86,9 +86,37 @@ spec:
             - name: GIT_MAX_PACK_BYTES
               value: {{ . | int64 | quote }}
             {{- end }}
+            {{- with .Values.config.projectMaxDocuments }}
+            - name: PROJECT_MAX_DOCUMENTS
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.projectMaxChunks }}
+            - name: PROJECT_MAX_CHUNKS
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.projectMaxUploadBytes }}
+            - name: PROJECT_MAX_UPLOAD_BYTES
+              value: {{ . | int64 | quote }}
+            {{- end }}
             {{- if .Values.config.mcpStructuredOutput }}
             - name: MCP_STRUCTURED_OUTPUT
               value: "1"
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.config.mcpRateLimitPerMinute) }}
+            - name: MCP_RATE_LIMIT_PER_MINUTE
+              value: {{ .Values.config.mcpRateLimitPerMinute | int64 | quote }}
+            {{- end }}
+            {{- if not (kindIs "invalid" .Values.config.mcpRateLimitAnonPerMinute) }}
+            - name: MCP_RATE_LIMIT_ANON_PER_MINUTE
+              value: {{ .Values.config.mcpRateLimitAnonPerMinute | int64 | quote }}
+            {{- end }}
+            {{- if .Values.config.mcpRateLimitTools }}
+            - name: MCP_RATE_LIMIT_TOOLS
+              value: {{ .Values.config.mcpRateLimitTools | quote }}
+            {{- end }}
+            {{- if eq (toString .Values.config.mcpRateLimitFailOpen) "false" }}
+            - name: MCP_RATE_LIMIT_FAIL_OPEN
+              value: "0"
             {{- end }}
             {{- if .Values.config.reindexOnModelChange }}
             - name: REINDEX_ON_MODEL_CHANGE

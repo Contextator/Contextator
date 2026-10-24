@@ -397,6 +397,33 @@ describe('one retrieval configuration at a time', () => {
   });
 });
 
+describe('one token at a time', () => {
+  const rotate = (rows: Awaited<ReturnType<typeof repeatedQuestions>>) => rows.find((r) => r.queryNorm === 'how do i rotate the webhook secret?');
+
+  it('reads back only the searches that came through the token it is given', async () => {
+    // 41 askings dealt to three tokens in turn: 14, 14 and 13.
+    expect(rotate(await repeatedQuestions(db, scope({ mcpTokenId: tokenIds[0] }), 20))?.asked).toBe(14);
+    expect(rotate(await repeatedQuestions(db, scope({ mcpTokenId: tokenIds[2] }), 20))?.asked).toBe(13);
+    expect(rotate(await repeatedQuestions(db, scope(), 20))?.asked).toBe(41);
+  });
+
+  it('applies to the volume, the excerpts and the configurations as well as to the questions', async () => {
+    const own = scope({ mcpTokenId: tokenIds[2] });
+    const volume = (await volumeOverTime(db, own)).reduce((n, b) => n + b.searches, 0);
+    expect(volume).toBeGreaterThan(0);
+    expect(volume).toBeLessThan(IN_SCOPE);
+    const configurations = await listQueryConfigurations(db, projectId, ago(7 * DAY), new Date(NOW + MINUTE), 'mcp', tokenIds[2]);
+    expect(configurations.reduce((n, c) => n + c.queries, 0)).toBeLessThan(IN_SCOPE + 10 + OTHER_FLOORS);
+    expect(configurations.find((c) => c.embeddingModel === MODEL_A && c.liveGeneration === LIVE && c.scoreFloor === FLOOR)?.queries).toBe(volume);
+  });
+
+  it('is empty for a token that asked nothing, rather than falling back to the whole project', async () => {
+    const stranger = scope({ mcpTokenId: '00000000-0000-4000-8000-000000000000' });
+    expect(await repeatedQuestions(db, stranger, 20)).toEqual([]);
+    expect((await volumeOverTime(db, stranger)).reduce((n, b) => n + b.searches, 0)).toBe(0);
+  });
+});
+
 describe('the documents nothing ever returned', () => {
   it('counts only the searches that ran after each document was indexed', async () => {
     const never = await neverReturnedDocuments(db, scope(), 20);

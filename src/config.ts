@@ -1,6 +1,7 @@
 import net from 'node:net';
 import path from 'node:path';
 import { z } from 'zod';
+import { MCP_TOOL_NAMES } from './mcp/tool-names.js';
 
 /** Project names double as URL segments (`/mcp/:projectName`), so keep them URL-safe. */
 export const PROJECT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,62}$/;
@@ -532,6 +533,61 @@ export const EnvSchema = z
      * can write in a second.
      */
     MCP_OAUTH_MAX_CLIENTS: z.coerce.number().int().min(1).max(100_000).default(200),
+    /**
+     * Requests per minute one MCP credential (a static token, an OAuth access token or a signed-in
+     * account) may make ([ADR-0112](../../.ssot/ADR.md#adr-0112)). `0` is off, and it is the default: a
+     * token holder is somebody the project's owner chose, and a limit nobody asked for is a surprise.
+     * The count is a fixed window in Postgres (`mcp_rate_limits`), so replicas share it.
+     */
+    MCP_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(0).max(1_000_000).default(0),
+    /**
+     * Requests per minute one client address may make to an `open` project, which has no credential to
+     * count. **On by default**, because an open project is reachable by anyone and the alternative is no
+     * ceiling at all; `0` switches it off. Keyed on `req.ip`, so behind a proxy it is `TRUST_PROXY` that
+     * decides whether this is a limit per caller or one shared by everybody the proxy serves.
+     */
+    MCP_RATE_LIMIT_ANON_PER_MINUTE: z.coerce.number().int().min(0).max(1_000_000).default(60),
+    /**
+     * A per-tool ceiling on top of the two above, as `name=n` pairs: `search_docs=30,read_document=120`.
+     * A tool that is not named has none. An unknown tool name is a configuration error rather than a
+     * limit that silently never applies.
+     */
+    MCP_RATE_LIMIT_TOOLS: z
+      .string()
+      .default('')
+      .transform((value, ctx): Record<string, number> => {
+        const limits: Record<string, number> = {};
+        for (const entry of csv(value)) {
+          const match = /^([a-z_]+)=(\d+)$/.exec(entry);
+          if (!match) {
+            ctx.addIssue({ code: 'custom', message: `"${entry}" must be name=n, for example search_docs=30` });
+            return z.NEVER;
+          }
+          const [, name, count] = match;
+          if (!MCP_TOOL_NAMES.includes(name)) {
+            ctx.addIssue({ code: 'custom', message: `unknown tool "${name}"; the tools are ${MCP_TOOL_NAMES.join(', ')}` });
+            return z.NEVER;
+          }
+          if (name in limits) {
+            ctx.addIssue({ code: 'custom', message: `tool "${name}" is listed twice` });
+            return z.NEVER;
+          }
+          const n = Number(count);
+          if (n < 1 || n > 1_000_000) {
+            ctx.addIssue({ code: 'custom', message: `the limit for "${name}" must be between 1 and 1000000; leave the tool out to have none` });
+            return z.NEVER;
+          }
+          limits[name] = n;
+        }
+        return limits;
+      }),
+    /**
+     * What a failed rate-limit counter does. `1` (default) serves the request, logs a warning and counts
+     * `contextator_mcp_rate_limit_errors_total`: a limiter that takes the whole server down with its
+     * database row is worse than the abuse it guards against. `0` answers 503 instead, for an instance
+     * that would rather be unavailable than unmetered.
+     */
+    MCP_RATE_LIMIT_FAIL_OPEN: z.string().default('1').transform(flag),
 
     // Database: a connection string, or (when unset) the libpq PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE
     // variables that node-postgres reads itself. The Docker image uses the latter for its embedded PostgreSQL.
@@ -774,6 +830,19 @@ export const EnvSchema = z
       .int()
       .min(1024)
       .default(1024 * 1024 * 1024),
+
+    // Per-project quotas ([ADR-0117](../.ssot/ADR.md#adr-0117))
+    /**
+     * The instance-wide default for how many documents one project may hold. **`0` is unlimited and is
+     * the default**, so an upgrade changes nothing until an operator writes a number. A project's own
+     * `max_documents` overrides this in both directions: a non-zero value tightens or loosens it, and
+     * `0` exempts that project.
+     */
+    PROJECT_MAX_DOCUMENTS: z.coerce.number().int().min(0).default(0),
+    /** The same for the number of chunks a project may hold (checked per document, before embedding). */
+    PROJECT_MAX_CHUNKS: z.coerce.number().int().min(0).default(0),
+    /** The same for the bytes stored for a project's upload sources, staging included. */
+    PROJECT_MAX_UPLOAD_BYTES: z.coerce.number().int().min(0).default(0),
 
     // What a web source may do to a site it does not own ([ADR-0070](../.ssot/ADR.md#adr-0070))
     /**

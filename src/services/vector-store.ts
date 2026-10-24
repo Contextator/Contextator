@@ -931,6 +931,20 @@ export async function getExistingDocuments(db: Db, projectId: string, generation
   );
 }
 
+/**
+ * How many chunks each stored document of a generation holds, by document id. The chunk quota needs it to
+ * know how many chunks a rewritten document gives back ([ADR-0117](../../.ssot/ADR.md#adr-0117)); documents
+ * without chunks are absent.
+ */
+export async function chunkCountsByDocument(db: Db, projectId: string, generation: number): Promise<Map<string, number>> {
+  const rows = await db
+    .select({ documentId: chunks.documentId, n: count() })
+    .from(chunks)
+    .where(and(eq(chunks.projectId, projectId), eq(chunks.indexGeneration, generation)))
+    .groupBy(chunks.documentId);
+  return new Map(rows.map((r) => [r.documentId, r.n]));
+}
+
 /** What `getExistingDocuments` knows about a stored document. */
 export interface ExistingDocument {
   id: string;

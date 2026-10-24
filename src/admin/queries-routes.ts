@@ -64,6 +64,8 @@ const floorNumber = (special: string) =>
 const SummaryFields = {
   days: z.coerce.number().int().min(1).max(MAX_SUMMARY_DAYS).default(DEFAULT_SUMMARY_DAYS),
   actor: z.enum(['mcp', 'dashboard', 'all']).default('mcp'),
+  /** One MCP token's searches only; a token of another project simply matches nothing. */
+  token: z.uuid().optional(),
   model: z.string().min(1).max(200).optional(),
   generation: z.coerce.number().int().min(0).optional(),
   floor: floorNumber('none').optional(),
@@ -123,7 +125,7 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
   /** The shared first half of both read routes: the project, the window, and the configuration. */
   async function resolve(
     id: string,
-    query: { days: number; actor: SummaryActor; model?: string; generation?: number; floor?: number | null },
+    query: { days: number; actor: SummaryActor; token?: string; model?: string; generation?: number; floor?: number | null },
   ): Promise<{
     project: Awaited<ReturnType<typeof getProjectById>>;
     from: Date;
@@ -136,7 +138,7 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
 
     const to = new Date();
     const from = new Date(to.getTime() - query.days * 24 * 60 * 60 * 1000);
-    const configurations = await listQueryConfigurations(db, id, from, to, query.actor);
+    const configurations = await listQueryConfigurations(db, id, from, to, query.actor, query.token);
     const configuration =
       query.model === undefined
         ? pickConfiguration(configurations)
@@ -182,6 +184,7 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
     const base = {
       window,
       actor: query.actor,
+      token: query.token ?? null,
       logEnabled: project?.queryLogEnabled === true,
       instanceLogEnabled: config.SEARCH_QUERY_LOG,
       /**
@@ -211,6 +214,7 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
       from,
       to,
       actor: query.actor,
+      ...(query.token === undefined ? {} : { mcpTokenId: query.token }),
       embeddingModel: configuration.embeddingModel,
       liveGeneration: configuration.liveGeneration,
       scoreFloor: configuration.scoreFloor,
@@ -244,6 +248,7 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
             from,
             to,
             actor: query.actor,
+            ...(query.token === undefined ? {} : { mcpTokenId: query.token }),
             embeddingModel: configuration.embeddingModel,
             liveGeneration: configuration.liveGeneration,
             scoreFloor: configuration.scoreFloor,

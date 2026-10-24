@@ -1,7 +1,9 @@
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   check,
+  cidr,
   customType,
   doublePrecision,
   foreignKey,
@@ -161,8 +163,27 @@ export const projects = pgTable(
      * describes are this instance's.
      */
     lastLegacySseAt: timestamp('last_legacy_sse_at', { withTimezone: true }),
+    /**
+     * This project's own caps on how much it may hold ([ADR-0117](../../.ssot/ADR.md#adr-0117)):
+     * documents, chunks, and bytes stored for its upload sources.
+     *
+     * **`null` is the default and means "the instance's value"** (`PROJECT_MAX_DOCUMENTS`,
+     * `PROJECT_MAX_CHUNKS`, `PROJECT_MAX_UPLOAD_BYTES`), so a project nobody has touched behaves as it
+     * did before the columns existed. **`0` means unlimited, and it overrides a non-zero instance value**:
+     * the one way to say "this project is exempt" is a value that cannot be mistaken for "not set".
+     * Three columns on the row rather than a quotas table, for the reason `score_floor` is a column:
+     * the decision belongs to the project, a `pg_dump` carries it, and every check is a read of a row
+     * the caller already has. `max_upload_bytes` is a `bigint` because a byte cap is the one of the
+     * three that can pass 2 GiB.
+     */
+    maxDocuments: integer('max_documents'),
+    maxChunks: integer('max_chunks'),
+    maxUploadBytes: bigint('max_upload_bytes', { mode: 'number' }),
   },
   (t) => [
+    check('projects_max_documents_check', sql`${t.maxDocuments} is null or ${t.maxDocuments} >= 0`),
+    check('projects_max_chunks_check', sql`${t.maxChunks} is null or ${t.maxChunks} >= 0`),
+    check('projects_max_upload_bytes_check', sql`${t.maxUploadBytes} is null or ${t.maxUploadBytes} >= 0`),
     check('projects_mcp_auth_check', sql`${t.mcpAuth} in ('open', 'token', 'account')`),
     check('projects_score_floor_check', sql`${t.scoreFloor} is null or (${t.scoreFloor} >= 0 and ${t.scoreFloor} <= 1)`),
   ],
@@ -249,6 +270,13 @@ export const mcpTokens = pgTable(
     clientId: text('client_id'),
     /** When this credential stops being accepted. NULL — never — is what a static token carries. */
     expiresAt: timestamp('expires_at', { withTimezone: true }),
+    /**
+     * The networks this **static** token may be presented from ([ADR-0118](../../.ssot/ADR.md#adr-0118)).
+     * NULL or empty — unrestricted — is every row that existed before the column did, so the migration
+     * changes what no token reaches. `cidr`, so PostgreSQL validates and normalises each entry; a single
+     * address is stored as `/32` or `/128`. Meaningless on the two OAuth kinds, which never carry one.
+     */
+    allowedCidrs: cidr('allowed_cidrs').array(),
   },
   (t) => [
     foreignKey({ name: 'mcp_tokens_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
@@ -1036,6 +1064,26 @@ export const auditEvents = pgTable(
     index('audit_events_actor_label_created_idx').on(t.actorLabel, t.createdAt.desc().nullsFirst()),
     index('audit_events_action_created_idx').on(t.action, t.createdAt.desc().nullsFirst()),
   ],
+);
+
+/**
+ * The MCP rate limiter's counters ([ADR-0112](../../.ssot/ADR.md#adr-0112)): one row per key, a fixed
+ * window, one `INSERT … ON CONFLICT DO UPDATE … RETURNING count` per check.
+ *
+ * `key` is `tok:<tokenId>` or `ip:<projectId>:<ip>`, optionally with `:tool:<name>` appended. It is not
+ * a foreign key: a counter outlives nothing that matters and the scheduler sweeps rows whose window
+ * ended ten minutes ago. An ordinary table and not UNLOGGED, because an unlogged table is emptied by a
+ * crash and replicated nowhere — a limit that resets on failover is a limit an attacker can wait out.
+ */
+export const mcpRateLimits = pgTable(
+  'mcp_rate_limits',
+  {
+    key: text('key').primaryKey(),
+    /** When the current window opened, taken from the application's clock, not the database's. */
+    windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+    count: integer('count').notNull(),
+  },
+  (t) => [index('mcp_rate_limits_window_idx').on(t.windowStart)],
 );
 
 export const settings = pgTable('settings', {

@@ -32,6 +32,7 @@ import {
 } from '../services/vector-store.js';
 import { type DocumentFence, documentFence, wrapDocumentText } from './document-fence.js';
 import type { McpEra } from './era.js';
+import { MCP_TOOL_NAMES } from './tool-names.js';
 import {
   type ListTopicsOutput,
   type ReadDocumentOutput,
@@ -243,13 +244,9 @@ export type ToolContext = Pick<AppContext, 'db' | 'embeddings' | 'config' | 'log
   metrics?: SearchCounter & SearchObserver & Partial<McpToolObserver>;
 };
 
-/**
- * The tools `registerTools` registers, by name. `contextator_mcp_requests_total` takes its `tool` label
- * from this list and nothing else (`toolLabel`); `test/mcp-metrics.test.ts` holds it equal to the names
- * `registerTools` registers, and `test/integration/mcp-headers-metrics.itest.ts` to what `tools/list`
- * answers, so a fourth tool cannot be added without it being counted by name.
- */
-export const MCP_TOOL_NAMES: readonly string[] = ['search_docs', 'list_topics', 'read_document'];
+// The tools `registerTools` registers, by name, live in `tool-names.ts` so that `config.ts` can validate
+// `MCP_RATE_LIMIT_TOOLS` against them without importing this file. `toolLabel` below reduces a name to them.
+export { MCP_TOOL_NAMES };
 
 /** The metric label for a `tools/call` name: the name itself when the tool exists, `other` when it does not. */
 export function toolLabel(name: unknown): string {

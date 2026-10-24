@@ -30,3 +30,13 @@ see when the last 2025-era client has gone, and `contextator_mcp_tool_duration_s
 call; no label carries a project, a document or a query. Revisit the single-process design when, sustained over a
 week, the search p95 while indexing is above 1 s and twice the idle p95, the interactive queue wait p95 is
 above 5 minutes, or the interactive backlog stays non-zero for 15 minutes at a time.
+
+Two endpoints of the MCP-token group are worth knowing by name here. `POST /api/projects/:id/mcp-tokens` and
+`PATCH /api/projects/:id/mcp-tokens/:tokenId` accept `allowedCidrs`, a list of at most 32 addresses or CIDR
+ranges that the static token is limited to (`[]` or `null` removes the limit; see
+[MCP access](mcp-access.md#restricting-a-static-token-to-a-network)). The PATCH answers with the token's view
+and is audited without writing the list into the audit event. Both answer `400` while `TRUST_PROXY=1`, because
+the address would be client-controlled.
+
+The query log's summary (`GET /api/projects/:id/queries/summary`) and export take an optional `token` (a token id)
+to show what one MCP token asked, on top of the existing filters.

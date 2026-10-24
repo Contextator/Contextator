@@ -93,6 +93,10 @@ const PROJECT_ROUTE_OVERRIDES: ReadonlyArray<{ method: string; url: string; need
   // A project's own relevance floor. What an agent is told "no good match" instead of an answer is the
   // same class of decision as whether its questions are recorded — not a day-to-day editorial change.
   { method: 'PATCH', url: '/api/projects/:id/score-floor', need: 'manager' },
+  // A project's quotas ([ADR-0117](../../.ssot/ADR.md#adr-0117)). `manager` is held only by an instance
+  // `admin`, `root` or `ADMIN_TOKEN`; memberships stop at `editor`. A limit spends the operator's disk and
+  // database, so the people using the project do not set it. Reading them is the default `viewer`.
+  { method: 'PATCH', url: '/api/projects/:id/quotas', need: 'manager' },
   // A measured suggestion for that floor, and its adoption. Generating one spends an embedding and a search per
   // probe and applying one is the `PATCH` above by another route, so both are a manager's; reading the stored
   // suggestions is the `GET` default's (a viewer's).

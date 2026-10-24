@@ -40,9 +40,9 @@ import { sweepExpiredMcpCredentials } from './services/auth/mcp-tokens.js';
 import { sweepStaleOauthClients } from './services/auth/oauth.js';
 import { startSessionReaper } from './services/auth/sessions.js';
 import { SetupGate } from './services/auth/setup.js';
-import { SlidingWindow } from './services/rate-limit.js';
+import { McpRateLimiter, SlidingWindow } from './services/rate-limit.js';
 import { runStartupMaintenance } from './services/startup-maintenance.js';
-import { UploadService } from './services/uploads.js';
+import { sweepExpiredUploadSessions, UploadService } from './services/uploads.js';
 import { APP_VERSION } from './version.js';
 
 async function main(): Promise<void> {
@@ -103,6 +103,7 @@ async function main(): Promise<void> {
   const uploads = new UploadService(config);
   const setup = new SetupGate();
   const loginLimiter = new SlidingWindow(config.AUTH_LOGIN_MAX_ATTEMPTS, config.AUTH_LOGIN_WINDOW_MIN * 60_000);
+  const mcpRateLimiter = new McpRateLimiter(db);
   // Built only when the instance-wide switch allows it (ADR-0047). Left undefined there is no sink for
   // the MCP tool or the search route to hand `searchProject`, so `SEARCH_QUERY_LOG=0` is not a flag the
   // search path has to remember to check — it is the absence of the thing that would have written.
@@ -120,6 +121,7 @@ async function main(): Promise<void> {
     sessions,
     setup,
     loginLimiter,
+    mcpRateLimiter,
     queryLog,
     metrics,
     audit,
@@ -207,6 +209,14 @@ async function main(): Promise<void> {
   // is not a number anybody can observe.
   stopSessionReaper = startSessionReaper(db, log, config.AUTH_SESSION_IDLE_MS, 15 * 60_000, () => {
     loginLimiter.sweep();
+    // The MCP rate-limit counters ([ADR-0112](../.ssot/ADR.md#adr-0112)): one row per key whose window
+    // closed more than ten minutes ago. Same timer, same reason as the sweeps below.
+    void ctx.mcpRateLimiter
+      .sweep()
+      .then((deleted) => {
+        if (deleted > 0) log.debug({ deleted }, 'swept mcp rate limit counters');
+      })
+      .catch((err: unknown) => log.warn({ err }, 'mcp rate limit sweep failed'));
     // The OAuth credentials and the clients that hold none ([ADR-0054](../.ssot/ADR.md#adr-0054)), on
     // the same quarter-hourly timer and for the same reason: a fourth interval in this process would
     // buy latency nobody can observe on a seven-day and a thirty-day window.
@@ -231,6 +241,14 @@ async function main(): Promise<void> {
         if (deleted > 0) log.info({ deleted, retentionDays: config.AUDIT_LOG_RETENTION_DAYS }, 'swept expired audit events');
       })
       .catch((err: unknown) => log.warn({ err }, 'audit log sweep failed'));
+    // Upload sessions idle for 24 hours, so that what the upload quota counts and what is on disk agree
+    // ([ADR-0117](../.ssot/ADR.md#adr-0117)). A directory walk of the staging roots, on the timer every other
+    // forgetting here uses. Also before the query log's `return`.
+    void sweepExpiredUploadSessions(config.DATA_DIR, Date.now(), locks)
+      .then((deleted) => {
+        if (deleted > 0) log.info({ deleted }, 'swept idle upload sessions');
+      })
+      .catch((err: unknown) => log.warn({ err }, 'upload session sweep failed'));
     if (!config.SEARCH_QUERY_LOG) return;
     void sweepQueryLog(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)
       .then((deleted) => {

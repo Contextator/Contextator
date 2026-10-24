@@ -1,6 +1,6 @@
 {
   "id": "f897c5af-6acf-4820-bc41-ad0f27b9bf93",
-  "prevId": "9d064c92-e074-4011-9a24-33367a5d58c3",
+  "prevId": "a2765a52-a90b-41ec-80cb-81b1b37f8450",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1254,6 +1254,53 @@
       },
       "isRLSEnabled": false
     },
+    "public.mcp_rate_limits": {
+      "name": "mcp_rate_limits",
+      "schema": "",
+      "columns": {
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "window_start": {
+          "name": "window_start",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "count": {
+          "name": "count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "mcp_rate_limits_window_idx": {
+          "name": "mcp_rate_limits_window_idx",
+          "columns": [
+            {
+              "expression": "window_start",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.mcp_tokens": {
       "name": "mcp_tokens",
       "schema": "",
@@ -1337,6 +1384,12 @@
         "expires_at": {
           "name": "expires_at",
           "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "allowed_cidrs": {
+          "name": "allowed_cidrs",
+          "type": "cidr[]",
           "primaryKey": false,
           "notNull": false
         }
@@ -1738,6 +1791,24 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
+        },
+        "max_documents": {
+          "name": "max_documents",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "max_chunks": {
+          "name": "max_chunks",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "max_upload_bytes": {
+          "name": "max_upload_bytes",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -1754,6 +1825,18 @@
       },
       "policies": {},
       "checkConstraints": {
+        "projects_max_documents_check": {
+          "name": "projects_max_documents_check",
+          "value": "\"projects\".\"max_documents\" is null or \"projects\".\"max_documents\" >= 0"
+        },
+        "projects_max_chunks_check": {
+          "name": "projects_max_chunks_check",
+          "value": "\"projects\".\"max_chunks\" is null or \"projects\".\"max_chunks\" >= 0"
+        },
+        "projects_max_upload_bytes_check": {
+          "name": "projects_max_upload_bytes_check",
+          "value": "\"projects\".\"max_upload_bytes\" is null or \"projects\".\"max_upload_bytes\" >= 0"
+        },
         "projects_mcp_auth_check": {
           "name": "projects_mcp_auth_check",
           "value": "\"projects\".\"mcp_auth\" in ('open', 'token', 'account')"
