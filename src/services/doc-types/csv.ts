@@ -13,6 +13,7 @@
  * comment. Every quoting rule it implements is pinned by a test.
  */
 
+import type { OutputBudget } from './budget.js';
 import { decodeUtf8, titleFromPath, withTitle } from './index.js';
 
 /** Sniffed in this order on ties, so a comma wins an ambiguous file. */
@@ -27,7 +28,7 @@ const SNIFF_BYTES = 8192;
  * of chunks, and a chunk of bare rows with no breadcrumb naming its columns is a chunk that retrieves
  * for nothing and reads as nothing. The section heading is what `chunkMarkdown` puts in `heading_path`.
  */
-const ROWS_PER_SECTION = 200;
+export const ROWS_PER_SECTION = 200;
 
 /**
  * RFC 4180, with CRLF normalised inside quoted fields as well as outside.
@@ -112,14 +113,36 @@ export function sniffDelimiter(text: string): string {
 }
 
 /** `|` ends a cell in GFM and a newline ends the row, so both have to stop being themselves. */
-function cell(value: string): string {
+export function cell(value: string): string {
   const text = value.replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>').replace(/\s+/g, ' ').trim();
   return text === '' ? ' ' : text;
 }
 
-function renderRow(values: string[], width: number): string {
-  const padded = Array.from({ length: width }, (_, i) => cell(values[i] ?? ''));
-  return `| ${padded.join(' | ')} |`;
+/**
+ * One table row, `width` cells wide.
+ *
+ * **With a `budget` the row is paid for as it is written** — the converters whose rows come from
+ * structures that can be wider than the file is long (a spreadsheet cell that points at a shared
+ * string, a `csv-table` whose first row is wide) pass one. The least the row can cost is refused before
+ * its cells are allocated, and each cell is paid for as it is rendered, so a row that repeats a
+ * megabyte-long string a thousand times stops after the few cells the budget affords instead of being
+ * built whole and measured. The row and its newline are spent here; the caller must not spend them again.
+ */
+export function renderRow(values: string[], width: number, budget?: OutputBudget): string {
+  if (!budget) {
+    const padded = Array.from({ length: width }, (_, i) => cell(values[i] ?? ''));
+    return `| ${padded.join(' | ')} |`;
+  }
+  // `| ` + one character per cell + ` | ` between them + ` |` + the newline.
+  budget.reserve(4 * width + 2);
+  budget.spend(2);
+  const cells: string[] = [];
+  for (let i = 0; i < width; i++) {
+    const text = cell(values[i] ?? '');
+    budget.spend(text.length + 3);
+    cells.push(text);
+  }
+  return `| ${cells.join(' | ')} |`;
 }
 
 export async function csvToMarkdown(bytes: Buffer, relativePath: string): Promise<string> {

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { PRODUCT_FACTS_PATH, buildProductFacts } from '../scripts/build-product-facts.js';
+import { PRODUCT_FACTS_PATH, buildProductFacts, defaultBindAddress } from '../scripts/build-product-facts.js';
+import { DEFAULT_MCP_AUTH } from '../src/db/schema.js';
 
 /**
  * `public/product-facts.json` is a second copy of facts that live in `src/` — the source types, the
@@ -42,5 +43,67 @@ describe('public/product-facts.json', () => {
       expect(tool.title, `${tool.name} has no title`).not.toBe('');
       expect(tool.parameters.length, `${tool.name} has no parameters`).toBeGreaterThan(0);
     }
+  });
+});
+
+/**
+ * ADR-0114: the default MCP auth and the default bind address are facts, and the bind address is read
+ * out of the compose files with a YAML parser. The tests below are the proof that the reading refuses
+ * to guess — a changed expression or a disagreement between the files stops the build.
+ */
+describe('default auth and bind address facts', () => {
+  const compose = (ports: string) =>
+    `services:\n  contextator:\n    image: contextator/contextator\n    ports:\n      # a comment mentioning \${CONTEXTATOR_BIND:-10.0.0.1}:3444:3444\n      - ${ports}\n`;
+  const published = (address: string) => `"\${CONTEXTATOR_BIND:-${address}}:\${PORT:-3444}:3444"`;
+
+  it('reports the schema default for the MCP auth mode and loopback for the bind address', () => {
+    const facts = buildProductFacts();
+    expect(facts.defaultMcpAuth).toBe(DEFAULT_MCP_AUTH);
+    expect(facts.defaultMcpAuth).toBe('token');
+    expect(facts.mcpAuthModes).toContain(facts.defaultMcpAuth);
+    expect(facts.defaultBindAddress).toBe('127.0.0.1');
+  });
+
+  it('reads the address from the ports entry and not from a comment', () => {
+    const files = { 'docker-compose.yml': compose(published('127.0.0.1')), 'docker-compose.slim.yml': compose(published('127.0.0.1')) };
+    expect(defaultBindAddress(files)).toBe('127.0.0.1');
+  });
+
+  it('fails when the two compose files publish on different addresses', () => {
+    const files = { 'docker-compose.yml': compose(published('127.0.0.1')), 'docker-compose.slim.yml': compose(published('0.0.0.0')) };
+    expect(() => defaultBindAddress(files)).toThrow(/different addresses/);
+  });
+
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: a compose expression, not a template literal
+  it('fails when the expression leaves the ${CONTEXTATOR_BIND:-...} shape', () => {
+    const files = { 'docker-compose.yml': compose('"127.0.0.1:3444:3444"'), 'docker-compose.slim.yml': compose(published('127.0.0.1')) };
+    expect(() => defaultBindAddress(files)).toThrow(/not \$\{CONTEXTATOR_BIND:-<address>\}/);
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: a compose expression, not a template literal
+    const renamed = { 'docker-compose.yml': compose(published('127.0.0.1')), 'docker-compose.slim.yml': compose('"${BIND:-127.0.0.1}:3444:3444"') };
+    expect(() => defaultBindAddress(renamed)).toThrow(/not \$\{CONTEXTATOR_BIND:-<address>\}/);
+  });
+
+  it('fails when a compose file stops publishing the port at all', () => {
+    const files = { 'docker-compose.yml': compose(published('127.0.0.1')), 'docker-compose.slim.yml': 'services:\n  contextator:\n    image: x\n' };
+    expect(() => defaultBindAddress(files)).toThrow(/docker-compose\.slim\.yml no longer publishes/);
+  });
+
+  it('brings a third compose variant that publishes the port into the check', () => {
+    const files = {
+      'docker-compose.yml': compose(published('127.0.0.1')),
+      'docker-compose.slim.yml': compose(published('127.0.0.1')),
+      'docker-compose.extra.yml': compose(published('0.0.0.0')),
+    };
+    expect(() => defaultBindAddress(files)).toThrow(/different addresses/);
+  });
+
+  it('does not mistake another service port for the application port', () => {
+    const files = {
+      'docker-compose.yml': compose(published('127.0.0.1')),
+      'docker-compose.slim.yml': compose(published('127.0.0.1')),
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: a compose expression, not a template literal
+      'docker-compose.dev.yml': compose('"${POSTGRES_HOST_PORT:-5432}:5432"'),
+    };
+    expect(defaultBindAddress(files)).toBe('127.0.0.1');
   });
 });

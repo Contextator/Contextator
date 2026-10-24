@@ -86,3 +86,38 @@ export function warnAboutProxyConfiguration(app: FastifyInstance, config: Config
     );
   });
 }
+
+/** `127.0.0.0/8`, `::1` and `localhost`: the addresses a listener can bind without becoming reachable from another machine. */
+export function isLoopbackHost(host: string): boolean {
+  const h = host
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '');
+  return h === 'localhost' || h === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
+/**
+ * The startup warning for the one combination that puts a project on the network without a credential
+ * ([ADR-0065](../.ssot/ADR.md#adr-0065), Faz 11 of the 0.4.0 plan): the server listens on an address other
+ * machines can reach, and at least one project has `mcp_auth = 'open'`.
+ *
+ * Neither half is a problem alone. A project is born `token` (ADR-0065), and `HOST=0.0.0.0` is how every
+ * container listens, with the port published on loopback only by the compose files — so warning on the
+ * bind address by itself would be said on every start of every container and mean nothing. A hosted
+ * template (Railway, Render, Fly) publishes the port to the internet, which is why an `open` project there
+ * is worth a line. Returns `null` when there is nothing to say.
+ *
+ * The process cannot see how its port is published, so on a default `docker compose up` (published on
+ * 127.0.0.1) an `open` project still triggers this. The message therefore says that case may be ignored,
+ * instead of claiming exposure it cannot verify.
+ */
+export function exposureWarning(host: string, openProjectNames: readonly string[]): string | null {
+  if (openProjectNames.length === 0 || isLoopbackHost(host)) return null;
+  const shown = openProjectNames.slice(0, 5).join(', ') + (openProjectNames.length > 5 ? `, … (${openProjectNames.length} in total)` : '');
+  return (
+    `the server listens on ${host}, which is not a loopback address, and these projects have no MCP token: ${shown}. ` +
+    `A container always listens on 0.0.0.0, so this is expected when the published port is limited to 127.0.0.1 (the default docker compose ` +
+    `files do that) and you can ignore it. If the port is reachable from other machines (a hosted template, a published port, a reverse proxy), ` +
+    `anyone who can reach it can read those projects: switch them to token authentication in the dashboard.`
+  );
+}

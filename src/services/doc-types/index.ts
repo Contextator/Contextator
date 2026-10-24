@@ -57,7 +57,7 @@ export interface ExtractLimits {
   maxFileBytes: number;
   /** Pages a PDF may declare. A few kilobytes of PDF can claim a hundred thousand of them. */
   maxPdfPages: number;
-  /** What a `.docx`'s central directory may claim its parts unpack to — the ordinary zip bomb. */
+  /** What an OOXML file's (`.docx`, `.pptx`, `.xlsx`) central directory may claim its parts unpack to — the ordinary zip bomb. */
   maxUnpackedBytes: number;
 }
 
@@ -138,6 +138,13 @@ const EXTRACTORS: Record<SupportedExtension, DocumentExtractor> = {
   csv: async (bytes, rel) => (await import('./csv.js')).csvToMarkdown(bytes, rel),
   docx: async (bytes, rel, limits) => (await import('./docx.js')).docxToMarkdown(bytes, rel, limits),
   pdf: async (bytes, rel, limits) => (await import('./pdf.js')).pdfToMarkdown(bytes, rel, limits),
+  // The OOXML pair read their zip through `zip.ts`, which is where `maxUnpackedBytes` is enforced (ADR-0115).
+  pptx: async (bytes, rel, limits) => (await import('./pptx.js')).pptxToMarkdown(bytes, rel, limits),
+  xlsx: async (bytes, rel, limits) => (await import('./xlsx.js')).xlsxToMarkdown(bytes, rel, limits),
+  // Plain-text formats that are still *converted*: JSON, reStructuredText and AsciiDoc are markup, not Markdown.
+  ipynb: async (bytes, rel, limits) => (await import('./ipynb.js')).ipynbToMarkdown(bytes, rel, limits),
+  rst: async (bytes, rel, limits) => (await import('./rst.js')).rstToMarkdown(bytes, rel, limits),
+  adoc: async (bytes, rel, limits) => (await import('./adoc.js')).adocToMarkdown(bytes, rel, limits),
 };
 
 /**
@@ -148,7 +155,10 @@ const EXTRACTORS: Record<SupportedExtension, DocumentExtractor> = {
  * thing people commit and which this product has always skipped quietly. An empty `.pdf` is a
  * conversion that produced nothing from a file that plainly held something, and that is a failure.
  */
-const CONVERTED: ReadonlySet<string> = new Set(['html', 'htm', 'csv', 'docx', 'pdf']);
+/** The types whose converted output is checked against `maxFileBytes` (ADR-0115 §4). */
+const BOUNDED_OUTPUT: ReadonlySet<string> = new Set(['pptx', 'xlsx', 'ipynb', 'rst', 'adoc']);
+
+const CONVERTED: ReadonlySet<string> = new Set(['html', 'htm', 'csv', 'docx', 'pdf', 'pptx', 'xlsx', 'ipynb', 'rst', 'adoc']);
 
 /**
  * What an operator can do about a file of this type that carried no text, per type, because "it
@@ -162,6 +172,11 @@ const REMEDY: Record<string, string> = {
   csv: 'A spreadsheet export with no rows has nothing to index; remove it from the source, or export it with its data.',
   html: 'A page whose whole body was script, style or images has no text to index; point the source at the rendered documentation instead.',
   htm: 'A page whose whole body was script, style or images has no text to index; point the source at the rendered documentation instead.',
+  pptx: 'A deck of nothing but pictures has nothing to index; add the text (titles, bullets or speaker notes), or remove it from the source.',
+  xlsx: 'A workbook whose visible sheets hold no values has nothing to index (hidden sheets are skipped); remove it from the source, or unhide the data.',
+  ipynb: 'A notebook with no markdown or code cells (outputs are not indexed) has nothing to index; remove it from the source.',
+  rst: 'A reStructuredText file that is only directives, comments or targets has no prose to index; remove it from the source.',
+  adoc: 'An AsciiDoc file that is only attributes, includes or comments has no prose to index; remove it from the source.',
 };
 
 /**
@@ -263,6 +278,15 @@ export async function extractDocument(relativePath: string, bytes: Buffer, limit
     if (err instanceof DocumentExtractionError) throw err;
     const message = err instanceof Error ? err.message : String(err);
     throw new DocumentExtractionError(`"${relativePath}" could not be read as a ".${ext}" file: ${message}`);
+  }
+
+  // ADR-0115 §4: what a converted file renders to is bounded by the same ceiling as what it was read from.
+  // The converters of these types stop earlier, while they build (`budget.ts`); this is the net under them.
+  if (BOUNDED_OUTPUT.has(ext) && Buffer.byteLength(markdown) > limits.maxFileBytes) {
+    throw new DocumentExtractionError(
+      `"${relativePath}" renders to more than the ${bytesLabel(limits.maxFileBytes)} a converted file may be. ` +
+        `Simplify the file, or raise MAX_CONVERTED_FILE_BYTES if the content is real.`,
+    );
   }
 
   if (converted && !hasBodyText(markdown)) {

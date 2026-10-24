@@ -12,6 +12,22 @@ ships, that stops.
 
 ### Added
 
+- **Default auth and bind address as product facts.** `public/product-facts.json` gains `defaultMcpAuth`
+  (read from `DEFAULT_MCP_AUTH`) and `defaultBindAddress` (the address the compose files publish the port
+  on). The bind address is read from `docker-compose.yml` and `docker-compose.slim.yml` with a YAML parser;
+  `npm run build:facts` fails if they disagree or if the `${CONTEXTATOR_BIND:-…}` expression changes shape
+  (ADR-0114). The README claims about both are tested against the facts.
+- **Contributing a connector.** `docs/contributing-a-connector.md` lists every place a new source type touches,
+  in order, and `test/connector-guide.test.ts` registers a throwaway driver through those steps so the guide
+  cannot drift from the code. `CONTRIBUTING.md` links it. No plugin loader is added (ADR-0012).
+- **One-click deploy templates.** `deploy/railway/`, `deploy/render/` and `deploy/fly/` set up the `-slim` image
+  with a PostgreSQL and a volume on Railway, Render and Fly.io; `docs/deployment.md` has the steps for each.
+  Projects stay token-protected, the first-run page needs `SETUP_CODE`, and `test/deploy-templates.test.ts`
+  fails if a template carries a setting that opens authentication.
+- **Startup warning for open projects on a reachable address.** When the server listens on a non-loopback
+  address and at least one project has no MCP token, the log says which projects (ADR-0065). Said once at
+  start; nothing changes for a loopback bind or for token-protected projects. It cannot see how a container's port is
+  published, so it says that a loopback-only publish makes it safe to ignore.
 - **Per-project quotas.** A project can be capped on documents, chunks and upload bytes. `PROJECT_MAX_DOCUMENTS`,
   `PROJECT_MAX_CHUNKS` and `PROJECT_MAX_UPLOAD_BYTES` set the instance default (`0`, the default, is unlimited);
   `PATCH /api/projects/:id/quotas` gives one project its own value, `0` to exempt it or `null` to follow the
@@ -55,6 +71,20 @@ ships, that stops.
   **Upgrade note:** existing documents start with both columns empty. They are filled in on each source's next
   index run without re-embedding anything; until then answers show no `Source:` line for them.
 
+- **Backups to S3-compatible storage, and a Helm CronJob.** `npm run backup -- --s3` uploads the
+  archive to a bucket (AWS S3, MinIO, Ceph, R2; path-style, SigV4 signed with `node:crypto`, multipart
+  for large archives, no new dependency) configured by `BACKUP_S3_*`, and applies `BACKUP_KEEP` to the
+  timestamped archives under the prefix. `npm run restore -- --s3 <name|latest>` restores from the
+  bucket. Helm chart 1.4.0 gains an optional `backup.*` CronJob (off by default; credentials from an
+  existing Secret, such as one created by the External Secrets Operator). The local-disk backup and the
+  manifest format are unchanged (ADR-0120, which extends ADR-0110).
+- **PowerPoint, Excel, Jupyter, reStructuredText and AsciiDoc files.** A source can now index `.pptx`
+  (one section per slide, speaker notes on a `Notes:` line), `.xlsx` (one section per visible sheet,
+  cached formula values, hidden sheets skipped), `.ipynb` (markdown and code cells, no outputs), `.rst`
+  and `.adoc` (heading hierarchy kept). They are opt-in per source like the other converted types, and
+  the Office types share the `MAX_DOCX_UNPACKED_BYTES` guard with `.docx` (ADR-0115).
+  What those types convert to is bounded by `MAX_CONVERTED_FILE_BYTES` as well: a file whose output would
+  pass it is refused by name, and an `.adoc` attribute that expands past 4 KiB is left undefined.
 - **Scheduled backups for the slim stack.** `docker-compose.backup.yml` is an optional overlay for
   `docker-compose.slim.yml` that runs `npm run backup` against the external database once at start and
   then every `BACKUP_INTERVAL_SECONDS` (default one day), keeping the newest `BACKUP_KEEP` (default 7)

@@ -334,7 +334,27 @@ docker compose restart contextator
 Run `npm run backup` with no path at all and it writes `<DATA_DIR>/backups/contextator-backup-<timestamp>.tar.gz`
 — on the data volume, never in the container's working directory, which is an image layer.
 
-**These two blocks are the only copy of this procedure.** The wiki and the documentation site
+**To an S3-compatible bucket.** Set `BACKUP_S3_BUCKET`, `BACKUP_S3_ACCESS_KEY_ID` and
+`BACKUP_S3_SECRET_ACCESS_KEY` (optionally `BACKUP_S3_ENDPOINT` for MinIO, Ceph or R2, `BACKUP_S3_REGION`,
+`BACKUP_S3_PREFIX`, `BACKUP_S3_SESSION_TOKEN`) and add `--s3`; the archive is built in the staging
+directory, uploaded (multipart above 16 MiB) and removed locally, and only the newest `BACKUP_KEEP`
+(default 7) timestamped archives under the prefix are kept:
+
+```sh
+docker exec contextator npm run backup -- --s3
+docker exec contextator npm run restore -- --s3 latest --check
+docker exec contextator npm run restore -- --s3 latest
+docker compose restart contextator
+```
+
+`latest` is the newest timestamped archive; a name restores that one. Requests are path-style and signed
+with SigV4 by the script itself, so no extra package is installed. Nothing in the server schedules this:
+on Kubernetes the chart renders an optional CronJob
+([Scheduled backup to S3](charts/contextator/README.md#scheduled-backup-to-s3)), elsewhere use cron or your
+orchestrator. `restore --check` with `--s3` downloads the archive to the data volume first and deletes
+the copy afterwards.
+
+**These blocks are the only copy of this procedure.** The wiki and the documentation site
 carry no commands for it and point here. `restore` overwrites a live database,
 so a command is changed **here** and nowhere else. `test/readme-mirrors.test.ts` fails if a copy that
 declares itself a mirror (a `MIRRORED-IN` / `MIRRORED-FROM` marker) appears; it cannot see an unmarked
