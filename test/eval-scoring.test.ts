@@ -181,6 +181,14 @@ describe('loading golden.jsonl', () => {
   it('fails on an empty question set', () => {
     expect(() => parseGoldenSet('\n\n', CORPUS)).toThrow(/no questions/);
   });
+
+  /** The set files are the operator's to name (`--corpus`, `--golden`), and an error must name theirs. */
+  it('names the files it was given, not the repository defaults, in every error', () => {
+    const labels = { file: 'docs/questions.jsonl', corpus: 'docs/' };
+    expect(() => parseGoldenSet(`${line()}\n{not json\n`, CORPUS, labels)).toThrow(/docs\/questions\.jsonl:2/);
+    expect(() => parseGoldenSet(`${line({ expectFile: 'en/nope.md' })}\n`, CORPUS, labels)).toThrow(/not a file under docs\//);
+    expect(() => parseGoldenSet('\n', CORPUS, labels)).toThrow(/docs\/questions\.jsonl holds no questions/);
+  });
 });
 
 /** The configuration a report is about. Module-level because the negative-set block below needs it too. */
@@ -223,6 +231,20 @@ describe('the report', () => {
     // One question carries two tags, so it is counted under both — a tag row is a slice, not a partition.
     expect(report.byTag.install.questions).toBe(2);
     expect(report.byTag['cross-lingual'].questions).toBe(1);
+  });
+
+  it('names the repository set in the header unless the run says it measured something else', () => {
+    expect(formatText(report)).toContain('Retrieval evaluation — eval/corpus + eval/golden.jsonl');
+    const mine = buildReport(
+      [scoreRow(question({ id: 'a' }), INSTALL_HITS)],
+      { ...context, subject: 'docs/ + questions.jsonl' },
+      {
+        recall5: null,
+        headingRecall5: null,
+      },
+    );
+    expect(formatText(mine)).toContain('Retrieval evaluation — docs/ + questions.jsonl');
+    expect(formatText(mine)).not.toContain('eval/golden.jsonl');
   });
 
   it('says which floor the run was judged against, in both formats', () => {
@@ -466,6 +488,10 @@ describe('loading negative.jsonl', () => {
 
   it('fails on an empty file, because a negative set that silently vanished is a refusal rate of zero', () => {
     expect(() => parseNegativeSet('\n\n')).toThrow(/no questions/);
+  });
+
+  it('names the file it was given in its errors', () => {
+    expect(() => parseNegativeSet(`${absent()}\n{not json\n`, 'mine/negatives.jsonl')).toThrow(/mine\/negatives\.jsonl:2/);
   });
 
   /**

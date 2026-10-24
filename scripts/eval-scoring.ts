@@ -389,6 +389,12 @@ export function worstMisses(results: readonly RowResult[], count: number): RowRe
 
 export interface RunContext {
   commit: string;
+  /**
+   * What was measured, when it is not the repository's own `eval/corpus` + `eval/golden.jsonl`: a user's
+   * corpus and question file, or a project's stored questions. Unset it is the repository's own set, and
+   * the report is byte-identical to what it was before the field existed.
+   */
+  subject?: string;
   providerId: string;
   embeddingModel: string;
   embeddingDtype: string;
@@ -598,7 +604,7 @@ export function formatText(report: Report): string {
   const { context: c, overall } = report;
   const out: string[] = [];
 
-  out.push('Retrieval evaluation — eval/corpus + eval/golden.jsonl');
+  out.push(`Retrieval evaluation — ${c.subject ?? 'eval/corpus + eval/golden.jsonl'}`);
   out.push('');
   out.push(`  commit              ${c.commit}`);
   out.push(`  provider            ${c.providerId}`);
