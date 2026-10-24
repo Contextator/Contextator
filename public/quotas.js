@@ -42,6 +42,16 @@ export function joinBytes(value, unitName) {
 }
 
 /**
+ * `joinBytes` for a typed limit: a figure that was a safe integer on its own can leave that range once
+ * it is multiplied into bytes (9,000,000 GiB), and the wire would round it silently.
+ */
+export function joinBytesChecked(value, unitName) {
+  const total = joinBytes(value, unitName);
+  if (!Number.isSafeInteger(total)) return { ok: false, message: 'That is too large once converted to bytes. Use a smaller figure or unit.' };
+  return { ok: true, value: total };
+}
+
+/**
  * One limit field as typed. Empty means "inherit the instance's default" (null on the wire), `0` means
  * unlimited, and anything else has to be a whole number: the server refuses fractions and negatives,
  * and saying so here saves the round trip.
@@ -264,7 +274,14 @@ export function initQuotasUi() {
         form.elements[def.key].focus();
         return;
       }
-      typed[def.key] = def.bytes && parsed.value != null ? joinBytes(parsed.value, form.elements.uploadBytesUnit.value) : parsed.value;
+      const joined = def.bytes && parsed.value != null ? joinBytesChecked(parsed.value, form.elements.uploadBytesUnit.value) : parsed;
+      if (!joined.ok) {
+        errorNode.textContent = `${def.label}: ${joined.message}`;
+        errorNode.hidden = false;
+        form.elements[def.key].focus();
+        return;
+      }
+      typed[def.key] = joined.value;
     }
     const patch = quotaPatch(dialogInitial, typed);
     if (Object.keys(patch).length === 0) {

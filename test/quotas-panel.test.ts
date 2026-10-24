@@ -4,6 +4,7 @@ import { ApiError, state } from '../public/core.js';
 import {
   describeApiError,
   joinBytes,
+  joinBytesChecked,
   loadQuotas,
   parseLimitField,
   quotaFigures,
@@ -89,6 +90,15 @@ describe('editing the limits', () => {
     expect(splitBytes(1500)).toEqual({ value: 1500, unit: 'bytes' });
     expect(joinBytes(2, 'MiB')).toBe(2097152);
     expect(joinBytes(splitBytes(7340032).value, splitBytes(7340032).unit)).toBe(7340032);
+  });
+
+  it('refuses a byte limit that was a safe number as typed but is not once it is in bytes', () => {
+    expect(parseLimitField('9000000').ok).toBe(true);
+    const tooBig = joinBytesChecked(9_000_000, 'GiB');
+    expect(tooBig.ok).toBe(false);
+    expect(tooBig.message).toMatch(/too large/);
+    expect(joinBytesChecked(2, 'MiB')).toEqual({ ok: true, value: 2097152 });
+    expect(joinBytesChecked(8000, 'GiB').ok).toBe(true);
   });
 
   it('sends only the limits that changed, null to go back to inheriting', () => {
