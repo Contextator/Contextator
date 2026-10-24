@@ -214,7 +214,9 @@ export function renderMcpAccess(project) {
 
     el('p', { class: 'field-hint token-limits' }, [
       el('strong', { text: 'Rate limits. ' }),
-      'Requests are counted per minute for each token, and for each address on an open project. The limits are instance-wide settings (',
+      'A limit per minute can apply to each token (off by default: ',
+      el('code', { text: '0' }),
+      ' means no limit) and to each address on an open project (60 by default). The limits are instance-wide settings (',
       el('code', { text: 'MCP_RATE_LIMIT_PER_MINUTE' }),
       ', ',
       el('code', { text: 'MCP_RATE_LIMIT_ANON_PER_MINUTE' }),
