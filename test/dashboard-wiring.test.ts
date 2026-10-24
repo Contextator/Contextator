@@ -187,17 +187,76 @@ describe('the dashboard markup and its modules agree', () => {
     for (const hash of linked) expect(app).toContain(`raw === '${hash}'`);
   });
 
+  /**
+   * The token and quota dialogs live in index.html, outside `#detail`, so they survive the poll. Each
+   * form the panel opens needs its fields, or the submit handler reads a field that is not there.
+   */
+  it('gives the allowlist and quota dialogs the fields their handlers read', async () => {
+    const html = await readFile(new URL('index.html', PUBLIC), 'utf8');
+    const mcp = await readFile(new URL('mcp.js', PUBLIC), 'utf8');
+    const quotas = await readFile(new URL('quotas.js', PUBLIC), 'utf8');
+    for (const name of ['allowedCidrs']) {
+      expect(mcp).toContain(`'${name}'`);
+      expect(html).toContain(`name="${name}"`);
+    }
+    for (const name of ['documents', 'chunks', 'uploadBytes', 'uploadBytesUnit']) {
+      expect(quotas).toContain(name);
+      expect(html).toContain(`name="${name}"`);
+    }
+    expect(html.match(/name="allowedCidrs"/g)).toHaveLength(2); // create dialog + edit dialog
+  });
+
+  /**
+   * The golden questions panel opens a dialog, reads its fields by name and registers itself in the
+   * project view: any one missing fails only when someone clicks Add question.
+   */
+  it('wires the golden questions panel into the project view and its dialog', async () => {
+    const html = await readFile(new URL('index.html', PUBLIC), 'utf8');
+    const golden = await readFile(new URL('golden.js', PUBLIC), 'utf8');
+    const app = await readFile(new URL('app.js', PUBLIC), 'utf8');
+    for (const name of ['key', 'lang', 'query', 'expectFile', 'expectHeading', 'tags', 'note']) {
+      expect(golden).toContain(name);
+      expect(html).toContain(`name="${name}"`);
+    }
+    const ids = idsIn(html);
+    for (const id of ['golden-dialog', 'golden-form', 'golden-title', 'golden-error', 'golden-cancel', 'golden-submit', 'golden-key-hint'])
+      expect(ids).toContain(id);
+    // Drawn in the project view, loaded on selection, and its dialog handlers attached once at boot.
+    expect(app).toMatch(/main\.append\(renderGolden\(p\)\)/);
+    // Twice: select() and the poll. A page opened on a project hash never runs select(), so without the
+    // poll's call the panel would read "Reading the questions…" for good.
+    expect(app.match(/void loadGolden\(\)/g)).toHaveLength(2);
+    expect(app).toMatch(/initGoldenUi\(\)/);
+  });
+
+  it('moves the source dialog to edit mode when a new source was created but its upload failed', async () => {
+    const app = await readFile(new URL('app.js', PUBLIC), 'utf8');
+    // The helper is the one place that locks the name; both the per-file-failure path and the thrown
+    // path (a 413 quota refusal) use it, or a second submit posts the same name again and gets a 409.
+    expect(app.match(/^\s+holdDialogOnSource\(project, source\);/gm)).toHaveLength(2);
+    // `source` outlives the try block so the catch can tell a created source from a failed create.
+    expect(app).toMatch(/let source;\s*try \{\s*const config = configForKind\(kind\);/);
+    expect(app).toContain('Source saved; upload refused');
+  });
+
   it('loads every module index.html needs through the one entry point', async () => {
     const html = await readFile(new URL('index.html', PUBLIC), 'utf8');
     const scripts = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1]);
     // One module graph, not a pile of script tags: app.js imports the rest.
     expect(scripts).toEqual(['/app.js?v={{version}}']);
 
-    const app = await readFile(new URL('app.js', PUBLIC), 'utf8');
-    const imported = new Set([...app.matchAll(/from '\.\/([a-z-]+)\.js'/g)].map((m) => `${m[1]}.js`));
+    // Reachable from app.js, directly or through another module (floor-suggestions.js is queries.js's).
+    const reached = new Set<string>();
+    const walk = async (file: string) => {
+      if (reached.has(file)) return;
+      reached.add(file);
+      const source = await readFile(new URL(file, PUBLIC), 'utf8');
+      for (const m of source.matchAll(/from '\.\/([a-z-]+)\.js'/g)) await walk(`${m[1]}.js`);
+    };
+    await walk('app.js');
     for (const file of await dashboardModules()) {
-      if (file === 'app.js') continue;
-      expect(imported.has(file) || file === 'core.js').toBe(true);
+      if (file === 'auth-page.js') continue;
+      expect(reached.has(file), `${file} is imported by the app`).toBe(true);
     }
   });
 });

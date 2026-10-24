@@ -12,6 +12,16 @@ ships, that stops.
 
 ### Added
 
+- **Panel: provenance, quotas, allowlists, floors, freshness and golden questions.** Search hits show the
+  clickable source link (`rel="noopener noreferrer"`), the source's modified date and a "long unchanged" marker.
+  The project view shows the quotas with their usage and, for an administrator, edits them; a refused upload
+  (`413`) is worded in documents, chunks or bytes. The token list edits each token's address allowlist and
+  explains the rate limits; the query log filters by MCP token; the relevance floor panel measures, shows and
+  applies suggested floors (a dismissal is kept in the browser only, the server has no reject route); each
+  source row shows its last sync and whether it is current, overdue or never synced (the admin API's
+  `lastSyncedAt`; `/metrics` stays unlabeled, ADR-0119). A new Golden questions panel lists, adds, edits,
+  deletes and exports the project's set and shows the `npm run eval -- --project <name>` command; the
+  evaluation itself stays a command-line tool. No server change.
 - **Evaluate your own corpus and questions.** `npm run eval -- --corpus <dir> --golden <file>` indexes a directory
   of yours and asks a question file of yours with the scoring `npm run eval` already uses; `--negative <file>`
   adds refusal questions (never defaulted for a custom set, ADR-0045). A project now keeps a question set of

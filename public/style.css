@@ -1348,6 +1348,50 @@ button:focus-visible {
   color: var(--accent);
 }
 
+/* Provenance of the excerpt's document: the link it came from, when it last changed there, and the
+   server's "long unchanged" verdict. A line of its own so a long URL truncates instead of pushing the score. */
+.hit-source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.hit-source-link {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hit-source-link:hover {
+  color: var(--accent-hover);
+}
+
+.hit-source-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.hit-source-date {
+  white-space: nowrap;
+}
+
+.pill.stale {
+  background: var(--warn-tint);
+  color: var(--warn-text);
+}
+
+.pill.stale::before {
+  background: var(--warn);
+}
+
 /* The chunks either side of the excerpt. Dimmed rather than separated, because they are the same
    page continuing and they carry neither a rank nor a score of their own (ADR-0042). */
 .hit-context {
@@ -2719,4 +2763,247 @@ body.auth .gate-card a {
   margin: 4px 0 8px;
   padding-left: 18px;
   font-size: 13px;
+}
+
+/* ---------- quotas panel ---------- */
+
+.quota-list {
+  display: grid;
+}
+
+.quota-row {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr) minmax(120px, 220px) auto;
+  align-items: center;
+  gap: 8px 16px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--neutral-tint);
+}
+
+.quota-row:last-child {
+  border-bottom: 0;
+}
+
+.quota-label {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.quota-figures {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.quota-meter {
+  display: block;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--neutral-tint);
+  overflow: hidden;
+}
+
+.quota-meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--ok);
+}
+
+.quota-meter.near .quota-meter-fill {
+  background: var(--warn);
+}
+
+.quota-meter.full .quota-meter-fill {
+  background: var(--err);
+}
+
+#quotas-panel > .hint,
+#quotas-panel > .form-error,
+#quotas-panel > .field-hint {
+  padding: 12px 20px;
+}
+
+@media (max-width: 720px) {
+  .quota-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .quota-label {
+    grid-column: 1 / -1;
+  }
+
+  .quota-meter {
+    grid-column: 1 / -1;
+    grid-row: 3;
+  }
+}
+
+.quota-meter.none {
+  opacity: 0.45;
+}
+
+/* ---------- MCP token address allowlist ---------- */
+
+.token-networks {
+  overflow-wrap: anywhere;
+}
+
+.token-networks.restricted {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.token-limits {
+  margin-top: 14px;
+  line-height: 1.5;
+}
+
+.token-limits code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- suggested relevance floor ---------- */
+
+.floor-suggestions {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--neutral-tint);
+}
+
+.floor-suggestion-list {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.floor-suggestion {
+  padding: 10px 12px;
+  border: 1px solid var(--neutral-tint);
+  border-radius: 7px;
+}
+
+.floor-suggestion p {
+  margin: 4px 0 0;
+}
+
+.floor-suggestion .field-hint.warn {
+  color: var(--warn-text);
+}
+
+.floor-suggestion-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+
+/* ---------- source freshness ---------- */
+
+.source-fresh {
+  align-items: flex-start;
+  gap: 4px;
+}
+
+/* ---------- golden questions ---------- */
+
+a.btn.ghost.small {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12.5px;
+  border-radius: 8px;
+  gap: 6px;
+}
+
+.golden-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px 20px 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.golden-item {
+  padding: 10px 12px;
+  border: 1px solid var(--neutral-tint);
+  border-radius: 7px;
+}
+
+.golden-item p {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.golden-item .source-actions {
+  margin-top: 8px;
+}
+
+/* Three header buttons do not fit beside the text on a phone: let the head and the buttons wrap. */
+#golden-panel > .sources-head {
+  flex-wrap: wrap;
+}
+
+#golden-panel > .sources-head .source-actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.golden-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.golden-key {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.golden-tag {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--neutral-tint);
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+
+.golden-expect code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.golden-eval {
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--neutral-tint);
+}
+
+#golden-panel > .hint,
+#golden-panel > div > .hint,
+#golden-panel > .form-error {
+  padding: 12px 20px;
+}
+
+.golden-command {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.golden-command code {
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: 7px;
+  background: var(--neutral-tint);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }

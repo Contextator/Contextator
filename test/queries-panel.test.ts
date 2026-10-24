@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error - public/ is untyped ES modules the browser loads directly (ADR-0022); see audit-panel.test.ts.
 import { state } from '../public/core.js';
 // @ts-expect-error - see above.
-import { floorBehind, loadQuerySummary, otherFloorSearches } from '../public/queries.js';
+import { floorBehind, loadQuerySummary, otherFloorSearches, renderQueries } from '../public/queries.js';
+import { descendants, fakeDocument } from './helpers/fake-dom.js';
 
 /**
  * **The panel names the relevance floor it wants figures for.** The log keeps the floor each search
@@ -23,7 +24,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock);
   state.projects = [PROJECT];
   state.selectedId = PROJECT.id;
-  Object.assign(state.queries, { projectId: PROJECT.id, days: 7, actor: 'mcp', configKey: null, loadedKey: null, data: null });
+  Object.assign(state.queries, { projectId: PROJECT.id, days: 7, actor: 'mcp', token: null, configKey: null, loadedKey: null, data: null });
 });
 
 afterEach(() => {
@@ -65,6 +66,60 @@ describe('which configuration the query panel asks for', () => {
     await loadQuerySummary();
     expect(sent()).toHaveLength(2);
     expect(sent()[1].searchParams.get('floor')).toBe('0.78');
+  });
+});
+
+/**
+ * **A token picked in the panel narrows the log to that token's searches (0.4-06).** The server filters;
+ * the panel's half is to send the token's id with the summary and the export, to refetch when it changes,
+ * and to forget it with the project.
+ */
+describe('the query panel narrowed to one MCP token', () => {
+  const TOKEN = '3f6d3b9e-6a58-4a3e-9d2b-5a1f0a9a2b11';
+
+  it('sends no token until one is chosen', async () => {
+    await loadQuerySummary();
+    expect(sent()[0].searchParams.has('token')).toBe(false);
+  });
+
+  it("asks for only the chosen token's queries", async () => {
+    state.queries.token = TOKEN;
+    await loadQuerySummary();
+    expect(sent()).toHaveLength(1);
+    expect(sent()[0].pathname).toBe('/api/projects/p1/queries/summary');
+    expect(sent()[0].searchParams.get('token')).toBe(TOKEN);
+  });
+
+  it('reads again when the token changes, and again when it is cleared', async () => {
+    await loadQuerySummary();
+    state.queries.token = TOKEN;
+    await loadQuerySummary();
+    await loadQuerySummary();
+    state.queries.token = null;
+    await loadQuerySummary();
+    expect(sent()).toHaveLength(3);
+    expect(sent()[1].searchParams.get('token')).toBe(TOKEN);
+    expect(sent()[2].searchParams.has('token')).toBe(false);
+  });
+
+  it('puts the chosen token on the export link as well, and none on it before one is chosen', () => {
+    vi.stubGlobal('document', fakeDocument());
+    const exportHref = () => {
+      const link = descendants(renderQueries(PROJECT)).find((n) => n.tag === 'a' && n.textContent === 'Export questions');
+      return new URL(link?.getAttribute('href') ?? '', 'http://panel.test');
+    };
+    expect(exportHref().pathname).toBe('/api/projects/p1/queries/export');
+    expect(exportHref().searchParams.has('token')).toBe(false);
+    state.queries.token = TOKEN;
+    expect(exportHref().searchParams.get('token')).toBe(TOKEN);
+  });
+
+  it('does not carry the token over to another project', async () => {
+    state.queries.token = TOKEN;
+    state.queries.projectId = 'other';
+    await loadQuerySummary();
+    expect(state.queries.token).toBeNull();
+    expect(sent()[0].searchParams.has('token')).toBe(false);
   });
 });
 

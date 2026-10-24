@@ -533,11 +533,131 @@
             </select>
             <span class="field-hint">An expired token is refused and stays listed until you revoke it. Never means it works until it is revoked.</span>
           </label>
+          <label class="field">
+            <span class="field-label">Allowed addresses <span class="muted">— optional</span></span>
+            <textarea name="allowedCidrs" rows="3" spellcheck="false" autocomplete="off" placeholder="10.0.0.0/8&#10;203.0.113.7/32"></textarea>
+            <span class="field-hint">One address or range (CIDR) per line, up to 32. The token is refused from anywhere else. Leave empty for no restriction. Not available while the server runs with <code>TRUST_PROXY=1</code>. The address checked is the one the server's socket sees; behind a reverse proxy that is the proxy's address.</span>
+          </label>
           <p id="token-error" class="form-error" role="alert" hidden></p>
         </div>
         <div class="dialog-foot">
           <button type="button" class="ghost" id="token-cancel">Cancel</button>
           <button type="submit" class="primary" id="token-submit">Create token</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="golden-dialog" class="dialog" aria-labelledby="golden-title">
+      <form id="golden-form" method="dialog" novalidate>
+        <div class="dialog-head">
+          <h2 id="golden-title">Add a golden question</h2>
+          <p class="muted">A question an agent would ask, and the file (and heading) that is the right answer.</p>
+        </div>
+        <div class="dialog-body">
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">Key</span>
+              <input name="key" autocomplete="off" spellcheck="false" maxlength="100" placeholder="reset-password" />
+              <span class="field-hint" id="golden-key-hint"></span>
+            </label>
+            <label class="field">
+              <span class="field-label">Language</span>
+              <select name="lang">
+                <option value="en" selected>English</option>
+                <option value="tr">Turkish</option>
+              </select>
+            </label>
+          </div>
+          <label class="field">
+            <span class="field-label">Question</span>
+            <textarea name="query" rows="3" maxlength="4000" placeholder="How do I reset my password?"></textarea>
+          </label>
+          <label class="field">
+            <span class="field-label">Expected file</span>
+            <input name="expectFile" autocomplete="off" spellcheck="false" maxlength="1024" placeholder="guides/account.md" />
+            <span class="field-hint">The path as it appears in search results.</span>
+          </label>
+          <label class="field">
+            <span class="field-label">Expected heading (optional)</span>
+            <input name="expectHeading" autocomplete="off" maxlength="1024" placeholder="Resetting a password" />
+          </label>
+          <label class="field">
+            <span class="field-label">Tags (optional)</span>
+            <input name="tags" autocomplete="off" placeholder="account, how-to" />
+            <span class="field-hint">Separate tags with commas.</span>
+          </label>
+          <label class="field">
+            <span class="field-label">Note (optional)</span>
+            <textarea name="note" rows="2" maxlength="4000"></textarea>
+          </label>
+          <p id="golden-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-foot">
+          <button type="button" class="ghost" id="golden-cancel">Cancel</button>
+          <button type="submit" class="primary" id="golden-submit">Add question</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="quota-dialog" class="dialog">
+      <form id="quota-form" method="dialog" novalidate>
+        <div class="dialog-head">
+          <h2>Project quotas</h2>
+          <p class="muted">Leave a field empty to follow the instance default. Enter <code>0</code> for no limit. Only the fields you change are saved.</p>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span class="field-label">Documents</span>
+            <input name="documents" inputmode="numeric" autocomplete="off" placeholder="instance default" />
+            <span class="field-hint" id="quota-documents-now"></span>
+          </label>
+          <label class="field">
+            <span class="field-label">Chunks</span>
+            <input name="chunks" inputmode="numeric" autocomplete="off" placeholder="instance default" />
+            <span class="field-hint" id="quota-chunks-now"></span>
+          </label>
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">Upload storage</span>
+              <input name="uploadBytes" inputmode="numeric" autocomplete="off" placeholder="instance default" />
+              <span class="field-hint" id="quota-uploadBytes-now"></span>
+            </label>
+            <label class="field">
+              <span class="field-label">Unit</span>
+              <select name="uploadBytesUnit">
+                <option value="bytes">bytes</option>
+                <option value="KiB">KiB</option>
+                <option value="MiB" selected>MiB</option>
+                <option value="GiB">GiB</option>
+              </select>
+            </label>
+          </div>
+          <p id="quota-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-foot">
+          <button type="button" class="ghost" id="quota-cancel">Cancel</button>
+          <button type="submit" class="primary" id="quota-submit">Save limits</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="networks-dialog" class="dialog">
+      <form id="networks-form" method="dialog" novalidate>
+        <div class="dialog-head">
+          <h2>Allowed addresses</h2>
+          <p class="muted">Where the token <strong id="networks-for"></strong> may be used from. A request from any other address is refused.</p>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span class="field-label">Addresses or ranges</span>
+            <textarea name="allowedCidrs" rows="5" spellcheck="false" autocomplete="off" placeholder="10.0.0.0/8&#10;203.0.113.7/32"></textarea>
+            <span class="field-hint">One address or range (CIDR) per line, up to 32. Empty removes the restriction. Not available while the server runs with <code>TRUST_PROXY=1</code>. The address checked is the one the server's socket sees; behind a reverse proxy that is the proxy's address.</span>
+          </label>
+          <p id="networks-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-foot">
+          <button type="button" class="ghost" id="networks-cancel">Cancel</button>
+          <button type="submit" class="primary" id="networks-submit">Save</button>
         </div>
       </form>
     </dialog>

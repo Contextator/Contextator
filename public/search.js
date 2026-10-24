@@ -217,6 +217,7 @@ function results(s) {
             title: `Cosine similarity — shown, not used to rank · chunk #${hit.chunkIndex} of ${hit.title}`,
           }),
         ]),
+        sourceLine(hit),
         // The neighbours are rendered inside the same block and dimmed, because that is what they
         // are: the passage around the excerpt, carrying no rank and no score of their own.
         el('pre', { class: 'hit-body' }, [
@@ -226,6 +227,50 @@ function results(s) {
         ]),
       ]),
     ),
+  ]);
+}
+
+/**
+ * The link the server stored for a hit, or `null` when it is not a plain web address. The server has
+ * already normalised it (ADR-0116); the check is repeated here because the value ends up in an `href`,
+ * and a `javascript:` URL in one is the difference between a link and a script.
+ */
+export function safeSourceUrl(value) {
+  if (typeof value !== 'string') return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `2026-03-14` for an ISO timestamp, in UTC so the same day shows for every reader. */
+export function modifiedDay(iso) {
+  if (typeof iso !== 'string') return null;
+  const at = new Date(iso);
+  return Number.isNaN(at.getTime()) ? null : at.toISOString().slice(0, 10);
+}
+
+/**
+ * Where the excerpt's document came from and when it last changed there (ADR-0116). Nothing is
+ * drawn for a local directory or an upload, which carry neither, so those hits look as they did.
+ * `stale` is the server's own verdict (SOURCE_STALE_AFTER_DAYS); the panel does not recompute it.
+ */
+function sourceLine(hit) {
+  const href = safeSourceUrl(hit.sourceUrl);
+  const day = modifiedDay(hit.sourceModifiedAt);
+  if (!href && !day) return null;
+  return el('div', { class: 'hit-source' }, [
+    href ? el('a', { class: 'hit-source-link', href, target: '_blank', rel: 'noopener noreferrer', title: href, text: href }) : null,
+    day ? el('span', { class: 'hit-source-date', text: `modified ${day}`, title: new Date(hit.sourceModifiedAt).toLocaleString() }) : null,
+    hit.stale === true
+      ? el('span', {
+          class: 'pill small stale',
+          text: 'long unchanged',
+          title: 'Not modified at its source for longer than this instance considers fresh (SOURCE_STALE_AFTER_DAYS). It may be out of date.',
+        })
+      : null,
   ]);
 }
 

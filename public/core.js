@@ -50,6 +50,16 @@ export const state = {
   membersFor: null,
   mcpTokens: [], // MCP tokens of the selected project
   mcpTokensFor: null,
+  /** The quota panel (quotas.js): limits and usage of the selected project, from its detail route (ADR-0117). */
+  quotas: {
+    projectId: null,
+    /** `{ documents, chunks, uploadBytes }`, each `{ limit, used, inherited }`; null until read. */
+    data: null,
+    /** The project and its counts the data answers; a change of either refetches. */
+    loadedKey: null,
+    status: 'idle', // 'idle' | 'loading' | 'done' | 'error'
+    error: '',
+  },
   users: [], // the account list, only while the users view is open
   usersLoaded: false,
   apiTokens: [], // the signed-in account's own bearer API tokens (ADR-0076), only while ~tokens is open
@@ -97,6 +107,8 @@ export const state = {
     tab: 'questions', // 'questions' | 'documents' | 'chunks' | 'volume'
     days: 7,
     actor: 'mcp',
+    /** An MCP token id (0.4-06): only that token's searches are read. null is every token. */
+    token: null,
     /** `<model>@<generation>@<floor|none>`, or null for whichever configuration the server picked. */
     configKey: null,
     /** The request the data in hand answers; a change of any part of it is what refetches. */
@@ -110,6 +122,26 @@ export const state = {
     floorPending: undefined,
     /** What floorPending would have done to the window: { key, status, data, error }. */
     floorPreview: null,
+  },
+  /** The suggested relevance floors of the open project (floor-suggestions.js): `data` is the route's `{ current, suggestions }`. */
+  floorSuggestions: {
+    projectId: null,
+    status: 'idle', // 'idle' | 'loading' | 'done' | 'error'
+    error: '',
+    data: null,
+    /** What the last measure/apply said, when it was an outcome rather than a result (too little data, busy, …). */
+    notice: '',
+    busy: false,
+    showAll: false,
+  },
+  /** The golden questions of the open project (golden.js): the stored set, how much of it is drawn, and which row awaits a delete confirmation. */
+  golden: {
+    projectId: null,
+    status: 'idle', // 'idle' | 'loading' | 'done' | 'error'
+    error: '',
+    questions: [],
+    shown: 25,
+    confirmDelete: null,
   },
   /**
    * The audit panel (audit.js), whole, and here for the reason state.search and state.queries are:
