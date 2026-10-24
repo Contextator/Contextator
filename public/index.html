@@ -533,6 +533,11 @@
             </select>
             <span class="field-hint">An expired token is refused and stays listed until you revoke it. Never means it works until it is revoked.</span>
           </label>
+          <label class="field">
+            <span class="field-label">Allowed addresses <span class="muted">— optional</span></span>
+            <textarea name="allowedCidrs" rows="3" spellcheck="false" autocomplete="off" placeholder="10.0.0.0/8&#10;203.0.113.7/32"></textarea>
+            <span class="field-hint">One address or range (CIDR) per line, up to 32. The token is refused from anywhere else. Leave empty for no restriction. Not available while the server runs with <code>TRUST_PROXY=1</code>.</span>
+          </label>
           <p id="token-error" class="form-error" role="alert" hidden></p>
         </div>
         <div class="dialog-foot">
@@ -580,6 +585,27 @@
         <div class="dialog-foot">
           <button type="button" class="ghost" id="quota-cancel">Cancel</button>
           <button type="submit" class="primary" id="quota-submit">Save limits</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="networks-dialog" class="dialog">
+      <form id="networks-form" method="dialog" novalidate>
+        <div class="dialog-head">
+          <h2>Allowed addresses</h2>
+          <p class="muted">Where the token <strong id="networks-for"></strong> may be used from. A request from any other address is refused.</p>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <span class="field-label">Addresses or ranges</span>
+            <textarea name="allowedCidrs" rows="5" spellcheck="false" autocomplete="off" placeholder="10.0.0.0/8&#10;203.0.113.7/32"></textarea>
+            <span class="field-hint">One address or range (CIDR) per line, up to 32. Empty removes the restriction. Not available while the server runs with <code>TRUST_PROXY=1</code>.</span>
+          </label>
+          <p id="networks-error" class="form-error" role="alert" hidden></p>
+        </div>
+        <div class="dialog-foot">
+          <button type="button" class="ghost" id="networks-cancel">Cancel</button>
+          <button type="submit" class="primary" id="networks-submit">Save</button>
         </div>
       </form>
     </dialog>

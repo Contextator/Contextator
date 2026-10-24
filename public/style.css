@@ -2843,3 +2843,26 @@ body.auth .gate-card a {
 .quota-meter.none {
   opacity: 0.45;
 }
+
+/* ---------- MCP token address allowlist ---------- */
+
+.token-networks {
+  overflow-wrap: anywhere;
+}
+
+.token-networks.restricted {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.token-limits {
+  margin-top: 14px;
+  line-height: 1.5;
+}
+
+.token-limits code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}

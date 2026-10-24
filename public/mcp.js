@@ -103,6 +103,45 @@ function tokenExpiry(t) {
   return el('span', { class: 'sub', text: `expires ${timeUntil(t.expiresAt)}`, title: `Expires ${when}` });
 }
 
+/** The most ranges the API accepts on one token. */
+export const MAX_ALLOWED_CIDRS = 32;
+
+/**
+ * The textarea's content as the list the API takes: one range per line, commas and spaces also split,
+ * repeats dropped. Empty is `null` — "from anywhere" — which the PATCH route reads as removing the
+ * restriction. Whether each entry is a real range is the database's to say (it validates and
+ * normalises `cidr`); the server's message is shown as it comes.
+ */
+export function parseNetworkList(text) {
+  const entries = [
+    ...new Set(
+      String(text ?? '')
+        .split(/[\s,]+/)
+        .filter(Boolean),
+    ),
+  ];
+  if (entries.length > MAX_ALLOWED_CIDRS)
+    return { ok: false, message: `A token takes at most ${MAX_ALLOWED_CIDRS} ranges; this has ${entries.length}.` };
+  return { ok: true, value: entries.length ? entries : null };
+}
+
+/** A token's network binding as words: where it works from. */
+export function describeNetworks(token) {
+  const list = token.allowedCidrs ?? [];
+  if (list.length === 0) return { restricted: false, text: 'works from any address' };
+  const shown = list.length > 2 ? `${list.slice(0, 2).join(', ')} +${list.length - 2} more` : list.join(', ');
+  return { restricted: true, text: `only from ${shown}` };
+}
+
+function networkNote(token) {
+  const { restricted, text } = describeNetworks(token);
+  return el('span', {
+    class: `sub token-networks${restricted ? ' restricted' : ''}`,
+    text,
+    title: restricted ? `Allowed addresses: ${token.allowedCidrs.join(', ')}` : 'No address restriction: any client holding the token can use it',
+  });
+}
+
 export function renderMcpAccess(project) {
   const mode = modeOf(project);
   const tokens = state.mcpTokensFor === project.id ? state.mcpTokens : [];
@@ -112,7 +151,7 @@ export function renderMcpAccess(project) {
   const rows = tokens.map((t) =>
     el('div', { class: 'user-row token-row mcp-token-row' }, [
       el('span', { class: 'source-glyph token', 'aria-hidden': 'true', text: 'KEY' }),
-      el('span', { class: 'source-cell' }, [el('code', { text: t.prefix }), el('span', { class: 'sub', text: t.name || 'unnamed' })]),
+      el('span', { class: 'source-cell' }, [el('code', { text: t.prefix }), el('span', { class: 'sub', text: t.name || 'unnamed' }), networkNote(t)]),
       // Third, so it is still on screen when a narrow layout drops the columns after it.
       tokenExpiry(t),
       el('span', { class: 'sub', text: `created ${relativeTime(t.createdAt)}` }),
@@ -120,7 +159,18 @@ export function renderMcpAccess(project) {
       el(
         'span',
         { class: 'source-actions' },
-        mayMint ? [el('button', { type: 'button', class: 'danger small', text: 'Revoke', onclick: () => revoke(project, t) })] : [],
+        mayMint
+          ? [
+              el('button', {
+                type: 'button',
+                class: 'ghost small',
+                text: 'Networks',
+                'aria-label': `Edit the address allowlist of ${t.name || t.prefix}`,
+                onclick: () => openNetworksDialog(project, t),
+              }),
+              el('button', { type: 'button', class: 'danger small', text: 'Revoke', onclick: () => revoke(project, t) }),
+            ]
+          : [],
       ),
     ]),
   );
@@ -161,6 +211,21 @@ export function renderMcpAccess(project) {
       : null,
 
     rows.length ? el('div', {}, rows) : null,
+
+    el('p', { class: 'field-hint token-limits' }, [
+      el('strong', { text: 'Rate limits. ' }),
+      'Requests are counted per minute for each token, and for each address on an open project. The limits are instance-wide settings (',
+      el('code', { text: 'MCP_RATE_LIMIT_PER_MINUTE' }),
+      ', ',
+      el('code', { text: 'MCP_RATE_LIMIT_ANON_PER_MINUTE' }),
+      ', and per tool ',
+      el('code', { text: 'MCP_RATE_LIMIT_TOOLS' }),
+      '), not set per token, so there is nothing to edit here. A client over its limit gets ',
+      el('code', { text: '429' }),
+      ' with a ',
+      el('code', { text: 'Retry-After' }),
+      ' header.',
+    ]),
 
     mayMint
       ? el('div', { class: 'token-foot' }, [
@@ -217,6 +282,19 @@ function openTokenDialog(project) {
   form.elements.name.focus();
 }
 
+let networksTarget = null;
+
+function openNetworksDialog(project, token) {
+  networksTarget = { project, token };
+  const form = $('#networks-form');
+  form.reset();
+  $('#networks-for').textContent = token.name ? `${token.name} (${token.prefix})` : token.prefix;
+  form.elements.allowedCidrs.value = (token.allowedCidrs ?? []).join('\n');
+  $('#networks-error').hidden = true;
+  openDialog($('#networks-dialog'));
+  form.elements.allowedCidrs.focus();
+}
+
 /**
  * The one moment the token exists outside the client's config, so hand over something pasteable.
  *
@@ -240,6 +318,7 @@ export function showMcpSecret(project, secret) {
 }
 
 export function initMcpUi() {
+  initNetworksUi();
   const dialog = $('#token-dialog');
   const form = $('#token-form');
   const errorNode = $('#token-error');
@@ -255,12 +334,58 @@ export function initMcpUi() {
     try {
       const data = new FormData(form);
       const days = Number(data.get('expiresInDays'));
+      const networks = parseNetworkList(data.get('allowedCidrs'));
+      if (!networks.ok) {
+        errorNode.textContent = networks.message;
+        errorNode.hidden = false;
+        return;
+      }
       const { secret } = await api(`/api/projects/${dialogProject.id}/mcp-tokens`, {
         method: 'POST',
-        body: { name: String(data.get('name')).trim(), expiresInDays: TOKEN_LIFETIMES.includes(days) ? days : null },
+        body: { name: String(data.get('name')).trim(), expiresInDays: TOKEN_LIFETIMES.includes(days) ? days : null, allowedCidrs: networks.value },
       });
       closeDialog(dialog);
       showMcpSecret(dialogProject, secret);
+      await loadMcpTokens(true);
+    } catch (err) {
+      errorNode.textContent = err.message;
+      errorNode.hidden = false;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+}
+
+/** The allowlist dialog: replaces the token's list; an empty box removes the restriction. */
+function initNetworksUi() {
+  const dialog = $('#networks-dialog');
+  const form = $('#networks-form');
+  const errorNode = $('#networks-error');
+  $('#networks-cancel').addEventListener('click', () => closeDialog(dialog));
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorNode.hidden = true;
+    const networks = parseNetworkList(form.elements.allowedCidrs.value);
+    if (!networks.ok) {
+      errorNode.textContent = networks.message;
+      errorNode.hidden = false;
+      return;
+    }
+    const { project, token } = networksTarget;
+    const submit = $('#networks-submit');
+    submit.disabled = true;
+    try {
+      const saved = await api(`/api/projects/${project.id}/mcp-tokens/${token.id}`, {
+        method: 'PATCH',
+        body: { allowedCidrs: networks.value },
+      });
+      closeDialog(dialog);
+      toast(
+        saved.allowedCidrs?.length
+          ? `${token.name || token.prefix} is limited to ${saved.allowedCidrs.join(', ')}`
+          : `${token.name || token.prefix} works from any address`,
+      );
       await loadMcpTokens(true);
     } catch (err) {
       errorNode.textContent = err.message;

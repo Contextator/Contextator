@@ -187,6 +187,25 @@ describe('the dashboard markup and its modules agree', () => {
     for (const hash of linked) expect(app).toContain(`raw === '${hash}'`);
   });
 
+  /**
+   * The token and quota dialogs live in index.html, outside `#detail`, so they survive the poll. Each
+   * form the panel opens needs its fields, or the submit handler reads a field that is not there.
+   */
+  it('gives the allowlist and quota dialogs the fields their handlers read', async () => {
+    const html = await readFile(new URL('index.html', PUBLIC), 'utf8');
+    const mcp = await readFile(new URL('mcp.js', PUBLIC), 'utf8');
+    const quotas = await readFile(new URL('quotas.js', PUBLIC), 'utf8');
+    for (const name of ['allowedCidrs']) {
+      expect(mcp).toContain(`'${name}'`);
+      expect(html).toContain(`name="${name}"`);
+    }
+    for (const name of ['documents', 'chunks', 'uploadBytes', 'uploadBytesUnit']) {
+      expect(quotas).toContain(name);
+      expect(html).toContain(`name="${name}"`);
+    }
+    expect(html.match(/name="allowedCidrs"/g)).toHaveLength(2); // create dialog + edit dialog
+  });
+
   it('loads every module index.html needs through the one entry point', async () => {
     const html = await readFile(new URL('index.html', PUBLIC), 'utf8');
     const scripts = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1]);
