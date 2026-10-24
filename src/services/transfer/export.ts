@@ -19,10 +19,12 @@ import {
   type ProjectRow,
 } from '../../db/schema.js';
 import { sourceCurrentDir } from '../data-dir.js';
+import { formatGoldenJsonl, listGoldenQuestions } from '../golden-questions.js';
 import { PROBE_TOKEN_KEY, type SourceType, withoutUrlCredentials } from '../sources.js';
 import {
   DATA_PREFIX,
   DOCUMENTS_ENTRY,
+  GOLDEN_QUESTIONS_ENTRY,
   MANIFEST_ENTRY,
   MANIFEST_KIND,
   MANIFEST_VERSION,
@@ -208,6 +210,11 @@ export async function exportProject(
     const written = await writeDocuments(db, staging, project.id, generation);
     const uploads = await copyUploadTrees(config, staging, project.id, sources);
 
+    // Written only when there is something to write: the entry is optional on the way back in, and a
+    // project that never had questions should export exactly what it exported before they existed.
+    const questions = await listGoldenQuestions(db, project.id);
+    if (questions.length > 0) await fs.writeFile(path.join(staging, GOLDEN_QUESTIONS_ENTRY), formatGoldenJsonl(questions));
+
     const manifest: Manifest = {
       kind: MANIFEST_KIND,
       manifestVersion: MANIFEST_VERSION,
@@ -229,7 +236,7 @@ export async function exportProject(
         maxUploadBytes: project.maxUploadBytes,
         lastIndexedAt: project.lastIndexedAt?.toISOString() ?? null,
       },
-      counts: { sources: sources.length, documents: written.documents, chunks: written.chunks, ...uploads },
+      counts: { sources: sources.length, documents: written.documents, chunks: written.chunks, ...uploads, goldenQuestions: questions.length },
       excluded: await excludedCounts(db, project.id),
       sources: sources.map((s) => ({ name: s.name, type: s.type as SourceType, needs: needsFor(s) })),
     };
@@ -239,6 +246,7 @@ export async function exportProject(
 
     // The manifest first, so that an importer reading the stream in order meets it before any data.
     const entries = [MANIFEST_ENTRY, README_ENTRY, SOURCES_ENTRY, DOCUMENTS_ENTRY];
+    if (questions.length > 0) entries.push(GOLDEN_QUESTIONS_ENTRY);
     if (uploads.uploadFiles > 0) entries.push(DATA_PREFIX);
 
     return {

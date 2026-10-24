@@ -113,6 +113,8 @@ export const UNENCRYPTED_SECRET_COLUMNS: Readonly<Record<string, string>> = {
     'A counter name ("tok:<token id>", "ip:<project id>:<address>"), not key material. The token id is not the token, and a row lives ten minutes at most. Here only because the guard test matches column names.',
   'settings.key':
     'The name of a setting — "schema_version", not key material. It is here only because the guard test matches column names and would otherwise ask about it on every run.',
+  'golden_questions.key':
+    'The stable name of an eval question ("pricing-tiers"), the `id` of a golden.jsonl row — not key material. Here only because the guard test matches column names.',
 };
 
 /**
