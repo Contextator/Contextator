@@ -613,11 +613,7 @@ async function measureCorpus(
   step(`floor-calibration: ${spec.name}: generating the product's floor suggestion`);
   // No `rerank`: the server never passes one when it measures (src/server.ts, src/admin/queries-routes.ts),
   // so the suggestion measured here must come from the same path the product takes.
-  const product = await generateFloorSuggestion(
-    { db, embeddings, scan: scanFrom(config), selection: selectionFrom(config) },
-    projectId,
-    'operator',
-  );
+  const product = await generateFloorSuggestion({ db, embeddings, scan: scanFrom(config), selection: selectionFrom(config) }, projectId, 'operator');
   return { spec, chunks: indexed.chunks, measured, product };
 }
 
