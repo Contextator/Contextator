@@ -3,11 +3,17 @@ import path from 'node:path';
 
 import type { Config } from '../src/config.js';
 import { createEmbeddingProvider } from '../src/services/embeddings/index.js';
-import { type CalibrationSample, fitFloor, refusedCount } from '../src/services/floor-calibration.js';
+import {
+  type CalibrationSample,
+  type FloorSuggestionOutcome,
+  fitFloor,
+  generateFloorSuggestion,
+  refusedCount,
+} from '../src/services/floor-calibration.js';
 import { createReranker } from '../src/services/reranker.js';
 import { belowRelevanceFloor, isIdentifierShaped } from '../src/services/relevance.js';
 import type { TextSearchConfig } from '../src/services/text-search.js';
-import type { SearchHit } from '../src/services/vector-store.js';
+import { scanFrom, selectionFrom, type SearchHit } from '../src/services/vector-store.js';
 import {
   EVAL_DIR,
   indexDocuments,
@@ -94,6 +100,8 @@ interface CorpusRun {
   spec: CorpusSpec;
   chunks: number;
   measured: Measured[];
+  /** What the product's own `generateFloorSuggestion` made of the same index, with no labelled question. */
+  product: FloorSuggestionOutcome;
 }
 
 interface Options {
@@ -550,6 +558,28 @@ function analyse(runs: readonly CorpusRun[]): { markdown: string; summary: unkno
 
   out.push(
     '',
+    '### Product path — `generateFloorSuggestion` against the floor fitted from labelled answerable questions',
+    '',
+    'The suggestion is made from probes taken out of the indexed text alone; the reference is the `0 refused` column above.',
+    '',
+    '| corpus | probes | suggested | fitted from labelled questions | gap |',
+    '|---|---:|---:|---:|---:|',
+  );
+  for (const run of runs) {
+    const reference = fitted[run.spec.name].zero;
+    if (run.product.status === 'created') {
+      const suggested = run.product.suggestion.suggestedFloor;
+      out.push(
+        `| ${run.spec.name} | ${run.product.suggestion.basis.probes} | ${fmt(suggested)} | ${fmt(reference)} | ${suggested - reference >= 0 ? '+' : ''}${(suggested - reference).toFixed(3)} |`,
+      );
+      Object.assign(summary[run.spec.name] as object, { product: { suggested, reference } });
+    } else {
+      out.push(`| ${run.spec.name} | - | ${run.product.status} | ${fmt(reference)} | - |`);
+    }
+  }
+
+  out.push(
+    '',
     `Fitted floors: ${Object.entries(fitted)
       .map(([name, f]) => `${name} ${fmt(f.zero)} / ${fmt(f.one)}`)
       .join('; ')}.`,
@@ -580,7 +610,13 @@ async function measureCorpus(
     const index = expected === undefined ? -1 : hits.findIndex((h) => h.file === expected);
     measured.push({ probe, hits, top: hits[0]?.score ?? Number.NaN, correctRank: index === -1 ? null : index + 1 });
   }
-  return { spec, chunks: indexed.chunks, measured };
+  step(`floor-calibration: ${spec.name}: generating the product's floor suggestion`);
+  const product = await generateFloorSuggestion(
+    { db, embeddings, scan: scanFrom(config), selection: selectionFrom(config), rerank: reranker ?? undefined },
+    projectId,
+    'operator',
+  );
+  return { spec, chunks: indexed.chunks, measured, product };
 }
 
 /** The date the run happened where it happened, not in UTC: the heading is what a BASELINE section is dated by. */

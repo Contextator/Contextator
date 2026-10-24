@@ -14,7 +14,10 @@ ships, that stops.
 
 - **Relevance floor suggestions.** After a re-index caused by an embedding-model change, and on request
   (`POST /api/projects/:id/score-floor/suggestions`, manager), the server measures the project with the floor
-  off and stores the highest floor that still answers every one of its own section headings. Suggestions are
+  off and stores the highest floor that still answers a fragment of each of up to 100 of its own chunks (the
+  last eight words of a sentence, never the heading). The suggestion is an upper bound: on the four reference
+  corpora it came out within 0.006 of the floor fitted from labelled questions on two and 0.03 to 0.04 above it
+  on the other two. Suggestions are
   listed (`GET`, viewer) and adopted only by `POST .../suggestions/:suggestionId/apply` (manager); the project's
   floor is never changed automatically, and a suggestion from an earlier model or index generation is refused.
   The fit is shared with `scripts/floor-calibration.ts`. Migration `0024` adds the `floor_suggestions` table

@@ -105,13 +105,25 @@ A relevance floor is a number about one encoder, so a project's own floor (`PATC
 /api/projects/:id/score-floor`) stops meaning anything once its index is rebuilt with another model. When a
 re-index finishes because the model changed, the server measures the project against its new index and
 stores a **floor suggestion**: the highest floor, on a 0.001 grid from 0.6 to 0.99, that still answers
-every section heading of the project when each is asked as a question. A manager can also ask for one at any
+every probe, where a probe is the last eight words of a sentence taken from one of up to 100 of the
+project's own chunks (never the chunk's heading, which the chunk is embedded with and would match too well).
+A manager can also ask for one at any
 time with `POST /api/projects/:id/score-floor/suggestions`, read them with `GET` on the same path, and adopt
 one with `POST .../suggestions/:suggestionId/apply`. Nothing is applied automatically: the project keeps
 the floor it had until a manager applies a suggestion, and a suggestion measured against an earlier model
-or index generation is refused. A project with fewer than 20 headed sections is not measured and gets no
-suggestion; the response says so. The same arithmetic is what `scripts/floor-calibration.ts` runs against
-labelled question sets.
+or index generation is refused. A project that yields fewer than 20 probes (little prose, or little content)
+is not measured and gets no suggestion; the response says so. The same arithmetic is what
+`scripts/floor-calibration.ts` runs against labelled question sets.
+
+**Treat a suggestion as an upper bound.** A probe is a fragment of the text it should find, which scores
+higher than a question a person would write about it, so the suggested floor can sit above the one that
+real questions would justify, and a floor set too high refuses questions the project does answer. Measured
+against the floor fitted from labelled questions on the four reference corpora, the suggestion was 0.808
+against 0.804 (the repository's synthetic documentation), 0.805 against 0.811 (the product's user wiki),
+0.802 against 0.775 (XQuAD, Turkish) and 0.775 against 0.738 (XQuAD, English). Before applying one,
+look at what it would have refused among your logged searches with `GET
+/api/projects/:id/score-floor/preview?floor=<n>`, and lower it by a few hundredths when it refuses
+something the project answers.
 
 ## Tracing (OpenTelemetry)
 

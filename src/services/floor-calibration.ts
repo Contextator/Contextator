@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.js';
 import { chunks, floorSuggestions, projects, type FloorSuggestionRow } from '../db/schema.js';
 import { ConflictError, NotFoundError } from './projects.js';
@@ -16,7 +16,10 @@ import type { SearchHit } from './vector-store.js';
  * can ask for that number for their own project — in particular right after a model change, when the
  * old floor means nothing (a cosine similarity is a number about one encoder, ADR-0037).
  *
- * **A suggestion is advice.** Nothing here writes `projects.score_floor` except
+ * **A suggestion is advice, and an upper bound.** A probe is a fragment of the text it should find, so it
+ * scores higher than a question a person writes about the same passage; measured against the floor fitted
+ * from labelled questions, the product path came out +0.004, -0.006, +0.027 and +0.037 on the four reference
+ * corpora (`scripts/floor-calibration.ts` prints the table). Nothing here writes `projects.score_floor` except
  * {@link applyFloorSuggestion}, which only a manager's request reaches and which refuses a suggestion
  * measured against a different encoder or generation than the project now has.
  */
@@ -25,10 +28,16 @@ import type { SearchHit } from './vector-store.js';
 export const FLOOR_GRID_MIN_MILLI = 600;
 export const FLOOR_GRID_MAX_MILLI = 990;
 
-/** Questions fewer than this say too little about a corpus to put a refusal rule on it. */
+/** Probes fewer than this say too little about a corpus to put a refusal rule on it. */
 export const MIN_CALIBRATION_PROBES = 20;
-/** The most questions one suggestion asks; each is an embedding and a search. */
+/** The most probes one suggestion asks; each is an embedding and a search. */
 export const MAX_CALIBRATION_PROBES = 100;
+/** Words kept from the end of the sampled sentence: enough to name a topic, too few to repeat the passage. */
+export const PROBE_WORDS = 8;
+/** A sentence shorter than this carries no topic of its own (a caption, a list stub). */
+export const MIN_PROBE_SENTENCE_WORDS = 6;
+/** Chunks read to find {@link MAX_CALIBRATION_PROBES} usable probes; tables and code leave some without a sentence. */
+const PROBE_CANDIDATE_CHUNKS = MAX_CALIBRATION_PROBES * 3;
 /** Suggestions kept per project; the oldest are dropped when a new one is written. */
 export const MAX_KEPT_SUGGESTIONS = 10;
 
@@ -90,8 +99,8 @@ export function summariseTopScores(samples: readonly CalibrationSample[]): TopSc
 
 /** What a suggestion was reached from — stored beside it so a reader can judge it. */
 export interface FloorSuggestionBasis {
-  /** `headings`: the project's own section headings, asked as questions the corpus certainly answers. */
-  method: 'headings';
+  /** `sentences`: a few words of running prose taken from a section, asked as a question that section certainly answers. */
+  method: 'sentences';
   probes: number;
   /** The share of answerable questions the suggested floor may refuse. `0` is "none of them". */
   allowedShare: number;
@@ -127,26 +136,76 @@ function toView(row: FloorSuggestionRow): FloorSuggestionView {
 }
 
 /**
- * The questions to ask: the project's own section breadcrumbs from the live generation, in an order
- * fixed by their hash so that two runs over the same index ask the same questions. A heading is the
- * one thing every section is certain to answer, which is what makes it a usable stand-in for an
- * answerable question when nobody has labelled any.
+ * The prose of a chunk as sentences: code fences, tables, headings, quotes and list markers are dropped,
+ * links keep their text. Only sentences with a topic of their own ({@link MIN_PROBE_SENTENCE_WORDS}) stay.
+ */
+function proseSentences(content: string): string[] {
+  const lines: string[] = [];
+  let inFence = false;
+  for (const raw of content.split('\n')) {
+    const line = raw.trim();
+    if (/^(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence || line === '' || /^[|#>]/.test(line)) continue;
+    lines.push(
+      line
+        .replace(/^([-*+]|\d+[.)])\s+/, '')
+        .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+        .replace(/[*_`]/g, '')
+        .trim(),
+    );
+  }
+  return lines
+    .join(' ')
+    .split(/(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.split(/\s+/).length >= MIN_PROBE_SENTENCE_WORDS);
+}
+
+/**
+ * One probe from one chunk: the last {@link PROBE_WORDS} words of the chunk's middle sentence, or `null`
+ * when the chunk has no prose (a table, a code listing).
+ *
+ * The probe must not carry the chunk's breadcrumb. A chunk is embedded as "breadcrumb, blank line,
+ * content", so a query built from the breadcrumb asks for the chunk's own prefix and scores far above
+ * what a real question does — measured on the reference corpora, the headings version fitted 0.845
+ * against 0.804 fitted from labelled questions. A fragment of the body has no such prefix to match.
+ */
+export function probeFromChunk(content: string): string | null {
+  const sentences = proseSentences(content);
+  if (sentences.length === 0) return null;
+  const middle = sentences[Math.floor((sentences.length - 1) / 2)];
+  return middle.split(/\s+/).slice(-PROBE_WORDS).join(' ');
+}
+
+/**
+ * The probes to ask: one fragment of prose per chunk of the live generation, over chunks taken in an
+ * order fixed by their id's hash so that two runs over the same index ask the same probes. A passage
+ * is the one thing its own fragment is certain to find, which makes it a usable stand-in for an
+ * answerable question when nobody has labelled any. Duplicates are asked once.
  */
 export async function calibrationQueries(db: Db, projectId: string, generation: number, limit = MAX_CALIBRATION_PROBES): Promise<string[]> {
   const rows = await db
-    .select({ headingPath: chunks.headingPath })
+    .select({ content: chunks.content })
     .from(chunks)
-    .where(and(eq(chunks.projectId, projectId), eq(chunks.indexGeneration, generation), ne(chunks.headingPath, '')))
-    .groupBy(chunks.headingPath)
-    .orderBy(sql`md5(${chunks.headingPath})`)
-    .limit(limit);
-  return rows.map((row) => row.headingPath.split(' > ').join(' ').trim()).filter((query) => query.length > 0);
+    .where(and(eq(chunks.projectId, projectId), eq(chunks.indexGeneration, generation)))
+    .orderBy(sql`md5(${chunks.id}::text)`)
+    .limit(Math.max(limit, PROBE_CANDIDATE_CHUNKS));
+  const probes = new Set<string>();
+  for (const row of rows) {
+    const probe = probeFromChunk(row.content);
+    if (probe !== null) probes.add(probe);
+    if (probes.size >= limit) break;
+  }
+  return [...probes];
 }
 
 export type FloorSuggestionOutcome =
   | { status: 'created'; suggestion: FloorSuggestionView }
   | { status: 'project_gone' }
-  /** Too few sections to measure from — the project is empty, or a flat file with no headings. */
+  /** Too few passages to measure from — the project is empty, or holds little but tables and code. */
   | { status: 'insufficient_data'; probes: number; required: number }
   /** Even the bottom of the grid would refuse an answerable question: no floor is suggested, because `0` is not advice. */
   | { status: 'no_fit'; probes: number }
@@ -190,7 +249,7 @@ export async function generateFloorSuggestion(
   if (suggestedFloor === 0) return { status: 'no_fit', probes: samples.length };
 
   const basis: FloorSuggestionBasis = {
-    method: 'headings',
+    method: 'sentences',
     probes: samples.length,
     allowedShare,
     topScores: summariseTopScores(samples),

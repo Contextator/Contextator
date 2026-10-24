@@ -4,6 +4,8 @@ import {
   FLOOR_GRID_MAX_MILLI,
   FLOOR_GRID_MIN_MILLI,
   fitFloor,
+  PROBE_WORDS,
+  probeFromChunk,
   refusedCount,
   summariseTopScores,
 } from '../src/services/floor-calibration.js';
@@ -80,5 +82,44 @@ describe('summariseTopScores', () => {
 
   it('is null when nothing returned a hit', () => {
     expect(summariseTopScores([{ query: 'q', hits: [] }])).toBeNull();
+  });
+});
+
+describe('probeFromChunk', () => {
+  const prose =
+    'Workers pull jobs from the queue. The scheduler assigns each job to the least busy worker in the pool. Idle workers are stopped after ten minutes of silence.';
+
+  it(`is the last ${PROBE_WORDS} words of the middle sentence`, () => {
+    expect(probeFromChunk(prose)).toBe('each job to the least busy worker in the pool.'.split(' ').slice(-PROBE_WORDS).join(' '));
+  });
+
+  it('never carries a heading, a table, a code fence, a quote or a list marker', () => {
+    const content = [
+      '# Scheduler',
+      '| name | value |',
+      '| --- | --- |',
+      '```sh',
+      'npm run scheduler --verbose --no-color --workers=4',
+      '```',
+      '> a quoted remark that has more than six words in it',
+      '- Every worker reports its own heartbeat to the scheduler.',
+    ].join('\n');
+    expect(probeFromChunk(content)).toBe('worker reports its own heartbeat to the scheduler.'.split(' ').slice(-PROBE_WORDS).join(' '));
+  });
+
+  it('keeps the text of a link and drops its target and the emphasis marks', () => {
+    expect(probeFromChunk('See the [retry policy](https://example.com/retry) for **every** failed job in the queue.')).toBe(
+      'policy for every failed job in the queue.',
+    );
+  });
+
+  it('is null for a chunk with no sentence of its own', () => {
+    expect(probeFromChunk('| a | b |\n| - | - |\n| 1 | 2 |')).toBeNull();
+    expect(probeFromChunk('Too short.')).toBeNull();
+    expect(probeFromChunk('```\nconst value = compute(argument, other);\n```')).toBeNull();
+  });
+
+  it('shortens a sentence only from the front', () => {
+    expect(probeFromChunk('One two three four five six.')).toBe('One two three four five six.');
   });
 });

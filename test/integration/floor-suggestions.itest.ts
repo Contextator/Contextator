@@ -93,9 +93,9 @@ const TOPICS = [
   'xray',
 ];
 
-/** One short section per topic, so each heading is a question its own section answers. */
+/** One short section per topic, so the closing words of its sentence are a question its own section answers. */
 function guide(topics: readonly string[]): string {
-  const sections = topics.map((t) => `## Topic ${t}\n\nTopic ${t} explains how the ${t} stage of the pipeline is configured and run.\n`);
+  const sections = topics.map((t) => `## Topic ${t}\n\nOperators configure and run the pipeline stage called ${t}.\n`);
   return `# Pipeline guide\n\nWhat the pipeline does.\n\n${sections.join('\n')}`;
 }
 
@@ -172,7 +172,7 @@ describe('a suggestion for a project with enough sections', () => {
 
     expect(suggestion.trigger).toBe('model_change');
     expect(suggestion.embeddingModel).toBe(MODEL_ID);
-    expect(suggestion.basis.method).toBe('headings');
+    expect(suggestion.basis.method).toBe('sentences');
     expect(suggestion.basis.probes).toBeGreaterThanOrEqual(MIN_CALIBRATION_PROBES);
     expect(suggestion.suggestedFloor).toBeGreaterThanOrEqual(0.6);
     expect(suggestion.suggestedFloor).toBeLessThanOrEqual(0.99);
@@ -222,10 +222,21 @@ describe('a suggestion for a project with enough sections', () => {
     const projectId = await seedProject(TOPICS);
     expect(await calibrationQueries(db, projectId, 0)).toEqual(await calibrationQueries(db, projectId, 0));
   });
+
+  it('is asked fragments of the text, never a section heading', async () => {
+    const projectId = await seedProject(TOPICS);
+    const queries = await calibrationQueries(db, projectId, 0);
+    expect(queries.length).toBeGreaterThanOrEqual(MIN_CALIBRATION_PROBES);
+    for (const query of queries) {
+      expect(query).toMatch(/^configure and run the pipeline stage called [a-z]+\.$/);
+      expect(query).not.toMatch(/Topic|Pipeline guide/);
+    }
+    expect(new Set(queries).size).toBe(queries.length);
+  });
 });
 
 describe('a project that cannot be measured', () => {
-  it('has too few sections to ask', async () => {
+  it('has too few passages to ask', async () => {
     const projectId = await seedProject(TOPICS.slice(0, 3));
     const outcome = await generateFloorSuggestion(deps(), projectId, 'operator');
     expect(outcome).toMatchObject({ status: 'insufficient_data', required: MIN_CALIBRATION_PROBES });
