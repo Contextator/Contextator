@@ -282,7 +282,7 @@ export type FloorSuggestionOutcome =
   /** The project's chunks and this server's encoder are not in one space; the next run re-embeds them. */
   | { status: 'model_mismatch'; indexedWith: string; serverUses: string }
   | { status: 'not_indexed' }
-  /** A measurement of this project is already running, or the server is already running its share of them. */
+  /** A measurement of this project is running or queued, or the server is already running its share of them. */
   | { status: 'busy'; reason: 'project' | 'server' };
 
 /** How many projects may be measured at once: each probe is an embedding and a search, a hundred of them per run. */
