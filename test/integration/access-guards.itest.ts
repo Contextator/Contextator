@@ -302,6 +302,52 @@ describe('an open project', () => {
   });
 });
 
+/**
+ * The claim the anonymous limit rests on ([ADR-0122](../../../.ssot/ADR.md#adr-0122)): under every supported
+ * `TRUST_PROXY`, a caller cannot reset its own per-address budget by writing `X-Forwarded-For`. `1` is outside
+ * this claim (it is deprecated, and 0.5.0 refuses it), which is why `limited` is not used here.
+ */
+describe('a forged X-Forwarded-For', () => {
+  const forged = (i: number) => `192.0.2.${i}`;
+
+  for (const trusting of ['0', '10.99.0.1']) {
+    it(`does not reset the per-address limit when the peer is not trusted (TRUST_PROXY=${trusting})`, async () => {
+      const instance = await startMcpInstance(database, {
+        dataDir: path.join(root, `forged-${trusting === '0' ? 'off' : 'elsewhere'}`),
+        docRoot: root,
+        env: { ADMIN_TOKEN, TRUST_PROXY: trusting, MCP_RATE_LIMIT_ANON_PER_MINUTE: String(PER_ANONYMOUS) },
+      });
+      try {
+        // A different forged address on every request: were the header believed, each would have a fresh budget.
+        for (let i = 1; i <= PER_ANONYMOUS; i++) expect((await post(instance, open, SEARCH(i), { 'x-forwarded-for': forged(i) })).status).toBe(200);
+        const refused = await post(instance, open, SEARCH(9), { 'x-forwarded-for': forged(9) });
+        expect(refused.status).toBe(429);
+        expect(refused.json.error?.data?.scope).toBe('anonymous');
+        // One counter, keyed by the socket's own address: the forged values never became a key.
+        const rows = await counters();
+        expect(rows).toHaveLength(1);
+        expect(rows[0].count).toBe(PER_ANONYMOUS + 1);
+        expect(rows[0].key).not.toContain('192.0.2.');
+      } finally {
+        await instance.close();
+      }
+    });
+  }
+
+  it('does not reset the per-address limit when the proxy is named: the key is the right-most value, the one the proxy appended', async () => {
+    // `proxied` is TRUST_PROXY=loopback and the test client connects from loopback, so it plays the proxy.
+    // The client's own values sit to the left of the address the proxy saw (203.0.113.50).
+    expect(proxied.ctx.config.MCP_RATE_LIMIT_ANON_PER_MINUTE).toBe(60);
+    for (let i = 1; i <= 60; i++) {
+      expect((await post(proxied, open, TOPICS(i), { 'x-forwarded-for': `${forged(i)}, 203.0.113.50` })).status).toBe(200);
+    }
+    const refused = await post(proxied, open, TOPICS(61), { 'x-forwarded-for': `${forged(61)}, 203.0.113.50` });
+    expect(refused.status).toBe(429);
+    expect(refused.json.error?.data?.scope).toBe('anonymous');
+    expect(await counters()).toEqual([{ key: `ip:${open.id}:203.0.113.50`, count: 61 }]);
+  });
+});
+
 describe('a per-tool limit', () => {
   it('applies to a modern client and, from the body, to a legacy one that sends no Mcp-Name', async () => {
     const t = await mint(limited, guarded, { name: 'tool' });

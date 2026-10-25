@@ -93,7 +93,7 @@ The address checked is the one the server believes the client has, which depends
 | A list of proxy addresses or CIDRs | `X-Forwarded-For`, read right to left, skipping the listed proxies. A header sent by any other peer is ignored. | Yes. This is the setting meant for it: name the proxy, not your clients' network. |
 | `loopback`, `linklocal` | As a list, for the proxy on the same host or link. | Yes. |
 | `uniquelocal` | As a list, trusting every private (LAN) address as a proxy. | Only if no untrusted host can reach the server from those ranges, because any of them can write the header. |
-| `1` | Every hop of `X-Forwarded-For` is believed, so the **leftmost** value, which the client writes, becomes the address. | **No.** The server refuses to save a non-empty list while `TRUST_PROXY=1`, and answers `403` (and logs it) to a token that already carries one. |
+| `1` (deprecated in 0.4.1, refused at startup from 0.5.0) | Every hop of `X-Forwarded-For` is believed, so the **leftmost** value, which the client writes, becomes the address. | **No.** The server refuses to save a non-empty list while `TRUST_PROXY=1`, and answers `403` (and logs it) to a token that already carries one. |
 
 ## Account required, and connecting a browser-based client
 

@@ -310,6 +310,57 @@ describe('what the column accepts', () => {
     await expect(db.update(projects).set({ scoreFloor: value }).where(eq(projects.id, projectId))).rejects.toThrow();
   });
 
+  /** What the audit event records as `floorFrom` / `floorTo` (ADR-0121): the row's value before, read under the lock that writes the next. */
+  it('hands back the floor the row held before, and the one it holds now', async () => {
+    expect(await setProjectScoreFloor(db, projectId, 0.8)).toEqual({ previous: null, scoreFloor: 0.8 });
+    expect(await setProjectScoreFloor(db, projectId, 0.5)).toEqual({ previous: 0.8, scoreFloor: 0.5 });
+    expect(await setProjectScoreFloor(db, projectId, 0.5)).toEqual({ previous: 0.5, scoreFloor: 0.5 });
+    expect(await setProjectScoreFloor(db, projectId, 0)).toEqual({ previous: 0.5, scoreFloor: 0 });
+    expect(await setProjectScoreFloor(db, projectId, null)).toEqual({ previous: 0, scoreFloor: null });
+    expect(await setProjectScoreFloor(db, projectId, null)).toEqual({ previous: null, scoreFloor: null });
+  });
+
+  /**
+   * Deterministic: a transaction holds the row lock by hand, so the change under test has to wait for it
+   * and can only report what the holder wrote. Without `FOR UPDATE` in `setProjectScoreFloor` its read would
+   * not wait: it would see the 0.4 the row held before and report that as its predecessor. That is what the
+   * final assertion catches; `settled` shows the wait itself (the write is blocked by the lock either way).
+   */
+  it('waits for a change in flight and reports what that change wrote as its predecessor', async () => {
+    await setProjectScoreFloor(db, projectId, 0.4);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const holder = db.transaction(async (tx) => {
+      await tx.select({ scoreFloor: projects.scoreFloor }).from(projects).where(eq(projects.id, projectId)).for('update');
+      locked();
+      await held;
+      await tx.update(projects).set({ scoreFloor: 0.6 }).where(eq(projects.id, projectId));
+    });
+    await isLocked;
+
+    let settled = false;
+    const pending = setProjectScoreFloor(db, projectId, 0.9).then((result) => {
+      settled = true;
+      return result;
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(settled).toBe(false);
+    } finally {
+      // Released even when the assertion fails, or the lock and its connection would outlive the test and
+      // make every later test of this file time out instead of showing the real failure.
+      release();
+      await holder;
+    }
+    expect(await pending).toEqual({ previous: 0.6, scoreFloor: 0.9 });
+  });
+
   it('returns undefined for a project that does not exist', async () => {
     expect(await setProjectScoreFloor(db, '3f2504e0-4f89-41d3-9a0c-0305e82c3301', 0.8)).toBeUndefined();
   });

@@ -357,6 +357,12 @@ export class UploadService {
         await fs.rm(target, { force: true });
         throw new ValidationError(`Archive "${name}" exceeds the limit of ${this.config.UPLOAD_MAX_ARCHIVE_BYTES} bytes`);
       }
+      // An archive that stops part-way (`ArchiveLimitError`: a file's size, the entry count, the total size)
+      // leaves what it had unpacked in the request's scratch directory, and the route keeps going and moves
+      // those files into the session. They are charged either way, so the request, the reservation and the
+      // requests that start after it see their bytes; the error is thrown again once they are counted. A quota
+      // error from the charge wins over it: the request is then taken back whole (ADR-0117).
+      let extractionError: unknown;
       try {
         await extractArchive(
           target,
@@ -366,10 +372,13 @@ export class UploadService {
           0,
           subdir.filter((s) => !s.startsWith('.')),
         );
+      } catch (error) {
+        extractionError = error;
       } finally {
         await fs.rm(target, { force: true }).catch(() => undefined);
       }
       await this.charge(tracker, stats);
+      if (extractionError !== undefined) throw extractionError;
       return stats;
     }
 

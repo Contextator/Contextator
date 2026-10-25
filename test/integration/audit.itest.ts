@@ -9,6 +9,7 @@ import {
   auditEvents,
   type AuditEventRow,
   documentSources,
+  floorSuggestions,
   indexRuns,
   mcpTokens,
   projects,
@@ -490,5 +491,135 @@ describe('the metrics endpoint of a running instance', () => {
   it('refuses a scrape that holds nothing', async () => {
     const res = await fetch(`${live.origin}/metrics`);
     expect(res.status).toBe(401);
+  });
+});
+
+/**
+ * **A relevance floor change records the floor before and after** ([ADR-0121](../../.ssot/ADR.md#adr-0121)).
+ *
+ * `audit_events.detail` is written by one place only, the `onResponse` hook of `src/auth/plugin.ts`, from
+ * what the route handed over in `req.auditDetail`. A test that called the service would never see that row,
+ * so every claim here goes through the real routes. The numbers come from the project row the transaction
+ * locked, not from the body, and neither response grows a field.
+ */
+describe('a relevance floor change', () => {
+  const FLOOR = 'PATCH /api/projects/:id/score-floor';
+  const APPLY = 'POST /api/projects/:id/score-floor/suggestions/:suggestionId/apply';
+  let floorProject: ProjectRow;
+
+  const floorEvents = async (action: string) => (await events()).filter((row) => row.action === action && row.projectId === floorProject.id);
+  const lastDetail = async (action: string) => {
+    await live.ctx.audit.settled();
+    return (await floorEvents(action)).at(-1)?.detail;
+  };
+  /**
+   * Settled before it returns: the event is written after the reply, so two requests in a row could land
+   * in either order and a count taken straight after one would be racing the insert.
+   */
+  const setFloor = async (body: unknown) => {
+    const res = await asAdmin('PATCH', `/api/projects/${floorProject.id}/score-floor`, body);
+    await live.ctx.audit.settled();
+    return res;
+  };
+  const storedFloor = async () =>
+    (await database.db.select({ scoreFloor: projects.scoreFloor }).from(projects).where(eq(projects.id, floorProject.id)))[0]?.scoreFloor;
+
+  beforeAll(async () => {
+    floorProject = await seedProject(database.db, 'floor-audit', { path: 'handbook/guide.md', body: HANDBOOK });
+  });
+
+  it('records "instance" to the number when a project takes a floor of its own', async () => {
+    const res = await setFloor({ floor: 0.79 });
+    expect(res.statusCode).toBe(200);
+    expect(await lastDetail(FLOOR)).toEqual({ floorFrom: 'instance', floorTo: 0.79 });
+    // The response is what it was before the audit learned the number.
+    expect(Object.keys(res.json()).sort()).toEqual(['effectiveScoreFloor', 'instanceScoreFloor', 'scoreFloor']);
+  });
+
+  it('records the number to "instance" when the project is handed back to the server', async () => {
+    expect((await setFloor({ floor: null })).statusCode).toBe(200);
+    expect(await lastDetail(FLOOR)).toEqual({ floorFrom: 0.79, floorTo: 'instance' });
+    expect(await storedFloor()).toBeNull();
+  });
+
+  it('records 0 as a number, not as "instance": off for this project is a floor of its own', async () => {
+    expect((await setFloor({ floor: 0.6 })).statusCode).toBe(200);
+    expect((await setFloor({ floor: 0 })).statusCode).toBe(200);
+    expect(await lastDetail(FLOOR)).toEqual({ floorFrom: 0.6, floorTo: 0 });
+  });
+
+  it('records a value written again: somebody confirming a floor is an event too', async () => {
+    expect((await setFloor({ floor: 0.79 })).statusCode).toBe(200);
+    const before = (await floorEvents(FLOOR)).length;
+    expect((await setFloor({ floor: 0.79 })).statusCode).toBe(200);
+    await live.ctx.audit.settled();
+    const after = await floorEvents(FLOOR);
+    expect(after).toHaveLength(before + 1);
+    const detail = after.at(-1)?.detail as { floorFrom: number; floorTo: number };
+    expect(detail.floorFrom).toBe(0.79);
+    expect(detail.floorTo).toBe(detail.floorFrom);
+  });
+
+  it('never takes the numbers from the request body', async () => {
+    const res = await setFloor({ floor: 0.55, floorFrom: 0.99, floorTo: 0.01, detail: { floorFrom: 'forged' } });
+    expect(res.statusCode).toBe(200);
+    expect(await lastDetail(FLOOR)).toEqual({ floorFrom: 0.79, floorTo: 0.55 });
+    // And a body the route refuses leaves no event at all.
+    const before = (await floorEvents(FLOOR)).length;
+    expect((await setFloor({ floor: 1.5, floorFrom: 0.1 })).statusCode).toBe(400);
+    await live.ctx.audit.settled();
+    expect(await floorEvents(FLOOR)).toHaveLength(before);
+  });
+
+  describe('adopting a suggestion', () => {
+    /** The shape `generateFloorSuggestion` writes, inserted directly: what is under test is the audit, not the measurement. */
+    const suggest = async (suggestedFloor: number): Promise<string> => {
+      const [row] = await database.db.select().from(projects).where(eq(projects.id, floorProject.id));
+      if (row.embeddingModel === null) throw new Error('seedProject sets an embedding model');
+      const [suggestion] = await database.db
+        .insert(floorSuggestions)
+        .values({
+          projectId: floorProject.id,
+          trigger: 'operator',
+          embeddingModel: row.embeddingModel,
+          liveGeneration: row.liveGeneration,
+          suggestedFloor,
+          previousFloor: row.scoreFloor,
+          basis: { method: 'itest' },
+        })
+        .returning({ id: floorSuggestions.id });
+      return suggestion.id;
+    };
+    const apply = async (id: string) => {
+      const res = await asAdmin('POST', `/api/projects/${floorProject.id}/score-floor/suggestions/${id}/apply`, {});
+      await live.ctx.audit.settled();
+      return res;
+    };
+
+    it('records the floor it replaced and the suggested one', async () => {
+      await setFloor({ floor: 0.7 });
+      const res = await apply(await suggest(0.83));
+      expect(res.statusCode).toBe(200);
+      expect(await lastDetail(APPLY)).toEqual({ floorFrom: 0.7, floorTo: 0.83 });
+      expect(res.json()).toMatchObject({ scoreFloor: 0.83 });
+      expect(Object.keys(res.json()).sort()).toEqual(['effectiveScoreFloor', 'instanceScoreFloor', 'scoreFloor', 'suggestion']);
+      expect(await storedFloor()).toBe(0.83);
+    });
+
+    it('records "instance" as the floor it replaced when the project had none of its own', async () => {
+      await setFloor({ floor: null });
+      expect((await apply(await suggest(0.64))).statusCode).toBe(200);
+      expect(await lastDetail(APPLY)).toEqual({ floorFrom: 'instance', floorTo: 0.64 });
+    });
+
+    it('records nothing for a suggestion the route refuses', async () => {
+      const id = await suggest(0.5);
+      expect((await apply(id)).statusCode).toBe(200);
+      const before = (await floorEvents(APPLY)).length;
+      // Applied once already: the second attempt is a 409 and not an event.
+      expect((await apply(id)).statusCode).toBe(409);
+      await live.ctx.audit.settled();
+      expect(await floorEvents(APPLY)).toHaveLength(before);
+    });
   });
 });

@@ -10,6 +10,30 @@ ships, that stops.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-25
+
+### Deprecated
+
+- `TRUST_PROXY=1`/`true` (trust every hop) is deprecated and will refuse startup from 0.5.0; name the proxy
+  instead (ADR-0122). **Nothing changes in 0.4.1:** the value still works, and the startup warning now says it
+  will be refused. To migrate, set `TRUST_PROXY` to `loopback`, to the proxy's address or CIDR block, or to `0`
+  when nothing sits in front of the server. Helm chart 1.8.1 drops `"1"` from the `config.trustProxy` comment
+  and `helm install`/`upgrade` prints a deprecation note for `"1"` or `"true"`; the values schema still accepts
+  both until chart 2.0.0.
+
+### Changed
+
+- Relevance floor audit events record the project's floor before and after (`detail.floorFrom` /
+  `detail.floorTo`). Each is the number, or `"instance"` for a project that follows `SEARCH_SCORE_FLOOR`
+  (ADR-0121). Earlier events keep the sentence they had; the API responses are unchanged.
+- Source comments that pointed at README sections that have moved now point at where the facts live. No
+  behaviour change.
+
+### Fixed
+
+- An upload archive that stops part-way (a file-size, entry-count or total-size limit) now counts the files it
+  had already unpacked against the project's upload quota.
+
 ## [0.4.0] - 2026-10-25
 
 ### Added
@@ -744,7 +768,9 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/Contextator/Contextator/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/Contextator/Contextator/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/Contextator/Contextator/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Contextator/Contextator/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Contextator/Contextator/compare/v0.2.1...v0.3.0

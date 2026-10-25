@@ -40,9 +40,21 @@ const rows = <T>(value: T[]) =>
     orderBy: () => ({ limit: async () => [] }),
   });
 
+/**
+ * `setProjectScoreFloor` reads the row `FOR UPDATE` and writes it in one transaction
+ * ([ADR-0121](../.ssot/ADR.md#adr-0121)), so the stub has to offer `transaction` and the
+ * `select().from().where().limit().for()` chain; the transaction is the stub itself.
+ */
 function stubDb(stub: Stub): Db {
-  return {
-    select: () => ({ from: () => ({ where: () => rows([stub.project]) }) }),
+  const db = {
+    select: () => ({
+      from: () => ({
+        where: () =>
+          Object.assign(rows([stub.project]), {
+            limit: () => Object.assign(Promise.resolve([stub.project]), { for: async () => (stub.found ? [stub.project] : []) }),
+          }),
+      }),
+    }),
     execute: async () => ({ rows: [] }),
     update: () => ({
       set: (values: { scoreFloor: number | null }) => ({
@@ -55,7 +67,9 @@ function stubDb(stub: Stub): Db {
       }),
     }),
     insert: () => ({ values: async () => [] }),
-  } as unknown as Db;
+    transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
+  };
+  return db as unknown as Db;
 }
 
 async function buildApi(db: Db, instanceFloor: number): Promise<FastifyInstance> {
@@ -128,6 +142,15 @@ describe('setting a project’s relevance floor', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ scoreFloor: floor, instanceScoreFloor: INSTANCE_FLOOR, effectiveScoreFloor: floor ?? INSTANCE_FLOOR });
     expect(stub.written).toEqual([floor]);
+  });
+
+  /** The previous floor feeds the audit event (ADR-0121) and nothing else: the API does not grow a field. */
+  it('answers with the new floor only, though it read the old one to audit the change', async () => {
+    const stub = newStub(0.7);
+    const res = await patch(stub, { floor: 0.79 });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ scoreFloor: 0.79, instanceScoreFloor: INSTANCE_FLOOR, effectiveScoreFloor: 0.79 });
+    expect(stub.written).toEqual([0.79]);
   });
 
   it.each([

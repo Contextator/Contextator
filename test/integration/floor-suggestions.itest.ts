@@ -402,6 +402,18 @@ describe('adopting a suggestion', () => {
     expect((await listFloorSuggestions(db, projectId))[0].appliedAt).not.toBeNull();
   });
 
+  /** What the route's audit event records as `floorFrom` (ADR-0121): the row as the apply transaction locked it. */
+  it('hands back the floor it replaced: NULL for a project on the server’s, the number otherwise', async () => {
+    const onInstance = await seedProject(TOPICS);
+    expect((await applyFloorSuggestion(db, onInstance, (await created(onInstance)).id)).previousFloor).toBeNull();
+
+    const ownFloor = await seedProject(TOPICS);
+    await db.update(projects).set({ scoreFloor: 0.31 }).where(eq(projects.id, ownFloor));
+    const applied = await applyFloorSuggestion(db, ownFloor, (await created(ownFloor)).id);
+    expect(applied.previousFloor).toBe(0.31);
+    expect(await projectFloor(ownFloor)).toBe(applied.scoreFloor);
+  });
+
   it('answers every probe under the adopted floor', async () => {
     const projectId = await seedProject(TOPICS);
     const suggestion = await created(projectId);

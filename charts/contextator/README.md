@@ -474,7 +474,8 @@ Enabling `ingress` does **not** make the application trust the Ingress controlle
 set only from `config.trustProxy`, never inferred from `ingress.enabled`: the chart cannot know what
 actually sits in front of the Pod (an ingress controller, a cloud load balancer, a CDN, or all three),
 and a trust setting that is guessed is one a caller can exploit. Left empty, the app's own default
-applies (`0`: `X-Forwarded-*` headers are ignored).
+applies (`0`: `X-Forwarded-*` headers are ignored). `"1"`/`"true"` (trust every hop) is deprecated:
+the app warns about it at every start and refuses it from app 0.5.0 (ADR-0122), so name the proxy.
 
 Behind an Ingress, set these together:
 

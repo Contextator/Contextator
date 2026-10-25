@@ -114,7 +114,10 @@ function isTrustProxyEntry(entry: string): boolean {
  *
  * **Three forms, and the fourth is refused on purpose.** `0`/`false` trusts nothing, `1`/`true` trusts
  * every proxy, and a comma-separated list of addresses, CIDR blocks and subnet names trusts exactly
- * those peers. Fastify also accepts a **hop count**, and this does not: a number is a claim about how
+ * those peers. **`1`/`true` is deprecated since 0.4.1 and this function will refuse it from 0.5.0**
+ * ([ADR-0122](../.ssot/ADR.md#adr-0122), which amends ADR-0060): it is still `true` here so that nothing
+ * changes under an operator in a patch release, and `warnAboutProxyConfiguration` says so at every start.
+ * Fastify also accepts a **hop count**, and this does not: a number is a claim about how
  * many proxies are in front of the instance that the server cannot check, and it goes silently wrong
  * the day somebody puts a CDN in front of the reverse proxy — which is the class of failure this whole
  * variable exists to end.
@@ -373,7 +376,8 @@ export const EnvSchema = z
      * `AUTH_COOKIE_SECURE=auto` loses its `Secure` flag for the same reason. **Set `PUBLIC_BASE_URL`
      * as well as this**, and the two URL-shaped failures stop depending on the header at all.
      *
-     * Set it to the proxy rather than to `1` wherever you can — and to the **proxy**, not to the
+     * Set it to the proxy, not to `1` — `1`/`true` is deprecated since 0.4.1 and refused from 0.5.0
+     * ([ADR-0122](../.ssot/ADR.md#adr-0122)) — and to the **proxy**, not to the
      * network the callers sit on: the list is applied to every hop, so a range that holds clients as
      * well as proxies is walked past and the caller writes `req.ip` again. `1` is "trust whoever wrote
      * the header", which is only safe when nothing but the proxy can open a socket to this port.

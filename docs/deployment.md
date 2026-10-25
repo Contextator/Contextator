@@ -113,8 +113,7 @@ What the shared key does not do is let anyone guess faster than the budget allow
 `TRUST_PROXY=1` would have lost. If you would rather have per-client limits, the choice is yours: set
 `TRUST_PROXY` to the **address or CIDR block of the platform's proxy** — check that range in the platform's own
 documentation, and name nothing wider, because the list applies to every hop and a range that includes your
-clients lets them write their own address again. Do not use `1` unless nothing but the proxy can open a socket
-to the service.
+clients lets them write their own address again. Do not use `1`: it is deprecated and refused from 0.5.0.
 
 Two habits shrink the exposure on a hosted instance: **do not share the URL before the first account exists**,
 and **do the first-run setup right after the deploy** (step 2 below). After the first forwarded request the log
