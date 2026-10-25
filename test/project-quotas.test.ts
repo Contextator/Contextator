@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import fsp, { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { QuotaExceededError, QuotaUsageUnavailableError } from '../src/services/errors.js';
 import { sourceCurrentDir, stagingDir, stagingRootDir } from '../src/services/data-dir.js';
@@ -277,6 +277,86 @@ describe('UploadService against a quota', () => {
     });
     await service.rollbackRequest(c!);
     await service.finishRequest(b!);
+  });
+
+  /** What the upload route measures: the project's staging tree without the scratch directories of the requests running now. */
+  const measureLikeTheRoute = (src: DocumentSourceRow, limit: number) => async (skipDirs: ReadonlySet<string>) =>
+    quota(limit, await directoryBytes(stagingRootDir(dataDir, src.projectId, src.id), skipDirs));
+
+  it('does not count an archive twice while it is being unpacked', async () => {
+    const src = isolatedSource(19);
+    const [sa, sc] = await Promise.all([1, 2].map(() => service.createSession(src, quota(1_000_000, 0))));
+    const a = await service.startRequest(src, sa!, measureLikeTheRoute(src, 1_000_000));
+    const zip = await readFile(path.join(__dirname, 'fixtures', 'docs.zip'));
+    const sessionDir = stagingDir(dataDir, src.projectId, src.id, sa!);
+    let midway: UploadRequestQuota | undefined;
+    // Another request joins and measures once the whole archive is on disk and before it has been unpacked.
+    async function* archive() {
+      yield zip;
+      while ((await directoryBytes(sessionDir)) < zip.length) await new Promise((resolve) => setTimeout(resolve, 5));
+      midway = await service.startRequest(src, sc!, measureLikeTheRoute(src, 1_000_000));
+    }
+    await service.addFile(src, sa!, 'docs.zip', (await import('node:stream')).Readable.from(archive()), a!);
+    // The archive is in no one's count: the measurement read 0, and the unpacked files are counted once, from A.
+    expect(a!.requestBytes).toBeGreaterThan(0);
+    expect(midway?.baseUsed).toBe(0);
+    expect(midway?.projectedUsed).toBe(a!.requestBytes);
+    expect(await directoryBytes(a!.tempDir)).toBe(0);
+    await service.rollbackRequest(midway!);
+    await service.finishRequest(a!);
+  });
+
+  it('does not let a refused request keep its bytes in the count while it is being taken back', async () => {
+    const src = isolatedSource(20);
+    const [sa, sb, sc] = await Promise.all([1, 2, 3].map(() => service.createSession(src, quota(100, 0))));
+    const a = await service.startRequest(src, sa!, measureLikeTheRoute(src, 100));
+    await service.addFile(src, sa!, 'a.md', await stream(bytes(70)), a!);
+    const b = await service.startRequest(src, sb!, measureLikeTheRoute(src, 100));
+    await expect(service.addFile(src, sb!, 'b.md', await stream(bytes(50)), b!)).rejects.toMatchObject({
+      code: 'quota_exceeded',
+      used: 70,
+      requested: 50,
+    });
+    // B has been refused and not yet rolled back (its part is still being drained): C's 20 bytes fit in 100 - 70.
+    const c = await service.startRequest(src, sc!, measureLikeTheRoute(src, 100));
+    await service.addFile(src, sc!, 'c.md', await stream(bytes(20)), c!);
+    expect(c!.projectedUsed).toBe(90);
+    await service.rollbackRequest(b!);
+    await service.finishRequest(c!);
+    await service.finishRequest(a!);
+  });
+
+  it('does not count a request in the middle of being rolled back', async () => {
+    const src = isolatedSource(21);
+    const [sa, sb, sc] = await Promise.all([1, 2, 3].map(() => service.createSession(src, quota(200, 0))));
+    const a = await service.startRequest(src, sa!, measureLikeTheRoute(src, 200));
+    await service.addFile(src, sa!, 'a.md', await stream(bytes(70)), a!);
+    const b = await service.startRequest(src, sb!, measureLikeTheRoute(src, 200));
+    await service.addFile(src, sb!, 'b.md', await stream(bytes(50)), b!);
+    // C starts and writes while B's scratch directory is being deleted: B's 50 bytes are no longer anyone's.
+    const original = fsp.rm.bind(fsp);
+    let c: UploadRequestQuota | undefined;
+    let during: Promise<void> | undefined;
+    const spy = vi.spyOn(fsp, 'rm').mockImplementation(async (target, options) => {
+      if (target === b!.scratchDir && !during) {
+        during = (async () => {
+          c = await service.startRequest(src, sc!, measureLikeTheRoute(src, 200));
+          await service.addFile(src, sc!, 'c.md', await stream(bytes(90)), c!);
+        })();
+        await during;
+      }
+      return original(target, options);
+    });
+    try {
+      await service.rollbackRequest(b!);
+    } finally {
+      spy.mockRestore();
+    }
+    await during;
+    // 70 from A and 90 from C: 160 of 200, which 50 more of B's would have pushed to 210.
+    expect(c!.projectedUsed).toBe(160);
+    await service.finishRequest(c!);
+    await service.finishRequest(a!);
   });
 
   it('gives the reservation back when a request is taken back, and keeps it while another request runs', async () => {
