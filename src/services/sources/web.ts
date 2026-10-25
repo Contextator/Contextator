@@ -671,8 +671,8 @@ class RunState {
    * a stale sitemap lists — was fetched in full, twenty pages in twenty-four requests, and the run
    * said nothing about a ceiling because by its own counting it had never reached one. A ceiling that
    * only counts successes is not a ceiling: the worse the site behaves, the less it bounds, which is
-   * exactly backwards. `.env.example` and `README.md` both say *fetch*, and this is the sentence they
-   * were describing.
+   * exactly backwards. `.env.example` says *fetch*, and this is the sentence it was
+   * describing.
    */
   full(): boolean {
     return this.fetched >= this.maxPages;

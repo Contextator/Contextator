@@ -771,7 +771,7 @@ export interface SpecLimits {
  * closes over `root`, and the indexer holds that generator across the whole embedding loop, so the
  * graph is resident for as long as that one file is being indexed — beside an embedding model that is
  * itself ~470 MB on the default provider. That is the cost 8 MiB buys, it is written into
- * `README.md`'s limits table in those terms, and an instance whose container cannot spare it should
+ * `docs/document-sources.md` (`MAX_SPEC_FILE_BYTES`) in those terms, and an instance whose container cannot spare it should
  * lower the ceiling rather than discover the number from an OOM kill.
  */
 export function checkSpecSize(relativePath: string, sizeBytes: number, limits: SpecLimits): void {
