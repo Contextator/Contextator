@@ -325,18 +325,11 @@ describe('the project quotas API and the upload quota', () => {
           return api.app.inject({ method: 'POST', url: `${url}/${session}/files`, headers: { ...ADMIN, ...headers }, payload });
         }),
       );
-      // How many of the three get in depends on timing: a request that measures the project while another is
-      // finishing may count that request's bytes twice (on disk and in the reservation), and then it refuses
-      // one that would have fitted. That errs on the safe side, so what is asserted is the safe side: nobody
-      // gets in past the limit (at most two of 40 bytes), the quota is never refused for every request, and
-      // every request is either accepted or refused for the quota.
-      const statuses = results.map((r) => r.statusCode);
-      const accepted = statuses.filter((code) => code === 200).length;
-      expect(statuses.filter((code) => code !== 200 && code !== 413)).toEqual([]);
-      expect(accepted).toBeGreaterThanOrEqual(1);
-      expect(accepted).toBeLessThanOrEqual(2);
-      // What is on disk never exceeds the limit, and is exactly what the accepted requests wrote: a refused one is taken back.
-      expect(await directoryBytes(path.join(dataDir, 'projects', project.id))).toBe(accepted * 40);
+      // Exactly two get in and the third is refused for the quota, whichever of the three that is: each byte is
+      // counted once, whether it is still in a request's scratch directory or already in the session.
+      expect(results.map((r) => r.statusCode).sort()).toEqual([200, 200, 413]);
+      // What is on disk never exceeds the limit, and is exactly what the two accepted requests wrote: the refused one is taken back.
+      expect(await directoryBytes(path.join(dataDir, 'projects', project.id))).toBe(80);
     });
 
     it('does not renew, and so does not 404, for a project without a quota', async () => {

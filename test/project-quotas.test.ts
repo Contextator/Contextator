@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { QuotaExceededError, QuotaUsageUnavailableError } from '../src/services/errors.js';
-import { sourceCurrentDir, stagingDir } from '../src/services/data-dir.js';
+import { sourceCurrentDir, stagingDir, stagingRootDir } from '../src/services/data-dir.js';
 import { KeyedMutex } from '../src/services/locks.js';
 import { NotFoundError } from '../src/services/projects.js';
 import { directoryBytes, overwrittenBytes, resolveQuota, resolveQuotas, UPLOAD_SESSION_TTL_MS } from '../src/services/quotas.js';
@@ -205,6 +205,7 @@ describe('UploadService against a quota', () => {
     const tracker = await service.beginRequest(src, session, quota(100, 60, 60));
     await service.addFile(src, session, 'a.md', await stream(bytes(70)), tracker);
     expect(tracker.requestBytes).toBe(10);
+    await service.rollbackRequest(tracker);
   });
 
   it('does not count a stored file twice once a staged file overwrites it', async () => {
@@ -229,9 +230,10 @@ describe('UploadService against a quota', () => {
     expect(tracker.requestBytes).toBe(-399);
     // 1 + 1500 over a cap of 1000 does not fit, which a thrice-subtracted 400 would have hidden.
     await expect(service.addFile(src, session, 'new.md', await stream(bytes(1500)), tracker)).rejects.toBeInstanceOf(QuotaExceededError);
+    await service.rollbackRequest(tracker);
   });
 
-  /** A source in a project of its own: the reservation is per project, and the other tests leave trackers open in theirs. */
+  /** A source in a project of its own: the reservation is per project, and a request still open counts in what the next one starts from. */
   const isolatedSource = (n: number): DocumentSourceRow =>
     ({ ...freshSource(n), projectId: `33333333-3333-4333-8333-${String(n).padStart(12, '0')}` }) as unknown as DocumentSourceRow;
 
@@ -253,6 +255,30 @@ describe('UploadService against a quota', () => {
     await service.rollbackRequest(trackers[2]!);
   });
 
+  it('counts a byte once when a request writes while another is still measuring the project', async () => {
+    const src = isolatedSource(18);
+    const [sb, sc] = await Promise.all([1, 2].map(() => service.createSession(src, quota(100, 0))));
+    const b = await service.startRequest(src, sb!, async () => quota(100, 0));
+    // C measures the staging tree the way the upload route does, with the running requests' scratch directories
+    // left out, and B writes 40 bytes while it is at it: the bytes are on disk when the scan looks and in B's
+    // count when B charges them. Counting both made the project look like 80 bytes before C had written any.
+    const root = stagingRootDir(dataDir, src.projectId, src.id);
+    const c = await service.startRequest(src, sc!, async (skipDirs) => {
+      await service.addFile(src, sb!, 'b.md', await stream(bytes(40)), b!);
+      return quota(100, await directoryBytes(root, skipDirs));
+    });
+    // The project holds 40 bytes, so C's 40 more fit (80 of 100) and no more than 60 would.
+    await service.addFile(src, sc!, 'c.md', await stream(bytes(40)), c!);
+    expect(c!.projectedUsed).toBe(80);
+    await expect(service.addFile(src, sc!, 'd.md', await stream(bytes(21)), c!)).rejects.toMatchObject({
+      code: 'quota_exceeded',
+      used: 40,
+      requested: 61,
+    });
+    await service.rollbackRequest(c!);
+    await service.finishRequest(b!);
+  });
+
   it('gives the reservation back when a request is taken back, and keeps it while another request runs', async () => {
     const src = isolatedSource(9);
     const [s1, s2, s3, s4] = await Promise.all([1, 2, 3, 4].map(() => service.createSession(src, quota(100, 0))));
@@ -262,9 +288,10 @@ describe('UploadService against a quota', () => {
     await service.rollbackRequest(a);
     // The taken-back 60 bytes are neither on disk nor reserved: b may use them.
     await service.addFile(src, s2!, 'b.md', await stream(bytes(60)), b);
-    // b is still running, so its 60 bytes are in the reservation for a request that starts now. That request
-    // measures the disk after b wrote, so it does not count them a second time.
-    const c = await service.beginRequest(src, s3!, quota(100, 60));
+    // b is still running, so its 60 bytes are in the reservation for a request that starts now. The measurement
+    // leaves b's scratch directory out (a file being written has no size to trust), so it reads 0 and b's 60
+    // come from the reservation: counted once.
+    const c = await service.beginRequest(src, s3!, quota(100, 0));
     expect(c.reservedAtStart).toBe(60);
     expect(c.projectedUsed).toBe(60);
     await service.finishRequest(b);

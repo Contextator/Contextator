@@ -53,8 +53,12 @@ export function resolveQuotas(project: QuotaColumns, defaults: QuotaDefaults): E
  * Anything else that goes wrong while reading is a `QuotaUsageUnavailableError`, with one exception: a file
  * that disappears between listing and `stat` (a concurrent delete or commit) simply is not counted, because
  * the measurement is of a tree that is allowed to change underneath it.
+ *
+ * `skip` names directories (absolute or relative as `dir` is) that are not entered and not counted: the scratch
+ * directories of upload requests that are still running, whose bytes the quota counts from the request itself
+ * (`UploadRequestQuota`) because a file still being written has no size a scan could trust.
  */
-export async function directoryBytes(dir: string): Promise<number> {
+export async function directoryBytes(dir: string, skip?: ReadonlySet<string>): Promise<number> {
   let entries;
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
@@ -65,8 +69,10 @@ export async function directoryBytes(dir: string): Promise<number> {
   let total = 0;
   for (const entry of entries) {
     const abs = path.join(dir, entry.name);
-    if (entry.isDirectory()) total += await directoryBytes(abs);
-    else if (entry.isFile()) {
+    if (entry.isDirectory()) {
+      if (skip?.has(path.resolve(abs))) continue;
+      total += await directoryBytes(abs, skip);
+    } else if (entry.isFile()) {
       try {
         total += (await fs.stat(abs)).size;
       } catch (err) {
@@ -100,7 +106,7 @@ export const SWEPT_SESSION_PREFIX = '.trash-';
  * and every entry that is not a session (a `.trash-` directory the sweep is deleting: removing its children
  * renews its modification time, so the time alone would call it live).
  */
-async function stagingBytes(root: string, excludeSession: string | undefined, now: number): Promise<number> {
+async function stagingBytes(root: string, excludeSession: string | undefined, now: number, skip?: ReadonlySet<string>): Promise<number> {
   let names: string[];
   try {
     names = await fs.readdir(root);
@@ -119,7 +125,7 @@ async function stagingBytes(root: string, excludeSession: string | undefined, no
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw new QuotaUsageUnavailableError(dir, err);
     }
-    total += await directoryBytes(dir);
+    total += await directoryBytes(dir, skip);
   }
   return total;
 }
@@ -129,6 +135,8 @@ export interface UploadUsageOptions {
   excludeSession?: string;
   /** Which source's `current/` bytes to report separately (see `UploadUsage.sourceCurrent`). */
   sourceId?: string;
+  /** Scratch directories of running upload requests, left out of the total because the request's own count stands for them. */
+  skipDirs?: ReadonlySet<string>;
 }
 
 export interface UploadUsage {
@@ -154,7 +162,7 @@ export async function projectUploadUsage(db: Db, dataDir: string, projectId: str
   for (const source of sources) {
     const current = await directoryBytes(sourceCurrentDir(dataDir, projectId, source.id));
     if (source.id === options.sourceId) sourceCurrent = current;
-    total += current + (await stagingBytes(stagingRootDir(dataDir, projectId, source.id), options.excludeSession, now));
+    total += current + (await stagingBytes(stagingRootDir(dataDir, projectId, source.id), options.excludeSession, now, options.skipDirs));
   }
   return { total, sourceCurrent };
 }
