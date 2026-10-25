@@ -414,12 +414,16 @@ export async function listFloorSuggestions(db: Db, projectId: string, limit = MA
  * Refused (`ConflictError`) when the suggestion was already applied, or when the project has been
  * re-indexed with another encoder or generation since it was measured: that number describes an index
  * that is no longer served. The row is locked for the check so two managers cannot both apply it.
+ *
+ * `previousFloor` is the project's `score_floor` as the locked row held it (NULL when it followed
+ * `SEARCH_SCORE_FLOOR`), so the route's audit event can say from where to where
+ * ([ADR-0121](../../.ssot/ADR.md#adr-0121)).
  */
 export async function applyFloorSuggestion(
   db: Db,
   projectId: string,
   suggestionId: string,
-): Promise<{ suggestion: FloorSuggestionView; scoreFloor: number }> {
+): Promise<{ suggestion: FloorSuggestionView; scoreFloor: number; previousFloor: number | null }> {
   return db.transaction(async (tx) => {
     const [suggestion] = await tx
       .select()
@@ -440,6 +444,6 @@ export async function applyFloorSuggestion(
       .set({ appliedAt: new Date() })
       .where(and(eq(floorSuggestions.id, suggestionId), isNull(floorSuggestions.appliedAt)))
       .returning();
-    return { suggestion: toView(applied), scoreFloor: suggestion.suggestedFloor };
+    return { suggestion: toView(applied), scoreFloor: suggestion.suggestedFloor, previousFloor: project.scoreFloor };
   });
 }

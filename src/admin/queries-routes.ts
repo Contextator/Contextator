@@ -43,6 +43,13 @@ import { scanFrom, selectionFrom } from '../services/vector-store.js';
 const ProjectParams = z.object({ id: z.uuid() });
 const SuggestionParams = z.object({ id: z.uuid(), suggestionId: z.uuid() });
 
+/**
+ * What `detail.floorFrom` / `floorTo` hold for a project whose `score_floor` is NULL — it follows the
+ * server's `SEARCH_SCORE_FLOOR` ([ADR-0121](../../.ssot/ADR.md#adr-0121)). `AuditDetail` has no `null`, and an
+ * absent key would read as an event written before 0.4.1.
+ */
+const FLOOR_FOLLOWS_INSTANCE = 'instance';
+
 /** A cosine similarity in a query string: digits, an optional fraction, between 0 and 1. */
 const floorNumber = (special: string) =>
   z
@@ -322,12 +329,16 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
    * `manager`, by its row in `PROJECT_ROUTE_OVERRIDES`: what this project refuses to answer is the same
    * class of decision as whether it records what it was asked. `null` returns the project to the
    * instance's `SEARCH_SCORE_FLOOR`; the next search reads the new value.
+   *
+   * The audit event records the floor before and after ([ADR-0121](../../.ssot/ADR.md#adr-0121)): both are
+   * read from the row the transaction locked, never from the body, and the response does not carry them.
    */
   app.patch('/api/projects/:id/score-floor', async (req) => {
     const { id } = ProjectParams.parse(req.params);
     const { floor } = FloorBody.parse(req.body);
     const row = await setProjectScoreFloor(db, id, floor);
     if (!row) throw new NotFoundError('Project not found');
+    req.auditDetail = { floorFrom: row.previous ?? FLOOR_FOLLOWS_INSTANCE, floorTo: row.scoreFloor ?? FLOOR_FOLLOWS_INSTANCE };
     return {
       scoreFloor: row.scoreFloor,
       instanceScoreFloor: config.SEARCH_SCORE_FLOOR,
@@ -391,11 +402,12 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
   /**
    * The one way a suggestion becomes the project's floor, and a `manager`'s like the `PATCH` it
    * amounts to. `409` for a suggestion already applied or measured against an index the project no
-   * longer serves.
+   * longer serves. The audit event records the floor before and after, as the `PATCH` does (ADR-0121).
    */
   app.post('/api/projects/:id/score-floor/suggestions/:suggestionId/apply', async (req) => {
     const { id, suggestionId } = SuggestionParams.parse(req.params);
-    const { suggestion, scoreFloor } = await applyFloorSuggestion(db, id, suggestionId);
+    const { suggestion, scoreFloor, previousFloor } = await applyFloorSuggestion(db, id, suggestionId);
+    req.auditDetail = { floorFrom: previousFloor ?? FLOOR_FOLLOWS_INSTANCE, floorTo: scoreFloor };
     return {
       suggestion,
       scoreFloor,

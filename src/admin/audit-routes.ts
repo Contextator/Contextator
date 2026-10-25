@@ -156,14 +156,33 @@ export function decodeCursor(raw: string): string {
  * `(enabled: false)` renders that as "switched query logging on handbook (enabled: false)", which an
  * operator scanning a page reads as the opposite of what happened. The same is true of
  * `/oauth/authorize`, where `deny` is the substance of the event. `consumes` then names the detail
- * keys the verb has already said, so the sentence does not repeat them in its parenthetical.
+ * keys the verb has already said, so the sentence does not repeat them in its parenthetical. It is a
+ * function of `detail` where the verb only says them for values it understands: a key whose value the
+ * verb passed over has to fall through to the generic `key: value`, not vanish.
  */
 type Phrase = {
   verb: string | ((detail: AuditDetail) => string);
   prep?: string;
   target?: string;
-  consumes?: readonly string[];
+  consumes?: readonly string[] | ((detail: AuditDetail) => readonly string[]);
 };
+
+/**
+ * A relevance floor as the sentence says it ([ADR-0121](../../.ssot/ADR.md#adr-0121)): the number, or the
+ * server's own when the project follows `SEARCH_SCORE_FLOOR` (`"instance"`). `undefined` for anything
+ * else — an event written before the keys existed, or a value of a type nothing here writes.
+ */
+const floorWord = (value: unknown): string | undefined =>
+  value === 'instance' ? "the server's" : typeof value === 'number' && Number.isFinite(value) ? String(value) : undefined;
+
+/** `' from 0.7 to 0.79'` when both ends are readable, `''` otherwise (the sentence then stays as it was). */
+const floorChange = (detail: AuditDetail): string => {
+  const from = floorWord(detail.floorFrom);
+  const to = floorWord(detail.floorTo);
+  return from !== undefined && to !== undefined ? ` from ${from} to ${to}` : '';
+};
+/** The keys `floorChange` said — all or none, so a half-readable pair is shown as it is rather than half-hidden. */
+const floorConsumed = (detail: AuditDetail): readonly string[] => (floorChange(detail) === '' ? [] : ['floorFrom', 'floorTo']);
 
 const PHRASES: Readonly<Record<string, Phrase>> = {
   // Projects
@@ -213,14 +232,21 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
     consumes: ['enabled'],
   },
   'DELETE /api/projects/:id/query-log': { verb: 'purged the query log', prep: 'of' },
-  // The number itself is not recorded: `AUDIT_DETAIL` holds closed sets of values only.
-  'PATCH /api/projects/:id/score-floor': { verb: 'changed the relevance floor', prep: 'of' },
+  // The floor before and after, read back from the row by the route (`req.auditDetail`, ADR-0121) — not
+  // from the body, which `AUDIT_DETAIL` would only admit as a closed set. An event written before 0.4.1
+  // has neither key and keeps the plain sentence.
+  'PATCH /api/projects/:id/score-floor': {
+    verb: (detail) => `changed the relevance floor${floorChange(detail)}`,
+    prep: 'of',
+    consumes: floorConsumed,
+  },
   'PATCH /api/projects/:id/quotas': { verb: 'changed the quotas', prep: 'of' },
   'POST /api/projects/:id/score-floor/suggestions': { verb: 'asked for a relevance floor suggestion', prep: 'for' },
   'POST /api/projects/:id/score-floor/suggestions/:suggestionId/apply': {
-    verb: 'applied a relevance floor suggestion',
+    verb: (detail) => `applied a relevance floor suggestion${floorChange(detail)}`,
     prep: 'to',
     target: 'suggestion',
+    consumes: floorConsumed,
   },
   // Accounts
   'POST /api/users': { verb: 'created an account', target: 'account' },
@@ -284,11 +310,13 @@ export function summarizeAuditEvent(event: AuditSummaryInput): string {
 
   const aside: string[] = [];
   if (event.targetType !== null && event.targetId !== null) aside.push(`${phrase?.target ?? event.targetType} ${shortId(event.targetId)}`);
-  // `detail` is already a closed set of fields and values (src/auth/policy.ts), so this cannot widen
-  // into free text however a request body was shaped. A field the verb has already said is left out
+  // `detail` holds no free text however a request body was shaped (src/auth/policy.ts, ADR-0055 §5 as
+  // amended by ADR-0121): a body field from a closed set of values, a value the server computed, or a
+  // number read back from a CHECK-bounded row. A field the verb has already said is left out
   // rather than repeated — "turned query logging off … (enabled: false)" says it twice.
+  const consumed = typeof phrase?.consumes === 'function' ? phrase.consumes(event.detail) : (phrase?.consumes ?? []);
   for (const [key, value] of Object.entries(event.detail)) {
-    if (phrase?.consumes?.includes(key)) continue;
+    if (consumed.includes(key)) continue;
     // The acting token's id (`src/services/audit.ts`): a uuid, so shortened like every other one here.
     if (key === 'tokenId' && typeof value === 'string') {
       aside.push(`via token ${shortId(value)}`);

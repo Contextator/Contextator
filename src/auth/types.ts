@@ -54,9 +54,11 @@ declare module 'fastify' {
     /**
      * Detail fields the handler computed itself and the request body cannot supply — a count of what
      * the action changed, known only once its transaction has run (`DELETE /api/auth/oidc/link`'s
-     * `revokedMcpCredentials`, [ADR-0090](../../.ssot/ADR.md#adr-0090)). Merged over the allowlisted
-     * body fields by the audit hook. Set only from server-side values, never from request input, so
-     * `detail` stays a closed set.
+     * `revokedMcpCredentials`, [ADR-0090](../../.ssot/ADR.md#adr-0090)), or a number read back from a
+     * row a CHECK constraint bounds (`floorFrom` / `floorTo` of a relevance floor change,
+     * [ADR-0121](../../.ssot/ADR.md#adr-0121)). Merged over the allowlisted body fields by the audit
+     * hook. Set only from server-side values, never from request input, so `detail` holds no free text
+     * (ADR-0055 §5 names the three sources; this is the second and the third).
      */
     auditDetail?: AuditDetail | null;
   }

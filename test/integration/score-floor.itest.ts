@@ -310,6 +310,29 @@ describe('what the column accepts', () => {
     await expect(db.update(projects).set({ scoreFloor: value }).where(eq(projects.id, projectId))).rejects.toThrow();
   });
 
+  /** What the audit event records as `floorFrom` / `floorTo` (ADR-0121): the row's value before, read under the lock that writes the next. */
+  it('hands back the floor the row held before, and the one it holds now', async () => {
+    expect(await setProjectScoreFloor(db, projectId, 0.8)).toEqual({ previous: null, scoreFloor: 0.8 });
+    expect(await setProjectScoreFloor(db, projectId, 0.5)).toEqual({ previous: 0.8, scoreFloor: 0.5 });
+    expect(await setProjectScoreFloor(db, projectId, 0.5)).toEqual({ previous: 0.5, scoreFloor: 0.5 });
+    expect(await setProjectScoreFloor(db, projectId, 0)).toEqual({ previous: 0.5, scoreFloor: 0 });
+    expect(await setProjectScoreFloor(db, projectId, null)).toEqual({ previous: 0, scoreFloor: null });
+    expect(await setProjectScoreFloor(db, projectId, null)).toEqual({ previous: null, scoreFloor: null });
+  });
+
+  it('gives two concurrent changes each their true predecessor', async () => {
+    await setProjectScoreFloor(db, projectId, 0.4);
+    const results = await Promise.all([setProjectScoreFloor(db, projectId, 0.6), setProjectScoreFloor(db, projectId, 0.9)]);
+    const [first, second] = results as [
+      { previous: number | null; scoreFloor: number | null },
+      { previous: number | null; scoreFloor: number | null },
+    ];
+    // One of them went first and saw 0.4; the other saw what the first wrote. Neither saw the same value as the other.
+    const [earlier, later] = first.previous === 0.4 ? [first, second] : [second, first];
+    expect(earlier.previous).toBe(0.4);
+    expect(later.previous).toBe(earlier.scoreFloor);
+  });
+
   it('returns undefined for a project that does not exist', async () => {
     expect(await setProjectScoreFloor(db, '3f2504e0-4f89-41d3-9a0c-0305e82c3301', 0.8)).toBeUndefined();
   });

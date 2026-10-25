@@ -287,8 +287,11 @@ export function auditCreatedTarget(method: string, url: string, body: unknown): 
 export const auditReadsResponse = (method: string, url: string): boolean => AUDIT_CREATED.some((r) => r.method === method && r.url === url);
 
 /**
- * One event's `detail`. Strings and booleans come from a request body through `AUDIT_DETAIL`; a number
- * is only ever a count a handler computed itself (`req.auditDetail`), never a value a caller sent.
+ * One event's `detail`, from three sources and no others ([ADR-0055](../../.ssot/ADR.md#adr-0055) §5, as
+ * amended by [ADR-0121](../../.ssot/ADR.md#adr-0121)): a string or boolean from a request body, through
+ * `AUDIT_DETAIL` and its closed set of values; a value the handler computed itself (`req.auditDetail`) — a
+ * count, the acting token's id; and a number read back from a row a CHECK constraint bounds
+ * (`floorFrom` / `floorTo`). A number is never a value a caller sent.
  */
 export type AuditDetail = Record<string, string | number | boolean>;
 

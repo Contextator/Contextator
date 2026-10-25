@@ -84,6 +84,59 @@ describe('a row as a sentence', () => {
   });
 
   /**
+   * A relevance floor change says from where to where ([ADR-0121](../.ssot/ADR.md#adr-0121)). `"instance"` is
+   * a project that follows the server's `SEARCH_SCORE_FLOOR`; an event from before 0.4.1 has no keys and
+   * keeps the sentence it always had; and a value of a type nothing writes is shown as a plain
+   * `key: value` rather than hidden or thrown on.
+   */
+  describe('a relevance floor change', () => {
+    const patched = (detail: Record<string, string | number | boolean>) =>
+      summarizeAuditEvent({ ...base, action: 'PATCH /api/projects/:id/score-floor', targetType: null, targetId: null, detail });
+    const applied = (detail: Record<string, string | number | boolean>) =>
+      summarizeAuditEvent({
+        ...base,
+        action: 'POST /api/projects/:id/score-floor/suggestions/:suggestionId/apply',
+        targetType: 'suggestion',
+        targetId: '7c1d9e20-0000-4000-8000-000000000004',
+        detail,
+      });
+
+    it('says both values, once: the pair is not repeated in the parenthetical', () => {
+      expect(patched({ floorFrom: 0.7, floorTo: 0.79 })).toBe('dana changed the relevance floor from 0.7 to 0.79 of handbook');
+      expect(applied({ floorFrom: 0.7, floorTo: 0.79 })).toBe(
+        'dana applied a relevance floor suggestion from 0.7 to 0.79 to handbook (suggestion 7c1d9e20…)',
+      );
+      expect(patched({ floorFrom: 0.7, floorTo: 0.79 })).not.toContain('floorFrom');
+      expect(patched({ floorFrom: 0.7, floorTo: 0.79 })).not.toContain('(from');
+    });
+
+    it('says the server’s for "instance", and 0 for a floor that is off', () => {
+      expect(patched({ floorFrom: 'instance', floorTo: 0.79 })).toBe("dana changed the relevance floor from the server's to 0.79 of handbook");
+      expect(patched({ floorFrom: 0.79, floorTo: 'instance' })).toBe("dana changed the relevance floor from 0.79 to the server's of handbook");
+      expect(patched({ floorFrom: 0.79, floorTo: 0 })).toBe('dana changed the relevance floor from 0.79 to 0 of handbook');
+    });
+
+    it('records a floor confirmed unchanged as what it is', () => {
+      expect(patched({ floorFrom: 0.79, floorTo: 0.79 })).toBe('dana changed the relevance floor from 0.79 to 0.79 of handbook');
+    });
+
+    it('keeps the old sentence for an event written before the keys existed', () => {
+      expect(patched({})).toBe('dana changed the relevance floor of handbook');
+      expect(applied({})).toBe('dana applied a relevance floor suggestion to handbook (suggestion 7c1d9e20…)');
+      expect(summarizeAction('PATCH /api/projects/:id/score-floor')).toBe('changed the relevance floor');
+    });
+
+    it('falls through to the generic key: value for a value it does not understand, and does not throw', () => {
+      expect(patched({ floorFrom: true, floorTo: 'somewhere' })).toBe(
+        'dana changed the relevance floor of handbook (floorFrom: true, floorTo: somewhere)',
+      );
+      // Half a pair is not half hidden: the readable end is shown as it is, too.
+      expect(patched({ floorFrom: 0.7 })).toBe('dana changed the relevance floor of handbook (floorFrom: 0.7)');
+      expect(patched({ floorFrom: 0.7, floorTo: Number.NaN })).toBe('dana changed the relevance floor of handbook (floorFrom: 0.7, floorTo: NaN)');
+    });
+  });
+
+  /**
    * The case the schema was written for: `audit_events.project_id` carries **no foreign key**, because
    * deleting a project is itself one of the events recorded. So a panel joining `projects` for the name
    * gets nothing back, and the sentence has to be honest about it rather than silently dropping the

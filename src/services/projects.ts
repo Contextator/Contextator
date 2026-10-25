@@ -58,11 +58,24 @@ export async function keyShareProjectRow(tx: Db, id: string): Promise<ProjectRow
  * Sets this project's own relevance floor, or with `null` hands it back to `SEARCH_SCORE_FLOOR`.
  *
  * It takes effect on the next search: `searchProject` re-reads the row on every call. Returns what the
- * row now holds, `undefined` when there is no such project.
+ * row now holds and what it held a moment before (`previous`, NULL when the project followed
+ * `SEARCH_SCORE_FLOOR`), `undefined` when there is no such project.
+ *
+ * `previous` is read from the row locked `FOR UPDATE` in the transaction that writes the new value, so two
+ * concurrent changes each report their true predecessor ([ADR-0121](../../.ssot/ADR.md#adr-0121)): the
+ * audit event of the route records the pair. Postgres 16 has no `RETURNING OLD`, hence the lock and the read.
  */
-export async function setProjectScoreFloor(db: Db, id: string, floor: number | null): Promise<{ scoreFloor: number | null } | undefined> {
-  const [row] = await db.update(projects).set({ scoreFloor: floor }).where(eq(projects.id, id)).returning({ scoreFloor: projects.scoreFloor });
-  return row;
+export async function setProjectScoreFloor(
+  db: Db,
+  id: string,
+  floor: number | null,
+): Promise<{ previous: number | null; scoreFloor: number | null } | undefined> {
+  return db.transaction(async (tx) => {
+    const [before] = await tx.select({ scoreFloor: projects.scoreFloor }).from(projects).where(eq(projects.id, id)).limit(1).for('update');
+    if (!before) return undefined;
+    const [row] = await tx.update(projects).set({ scoreFloor: floor }).where(eq(projects.id, id)).returning({ scoreFloor: projects.scoreFloor });
+    return row ? { previous: before.scoreFloor, scoreFloor: row.scoreFloor } : undefined;
+  });
 }
 
 export async function getProjectByName(db: Db, name: string): Promise<ProjectRow | undefined> {
