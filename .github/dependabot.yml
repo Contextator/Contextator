@@ -21,6 +21,11 @@ updates:
     groups:
       dependencies-minor-patch:
         update-types: ["minor", "patch"]
+    ignore:
+      # ADR-0119 keeps the OpenTelemetry packages on one line (2.11 / 0.222), and they only
+      # resolve when they move together, so only patch releases are proposed automatically.
+      - dependency-name: "@opentelemetry/*"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
 
   - package-ecosystem: "docker"
     directory: "/"
