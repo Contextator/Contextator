@@ -42,8 +42,8 @@ the app, and is free software under the **AGPL-3.0-or-later** with a commercial 
   its access becomes the memberships you already manage. Browser-based connectors sign in through OAuth 2.1.
   See [MCP access](docs/mcp-access.md).
 - **Incremental indexing.** Files are hashed; only changed files are re-embedded, removed files are deleted.
-- **More than Markdown.** `.html`, `.docx`, `.csv` and `.pdf` are converted to Markdown as they are indexed, so
-  an agent reads a Word file or a PDF the way it reads a page of documentation. See
+- **More than Markdown.** `.html`, `.docx`, `.csv`, `.pdf`, `.pptx`, `.xlsx`, `.ipynb`, `.rst` and `.adoc` are converted to Markdown as they
+  are indexed, so an agent reads a Word file or a PDF the way it reads a page of documentation. See
   [File types](docs/file-types.md).
 
 ## Quick Start
