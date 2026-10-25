@@ -10,6 +10,8 @@ ships, that stops.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-25
+
 ### Added
 
 - `.asciidoc` is indexed as AsciiDoc, the same as `.adoc`. Like every converted type it is opt-in per source (#26).
@@ -18,7 +20,8 @@ ships, that stops.
 
 - The dashboard's File types row now offers `.pptx`, `.xlsx`, `.ipynb`, `.rst`, `.adoc` and `.asciidoc`. The
   types added in 0.4.0 had no checkbox, so they could only be enabled through the API, and saving a source from
-  the dashboard dropped them from its extensions.
+  the dashboard dropped them from its extensions. Helm chart 1.8.2 moves `appVersion` to 0.4.2 and changes
+  no value.
 
 ## [0.4.1] - 2026-10-25
 
@@ -778,7 +781,8 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/Contextator/Contextator/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/Contextator/Contextator/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Contextator/Contextator/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/Contextator/Contextator/compare/v0.3.1...v0.3.2

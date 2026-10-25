@@ -7,17 +7,18 @@ release is not patched — upgrading is the fix.
 
 | Version | Supported |
 |---------|-----------|
-| `0.4.1` (tagged `v0.4.1`) | Yes — it is the latest release |
-| `0.4.0` (tagged `v0.4.0`) | No — upgrade to `0.4.1` |
-| `0.3.2` (tagged `v0.3.2`) | No — upgrade to `0.4.1` |
-| `0.3.1` (tagged `v0.3.1`) | No — upgrade to `0.4.1` |
-| `0.3.0` (tagged `v0.3.0`) | No — upgrade to `0.4.1` |
-| `0.2.1` (tagged `v0.2.1`) | No — upgrade to `0.4.1` |
-| `0.2.0` (tagged `v0.2.0`) | No — upgrade to `0.4.1` |
-| `0.1.0` (tagged `v0.1.0`) | No — upgrade to `0.4.1` |
+| `0.4.2` (tagged `v0.4.2`) | Yes — it is the latest release |
+| `0.4.1` (tagged `v0.4.1`) | No — upgrade to `0.4.2` |
+| `0.4.0` (tagged `v0.4.0`) | No — upgrade to `0.4.2` |
+| `0.3.2` (tagged `v0.3.2`) | No — upgrade to `0.4.2` |
+| `0.3.1` (tagged `v0.3.1`) | No — upgrade to `0.4.2` |
+| `0.3.0` (tagged `v0.3.0`) | No — upgrade to `0.4.2` |
+| `0.2.1` (tagged `v0.2.1`) | No — upgrade to `0.4.2` |
+| `0.2.0` (tagged `v0.2.0`) | No — upgrade to `0.4.2` |
+| `0.1.0` (tagged `v0.1.0`) | No — upgrade to `0.4.2` |
 
 Fixes land on `main` first and stay there until the next release is tagged — check `main` if you are
-reproducing a report against a fix that is not in `v0.4.1` yet.
+reproducing a report against a fix that is not in `v0.4.2` yet.
 
 ## Response
 
