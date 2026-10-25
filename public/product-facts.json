@@ -4,7 +4,7 @@
   "sourceTypes": ["local", "git", "upload", "notion", "confluence", "web"],
   "sourceFlavors": ["plain", "obsidian", "notion-export", "openapi"],
   "fileExtensions": {
-    "document": ["md", "mdx", "txt", "html", "htm", "csv", "docx", "pdf", "pptx", "xlsx", "ipynb", "rst", "adoc"],
+    "document": ["md", "mdx", "txt", "html", "htm", "csv", "docx", "pdf", "pptx", "xlsx", "ipynb", "rst", "adoc", "asciidoc"],
     "flavorOnly": ["yaml", "yml", "json"],
     "archive": ["zip", "tar", "tgz", "tar.gz", "rar"]
   },

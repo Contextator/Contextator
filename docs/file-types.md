@@ -1,7 +1,7 @@
 # File types
 
 A source indexes `.md`/`.mdx` by default and can be told to take `.txt`, `.html`/`.htm`, `.csv`, `.docx`,
-`.pdf`, `.pptx`, `.xlsx`, `.ipynb`, `.rst` and `.adoc` as well; `.yaml`/`.yml`/`.json` are readable only through the
+`.pdf`, `.pptx`, `.xlsx`, `.ipynb`, `.rst` and `.adoc`/`.asciidoc` as well; `.yaml`/`.yml`/`.json` are readable only through the
 [OpenAPI / Swagger](document-sources.md#openapi-and-swagger) content type. **Everything becomes Markdown on the way in**,
 once, at the edge, so the chunker, the embedder and `read_document` see one format. A file that cannot be
 converted — a scanned or encrypted PDF, a Word file that is all images — is refused by name rather than
@@ -19,7 +19,7 @@ single file while it converts, and the PDF-length benchmark against `MAX_STORED_
 | `.xlsx` | visible sheet (`## Sheet name`) | cell values as a table, shared strings, the cached result of each formula | hidden sheets, formulas themselves (never evaluated), charts, cell formatting (a date reads as its serial number) |
 | `.ipynb` | notebook (`#` from the markdown cells) | markdown and code cells, code fenced with the notebook language | cell outputs, raw cells, metadata |
 | `.rst` | the document's own headings, by order of appearance | headings, paragraphs, lists, literal blocks, tables, admonitions, links | comments, toolchain directives such as `contents` |
-| `.adoc` | the document's own headings (`=`, `==`, ...) | headings, paragraphs, lists, listing blocks, tables, admonitions, links, attribute references | comments, attribute entries, conditionals |
+| `.adoc`, `.asciidoc` | the document's own headings (`=`, `==`, ...) | headings, paragraphs, lists, listing blocks, tables, admonitions, links, attribute references | comments, attribute entries, conditionals |
 
 `.pptx` and `.xlsx` are zip archives, read by a small in-process reader that refuses an archive whose
 parts declare more than `MAX_DOCX_UNPACKED_BYTES` (the same limit as `.docx`, now covering every

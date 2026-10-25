@@ -61,7 +61,10 @@ function inline(raw: string, ctx: Context): string {
       [menu, ...items.split('>').map((s) => s.trim())].filter(Boolean).join(' > '),
     )
     .replace(/image::?[^\s[]+\[([^\]]*)\]/g, (_m, alt: string) => alt.split(',')[0].trim())
-    .replace(/xref:([^[\s]+)\[([^\]]*)\]/g, (_m, target: string, label: string) => label || target.replace(/^.*#/, '').replace(/\.adoc$/, ''))
+    .replace(
+      /xref:([^[\s]+)\[([^\]]*)\]/g,
+      (_m, target: string, label: string) => label || target.replace(/^.*#/, '').replace(/\.(adoc|asciidoc)$/, ''),
+    )
     .replace(/<<([^,>]+)(?:,([^>]*))?>>/g, (_m, id: string, label?: string) => (label ?? id).trim())
     .replace(/\[\[[^\]]+\]\]/g, '')
     .replace(/(?:link:)?((?:https?|ftp|mailto):[^\s[]+|link:[^\s[]+)\[([^\]]*)\]/g, (_m, url: string, label: string) => {
