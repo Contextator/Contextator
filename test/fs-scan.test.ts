@@ -93,7 +93,7 @@ describe('resolveProjectRoot + walkMarkdown', () => {
 
   it('keeps md and mdx as the defaults, so pptx and xlsx are opt-in per source (ADR-0115)', async () => {
     expect(DEFAULT_EXTENSIONS).toEqual(['md', 'mdx']);
-    for (const ext of ['pptx', 'xlsx', 'ipynb', 'rst', 'adoc']) expect(SUPPORTED_EXTENSIONS).toContain(ext);
+    for (const ext of ['pptx', 'xlsx', 'ipynb', 'rst', 'adoc', 'asciidoc']) expect(SUPPORTED_EXTENSIONS).toContain(ext);
 
     const found: string[] = [];
     for await (const f of walkMarkdown(path.join(root, 'proj'), { ignoreGlobs: [], extensions: [] })) found.push(f.relativePath);

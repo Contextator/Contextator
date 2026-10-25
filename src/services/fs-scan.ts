@@ -37,7 +37,22 @@ const MARKDOWN_EXT = /\.(md|mdx)$/i;
  * holds one transform per entry and the compiler checks the two agree — so adding a type here without
  * a transform for it does not compile.
  */
-export const SUPPORTED_EXTENSIONS = ['md', 'mdx', 'txt', 'html', 'htm', 'csv', 'docx', 'pdf', 'pptx', 'xlsx', 'ipynb', 'rst', 'adoc'] as const;
+export const SUPPORTED_EXTENSIONS = [
+  'md',
+  'mdx',
+  'txt',
+  'html',
+  'htm',
+  'csv',
+  'docx',
+  'pdf',
+  'pptx',
+  'xlsx',
+  'ipynb',
+  'rst',
+  'adoc',
+  'asciidoc',
+] as const;
 export type SupportedExtension = (typeof SUPPORTED_EXTENSIONS)[number];
 export const DEFAULT_EXTENSIONS: SupportedExtension[] = ['md', 'mdx'];
 

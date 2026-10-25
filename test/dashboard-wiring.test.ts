@@ -1,5 +1,7 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
+import { SUPPORTED_EXTENSIONS } from '../src/services/fs-scan.js';
+import { FLAVOR_ONLY_EXTENSIONS } from '../src/services/flavors.js';
 
 /**
  * The dashboard has no build step, so nothing links its JavaScript to its HTML: a renamed id or a
@@ -93,6 +95,13 @@ describe('the dashboard markup and its modules agree', () => {
     const select = html.match(/<select name="expiresInDays">([\s\S]*?)<\/select>/)?.[1] ?? '';
     expect([...select.matchAll(/value="([^"]*)"/g)].map((m) => m[1])).toEqual(['', '30', '90', '365']);
     expect(select).toMatch(/<option value="" selected>Never<\/option>/);
+  });
+
+  it('offers a File types checkbox for every extension a source accepts, and nothing else (#26)', async () => {
+    // Saving a source sends only the checked boxes, so a type with no box is dropped from any source edited here.
+    const html = await readFile(new URL('index.html', PUBLIC), 'utf8');
+    const boxes = [...html.matchAll(/<input type="checkbox" name="ext" value="([^"]+)"/g)].map((m) => m[1]);
+    expect([...boxes].sort()).toEqual([...SUPPORTED_EXTENSIONS, ...FLAVOR_ONLY_EXTENSIONS].sort());
   });
 
   it('shows a source its last error even when the source did not fail', async () => {

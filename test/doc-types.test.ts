@@ -197,10 +197,10 @@ describe('the document type registry', () => {
     const matcher = extensionMatcher(['md', 'html', 'htm', 'csv', 'docx', 'pdf']);
     for (const name of ['a.md', 'a.html', 'a.HTM', 'a.csv', 'report.docx', 'book.PDF']) expect(matcher.test(name)).toBe(true);
     for (const name of ['a.doc', 'a.pptx', 'a.xlsx', 'a.htmlx', 'a.pdf.bak']) expect(matcher.test(name)).toBe(false);
-    // ADR-0115: the five newer types are on the list, and are matched once a source opts in.
-    const opted = extensionMatcher(['pptx', 'xlsx', 'ipynb', 'rst', 'adoc']);
-    for (const name of ['deck.pptx', 'book.XLSX', 'nb.ipynb', 'guide.rst', 'manual.adoc']) expect(opted.test(name)).toBe(true);
-    for (const name of ['deck.ppt', 'book.xls', 'guide.rest', 'manual.asciidoc']) expect(opted.test(name)).toBe(false);
+    // ADR-0115: the newer types are on the list, and are matched once a source opts in.
+    const opted = extensionMatcher(['pptx', 'xlsx', 'ipynb', 'rst', 'adoc', 'asciidoc']);
+    for (const name of ['deck.pptx', 'book.XLSX', 'nb.ipynb', 'guide.rst', 'manual.adoc', 'manual.asciidoc']) expect(opted.test(name)).toBe(true);
+    for (const name of ['deck.ppt', 'book.xls', 'guide.rest', 'manual.asc']) expect(opted.test(name)).toBe(false);
   });
 
   it('leaves Markdown exactly as it was, byte for byte', async () => {
@@ -733,6 +733,10 @@ describe('.adoc', () => {
     expect(headings(markdown)).toEqual(['# Operations Manual', '## Overview', '## Procedures', '### Rotating credentials']);
     expect(markdown).not.toContain(':author:');
     expect(markdown).not.toContain('Platform Team');
+  });
+
+  it('converts a `.asciidoc` file exactly as it converts the same bytes under `.adoc` (#26)', async () => {
+    expect(await extract('operations-manual.asciidoc', bytesOf(NAME))).toBe(await extract(NAME, bytesOf(NAME)));
   });
 
   it('substitutes attributes and converts macros, lists, code, tables and admonitions', async () => {

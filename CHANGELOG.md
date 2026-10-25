@@ -10,6 +10,16 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Added
+
+- `.asciidoc` is indexed as AsciiDoc, the same as `.adoc`. Like every converted type it is opt-in per source (#26).
+
+### Fixed
+
+- The dashboard's File types row now offers `.pptx`, `.xlsx`, `.ipynb`, `.rst`, `.adoc` and `.asciidoc`. The
+  types added in 0.4.0 had no checkbox, so they could only be enabled through the API, and saving a source from
+  the dashboard dropped them from its extensions.
+
 ## [0.4.1] - 2026-10-25
 
 ### Deprecated

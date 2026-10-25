@@ -145,6 +145,7 @@ const EXTRACTORS: Record<SupportedExtension, DocumentExtractor> = {
   ipynb: async (bytes, rel, limits) => (await import('./ipynb.js')).ipynbToMarkdown(bytes, rel, limits),
   rst: async (bytes, rel, limits) => (await import('./rst.js')).rstToMarkdown(bytes, rel, limits),
   adoc: async (bytes, rel, limits) => (await import('./adoc.js')).adocToMarkdown(bytes, rel, limits),
+  asciidoc: async (bytes, rel, limits) => (await import('./adoc.js')).adocToMarkdown(bytes, rel, limits),
 };
 
 /**
@@ -156,9 +157,9 @@ const EXTRACTORS: Record<SupportedExtension, DocumentExtractor> = {
  * conversion that produced nothing from a file that plainly held something, and that is a failure.
  */
 /** The types whose converted output is checked against `maxFileBytes` (ADR-0115 §4). */
-const BOUNDED_OUTPUT: ReadonlySet<string> = new Set(['pptx', 'xlsx', 'ipynb', 'rst', 'adoc']);
+const BOUNDED_OUTPUT: ReadonlySet<string> = new Set(['pptx', 'xlsx', 'ipynb', 'rst', 'adoc', 'asciidoc']);
 
-const CONVERTED: ReadonlySet<string> = new Set(['html', 'htm', 'csv', 'docx', 'pdf', 'pptx', 'xlsx', 'ipynb', 'rst', 'adoc']);
+const CONVERTED: ReadonlySet<string> = new Set(['html', 'htm', 'csv', 'docx', 'pdf', 'pptx', 'xlsx', 'ipynb', 'rst', 'adoc', 'asciidoc']);
 
 /**
  * What an operator can do about a file of this type that carried no text, per type, because "it
@@ -177,6 +178,7 @@ const REMEDY: Record<string, string> = {
   ipynb: 'A notebook with no markdown or code cells (outputs are not indexed) has nothing to index; remove it from the source.',
   rst: 'A reStructuredText file that is only directives, comments or targets has no prose to index; remove it from the source.',
   adoc: 'An AsciiDoc file that is only attributes, includes or comments has no prose to index; remove it from the source.',
+  asciidoc: 'An AsciiDoc file that is only attributes, includes or comments has no prose to index; remove it from the source.',
 };
 
 /**

@@ -16,7 +16,7 @@ agents (Cursor, Claude Code, Claude Desktop, …) can search semantically at
   and a per-project `member` that is a read-only `viewer` or a source-managing `editor`.
 - **Incremental indexing.** Files are hashed; only changed files are re-embedded, removed files are
   deleted.
-- **More than Markdown.** `.html`, `.docx`, `.csv`, `.pdf`, `.pptx`, `.xlsx`, `.ipynb`, `.rst` and `.adoc` are converted to Markdown as
+- **More than Markdown.** `.html`, `.docx`, `.csv`, `.pdf`, `.pptx`, `.xlsx`, `.ipynb`, `.rst` and `.adoc`/`.asciidoc` are converted to Markdown as
   they are indexed.
 
 This image (`contextator/contextator`) is the whole product in **one container**: PostgreSQL 16 +
