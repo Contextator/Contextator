@@ -320,17 +320,40 @@ describe('what the column accepts', () => {
     expect(await setProjectScoreFloor(db, projectId, null)).toEqual({ previous: null, scoreFloor: null });
   });
 
-  it('gives two concurrent changes each their true predecessor', async () => {
+  /**
+   * Deterministic: a transaction holds the row lock by hand, so the change under test has to wait for it
+   * and can only report what the holder wrote. Without `FOR UPDATE` in `setProjectScoreFloor` it would not
+   * wait, would read the 0.4 the row held before, and settle while the lock is still held.
+   */
+  it('waits for a change in flight and reports what that change wrote as its predecessor', async () => {
     await setProjectScoreFloor(db, projectId, 0.4);
-    const results = await Promise.all([setProjectScoreFloor(db, projectId, 0.6), setProjectScoreFloor(db, projectId, 0.9)]);
-    const [first, second] = results as [
-      { previous: number | null; scoreFloor: number | null },
-      { previous: number | null; scoreFloor: number | null },
-    ];
-    // One of them went first and saw 0.4; the other saw what the first wrote. Neither saw the same value as the other.
-    const [earlier, later] = first.previous === 0.4 ? [first, second] : [second, first];
-    expect(earlier.previous).toBe(0.4);
-    expect(later.previous).toBe(earlier.scoreFloor);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const holder = db.transaction(async (tx) => {
+      await tx.select({ scoreFloor: projects.scoreFloor }).from(projects).where(eq(projects.id, projectId)).for('update');
+      locked();
+      await held;
+      await tx.update(projects).set({ scoreFloor: 0.6 }).where(eq(projects.id, projectId));
+    });
+    await isLocked;
+
+    let settled = false;
+    const pending = setProjectScoreFloor(db, projectId, 0.9).then((result) => {
+      settled = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(settled).toBe(false);
+
+    release();
+    await holder;
+    expect(await pending).toEqual({ previous: 0.6, scoreFloor: 0.9 });
   });
 
   it('returns undefined for a project that does not exist', async () => {

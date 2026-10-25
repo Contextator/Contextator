@@ -768,7 +768,9 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/Contextator/Contextator/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/Contextator/Contextator/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/Contextator/Contextator/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Contextator/Contextator/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Contextator/Contextator/compare/v0.2.1...v0.3.0
