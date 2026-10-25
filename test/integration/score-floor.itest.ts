@@ -322,8 +322,9 @@ describe('what the column accepts', () => {
 
   /**
    * Deterministic: a transaction holds the row lock by hand, so the change under test has to wait for it
-   * and can only report what the holder wrote. Without `FOR UPDATE` in `setProjectScoreFloor` it would not
-   * wait, would read the 0.4 the row held before, and settle while the lock is still held.
+   * and can only report what the holder wrote. Without `FOR UPDATE` in `setProjectScoreFloor` its read would
+   * not wait: it would see the 0.4 the row held before and report that as its predecessor. That is what the
+   * final assertion catches; `settled` shows the wait itself (the write is blocked by the lock either way).
    */
   it('waits for a change in flight and reports what that change wrote as its predecessor', async () => {
     await setProjectScoreFloor(db, projectId, 0.4);
@@ -348,11 +349,15 @@ describe('what the column accepts', () => {
       settled = true;
       return result;
     });
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(settled).toBe(false);
-
-    release();
-    await holder;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(settled).toBe(false);
+    } finally {
+      // Released even when the assertion fails, or the lock and its connection would outlive the test and
+      // make every later test of this file time out instead of showing the real failure.
+      release();
+      await holder;
+    }
     expect(await pending).toEqual({ previous: 0.6, scoreFloor: 0.9 });
   });
 
