@@ -426,7 +426,8 @@ export async function verifyRefreshToken(db: Db, raw: string): Promise<RefreshGr
  * closed for thirty-one days came back, was answered `invalid_grant` as it should be, and produced a
  * log line saying a spent refresh token had been presented again and the grant had been revoked. That
  * sentence is defined as a theft signal in [SECURITY.md](../../../.ssot/SECURITY.md) T18 and in
- * [ADR-0054](../../../.ssot/ADR.md#adr-0054), and a signal that fires on the ordinary case is not a signal. Expiry is its own outcome: refused, nothing revoked, nothing warned.
+ * [ADR-0054](../../../.ssot/ADR.md#adr-0054), and a signal that fires on the ordinary case is not a
+ * signal. Expiry is its own outcome: refused, nothing revoked, nothing warned.
  */
 export async function findSpentRefreshToken(db: Db, raw: string): Promise<RefreshGrant | null> {
   return findRefreshToken(db, raw, 'revoked');

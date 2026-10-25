@@ -13,7 +13,8 @@
  * outbound call goes to a service with an account behind it — a git remote, Notion, Confluence, an
  * embedding API. What that costs, and what it does not protect against, is written down in
  * [SECURITY.md](../../../.ssot/SECURITY.md) T27 rather than left to be inferred from here. Every
- * request it makes goes through the egress guard (`confluence-egress.ts`, ADR-0088 and ADR-0107), the redirect hops included.
+ * request it makes goes through the egress guard (`confluence-egress.ts`, ADR-0088 and ADR-0107), the
+ * redirect hops included.
  */
 
 import type { Logger } from '../../context.js';
