@@ -1,11 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import fsp, { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { QuotaExceededError, QuotaUsageUnavailableError } from '../src/services/errors.js';
-import { sourceCurrentDir, stagingDir } from '../src/services/data-dir.js';
+import { sourceCurrentDir, stagingDir, stagingRootDir } from '../src/services/data-dir.js';
 import { KeyedMutex } from '../src/services/locks.js';
 import { NotFoundError } from '../src/services/projects.js';
 import { directoryBytes, overwrittenBytes, resolveQuota, resolveQuotas, UPLOAD_SESSION_TTL_MS } from '../src/services/quotas.js';
@@ -205,6 +205,7 @@ describe('UploadService against a quota', () => {
     const tracker = await service.beginRequest(src, session, quota(100, 60, 60));
     await service.addFile(src, session, 'a.md', await stream(bytes(70)), tracker);
     expect(tracker.requestBytes).toBe(10);
+    await service.rollbackRequest(tracker);
   });
 
   it('does not count a stored file twice once a staged file overwrites it', async () => {
@@ -229,9 +230,10 @@ describe('UploadService against a quota', () => {
     expect(tracker.requestBytes).toBe(-399);
     // 1 + 1500 over a cap of 1000 does not fit, which a thrice-subtracted 400 would have hidden.
     await expect(service.addFile(src, session, 'new.md', await stream(bytes(1500)), tracker)).rejects.toBeInstanceOf(QuotaExceededError);
+    await service.rollbackRequest(tracker);
   });
 
-  /** A source in a project of its own: the reservation is per project, and the other tests leave trackers open in theirs. */
+  /** A source in a project of its own: the reservation is per project, and a request still open counts in what the next one starts from. */
   const isolatedSource = (n: number): DocumentSourceRow =>
     ({ ...freshSource(n), projectId: `33333333-3333-4333-8333-${String(n).padStart(12, '0')}` }) as unknown as DocumentSourceRow;
 
@@ -253,6 +255,110 @@ describe('UploadService against a quota', () => {
     await service.rollbackRequest(trackers[2]!);
   });
 
+  it('counts a byte once when a request writes while another is still measuring the project', async () => {
+    const src = isolatedSource(18);
+    const [sb, sc] = await Promise.all([1, 2].map(() => service.createSession(src, quota(100, 0))));
+    const b = await service.startRequest(src, sb!, async () => quota(100, 0));
+    // C measures the staging tree the way the upload route does, with the running requests' scratch directories
+    // left out, and B writes 40 bytes while it is at it: the bytes are on disk when the scan looks and in B's
+    // count when B charges them. Counting both made the project look like 80 bytes before C had written any.
+    const root = stagingRootDir(dataDir, src.projectId, src.id);
+    const c = await service.startRequest(src, sc!, async (skipDirs) => {
+      await service.addFile(src, sb!, 'b.md', await stream(bytes(40)), b!);
+      return quota(100, await directoryBytes(root, skipDirs));
+    });
+    // The project holds 40 bytes, so C's 40 more fit (80 of 100) and no more than 60 would.
+    await service.addFile(src, sc!, 'c.md', await stream(bytes(40)), c!);
+    expect(c!.projectedUsed).toBe(80);
+    await expect(service.addFile(src, sc!, 'd.md', await stream(bytes(21)), c!)).rejects.toMatchObject({
+      code: 'quota_exceeded',
+      used: 40,
+      requested: 61,
+    });
+    await service.rollbackRequest(c!);
+    await service.finishRequest(b!);
+  });
+
+  /** What the upload route measures: the project's staging tree without the scratch directories of the requests running now. */
+  const measureLikeTheRoute = (src: DocumentSourceRow, limit: number) => async (skipDirs: ReadonlySet<string>) =>
+    quota(limit, await directoryBytes(stagingRootDir(dataDir, src.projectId, src.id), skipDirs));
+
+  it('does not count an archive twice while it is being unpacked', async () => {
+    const src = isolatedSource(19);
+    const [sa, sc] = await Promise.all([1, 2].map(() => service.createSession(src, quota(1_000_000, 0))));
+    const a = await service.startRequest(src, sa!, measureLikeTheRoute(src, 1_000_000));
+    const zip = await readFile(path.join(__dirname, 'fixtures', 'docs.zip'));
+    const sessionDir = stagingDir(dataDir, src.projectId, src.id, sa!);
+    let midway: UploadRequestQuota | undefined;
+    // Another request joins and measures once the whole archive is on disk and before it has been unpacked.
+    async function* archive() {
+      yield zip;
+      while ((await directoryBytes(sessionDir)) < zip.length) await new Promise((resolve) => setTimeout(resolve, 5));
+      midway = await service.startRequest(src, sc!, measureLikeTheRoute(src, 1_000_000));
+    }
+    await service.addFile(src, sa!, 'docs.zip', (await import('node:stream')).Readable.from(archive()), a!);
+    // The archive is in no one's count: the measurement read 0, and the unpacked files are counted once, from A.
+    expect(a!.requestBytes).toBeGreaterThan(0);
+    expect(midway?.baseUsed).toBe(0);
+    expect(midway?.projectedUsed).toBe(a!.requestBytes);
+    expect(await directoryBytes(a!.tempDir)).toBe(0);
+    await service.rollbackRequest(midway!);
+    await service.finishRequest(a!);
+  });
+
+  it('does not let a refused request keep its bytes in the count while it is being taken back', async () => {
+    const src = isolatedSource(20);
+    const [sa, sb, sc] = await Promise.all([1, 2, 3].map(() => service.createSession(src, quota(100, 0))));
+    const a = await service.startRequest(src, sa!, measureLikeTheRoute(src, 100));
+    await service.addFile(src, sa!, 'a.md', await stream(bytes(70)), a!);
+    const b = await service.startRequest(src, sb!, measureLikeTheRoute(src, 100));
+    await expect(service.addFile(src, sb!, 'b.md', await stream(bytes(50)), b!)).rejects.toMatchObject({
+      code: 'quota_exceeded',
+      used: 70,
+      requested: 50,
+    });
+    // B has been refused and not yet rolled back (its part is still being drained): C's 20 bytes fit in 100 - 70.
+    const c = await service.startRequest(src, sc!, measureLikeTheRoute(src, 100));
+    await service.addFile(src, sc!, 'c.md', await stream(bytes(20)), c!);
+    expect(c!.projectedUsed).toBe(90);
+    await service.rollbackRequest(b!);
+    await service.finishRequest(c!);
+    await service.finishRequest(a!);
+  });
+
+  it('does not count a request in the middle of being rolled back', async () => {
+    const src = isolatedSource(21);
+    const [sa, sb, sc] = await Promise.all([1, 2, 3].map(() => service.createSession(src, quota(200, 0))));
+    const a = await service.startRequest(src, sa!, measureLikeTheRoute(src, 200));
+    await service.addFile(src, sa!, 'a.md', await stream(bytes(70)), a!);
+    const b = await service.startRequest(src, sb!, measureLikeTheRoute(src, 200));
+    await service.addFile(src, sb!, 'b.md', await stream(bytes(50)), b!);
+    // C starts and writes while B's scratch directory is being deleted: B's 50 bytes are no longer anyone's.
+    const original = fsp.rm.bind(fsp);
+    let c: UploadRequestQuota | undefined;
+    let during: Promise<void> | undefined;
+    const spy = vi.spyOn(fsp, 'rm').mockImplementation(async (target, options) => {
+      if (target === b!.scratchDir && !during) {
+        during = (async () => {
+          c = await service.startRequest(src, sc!, measureLikeTheRoute(src, 200));
+          await service.addFile(src, sc!, 'c.md', await stream(bytes(90)), c!);
+        })();
+        await during;
+      }
+      return original(target, options);
+    });
+    try {
+      await service.rollbackRequest(b!);
+    } finally {
+      spy.mockRestore();
+    }
+    await during;
+    // 70 from A and 90 from C: 160 of 200, which 50 more of B's would have pushed to 210.
+    expect(c!.projectedUsed).toBe(160);
+    await service.finishRequest(c!);
+    await service.finishRequest(a!);
+  });
+
   it('gives the reservation back when a request is taken back, and keeps it while another request runs', async () => {
     const src = isolatedSource(9);
     const [s1, s2, s3, s4] = await Promise.all([1, 2, 3, 4].map(() => service.createSession(src, quota(100, 0))));
@@ -262,9 +368,10 @@ describe('UploadService against a quota', () => {
     await service.rollbackRequest(a);
     // The taken-back 60 bytes are neither on disk nor reserved: b may use them.
     await service.addFile(src, s2!, 'b.md', await stream(bytes(60)), b);
-    // b is still running, so its 60 bytes are in the reservation for a request that starts now. That request
-    // measures the disk after b wrote, so it does not count them a second time.
-    const c = await service.beginRequest(src, s3!, quota(100, 60));
+    // b is still running, so its 60 bytes are in the reservation for a request that starts now. The measurement
+    // leaves b's scratch directory out (a file being written has no size to trust), so it reads 0 and b's 60
+    // come from the reservation: counted once.
+    const c = await service.beginRequest(src, s3!, quota(100, 0));
     expect(c.reservedAtStart).toBe(60);
     expect(c.projectedUsed).toBe(60);
     await service.finishRequest(b);

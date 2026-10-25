@@ -10,6 +10,8 @@ ships, that stops.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-25
+
 ### Added
 
 - **Panel: provenance, quotas, allowlists, floors, freshness and golden questions.** Search hits show the
@@ -154,6 +156,38 @@ ships, that stops.
 - **README restructured.** The README now follows the standard section order. The long reference sections
   (document sources, accounts, MCP access, admin API, file types, troubleshooting) moved to `docs/`. The
   backup and PostgreSQL major-upgrade procedures stay in the README.
+
+### Upgrade notes
+
+**The one behaviour change.** An `open` project now answers at most 60 MCP requests a minute per client
+address; the 61st within the minute gets `429` with `Retry-After`. It is on by default
+(`MCP_RATE_LIMIT_ANON_PER_MINUTE=60`) because an open project is reachable by anyone and had no ceiling at
+all. Set `MCP_RATE_LIMIT_ANON_PER_MINUTE=0` to keep the old behaviour. Behind a reverse proxy the address is
+the client's only with `TRUST_PROXY` set; without it every caller shares the proxy's address and its one
+budget (ADR-0112, FR-650). Everything else below changes nothing until you set a value.
+
+- **Five migrations run at start-up, in order:** `0021_document_source_url`, `0022_project_quotas`,
+  `0023_rate_limit_allowlist`, `0024_floor_suggestions` and `0025_golden_questions`. They only add columns
+  and tables and rewrite no existing row. Take a backup first, as for any upgrade (`npm run backup`).
+- **`source_url` and `source_modified_at` start as null** on every existing document. Search and
+  `read_document` show no `Source:` line for a document until its source has run again; that run fills
+  both in without re-embedding anything.
+- **New environment variables, all optional:** `MCP_RATE_LIMIT_PER_MINUTE` (default `0`, off),
+  `MCP_RATE_LIMIT_ANON_PER_MINUTE` (default `60`, see above), `MCP_RATE_LIMIT_TOOLS` (empty),
+  `MCP_RATE_LIMIT_FAIL_OPEN` (`1`), `PROJECT_MAX_DOCUMENTS`, `PROJECT_MAX_CHUNKS` and
+  `PROJECT_MAX_UPLOAD_BYTES` (default `0`), `SOURCE_STALE_AFTER_DAYS` (`365`), `REINDEX_ON_MODEL_CHANGE`
+  (`0`), `OTEL_EXPORTER_OTLP_ENDPOINT` (unset, tracing off), `OTEL_SERVICE_NAME` (`contextator`) and, for
+  `npm run backup -- --s3`, the `BACKUP_S3_*` family, plus `BACKUP_KEEP` (`7`, how many archives `--s3` and
+  the compose sidecar keep) and the sidecar's own `BACKUP_INTERVAL_SECONDS` (`86400`). `.env.example`
+  documents each of them except `BACKUP_INTERVAL_SECONDS`, which only the backup sidecar reads and the README documents.
+- **Quotas default to `0`, which is unlimited,** instance-wide and per project, so no project is refused
+  anything after the upgrade. A project's own `max_documents`, `max_chunks` or `max_upload_bytes` overrides
+  the instance value in both directions, and `0` exempts that project.
+- **The optional compose backup sidecar** (`docker-compose.backup.yml`, ADR-0110) is not started by the
+  default compose files; nothing changes unless you add the overlay.
+- **Helm chart `1.8.0`** (`appVersion` `0.4.0`). This release changes nothing in the chart but those two
+  fields: the 0.4.0 values arrived in `1.3.1` to `1.7.0`, and an existing `values.yaml` keeps working.
+- **The README is restructured.** Links into its old long sections now land in `docs/`.
 
 ## [0.3.2] - 2026-10-10
 

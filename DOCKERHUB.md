@@ -16,8 +16,8 @@ agents (Cursor, Claude Code, Claude Desktop, …) can search semantically at
   and a per-project `member` that is a read-only `viewer` or a source-managing `editor`.
 - **Incremental indexing.** Files are hashed; only changed files are re-embedded, removed files are
   deleted.
-- **More than Markdown.** `.html`, `.docx`, `.csv` and `.pdf` are converted to Markdown as they are
-  indexed.
+- **More than Markdown.** `.html`, `.docx`, `.csv`, `.pdf`, `.pptx`, `.xlsx`, `.ipynb`, `.rst` and `.adoc` are converted to Markdown as
+  they are indexed.
 
 This image (`contextator/contextator`) is the whole product in **one container**: PostgreSQL 16 +
 pgvector and the Node.js app, started and stopped together by a small entrypoint script. There is
@@ -74,11 +74,11 @@ start's log will not work.
 | Tag | Meaning |
 |-----|---------|
 | `latest` | The most recent stable release. Never points at a pre-release (`-rc.*`, `-beta.*`, …). |
-| `0.3` | The latest patch release inside the `0.3.x` minor line. Moves as `0.3.x` releases ship. |
-| `0.3.2` | One exact release. Immutable — always the same image. |
-| `…-slim` | The same release **without the embedded PostgreSQL** — `latest-slim`, `0.3-slim`, `0.3.2-slim`. Every tag from `0.2.0` on has one. |
+| `0.4` | The latest patch release inside the `0.4.x` minor line. Moves as `0.4.x` releases ship. |
+| `0.4.0` | One exact release. Immutable — always the same image. |
+| `…-slim` | The same release **without the embedded PostgreSQL** — `latest-slim`, `0.4-slim`, `0.4.0-slim`. Every tag from `0.2.0` on has one. |
 
-Pin `0.3.2`-style tags for anything you upgrade deliberately; use `latest` only where an unattended
+Pin `0.4.0`-style tags for anything you upgrade deliberately; use `latest` only where an unattended
 minor/patch bump is acceptable.
 
 ## Bringing your own PostgreSQL

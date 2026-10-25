@@ -325,9 +325,11 @@ describe('the project quotas API and the upload quota', () => {
           return api.app.inject({ method: 'POST', url: `${url}/${session}/files`, headers: { ...ADMIN, ...headers }, payload });
         }),
       );
+      // Exactly two get in and the third is refused for the quota, whichever of the three that is: each byte is
+      // counted once, whether it is still in a request's scratch directory or already in the session.
       expect(results.map((r) => r.statusCode).sort()).toEqual([200, 200, 413]);
-      // What is on disk never exceeds the limit, whichever request lost.
-      expect(await directoryBytes(path.join(dataDir, 'projects', project.id))).toBeLessThanOrEqual(100);
+      // What is on disk never exceeds the limit, and is exactly what the two accepted requests wrote: the refused one is taken back.
+      expect(await directoryBytes(path.join(dataDir, 'projects', project.id))).toBe(80);
     });
 
     it('does not renew, and so does not 404, for a project without a quota', async () => {

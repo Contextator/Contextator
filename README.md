@@ -42,8 +42,8 @@ the app, and is free software under the **AGPL-3.0-or-later** with a commercial 
   its access becomes the memberships you already manage. Browser-based connectors sign in through OAuth 2.1.
   See [MCP access](docs/mcp-access.md).
 - **Incremental indexing.** Files are hashed; only changed files are re-embedded, removed files are deleted.
-- **More than Markdown.** `.html`, `.docx`, `.csv` and `.pdf` are converted to Markdown as they are indexed, so
-  an agent reads a Word file or a PDF the way it reads a page of documentation. See
+- **More than Markdown.** `.html`, `.docx`, `.csv`, `.pdf`, `.pptx`, `.xlsx`, `.ipynb`, `.rst` and `.adoc` are converted to Markdown as they
+  are indexed, so an agent reads a Word file or a PDF the way it reads a page of documentation. See
   [File types](docs/file-types.md).
 
 ## Quick Start
@@ -122,11 +122,11 @@ docker run -d --name contextator -p 127.0.0.1:3444:3444 \
 Building the image from source instead of pulling it:
 [wiki/Installation#build-the-image-yourself](https://github.com/Contextator/Contextator/wiki/Installation#build-the-image-yourself).
 
-**Tags.** `latest` is the newest stable release; `0.3` tracks the latest patch inside the `0.3.x`
-line; `0.3.2` is one exact, immutable release. Pin a versioned tag for anything you upgrade
-deliberately by setting `CONTEXTATOR_TAG` in `.env` (e.g. `CONTEXTATOR_TAG=0.3.2`) and running
+**Tags.** `latest` is the newest stable release; `0.4` tracks the latest patch inside the `0.4.x`
+line; `0.4.0` is one exact, immutable release. Pin a versioned tag for anything you upgrade
+deliberately by setting `CONTEXTATOR_TAG` in `.env` (e.g. `CONTEXTATOR_TAG=0.4.0`) and running
 `docker compose up -d` — this reads at every start, not only the first. Every one of those tags from
-`0.2.0` on has a `-slim` twin — `latest-slim`, `0.3-slim`, `0.3.2-slim` — which is described in [Bringing your
+`0.2.0` on has a `-slim` twin — `latest-slim`, `0.4-slim`, `0.4.0-slim` — which is described in [Bringing your
 own PostgreSQL](docs/deployment.md#bringing-your-own-postgresql).
 
 ## Usage
@@ -601,7 +601,7 @@ do not repeat the commands.
 
 ## Project Status
 
-**Beta.** Contextator is at `0.3.x`; it is not yet stable. Before `1.0.0` a minor version may change a public
+**Beta.** Contextator is at `0.4.x`; it is not yet stable. Before `1.0.0` a minor version may change a public
 contract — the HTTP and MCP APIs, the MCP tool names and their parameters, environment variable names — without
 a major bump. Breaking changes are listed in [`CHANGELOG.md`](CHANGELOG.md).
 

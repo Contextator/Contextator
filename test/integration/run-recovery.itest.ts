@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { WEB_LIMIT_DEFAULTS } from '../../src/config.js';
@@ -84,7 +84,11 @@ const indexerConfig = {
   PROJECT_MAX_CHUNKS: 0,
 };
 
-/** Waits for the job to settle and then for the project row to stop saying `indexing` (see index-generations.itest.ts). */
+/**
+ * Waits for the job to settle, then for the project row to stop saying `indexing` (see index-generations.itest.ts),
+ * then for the job's `index_runs` row. The indexer releases the project first and records the run after it, so
+ * without the last wait a test that reads the newest run can still see the one before.
+ */
 async function settle(db: Db, job: JobState): Promise<JobState> {
   const deadline = Date.now() + 60_000;
   while (job.phase !== 'done' && job.phase !== 'error') {
@@ -93,8 +97,20 @@ async function settle(db: Db, job: JobState): Promise<JobState> {
   }
   for (;;) {
     const project = await getProjectById(db, job.projectId);
-    if (project?.status !== 'indexing') return job;
+    if (project?.status !== 'indexing') break;
     if (Date.now() > deadline) throw new Error(`project row still says "indexing" after the job settled as ${job.phase}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  if (!job.startedAt) return job;
+  const startedAt = new Date(job.startedAt);
+  for (;;) {
+    const rows = await db
+      .select({ id: indexRuns.id })
+      .from(indexRuns)
+      .where(and(eq(indexRuns.projectId, job.projectId), eq(indexRuns.startedAt, startedAt)))
+      .limit(1);
+    if (rows.length > 0) return job;
+    if (Date.now() > deadline) throw new Error(`no index_runs row for the job that settled as ${job.phase}`);
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }

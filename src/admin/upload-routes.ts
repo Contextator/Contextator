@@ -63,14 +63,20 @@ export const uploadRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
    * ([ADR-0117](../../.ssot/ADR.md#adr-0117)). An unlimited project skips the directory scan entirely. When
    * the scan fails the error propagates and the request is refused with `503`: usage nobody could measure
    * is not "under the limit". `used` includes the staging of every live session; a commit passes its own
-   * `excludeSession`, because it measures that session's files itself.
+   * `excludeSession`, because it measures that session's files itself. A `files` request passes `skipDirs`, the
+   * scratch directories of the requests running beside it, which the reservation counts instead of the disk.
    */
-  const loadUploadQuota = async (projectId: string, sourceId: string, excludeSession?: string): Promise<UploadQuota | undefined> => {
+  const loadUploadQuota = async (
+    projectId: string,
+    sourceId: string,
+    excludeSession?: string,
+    skipDirs?: ReadonlySet<string>,
+  ): Promise<UploadQuota | undefined> => {
     const project = await getProjectById(db, projectId);
     if (!project) throw new NotFoundError('Project not found');
     const { limit } = resolveQuotas(project, config).uploadBytes;
     if (limit === 0) return undefined;
-    const usage = await projectUploadUsage(db, config.DATA_DIR, projectId, { excludeSession, sourceId });
+    const usage = await projectUploadUsage(db, config.DATA_DIR, projectId, { excludeSession, sourceId, skipDirs });
     return { limit, used: usage.total, sourceCurrent: usage.sourceCurrent };
   };
 
@@ -90,12 +96,12 @@ export const uploadRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     // Joins the project's reservation before the project is measured, so that requests running at the same
     // time see each other's bytes. Renewing comes first and only when a quota applies: a session idle past the
     // expiry is not counted and this request revives it, while a project without a quota behaves as it always has.
-    const tracker: UploadRequestQuota | undefined = await uploads.startRequest(source, session, async () => {
+    const tracker: UploadRequestQuota | undefined = await uploads.startRequest(source, session, async (skipDirs) => {
       const project = await getProjectById(db, id);
       if (!project) throw new NotFoundError('Project not found');
       if (resolveQuotas(project, config).uploadBytes.limit === 0) return undefined;
       await uploads.renew(source, session);
-      return loadUploadQuota(id, sid);
+      return loadUploadQuota(id, sid, undefined, skipDirs);
     });
     const totals: ImportStats = { files: 0, skipped: 0, bytes: 0 };
     const errors: string[] = [];
