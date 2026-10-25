@@ -302,6 +302,9 @@ describe('a TRUST_PROXY that disagrees with the traffic says so, once', () => {
     const said = await runWith({ TRUST_PROXY: '1' }, []);
     expect(said).toHaveLength(1);
     expect(said[0]).toContain('every hop');
+    // The deprecation (ADR-0122) rides on the same line, once per start.
+    expect(said[0]).toContain('0.5.0');
+    expect(said[0]).toContain('ADR-0122');
   });
 });
 

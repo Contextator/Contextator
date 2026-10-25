@@ -54,6 +54,8 @@ const TRUST_PROXY_CONSEQUENCES =
  *
  * `TRUST_PROXY=1` is the opposite failure and needs no evidence, because the danger is the setting
  * itself: it says nothing about traffic, so it is stated at startup and unconditionally.
+ * It is also deprecated since 0.4.1 and refused from 0.5.0 ([ADR-0122](../.ssot/ADR.md#adr-0122)), and
+ * the same line says so; the behaviour itself is unchanged until then.
  */
 export function warnAboutProxyConfiguration(app: FastifyInstance, config: Config, warn: (message: string) => void): void {
   if (config.TRUST_PROXY === true) {
@@ -62,8 +64,9 @@ export function warnAboutProxyConfiguration(app: FastifyInstance, config: Config
         'whoever opened the socket wrote. That is only safe when nothing but your proxy can reach this ' +
         'port; if the port is reachable directly, a caller chooses its own rate-limit key. A static MCP token ' +
         'bound to a network allowlist is refused outright under this setting, because the address it would ' +
-        'be matched against is not a fact. Prefer naming ' +
-        'the proxy: TRUST_PROXY=loopback, or its address or CIDR block — and name the proxy rather than ' +
+        'be matched against is not a fact. TRUST_PROXY=1/true is deprecated and will be refused at startup from ' +
+        '0.5.0 (ADR-0122): name the proxy instead — TRUST_PROXY=loopback, its address or its CIDR block, or ' +
+        'TRUST_PROXY=0 when nothing sits in front of this server — and name the proxy rather than ' +
         'the network your clients are on, because the list is applied to every hop.',
     );
     return;

@@ -112,9 +112,9 @@ config:
   # Fastify trust-proxy setting (ADR-0060, src/config.ts parseTrustProxy). Off by default (empty
   # here maps to the app's own TRUST_PROXY default of "0") and never inferred from
   # `ingress.enabled` — ADR-0060 requires an operator to name what is in front. If this chart is
-  # installed behind an Ingress/reverse proxy, set it explicitly: "1" trusts every hop's
-  # X-Forwarded-For (not just one), or supply a comma-separated list of trusted proxy IPs/CIDRs/
-  # subnet names (loopback, linklocal, uniquelocal) to trust only those.
+  # installed behind an Ingress/reverse proxy, set it explicitly to a comma-separated list of
+  # trusted proxy IPs/CIDRs/subnet names (loopback, linklocal, uniquelocal) to trust only those.
+  # "1"/"true" (trust every hop's X-Forwarded-For) is deprecated and refused from app 0.5.0 (ADR-0122).
   trustProxy: ""
   # CONFLUENCE_ALLOWED_HOSTS (ADR-0088): host names — not URLs — a Confluence source may reach on a
   # private address (10/8, 172.16/12, 192.168/16, fc00::/7). Set it when Confluence Data Center is

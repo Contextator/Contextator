@@ -25,6 +25,13 @@ Contextator {{ .Chart.AppVersion }} has been installed ({{ include "contextator.
    to match what actually sits in front of the Pod — see the chart README, "Ingress and reverse
    proxies". If 0 is deliberate, ignore this note.
 {{- end }}
+{{- if or (eq (lower (toString .Values.config.trustProxy)) "1") (eq (lower (toString .Values.config.trustProxy)) "true") }}
+
+   DEPRECATED: config.trustProxy is "{{ .Values.config.trustProxy }}", which trusts every hop of X-Forwarded-For.
+   The app logs a warning for it at every start and will refuse to start with it from 0.5.0
+   (ADR-0122). Name the proxy instead (its address, its CIDR block, or "loopback") — see the chart
+   README, "Ingress and reverse proxies".
+{{- end }}
 
 3) Complete the first-run setup (needsSetup) in the dashboard.
 

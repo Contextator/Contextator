@@ -17,6 +17,10 @@ AUTH_COOKIE_SECURE=1
 Full reasoning for each of the three, what breaks without them, and the "name the proxy, not the
 network your clients are on" rule for `TRUST_PROXY`: [Configuration](https://contextator.com/en/docs/configuration/#running-behind-a-reverse-proxy).
 
+`TRUST_PROXY=1`/`true` ("trust every hop") is deprecated in 0.4.1 and refused at startup from 0.5.0
+(ADR-0122). It still works until then and logs a warning at every start; name the proxy instead (`loopback`,
+its address or its CIDR block, or `0` when nothing is in front).
+
 ## Embedding with a server of your own
 
 `EMBEDDING_PROVIDER=openai` speaks to any server that offers an OpenAI-compatible `/embeddings` endpoint.
@@ -173,7 +177,7 @@ answers `503` when the counter is unreachable) limit how often a token, an anony
 called. How they count, what the `429` looks like and what an upgrade changes are in
 [MCP access](mcp-access.md#limiting-how-much-a-client-may-ask-for). A per-token network allowlist depends on
 `TRUST_PROXY` being exact: [the table](mcp-access.md#restricting-a-static-token-to-a-network) says what each value
-trusts, and `TRUST_PROXY=1` refuses to save a list.
+trusts, and `TRUST_PROXY=1` (deprecated in 0.4.1, refused at startup from 0.5.0) refuses to save a list.
 
 ## Project quotas
 
