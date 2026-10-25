@@ -10,7 +10,7 @@ ships, that stops.
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-10-24
+## [0.4.0] - 2026-10-25
 
 ### Added
 
@@ -177,7 +177,9 @@ budget (ADR-0112, FR-650). Everything else below changes nothing until you set a
   `MCP_RATE_LIMIT_FAIL_OPEN` (`1`), `PROJECT_MAX_DOCUMENTS`, `PROJECT_MAX_CHUNKS` and
   `PROJECT_MAX_UPLOAD_BYTES` (default `0`), `SOURCE_STALE_AFTER_DAYS` (`365`), `REINDEX_ON_MODEL_CHANGE`
   (`0`), `OTEL_EXPORTER_OTLP_ENDPOINT` (unset, tracing off), `OTEL_SERVICE_NAME` (`contextator`) and, for
-  `npm run backup -- --s3`, the `BACKUP_S3_*` family. `.env.example` documents each.
+  `npm run backup -- --s3`, the `BACKUP_S3_*` family, plus `BACKUP_KEEP` (`7`, how many archives `--s3` and
+  the compose sidecar keep) and the sidecar's own `BACKUP_INTERVAL_SECONDS` (`86400`). `.env.example`
+  documents each of them except `BACKUP_INTERVAL_SECONDS`, which only the backup sidecar reads and the README documents.
 - **Quotas default to `0`, which is unlimited,** instance-wide and per project, so no project is refused
   anything after the upgrade. A project's own `max_documents`, `max_chunks` or `max_upload_bytes` overrides
   the instance value in both directions, and `0` exempts that project.
