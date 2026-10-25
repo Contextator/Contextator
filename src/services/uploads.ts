@@ -322,7 +322,9 @@ export class UploadService {
 
   /**
    * Stores one uploaded part. `relativePath` is the browser-supplied path (folder uploads keep their
-   * structure). Archives are unpacked right away into the staging tree, next to where they were dropped.
+   * structure). Archives are unpacked right away: without a quota into the staging tree, next to where they were
+   * dropped; with one the archive is held in the request's temporary directory and its content is unpacked into
+   * the request's scratch directory, which `finishRequest` moves into the session.
    */
   async addFile(
     source: DocumentSourceRow,
