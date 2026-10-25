@@ -237,7 +237,8 @@ export const ConfluenceConfig = z.object({
  * A published documentation site ([ADR-0070](../../.ssot/ADR.md#adr-0070)). **Public pages only** —
  * there is no credential on this type at all, which is the shape of the decision rather than a gap:
  * a login flow is a per-site negotiation and half of one is a connector that fails in a way nobody can
- * diagnose. `README.md` says so rather than leaving it to be discovered from an index of login pages.
+ * diagnose. `docs/document-sources.md` says so rather than leaving it to be discovered from an index of
+ * login pages.
  */
 export const WebConfig = z.object({
   /** `https://docs.example.com/sitemap.xml`, `…/llms.txt`, or the page a crawl starts from. */

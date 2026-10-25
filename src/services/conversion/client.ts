@@ -164,7 +164,7 @@ export class ConversionService {
   /**
    * Whether a conversion thread is being held right now.
    *
-   * The idle promise — ADR-0071 §3, `README.md` and `.env.example` all make it — is a promise about
+   * The idle promise — ADR-0071 §3 and `.env.example` both make it — is a promise about
    * exactly this bit: after `CONVERSION_IDLE_MS` with nothing to convert it goes false, and the heap a
    * large document grew goes back to the operating system with it.
    */

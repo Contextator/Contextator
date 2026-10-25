@@ -12,8 +12,9 @@
  * **This is the only file in the product that reaches a host the operator named.** Every other
  * outbound call goes to a service with an account behind it — a git remote, Notion, Confluence, an
  * embedding API. What that costs, and what it does not protect against, is written down in
- * `README.md`'s security notes rather than left to be inferred from here. Every request it makes goes
- * through the egress guard (`confluence-egress.ts`, ADR-0088 and ADR-0107), the redirect hops included.
+ * [SECURITY.md](../../../.ssot/SECURITY.md) T27 rather than left to be inferred from here. Every
+ * request it makes goes through the egress guard (`confluence-egress.ts`, ADR-0088 and ADR-0107), the
+ * redirect hops included.
  */
 
 import type { Logger } from '../../context.js';
