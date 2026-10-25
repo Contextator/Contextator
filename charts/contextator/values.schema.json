@@ -350,8 +350,11 @@
           "type": "string"
         },
         "trustProxy": {
-          "description": "TRUST_PROXY. Empty leaves it unset (the app's default, off); never inferred from ingress.enabled (ADR-0060).",
-          "type": "string"
+          "description": "TRUST_PROXY. Empty leaves it unset (the app's default, off); never inferred from ingress.enabled (ADR-0060). \"1\" and \"true\" (trust every hop of X-Forwarded-For, any letter case, surrounding whitespace ignored) are rejected since chart 2.0.0 because the application refuses to start with them from 0.5.0 (ADR-0122): name the proxy instead, with its address, its CIDR block or \"loopback\", or leave the value empty or \"0\" when nothing sits in front.",
+          "type": "string",
+          "not": {
+            "pattern": "^[\\s\\x0b]*([1]|[Tt][Rr][Uu][Ee])[\\s\\x0b]*$"
+          }
         },
         "confluenceAllowedHosts": {
           "description": "CONFLUENCE_ALLOWED_HOSTS: host names or IP addresses (not URLs: no scheme, port or path) a Confluence source may reach on a private address (ADR-0088). Mirrors the application's startup check (src/config.ts): a DNS-style name (letters, digits, '_' and inner '-', optional trailing dot) or an IP address, IPv6 optionally in brackets. Empty leaves it unset.",

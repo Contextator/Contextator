@@ -60,7 +60,7 @@ async function main(): Promise<void> {
   // Both directions of a wrong `TRUST_PROXY` are silent ([ADR-0060](../.ssot/ADR.md#adr-0060)), and the
   // one that actually happens is diagnosed from traffic rather than from settings. Installed before the
   // route plugins so the hook sees every request.
-  warnAboutProxyConfiguration(app, config, (message) => log.warn(message));
+  warnAboutProxyConfiguration(app, (message) => log.warn(message));
 
   // Before anything that could be traced. A no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set, in which case
   // this is also the only point the OpenTelemetry modules are loaded.

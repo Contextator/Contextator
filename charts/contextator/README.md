@@ -474,8 +474,9 @@ Enabling `ingress` does **not** make the application trust the Ingress controlle
 set only from `config.trustProxy`, never inferred from `ingress.enabled`: the chart cannot know what
 actually sits in front of the Pod (an ingress controller, a cloud load balancer, a CDN, or all three),
 and a trust setting that is guessed is one a caller can exploit. Left empty, the app's own default
-applies (`0`: `X-Forwarded-*` headers are ignored). `"1"`/`"true"` (trust every hop) is deprecated:
-the app warns about it at every start and refuses it from app 0.5.0 (ADR-0122), so name the proxy.
+applies (`0`: `X-Forwarded-*` headers are ignored). `"1"`/`"true"` (trust every hop) is refused: the app
+refuses to start with it from app 0.5.0 and the values schema rejects it from chart 2.0.0 (ADR-0122), so
+name the proxy. See [Upgrading to chart 2.0.0](#upgrading-to-chart-200).
 
 Behind an Ingress, set these together:
 
@@ -503,6 +504,26 @@ NetworkPolicy that lets nothing but the ingress controller reach this Pod's port
 it only when that NetworkPolicy exists. A hop count is not accepted. Also check that your ingress
 controller **replaces** an incoming `X-Forwarded-For` rather than appending to what the client sent;
 no setting here can tell the difference.
+
+### Upgrading to chart 2.0.0
+
+Chart 2.0.0 is a major version because the values schema newly rejects a value (ADR-0092):
+`config.trustProxy` set to `"1"` or `"true"` (any letter case, surrounding whitespace ignored), which told the
+application to believe the left-most `X-Forwarded-For` whoever wrote it. Application 0.5.0 refuses the same
+value at startup (ADR-0122), so a release that kept it would have gone into a CrashLoop; the schema stops
+`helm upgrade` instead, before anything changes.
+
+Before upgrading, if your values file or `--set` flags set it:
+
+- the proxy is on another host or in another Pod: set `config.trustProxy` to its address or CIDR block, for
+  example `"172.18.0.0/16"` (the narrowest range that holds the proxy, not the network your clients are on);
+- the proxy runs on the same host as the application: `"loopback"`;
+- nothing sits in front of the Pod: `"0"`, or leave it empty.
+
+`helm template t charts/contextator --set-string config.trustProxy=1` shows the refusal. Note `--set` turns `1`
+and `true` into a number and a boolean, which the schema already rejected as a type error; `--set-string` is
+the form that tests this rule. A `TRUST_PROXY` set through the free-form `env` map is not seen by the
+schema, but the application refuses it the same way when the Pod starts.
 
 ## Persistence
 

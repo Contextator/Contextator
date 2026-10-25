@@ -154,12 +154,14 @@ export async function startMcpInstance(
 ): Promise<LiveInstance> {
   const config = loadConfig({
     DATABASE_URL: database.url,
-    // `1`, which is **not** the product default ([ADR-0060](../../../.ssot/ADR.md#adr-0060)). It is
-    // what lets a suite present itself as several hosts over a loopback socket: the per-host budget on
-    // `/oauth/register` is a product behaviour, and a test file that registered thirty clients from one
-    // address would be hitting it on purpose. The setting is proved in both directions against the real
-    // route in `test/trust-proxy.test.ts`; this file needs the forwarded address to be read.
-    TRUST_PROXY: '1',
+    // `loopback`, which is **not** the product default ([ADR-0060](../../../.ssot/ADR.md#adr-0060)). The suite's
+    // client connects from loopback, so it plays the reverse proxy: that is what lets a suite present
+    // itself as several hosts over a loopback socket, and the per-host budget on `/oauth/register` is a
+    // product behaviour a test file that registered thirty clients from one address would be hitting on
+    // purpose. It is a *named* proxy and not `1`, which is refused since 0.5.0
+    // ([ADR-0122](../../../.ssot/ADR.md#adr-0122)). The setting is proved in both directions against the
+    // real route in `test/trust-proxy.test.ts`; this file needs the forwarded address to be read.
+    TRUST_PROXY: 'loopback',
     ALLOWED_DOC_ROOTS: opts.docRoot,
     DATA_DIR: opts.dataDir,
     SECRET_KEY: '0'.repeat(64),
