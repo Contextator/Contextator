@@ -49,6 +49,10 @@ const TOOLS = [
   },
   { name: 'list_topics', text: 'Indexed documents grouped by directory, with title and chunk count; paged with a cursor.' },
   { name: 'read_document', text: 'Markdown of one indexed file from the database — a whole page, or one section by its heading.' },
+  {
+    name: 'whats_new',
+    text: 'What was added, changed or removed since a point in time, newest first; says how far back its record goes and whether the question reaches that far.',
+  },
 ];
 
 const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN', confluence: 'CNF', web: 'WEB' };
@@ -725,7 +729,7 @@ function renderDetail() {
       el('section', { class: 'panel' }, [
         el('div', { class: 'panel-head' }, [
           el('h3', { text: 'Tools exposed to the agent' }),
-          el('p', { text: 'Every project publishes the same three tools, scoped to its own chunks.' }),
+          el('p', { text: 'Every project publishes the same tools, scoped to its own chunks.' }),
         ]),
         el(
           'div',

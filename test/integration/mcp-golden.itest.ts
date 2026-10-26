@@ -5,12 +5,12 @@ import path from 'node:path';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { McpServer } from '@modelcontextprotocol/server';
 import { LATEST_PROTOCOL_VERSION, type JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { loadConfig } from '../../src/config.js';
 import type { Db } from '../../src/db/client.js';
-import { documentSources, projects, type ProjectRow } from '../../src/db/schema.js';
+import { documentChanges, documentSources, projects, type ProjectRow } from '../../src/db/schema.js';
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
 import { chunkMarkdown, embeddingText, estimateTokens } from '../../src/services/chunker.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
@@ -120,12 +120,23 @@ const LEGACY = `# Legacy notes
 The archive rotation job ran nightly before the scheduler replaced it.
 `;
 
+/**
+ * The instant `whats_new` takes for "now" (`ToolContext.now`): what it compares `since` with, and the
+ * retention horizon it measures from. Fixed, so that `history_starts_at` and the refusal of a future
+ * `since` are the same text on every day this runs.
+ */
+const NOW = new Date('2026-10-25T12:00:00.000Z');
+/** When the record is said to have begun: later than `NOW` less ninety days (2026-07-27), so it is what `history_starts_at` says. */
+const TRACKING_SINCE = '2026-09-01T00:00:00.000Z';
+
 interface Fixture {
   database: TestDatabase;
   root: string;
   handbook: ProjectRow;
   empty: ProjectRow;
   strict: ProjectRow;
+  changes: ProjectRow;
+  young: ProjectRow;
   ctx: (maxChars?: number) => ToolContext;
 }
 
@@ -145,7 +156,16 @@ function chunksOf(source: string, relativePath: string): { title: string; rows: 
   };
 }
 
-async function seed(db: Db, projectId: string, sourceId: string, relativePath: string, body: string, store = true): Promise<void> {
+async function seed(
+  db: Db,
+  projectId: string,
+  sourceId: string,
+  relativePath: string,
+  body: string,
+  store = true,
+  origin: { sourceUrl: string; sourceModifiedAt: Date } | null = null,
+  version = '',
+): Promise<void> {
   const { title, rows } = chunksOf(body, relativePath);
   await replaceDocument(
     db,
@@ -157,7 +177,8 @@ async function seed(db: Db, projectId: string, sourceId: string, relativePath: s
       contentHash: `hash-${relativePath}`,
       sizeBytes: Buffer.byteLength(body),
       indexGeneration: LIVE,
-      version: '',
+      version,
+      ...(origin ?? {}),
       ...(store ? storedDocumentContent(body, 1024 * 1024) : { content: null, contentTruncated: false }),
     },
     rows,
@@ -206,7 +227,7 @@ interface Case {
   slug: string;
   tool: string;
   args: Record<string, unknown>;
-  project?: 'handbook' | 'empty' | 'strict';
+  project?: 'handbook' | 'empty' | 'strict' | 'changes' | 'young';
   maxChars?: number;
 }
 
@@ -253,6 +274,23 @@ const CASES: Case[] = [
   { slug: 'read-error-no-such-heading', tool: 'read_document', args: { path: 'handbook/guide.md', heading: 'Backup and restore' } },
   { slug: 'read-error-reversed-range', tool: 'read_document', args: { path: 'handbook/manual.md', from: 5, to: 2 } },
   { slug: 'read-error-invalid-path', tool: 'read_document', args: { path: '../../etc/passwd' } },
+  // whats_new, over the `changes` project: see the record seeded in `beforeAll`.
+  // Newest first; the path added and removed again inside the window (docs/scratch.md) is not there.
+  { slug: 'whats-new-results', tool: 'whats_new', args: { since: '2026-10-15' }, project: 'changes' },
+  { slug: 'whats-new-source-filter', tool: 'whats_new', args: { since: '2026-10-01', source: 'docs' }, project: 'changes' },
+  { slug: 'whats-new-version-filter', tool: 'whats_new', args: { since: '2026-10-01', version: 'v2' }, project: 'changes' },
+  { slug: 'whats-new-truncated', tool: 'whats_new', args: { since: '2026-10-01', limit: 2 }, project: 'changes' },
+  { slug: 'whats-new-nothing-since', tool: 'whats_new', args: { since: '2026-10-25T00:00:00Z' }, project: 'changes' },
+  // Further back than the record goes: the answer says it cannot speak for the earlier time.
+  { slug: 'whats-new-incomplete', tool: 'whats_new', args: { since: '2026-08-01T00:00:00Z' }, project: 'changes' },
+  // A project created after the record began (an import): it says it cannot speak for before it existed here.
+  { slug: 'whats-new-incomplete-young-project', tool: 'whats_new', args: { since: '2026-10-01' }, project: 'young' },
+  // Another project's rows are another project's: this is the one the `changes` cases never show.
+  { slug: 'whats-new-other-project', tool: 'whats_new', args: { since: '2026-10-01' } },
+  { slug: 'whats-new-unknown-source', tool: 'whats_new', args: { since: '2026-10-01', source: 'elsewhere' }, project: 'changes' },
+  { slug: 'whats-new-error-invalid-since', tool: 'whats_new', args: { since: 'last tuesday' }, project: 'changes' },
+  { slug: 'whats-new-error-future-since', tool: 'whats_new', args: { since: '2026-11-01' }, project: 'changes' },
+  { slug: 'whats-new-error-invalid-arguments', tool: 'whats_new', args: { since: '', limit: 0 }, project: 'changes' },
   // No such tool: the protocol's answer, not a tool's.
   { slug: 'call-error-unknown-tool', tool: 'delete_everything', args: {} },
 ];
@@ -263,15 +301,19 @@ beforeAll(async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'contextator-mcp-golden-'));
   const { db } = database;
 
-  const source = async (project: ProjectRow): Promise<string> => {
+  const source = async (project: ProjectRow, name = 'handbook'): Promise<string> => {
     const [row] = await db
       .insert(documentSources)
-      .values({ projectId: project.id, type: 'local', name: 'handbook', config: { path: root, extensions: ['md'] } })
+      .values({ projectId: project.id, type: 'local', name, config: { path: root, extensions: ['md'] } })
       .returning();
     return row.id;
   };
 
-  const [handbook] = await db.insert(projects).values({ name: 'handbook-project', embeddingModel: MODEL_ID }).returning();
+  // `created_at` fixed, since `whats_new` takes it into `history_starts_at` (see the `changes` project below).
+  const [handbook] = await db
+    .insert(projects)
+    .values({ name: 'handbook-project', embeddingModel: MODEL_ID, createdAt: new Date('2026-08-15T00:00:00Z') })
+    .returning();
   const handbookSource = await source(handbook);
   await seed(db, handbook.id, handbookSource, 'handbook/guide.md', GUIDE);
   await seed(db, handbook.id, handbookSource, 'handbook/manual.md', MANUAL);
@@ -290,14 +332,69 @@ beforeAll(async () => {
   await seed(db, strict.id, strictSource, 'handbook/page-03.md', '# Page 3\n\nShort page number 3.\n');
   await db.update(projects).set({ documentCount: 1, chunkCount: 1 }).where(eq(projects.id, strict.id));
 
+  // A project of its own for `whats_new`: the record it answers from is seeded by hand, with instants that
+  // never move, in a project no other case reads, so that no existing record can change with it.
+  // Created before the record began, as a project of an installation that has been recording for a while is;
+  // `created_at` is part of what `history_starts_at` is the latest of, so it must not be the day this runs.
+  const [changes] = await db
+    .insert(projects)
+    .values({ name: 'changes-project', embeddingModel: MODEL_ID, createdAt: new Date('2026-08-15T00:00:00Z') })
+    .returning();
+  // One that came into being after the record began, as an import does: nothing before its creation is known.
+  const [young] = await db
+    .insert(projects)
+    .values({ name: 'young-project', embeddingModel: MODEL_ID, createdAt: new Date('2026-10-10T08:00:00Z') })
+    .returning();
+  const docsSource = await source(changes, 'docs');
+  const notesSource = await source(changes, 'notes');
+  await seed(db, changes.id, docsSource, 'docs/install.md', '# Install guide\n\nInstall it.\n', true, {
+    sourceUrl: 'https://docs.example.com/install',
+    sourceModifiedAt: new Date('2026-10-20T09:00:00Z'),
+  });
+  await seed(db, changes.id, docsSource, 'docs/quickstart.md', '# Quickstart\n\nStart here.\n');
+  await seed(db, changes.id, docsSource, 'docs/changelog.md', '# Changelog\n\nWhat shipped.\n', true, null, 'v2');
+  await seed(db, changes.id, notesSource, 'notes/standup.md', '# Standup notes\n\nWho did what.\n');
+  const change = (
+    projectId: string,
+    relativePath: string,
+    kind: 'added' | 'modified' | 'removed',
+    title: string,
+    changedAt: string,
+    addedAt: string | null,
+    version = '',
+  ) => ({
+    projectId,
+    relativePath,
+    change: kind,
+    title,
+    version,
+    addedAt: addedAt === null ? null : new Date(addedAt),
+    changedAt: new Date(changedAt),
+    runId: null,
+  });
+  await db.insert(documentChanges).values([
+    change(changes.id, 'docs/install.md', 'modified', 'Install guide', '2026-10-20T10:00:00Z', null),
+    change(changes.id, 'docs/quickstart.md', 'added', 'Quickstart', '2026-10-22T08:00:00Z', '2026-10-22T08:00:00Z'),
+    change(changes.id, 'docs/retired.md', 'removed', 'Retired runbook', '2026-10-23T09:00:00Z', null),
+    // Added and removed again inside any window that opens before the 23rd at noon: never reported.
+    change(changes.id, 'docs/scratch.md', 'removed', 'Scratch', '2026-10-24T09:00:00Z', '2026-10-23T12:00:00Z'),
+    change(changes.id, 'docs/changelog.md', 'modified', 'Changelog', '2026-10-24T07:30:00Z', null, 'v2'),
+    change(changes.id, 'docs/legacy.md', 'modified', 'Legacy notes', '2026-09-15T10:00:00Z', null),
+    change(changes.id, 'notes/standup.md', 'modified', 'Standup notes', '2026-10-21T10:00:00Z', null),
+    // The handbook project's own, which the `changes` cases must not see.
+    change(handbook.id, 'handbook/guide.md', 'modified', 'Delivery guide', '2026-10-24T12:00:00Z', null),
+  ]);
+  await db.execute(sql`UPDATE settings SET value = ${TRACKING_SINCE} WHERE key = 'document_changes_tracking_since'`);
+
   const env = { DATABASE_URL: database.url, ALLOWED_DOC_ROOTS: path.dirname(root), DATA_DIR: path.join(root, '.data'), SECRET_KEY: '0'.repeat(64) };
   const ctx = (maxChars?: number): ToolContext => ({
     db,
     embeddings,
     config: loadConfig(maxChars === undefined ? env : { ...env, SEARCH_MAX_RESULT_CHARS: String(maxChars) }),
     log: silentLogger,
+    now: () => NOW,
   });
-  fx = { database, root, handbook, empty, strict, ctx };
+  fx = { database, root, handbook, empty, strict, changes, young, ctx };
 });
 
 afterAll(async () => {

@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Project \"changes-project\": 4 changes since 2026-10-01T00:00:00.000Z, newest first.\nhistory_starts_at: 2026-09-01T00:00:00.000Z (complete)\n\n• modified — docs/changelog.md — Changelog (2026-10-24T07:30:00.000Z) [version v2]\n• removed — docs/retired.md — Retired runbook (2026-10-23T09:00:00.000Z)\n• added — docs/quickstart.md — Quickstart (2026-10-22T08:00:00.000Z)\n• modified — docs/install.md — Install guide (2026-10-20T10:00:00.000Z)\n  Source: https://docs.example.com/install\n  Modified at origin: 2026-10-20"
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

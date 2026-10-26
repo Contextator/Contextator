@@ -149,7 +149,7 @@ describe('a 2026-07-28 client', () => {
     try {
       expect(client.getProtocolEra()).toBe('modern');
       const { tools } = await client.listTools();
-      expect(tools.map((t) => t.name)).toEqual(['search_docs', 'list_topics', 'read_document']);
+      expect(tools.map((t) => t.name)).toEqual(['search_docs', 'list_topics', 'read_document', 'whats_new']);
       const result = await client.callTool({ name: 'search_docs', arguments: { query: 'DISPATCH_WORKERS cores', limit: 3 } });
       expect(result.isError).toBeFalsy();
       expect(textOf(result)).toContain('handbook/guide.md');

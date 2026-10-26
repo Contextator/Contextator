@@ -9,6 +9,12 @@ export const RUN_HISTORY_LIMIT = 20;
 
 /** The subset of a job the run record is derived from (kept small so it can be unit-tested without the indexer). */
 export interface FinishedJobSummary {
+  /**
+   * The id the run was given when it started, which is also what its `document_changes` rows carry as
+   * `run_id` ([ADR-0123](../../.ssot/ADR.md#adr-0123)). Absent for a row built without one (an interrupted
+   * run found at startup), which gets a generated id as before.
+   */
+  runId?: string;
   projectId: string;
   force: boolean;
   /** What asked for the run ([ADR-0048](../../.ssot/ADR.md#adr-0048)). */
@@ -30,6 +36,7 @@ export function buildRunRecord(job: FinishedJobSummary): IndexRunInsert {
   const finishedAt = job.finishedAt ? new Date(job.finishedAt) : new Date();
   const startedAt = job.startedAt ? new Date(job.startedAt) : finishedAt;
   return {
+    ...(job.runId === undefined ? {} : { id: job.runId }),
     projectId: job.projectId,
     mode: job.force ? 'force' : 'incremental',
     status: job.phase,

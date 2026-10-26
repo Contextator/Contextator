@@ -128,6 +128,50 @@
           "idempotentHint": true,
           "openWorldHint": false
         }
+      },
+      {
+        "name": "whats_new",
+        "title": "What changed in the documentation",
+        "description": "Lists the documents of the \"handbook-project\" project that were added, changed or removed after a point in time: the answer to \"what changed since I last looked\". Pass since as an ISO 8601 date or date-time (not in the future). Newest first, each with its path (what read_document takes), its title and what happened to it. A removed document has no text any more, so only its path and title are known. Narrow it with source or version. A document counts as changed when its text changed, so a file that was touched without changing what it says is not listed. The answer says from when its record starts (history_starts_at; historyStartsAt in the structured answer) and whether since reaches back that far (complete), so a question about a time before that is never mistaken for \"nothing changed\".",
+        "inputSchema": {
+          "type": "object",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "since": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "description": "The point in time to ask about, as an ISO 8601 date or date-time, e.g. \"2026-10-01\" or \"2026-10-01T09:30:00Z\". A date-time with no offset is read as UTC. Must not be in the future. Documents that changed after this instant are listed."
+            },
+            "source": {
+              "description": "Only documents of this source — the first segment of the paths list_topics shows. Works for a source since deleted. Omit for every source.",
+              "type": "string",
+              "maxLength": 64
+            },
+            "version": {
+              "description": "Only documents of this release, as search_docs takes it: an exact label. Omit for every version.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "limit": {
+              "default": 50,
+              "description": "Maximum number of changes to return, newest first (1-200, default 50)",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          "required": [
+            "since"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
       }
     ]
   },

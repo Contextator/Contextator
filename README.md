@@ -139,8 +139,9 @@ one. For a project that requires a token:
 claude mcp add --transport http demo-docs http://localhost:3444/mcp/demo   --header "Authorization: Bearer ctxm_9f3a…"
 ```
 
-Three read-only tools are exposed: `search_docs` (hybrid search, ranked excerpts), `list_topics` (the indexed
-document list) and `read_document` (one file's Markdown, by path or heading range). Beside the tools, each
+Four read-only tools are exposed: `search_docs` (hybrid search, ranked excerpts), `list_topics` (the indexed
+document list), `read_document` (one file's Markdown, by path or heading range) and `whats_new` (what was added,
+changed or removed since a point in time). Beside the tools, each
 project publishes its documents as MCP resources and two read-only **prompts**, `answer_from_docs` (argument
 `question`) and `explore_topic` (argument `topic`).
 

@@ -41,6 +41,37 @@ endpoint was public does not outlive the moment it stopped being.
 Deciding whether a project's documents are readable by anything that can reach the URL is the same class of decision
 as creating the project in the first place, which is why it sits with `admin` rather than `editor`.
 
+## The tools a client reaches
+
+Every project publishes the same four read-only tools, and all four sit behind the access mode above and the limits
+below. A token reads **everything indexed in that project**, and that includes what `whats_new` remembers.
+
+| Tool | What it answers | Arguments |
+|------|-----------------|-----------|
+| `search_docs` | Ranked excerpts for a question or an identifier | `query`; optional `limit`, `source`, `path_prefix`, `version` |
+| `list_topics` | The indexed documents, grouped by source and directory | optional `cursor`, `limit` |
+| `read_document` | One file's Markdown, whole or by section or chunk range | `path`; optional `heading`, `from`, `to`, `max_tokens` |
+| `whats_new` | What was added, changed or removed after a point in time | `since`; optional `source`, `version`, `limit` |
+
+`whats_new` takes `since` as an ISO 8601 date or date-time (a date alone is midnight UTC; a date-time without an
+offset is UTC; a time in the future is refused). It answers newest first, 50 changes by default and 200 at most, and
+every answer carries two statements about the record itself:
+
+- `history_starts_at` (`historyStartsAt` in the structured answer) is the oldest moment the record can speak for:
+  90 days ago, the moment this instance began recording, or the moment the project came to exist on this instance
+  (an imported project has documents the record never saw), whichever is latest. The 90 days are fixed and are not
+  an environment variable. Starting the server with `RESET_VECTORS=1` deletes every document and forgets the record,
+  so it begins again from that moment.
+- `complete` is true when `since` is not before that moment. When it is false an empty list does not mean nothing
+  changed: it means nothing was recorded.
+
+A document counts as changed when its **text** changed. A force re-index of unchanged content, a changed `language` or
+`version` label on a source, and the other documents of an OpenAPI specification when one operation changed are not
+changes. A removed document returns only its path and title. Only the latest change of each path is kept, so
+"which documents did run X change" cannot be answered, and a path that was removed and came back inside the window is
+reported as added. A document that existed before the upgrade to `0.5.0` is reported as modified, never as added,
+because when it was added is not known. Deleting a source records its live documents as removed.
+
 ## Limiting how much a client may ask for
 
 Three optional limits sit in front of the tools, all counted per minute in a fixed one-minute window kept in the

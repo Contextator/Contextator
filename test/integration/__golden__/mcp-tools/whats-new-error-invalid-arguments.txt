@@ -1,0 +1,13 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Input validation error: Invalid arguments for tool whats_new: since: Too small: expected string to have >=1 characters, limit: Too small: expected number to be >=1"
+      }
+    ],
+    "isError": true
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}
