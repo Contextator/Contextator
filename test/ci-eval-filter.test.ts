@@ -67,7 +67,9 @@ describe('the eval job path filter in ci.yml', () => {
 
   it('reaches the harness files it is meant to protect', () => {
     // A guard on the walker itself: an empty or truncated closure would make the next test pass for nothing.
-    expect(closure.files).toEqual(expect.arrayContaining([...ENTRY_POINTS, 'src/services/eval-scoring.ts', 'src/config.ts', 'src/services/search.ts']));
+    expect(closure.files).toEqual(
+      expect.arrayContaining([...ENTRY_POINTS, 'src/services/eval-scoring.ts', 'src/config.ts', 'src/services/search.ts']),
+    );
   });
 
   it('matches every file the harness imports, directly or through another file', () => {

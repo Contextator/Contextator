@@ -542,7 +542,7 @@
           <label class="field">
             <span class="field-label">Allowed addresses <span class="muted">— optional</span></span>
             <textarea name="allowedCidrs" rows="3" spellcheck="false" autocomplete="off" placeholder="10.0.0.0/8&#10;203.0.113.7/32"></textarea>
-            <span class="field-hint">One address or range (CIDR) per line, up to 32. The token is refused from anywhere else. Leave empty for no restriction. Not available while the server runs with <code>TRUST_PROXY=1</code>. The address checked is the one the server's socket sees; behind a reverse proxy that is the proxy's address.</span>
+            <span class="field-hint">One address or range (CIDR) per line, up to 32. The token is refused from anywhere else. Leave empty for no restriction. The address checked is the client's: the one the server's socket sees or, when <code>TRUST_PROXY</code> names the proxy in front, the one that proxy forwards.</span>
           </label>
           <p id="token-error" class="form-error" role="alert" hidden></p>
         </div>
@@ -657,7 +657,7 @@
           <label class="field">
             <span class="field-label">Addresses or ranges</span>
             <textarea name="allowedCidrs" rows="5" spellcheck="false" autocomplete="off" placeholder="10.0.0.0/8&#10;203.0.113.7/32"></textarea>
-            <span class="field-hint">One address or range (CIDR) per line, up to 32. Empty removes the restriction. Not available while the server runs with <code>TRUST_PROXY=1</code>. The address checked is the one the server's socket sees; behind a reverse proxy that is the proxy's address.</span>
+            <span class="field-hint">One address or range (CIDR) per line, up to 32. Empty removes the restriction. The address checked is the client's: the one the server's socket sees or, when <code>TRUST_PROXY</code> names the proxy in front, the one that proxy forwards.</span>
           </label>
           <p id="networks-error" class="form-error" role="alert" hidden></p>
         </div>
