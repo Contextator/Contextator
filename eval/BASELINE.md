@@ -1819,3 +1819,154 @@ The run above used those two floors and passed. CI's eval job runs it with per-l
 (TR 0.98 / 0.95, EN 0.985 / 0.97; ADR-0083). The Turkish bars were read off the Turkish numbers;
 English sits higher (99.9 % / 98.5 %), so one bar for both would leave English 1.9 and 3.5 points of
 room — the per-language flags hold each language to its own height.
+
+---
+
+# The remote rerank gate: `bge-reranker-v2-m3` behind TEI (2026-10-25)
+
+K-22, the 0.5.0 measurement gate. The question is whether a **multilingual** cross-encoder served
+remotely earns a place in the product, and the answer decides whether Phase 07 is built. The gate was
+fixed before the run: on the thirty `cross-lingual` questions, `recall@5` **more than 40.0 %** — and, on
+every other question, **no loss** of `recall@5`, read gross: one question leaving the top five fails the
+gate, and a question gained elsewhere does not pay for it. The p95 latency is measured and written down,
+and is information, not a gate.
+
+**Gate: FAILED, on two counts.** Cross-lingual `recall@5` is 50.0 % by the harness's own definition, which
+does not read the relevance floor; with the shipped `SEARCH_SCORE_FLOOR=0.82` applied it is 33.3 % (10 of
+30) and does not clear its bar (see "What the floor does to it" below). And the other questions lose two,
+which fails the second condition on its own.
+
+| | |
+|---|---|
+| Date | 2026-10-25 |
+| Rerank | `remote-rerank:bge-reranker-v2-m3`, raw logits over `POST /rerank`, 32 passages per request |
+| Server | Hugging Face Text Embeddings Inference 1.9.4, `ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-latest` at `sha256:5d32815d74cf8e9ebbfb99ec4187216d83d93fdf509e52c6ff88ac5364aa39fb`, candle backend, fp32, `--max-batch-tokens 4096 --max-concurrent-requests 64` |
+| Model | `BAAI/bge-reranker-v2-m3` at revision `953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e`, `model.safetensors` sha256 `d9e3e081faff1eefb84019509b2f5558fd74c1a05a2c7db22f74174fcedb5286` |
+| Where | between the fusion and the truncation, over the **whole** fused pool, as in the local spike above |
+| Everything else | the run above, unchanged: 26 documents, 577 chunks, 92 questions, `e5-small` at 96/24, the `off` arm and the `on` arm asked of the same code at the same commit (`cb127c7`, the harness change uncommitted) |
+
+**Where it ran.** The model was downloaded as data (pinned revision, checksum verified) and served from a
+container with a read-only root filesystem, every capability dropped, the model directory mounted read-only
+and **no route out**: an `--internal` Docker network, which a probe container on it confirmed cannot reach
+the internet. The harness reached it through a relay container that joins that network and publishes one
+port on `127.0.0.1`. Nothing downloaded was executed on the host.
+
+**The set is 92 questions and the gate was written against 84.** `eval/golden.jsonl` gained eight
+`inflection` questions on 2026-09-21, after the "other 54" were counted. The gate is reported over both:
+the 62 questions that are not cross-lingual, and the original 54, which are those 62 without the
+`inflection` rows. The two give the same verdict, because both losses are among the original 54.
+
+## The numbers it was judged on
+
+| | rerank off | rerank on | |
+|---|--:|--:|---|
+| `cross-lingual` (30) `recall@5`, floor not read | 13.3 % (4) | **50.0 %** (15) | bar: more than 40.0 % — met by the harness's definition |
+| `cross-lingual` (30) `recall@5`, floor 0.82 applied | 13.3 % (4) | **33.3 %** (10) | bar: more than 40.0 % — **not met**; information, see below |
+| the other 62, `recall@5` | **100.0 %** (62) | 96.8 % (60) | bar: no loss — **2 lost, 0 gained** |
+| the original 54, `recall@5` | **100.0 %** (54) | 96.3 % (52) | the same two questions |
+| the other 62, `recall@1` | 88.7 % (55) | 91.9 % (57) | |
+| the other 62, `heading@5` | 96.8 % (60) | 91.9 % (57) | |
+| overall `recall@1` / `@5` | 63.0 / 71.7 | 72.8 / **81.5** | |
+| overall `MRR` | 0.674 | **0.769** | |
+| rerank latency per search, p50 / p95 | — | 40.9 s / **92.5 s** | information, 116 searches |
+
+**The two questions it lost are `en-api-01` (rank 4 → 6) and `en-api-02` (rank 0 → 6)**, both asking about
+`en/reference/http-api.md`. Both were answered before; both are pushed out of the top five by a
+cross-encoder that prefers other chunks, and the eight `inflection` questions it did not touch are why
+the loss is the same over 54 and over 62. A reranker that wins eleven questions and loses two is a good
+reranker by most measures and still not one this gate lets through, which is what a gate that says "no
+loss" is for.
+
+## What it did to the cross-lingual slice
+
+| the 30 cross-lingual questions | n | off | on |
+|---|--:|--:|--:|
+| `xl-en-tr` — English question, Turkish page | 15 | 13.3 % (2) | **80.0 %** (12) |
+| `xl-tr-en` — Turkish question, English page | 15 | 13.3 % (2) | **20.0 %** (3) |
+| natural language | 21 | 0 % (0) | **33.3 %** (7) |
+| identifier-shaped | 9 | 44.4 % (4) | **88.9 %** (8) |
+
+It is a real effect and a lopsided one. The local `bge-reranker-base` spike moved the slice from 13.3 % to
+33.3 % with an English-question-only gain; this model moves it to 50.0 % and the English-question gain is
+bigger, but **the direction the product's audience is in barely moved**: a Turkish question about an
+English page nets one question in fifteen (`x-tr-en-02`, an identifier question, rank 9 → 0;
+`x-tr-en-13` reached rank 6, one place outside the top five, and is not counted). Ten of the eleven
+gains are English questions about Turkish pages. The ceiling recorded above for a reorderer over the whole pool is 53.3 % (16); it reached
+15 in the top five.
+
+## What the floor does to it
+
+The harness's `recall@5` takes the top five and does not ask whether the product would have shown them:
+`searchProject` is run with the floor off and the floor is decided afterwards (`belowRelevanceFloor`), so
+a refused question that had its answer at rank 1 still counts as a hit. The table above is that number,
+and it is the one the gate was written in. It is not what a user at the default floor is told.
+
+At `SEARCH_SCORE_FLOOR=0.82` the reranked run would refuse **8 of 92** golden questions against **1 of 92**
+with the rerank off, and **all eight are cross-lingual**: `x-en-tr-01`, `x-en-tr-05`, `x-en-tr-07` and
+`x-en-tr-10` (answer at rank 0), `x-en-tr-12` (rank 3), and `x-tr-en-01`, `x-tr-en-07`, `x-tr-en-09` (no
+answer). The five with an answer inside the top five are five of the rerank's fifteen cross-lingual hits. Taking
+them out, the slice is **10 of 30, 33.3 %**, against 4 of 30 with the rerank off (its one refused question,
+`x-tr-en-08`, had no answer anyway), and that is under the 40.0 % bar. The other 62 questions are untouched
+by the floor in both arms. It also refuses 2 of the 12 absent-feature questions against 1, which is the floor doing its job and is not a cost.
+
+The floor is read off the hit's stored similarity, and reordering the pool puts hits with lower
+similarity at rank 1. The verdict does not change — both conditions are stated above and the second fails
+regardless — but a record that said "cross-lingual cleared its bar and two questions were lost" would
+hide that the bar is cleared only by counting answers the shipped configuration refuses. A product that
+shipped this rerank would have to decide what the floor reads, and would not get to leave it alone.
+
+## What else moved, which the gate does not read
+
+- **The latency is CPU, fp32, in a Docker Desktop VM, and it is not close to NFR-02.** 116 searches (92
+  golden and 24 negative; about 74 passages each, in requests of 32): p50 40.9 s, mean 46.1 s, p95 92.5 s,
+  max 137.7 s. Reference hardware: an Apple-silicon Mac, Docker Desktop's VM (12 CPUs, 8 GiB visible),
+  the container capped at 5 GiB, other containers running beside it. TEI itself reported 2–4 s of model
+  time per request; the rest is queueing inside the server behind a 4096-token batch limit. A GPU or an
+  int8 ONNX build would be a different measurement, and this one does not price it.
+
+## Reproducing it
+
+```bash
+# the model files are fetched as data (pinned revision, sha256 checked), then the server has no network
+docker network create --internal rerank-iso
+docker run -d --name tei-rerank --network rerank-iso --network-alias tei-rerank --read-only --tmpfs /tmp \
+  --cap-drop ALL --security-opt no-new-privileges --memory 5g \
+  -v "$PWD/bge-reranker-v2-m3:/data/bge-reranker-v2-m3:ro" -e HF_HUB_OFFLINE=1 \
+  ghcr.io/huggingface/text-embeddings-inference@sha256:5d32815d74cf8e9ebbfb99ec4187216d83d93fdf509e52c6ff88ac5364aa39fb \
+  --model-id /data/bge-reranker-v2-m3 --port 80 --max-batch-tokens 4096 --max-concurrent-requests 64
+
+# the relay (nginx 1.30.6, pinned like the server): created on the default bridge so that it can publish a port, then joined to the isolated
+# network. relay.conf is a reverse proxy to the one backend and nothing else — not a forward proxy, which
+# would give the server a way out.
+cat > relay.conf <<'CONF'
+events {}
+http {
+  server {
+    listen 8080;
+    client_max_body_size 8m;
+    location / {
+      proxy_pass http://tei-rerank:80;
+      proxy_http_version 1.1;
+      proxy_read_timeout 300s;
+      proxy_send_timeout 300s;
+    }
+  }
+}
+CONF
+docker run -d --name rerank-relay -p 127.0.0.1:8089:8080 -v "$PWD/relay.conf:/etc/nginx/nginx.conf:ro" \
+  --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add NET_BIND_SERVICE \
+  nginx@sha256:a7675fcee220f59b4a99f7098c06a0d5d999c2c0ee37c0211efb780536e5cb20
+docker network connect rerank-iso rerank-relay
+
+# the isolation check: this must print NO_EGRESS
+docker run --rm --network rerank-iso nginx@sha256:a7675fcee220f59b4a99f7098c06a0d5d999c2c0ee37c0211efb780536e5cb20 bash -c \
+  'timeout 4 bash -c "</dev/tcp/1.1.1.1/443" 2>/dev/null && echo REACHED_INTERNET || echo NO_EGRESS'
+
+npm run eval -- --json=off.json
+npm run eval -- --rerank-url http://127.0.0.1:8089 --rerank-latency latency.json --json=on.json
+npx tsx scripts/eval-rerank-remote.ts --off off.json --on on.json --latency latency.json   # exits 2 when the gate fails (gross loss, floor figure printed beside it)
+```
+
+`--max-concurrent-requests` has to be at least the batch size (32): TEI takes one permit per passage and
+answers 429 to a request it could have served. `npm run eval` without `--rerank-url` is byte-identical to
+what it was before the flag existed, timing line aside.
