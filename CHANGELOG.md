@@ -23,6 +23,21 @@ ships, that stops.
   through the free-form `env` map is not seen by the schema; the application refuses it when the Pod starts. The
   chart README has an "Upgrading to chart 2.0.0" section.
 
+### Added
+
+- `docs/configuration.md` has a guide to sizing `CONVERSION_WORKER_MAX_HEAP_MB` against the container's memory
+  limit, with the measurements it rests on (peak resident memory and the smallest working cap for `.pptx`,
+  `.xlsx` and `.pdf` inputs up to the 2000-page ceiling); the Helm chart README points to it next to
+  `resources.limits.memory`. The setting still has no default (ADR-0097).
+
+### Changed
+
+- CI: a failing unit or integration run now keeps the name of the failed test: failures are annotated on the run,
+  and a JUnit report is uploaded as an artifact (90 days). The retrieval evaluation now also runs when a pull
+  request changes a file the eval harness imports (`src/config.ts`, `src/context.ts`, `src/db/`, and the
+  `src/auth/` and `src/mcp/` modules it reaches), not only `src/services/`; a unit test keeps that filter in step
+  with the harness's imports. The MinIO image used by the backup integration test is pinned by digest.
+
 ### Removed
 
 - The two `TRUST_PROXY=1`-only paths of the MCP token network allowlist (ADR-0118): saving a list answered `400`
@@ -31,6 +46,9 @@ ships, that stops.
 
 ### Fixed
 
+- A project import that refused a malformed line in `sources.ndjson`, `golden-questions.ndjson` or
+  `documents.ndjson` named a line number that was too low whenever blank lines came before it; the number now
+  counts every physical line, as an editor does.
 - `docs/deployment.md` said a shared rate-limit key means nobody can guess faster than the budget allows. Anyone
   with an account of their own can reset the shared sign-in budget with a successful sign-in, so against other
   accounts only the per-account lockout bounds guessing; the text now says so.

@@ -112,7 +112,23 @@ jobs:
       # `CI` is set by Actions, and `test/support/model-cache.ts` reads it: the model tests do not skip
       # here. If the cache step above is ever removed or the download fails, those tests fail the job
       # loudly rather than reporting green with three fewer assertions than they claim.
-      - run: npm test
+      # Issue #66. `npm test` is unchanged; `vitest.config.ts` adds the `github-actions` reporter (each
+      # failure becomes an annotation on the run) and the JUnit one when `CI` is set. The step id is what
+      # lets the upload below fire for a red suite and not for a broken `npm ci`.
+      - name: Unit suite
+        id: unit
+        run: npm test
+
+      # The JUnit file names every failed test, its file and its message, and outlives the log. Same
+      # retention and `warn` reasoning as the integration job's artifact below.
+      - name: Keep the failing suite's report
+        if: failure() && steps.unit.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unit-failure-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: junit-report.xml
+          retention-days: 90
+          if-no-files-found: warn
 
   # A reminder, not a gate: a pull request that changes `src/` while `[Unreleased]` has no entry gets
   # a warning on the run, never a red check — plenty of `src/` changes have nothing a user would
@@ -194,7 +210,9 @@ jobs:
         id: integration
         run: |
           set -o pipefail
-          npm run test:integration:report 2>&1 | tee integration-output.log
+          # `--reporter` on the command line replaces the list in `vitest.config.ts`, so the two that file
+          # adds on CI (annotations, JUnit) are asked for again here; `outputFile.junit` still comes from it.
+          npm run test:integration:report -- --reporter=github-actions --reporter=junit 2>&1 | tee integration-output.log
 
       # Only on a failure of the step above — `failure()` alone would also fire for a broken `npm ci`,
       # which has no suite output to keep. Named for the run and the attempt so a re-run does not
@@ -211,6 +229,7 @@ jobs:
           path: |
             integration-output.log
             integration-report.json
+            junit-report.xml
           retention-days: 90
           # The log is always there; the JSON is not, for the reason given above. Warn rather than
           # fail, so a crashed run still uploads the half that survived.
@@ -407,11 +426,14 @@ jobs:
           fi
           changed=$(git diff --name-only '${{ github.event.pull_request.base.sha }}' HEAD)
           printf '%s\n' "$changed"
-          if printf '%s\n' "$changed" | grep -qE '^(src/services/|eval/|scripts/eval)'; then
+          # `test/ci-eval-filter.test.ts` reads this pattern and asserts it covers every file the harness
+          # imports, so a new import in `scripts/eval*.ts` that falls outside it fails the unit suite
+          # instead of letting a change to it merge without ever being measured.
+          if printf '%s\n' "$changed" | grep -qE '^(src/services/|src/config\.ts$|src/context\.ts$|src/db/|src/auth/(csrf|policy|types)\.ts$|src/mcp/(sessions|tool-names)\.ts$|test/integration/support/postgres\.ts$|eval/|scripts/eval)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo 'No retrieval evaluation: this change touches neither `src/services/**`, `eval/**` nor `scripts/eval.ts`.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'No retrieval evaluation: this change touches nothing the eval harness imports (`src/services/**`, `src/db/**`, `src/config.ts`, ...), `eval/**` or `scripts/eval*.ts`.' >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

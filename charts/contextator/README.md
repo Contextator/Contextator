@@ -690,6 +690,14 @@ default `EMBEDDING_DTYPE=fp32`):
 If you change `env.EMBEDDING_DTYPE` to `fp16` or `q8` to shrink the model's memory footprint, lower
 `resources` accordingly — the figures above are for the fp32 default.
 
+- **Conversion thread cap (`env.CONVERSION_WORKER_MAX_HEAP_MB`, unset by default):** the chart sets no cap, so a
+  very large PDF or spreadsheet can grow the Pod toward `resources.limits.memory` and have it OOM-killed. To turn
+  that into one refused file instead, set the cap to at most `resources.limits.memory` minus 1200 MiB (800 MiB for the
+  server above, 400 MiB for what a conversion holds outside the heap): `384` to `512` under the default 2Gi limit,
+  which converts every file measured, including a 2000-page PDF (smallest cap that converted it: 384 MiB, peak RSS
+  640 MiB there against 2.1 GiB uncapped). The measurements and the full table are in
+  [`docs/configuration.md`](../../docs/configuration.md#sizing-conversion_worker_max_heap_mb-against-the-containers-memory-limit).
+
 ## Uninstall
 
 ```sh

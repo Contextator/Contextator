@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { DocumentSourceRow } from '../src/db/schema.js';
 import { SOURCE_TYPES } from '../src/services/sources.js';
 import { exportedSource, needsFor, sourceNameOf } from '../src/services/transfer/export.js';
+import { type ImportDeps, lines, readGoldenQuestions, readSources, writeDocuments } from '../src/services/transfer/import.js';
 import {
   ImportRefusedError,
   MANIFEST_KIND,
@@ -359,5 +363,57 @@ describe('how the two halves of the tarball agree on which source is which', () 
     // The evaluation harness writes documents with no `document_sources` row at all (ADR-0034).
     expect(sourceNameOf('install.md')).toBeNull();
     expect(sourceNameOf('/leading.md')).toBeNull();
+  });
+});
+
+describe('the line numbers an import refusal quotes', () => {
+  const scratch: string[] = [];
+  afterEach(async () => {
+    await Promise.all(scratch.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  const ndjson = async (name: string, content: string): Promise<string> => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'contextator-lines-'));
+    scratch.push(dir);
+    const file = path.join(dir, name);
+    await writeFile(file, content);
+    return file;
+  };
+
+  const collect = async (file: string) => {
+    const out: Array<{ text: string; lineNumber: number }> = [];
+    for await (const line of lines(file)) out.push(line);
+    return out;
+  };
+
+  it('counts the blank lines it skips, so the number is the one an editor shows', async () => {
+    const file = await ndjson('x.ndjson', '{"a":1}\n\n   \n{"a":2}\n\n{"a":3}');
+    expect(await collect(file)).toEqual([
+      { text: '{"a":1}', lineNumber: 1 },
+      { text: '{"a":2}', lineNumber: 4 },
+      { text: '{"a":3}', lineNumber: 6 },
+    ]);
+  });
+
+  it('points readSources at the physical line of a malformed record that follows blank lines', async () => {
+    const file = await ndjson('sources.ndjson', '\n\n{ not json\n');
+    await expect(readSources(file)).rejects.toThrow('sources.ndjson:3: not valid JSON');
+  });
+
+  it('points readGoldenQuestions at the physical line too', async () => {
+    const file = await ndjson('golden-questions.ndjson', '{ not json\n');
+    await expect(readGoldenQuestions(file)).rejects.toThrow('golden-questions.ndjson:1: not valid JSON');
+    const later = await ndjson('golden-questions.ndjson', '\n\n\n{ not json\n');
+    await expect(readGoldenQuestions(later)).rejects.toThrow('golden-questions.ndjson:4: not valid JSON');
+  });
+
+  it('points writeDocuments at the physical line too, before it touches the database or the embedder', async () => {
+    const file = await ndjson('documents.ndjson', '\n\n\n\n{ not json\n');
+    // A malformed line is refused by the parse, which runs before anything in `deps` is read.
+    await expect(writeDocuments({} as ImportDeps, 'project-id', file, new Map(), new Map())).rejects.toThrow('documents.ndjson:5: not valid JSON');
+  });
+
+  it('is an empty iteration for a file that does not exist', async () => {
+    expect(await collect(path.join(tmpdir(), 'contextator-no-such-file.ndjson'))).toEqual([]);
   });
 });

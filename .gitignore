@@ -6,6 +6,7 @@ dist/
 .DS_Store
 .data
 integration-report.json
+junit-report.xml
 
 # Repository standard (STANDARD.md §13)
 /.ssot/
