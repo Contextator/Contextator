@@ -13,7 +13,7 @@ import { chunkReserveTokens } from '../src/services/chunk-budget.js';
 import { chunkMarkdown, embeddingText } from '../src/services/chunker.js';
 import { createEmbeddingProvider, type EmbeddingProvider } from '../src/services/embeddings/index.js';
 import { extractDocument } from '../src/services/doc-types/index.js';
-import { createReranker, type LocalReranker } from '../src/services/reranker.js';
+import { createReranker, type Reranker } from '../src/services/reranker.js';
 import { readAndHash } from '../src/services/fs-scan.js';
 import { findUnknownExpectFiles, listGoldenQuestions, toGoldenRow } from '../src/services/golden-questions.js';
 import { getProjectById, getProjectByName } from '../src/services/projects.js';
@@ -57,6 +57,7 @@ import {
   type RunContext,
   type ScoredHit,
 } from './eval-scoring.js';
+import { createRemoteReranker, parseRerankUrl, RemoteReranker } from './eval-rerank-remote.js';
 
 /**
  * `npm run eval` — the retrieval measurement of [ADR-0034](../.ssot/ADR.md#adr-0034), FR-190 to FR-195.
@@ -198,6 +199,13 @@ export interface Options {
   project: string | null;
   /** Whether the run is the repository's own set, which is what the report header names. */
   customSet: boolean;
+  /**
+   * A remote cross-encoder to rerank with, over HTTP (`--rerank-url`): the measurement arm of K-22. `null`
+   * is the default, and with it the run is exactly what it was before the flag existed.
+   */
+  rerankUrl: string | null;
+  /** Where to write the remote rerank's latency summary as JSON (`--rerank-latency`). Only with `--rerank-url`. */
+  rerankLatencyPath: string | null;
 }
 
 const USAGE = `Usage: npm run eval [-- <options>]
@@ -211,6 +219,11 @@ const USAGE = `Usage: npm run eval [-- <options>]
   --project <name|id>      Ask the question set stored for a project (the admin API's golden-questions)
                            of that project's live index, through the same search path. Reads DATABASE_URL
                            and indexes nothing. Cannot be combined with --corpus or --golden.
+  --rerank-url <url>       Rerank the fused pool with a remote cross-encoder behind a TEI-compatible
+                           /rerank endpoint (e.g. http://127.0.0.1:8089) instead of the local model. A
+                           measurement arm: scripts/eval-rerank-remote.ts compares it with a run without.
+                           Cannot be combined with SEARCH_RERANK=on.
+  --rerank-latency <file>  With --rerank-url: write the per-search rerank latency (p50, p95, max) as JSON.
   --markdown[=<file>]      Markdown tables. With a file, written there and the text report still prints.
   --json[=<file>]          The same numbers as JSON, same rule about the file.
   --min-recall5=<0..1>     Fail the run when recall@5 is below this. The shipped floor is in eval/BASELINE.md.
@@ -282,6 +295,8 @@ export function parseArgs(argv: readonly string[], cwd: string = invocationDirec
   let golden: string | null = null;
   let negative: string | null = null;
   let project: string | null = null;
+  let rerankUrl: string | null = null;
+  let rerankLatency: string | null = null;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -302,6 +317,18 @@ export function parseArgs(argv: readonly string[], cwd: string = invocationDirec
         else if (flag === '--golden') golden = taken.value;
         else if (flag === '--negative') negative = taken.value;
         else project = taken.value;
+        break;
+      }
+      case '--rerank-url': {
+        const taken = takeValue(flag, value, argv, i);
+        i += taken.consumed;
+        rerankUrl = parseRerankUrl(taken.value).href;
+        break;
+      }
+      case '--rerank-latency': {
+        const taken = takeValue(flag, value, argv, i);
+        i += taken.consumed;
+        rerankLatency = path.resolve(cwd, taken.value);
         break;
       }
       case '--markdown':
@@ -329,6 +356,7 @@ export function parseArgs(argv: readonly string[], cwd: string = invocationDirec
   if (project !== null && (corpus !== null || golden !== null)) {
     throw new Error('--project asks the questions stored for a project of its live index; it cannot be combined with --corpus or --golden');
   }
+  if (rerankLatency !== null && rerankUrl === null) throw new Error('--rerank-latency measures the remote rerank and needs --rerank-url');
   if (!quietText) outputs.unshift({ format: 'text', file: null });
 
   const corpusDir = corpus === null ? DEFAULT_CORPUS_DIR : path.resolve(cwd, corpus);
@@ -344,6 +372,8 @@ export function parseArgs(argv: readonly string[], cwd: string = invocationDirec
     negativePath: negative !== null ? path.resolve(cwd, negative) : customSet ? null : DEFAULT_NEGATIVE_PATH,
     project,
     customSet,
+    rerankUrl,
+    rerankLatencyPath: rerankLatency,
   };
 }
 
@@ -520,7 +550,7 @@ export interface AskDeps {
   db: Db;
   embeddings: EmbeddingProvider;
   config: Config;
-  reranker: LocalReranker | null;
+  reranker: Reranker | null;
   projectId: string;
   /** The floor `refused` is decided against: the instance's, or the project's own when it holds one (ADR-0083). */
   refusalFloor: number;
@@ -666,7 +696,10 @@ function labelFor(absolute: string): string {
   return relative !== '' && !relative.startsWith('..') ? relative.split(path.sep).join('/') : absolute;
 }
 
-async function warmModels(config: Config): Promise<{ embeddings: EmbeddingProvider; reranker: LocalReranker | null; modelLoadMs: number }> {
+async function warmModels(
+  config: Config,
+  options: Options,
+): Promise<{ embeddings: EmbeddingProvider; reranker: Reranker | null; modelLoadMs: number }> {
   const embeddings = createEmbeddingProvider(config, evalLogger);
   step(`eval: loading ${embeddings.id} (a first run downloads it, which takes minutes)`);
   const modelStart = Date.now();
@@ -676,12 +709,43 @@ async function warmModels(config: Config): Promise<{ embeddings: EmbeddingProvid
   // The second model, and only when an operator asked for one (ROADMAP.md Item 12). It is warmed up
   // here rather than on the first question so that its load does not land inside `searchMs` and read
   // as latency every search pays.
+  if (options.rerankUrl !== null) {
+    if (config.SEARCH_RERANK === 'on') {
+      throw new Error('--rerank-url and SEARCH_RERANK=on both name a reranker; a run measures one, so set only one of them');
+    }
+    const remote = createRemoteReranker({ url: options.rerankUrl });
+    step(`eval: contacting the remote reranker at ${options.rerankUrl}`);
+    await remote.warmup();
+    return { embeddings, reranker: remote, modelLoadMs };
+  }
   const reranker = createReranker(config, evalLogger);
   if (reranker) {
     step(`eval: loading ${reranker.id} (a first run downloads it, which takes minutes)`);
     await reranker.warmup();
   }
   return { embeddings, reranker, modelLoadMs };
+}
+
+/**
+ * The report's `rerank` row. A remote reranker describes itself, latency included, because it is read
+ * after the questions were asked; the local one is what it has always been, and `off` stays `off`.
+ */
+function describeRerank(reranker: Reranker | null, config: Config): string {
+  if (reranker === null) return 'off';
+  if (reranker instanceof RemoteReranker) return reranker.describe();
+  return `${reranker.id}, max_tokens=${config.SEARCH_RERANK_MAX_TOKENS}, batch=${config.SEARCH_RERANK_BATCH}`;
+}
+
+/** Writes the remote rerank's latency summary where `--rerank-latency` asked, and says it on stderr either way. */
+async function reportRerankLatency(reranker: Reranker | null, options: Options): Promise<void> {
+  if (!(reranker instanceof RemoteReranker)) return;
+  const summary = reranker.latencySummary();
+  if (summary === null) return;
+  step(`eval: remote rerank latency over ${summary.searches} searches: p50 ${summary.p50Ms.toFixed(0)} ms, p95 ${summary.p95Ms.toFixed(0)} ms`);
+  if (options.rerankLatencyPath !== null) {
+    await fs.writeFile(options.rerankLatencyPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+    step(`eval: wrote the rerank latency to ${options.rerankLatencyPath}`);
+  }
 }
 
 async function readNegatives(options: Options): Promise<NegativeRow[]> {
@@ -714,7 +778,7 @@ async function runCorpus(options: Options): Promise<GateVerdict> {
   const negative = await readNegatives(options);
   step(`eval: ${files.length} corpus files, ${golden.length} questions, ${negative.length} negative questions`);
 
-  const { embeddings, reranker, modelLoadMs } = await warmModels(config);
+  const { embeddings, reranker, modelLoadMs } = await warmModels(config, options);
 
   const provided = process.env.EVAL_DATABASE_URL ?? process.env.DATABASE_URL;
   let container: RunningPostgres | null = null;
@@ -763,6 +827,7 @@ async function runCorpus(options: Options): Promise<GateVerdict> {
 
     const ask = makeAsk({ db, embeddings, config, reranker, projectId: project.id, refusalFloor: config.SEARCH_SCORE_FLOOR });
     const { results, negativeResults, searchMs } = await askQuestions(ask, golden, negative);
+    await reportRerankLatency(reranker, options);
 
     /**
      * **The harness records nothing, and that is asserted rather than assumed**
@@ -800,7 +865,7 @@ async function runCorpus(options: Options): Promise<GateVerdict> {
       textSearchConfig: textSearchConfigs.describe,
       resultSelection:
         `max_per_document=${selection.maxPerDocument}, neighbor_context=${selection.neighborContext}, ` + `score_floor=${config.SEARCH_SCORE_FLOOR}`,
-      rerank: reranker ? `${reranker.id}, max_tokens=${config.SEARCH_RERANK_MAX_TOKENS}, batch=${config.SEARCH_RERANK_BATCH}` : 'off',
+      rerank: describeRerank(reranker, config),
       documents: indexed.documents,
       chunks: indexed.chunks,
       startedAt: startedAt.toISOString(),
@@ -852,7 +917,7 @@ export async function measureProject(
   db: Db,
   config: Config,
   embeddings: EmbeddingProvider,
-  reranker: LocalReranker | null,
+  reranker: Reranker | null,
   nameOrId: string,
   negative: readonly NegativeRow[],
 ): Promise<ProjectMeasurement> {
@@ -912,10 +977,11 @@ async function runProject(options: Options): Promise<GateVerdict> {
   const nameOrId = options.project ?? '';
 
   const negative = await readNegatives(options);
-  const { embeddings, reranker, modelLoadMs } = await warmModels(config);
+  const { embeddings, reranker, modelLoadMs } = await warmModels(config, options);
   const { db, pool } = createDb(url);
   try {
     const measured = await measureProject(db, config, embeddings, reranker, nameOrId, negative);
+    await reportRerankLatency(reranker, options);
     const scan = scanFrom(config);
     const selection = selectionFrom(config);
     const context: RunContext = {
@@ -934,7 +1000,7 @@ async function runProject(options: Options): Promise<GateVerdict> {
       textSearchConfig: 'as indexed, per source',
       resultSelection:
         `max_per_document=${selection.maxPerDocument}, neighbor_context=${selection.neighborContext}, ` + `score_floor=${measured.refusalFloor}`,
-      rerank: reranker ? `${reranker.id}, max_tokens=${config.SEARCH_RERANK_MAX_TOKENS}, batch=${config.SEARCH_RERANK_BATCH}` : 'off',
+      rerank: describeRerank(reranker, config),
       documents: measured.project.documentCount,
       chunks: measured.project.chunkCount,
       startedAt: startedAt.toISOString(),
