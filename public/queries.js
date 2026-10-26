@@ -22,7 +22,7 @@
 // poll, and a tab or a window length held in the DOM would vanish while somebody was reading it.
 
 import { ApiError, api, el, emit, fmt, relativeTime, state, toast } from './core.js';
-import { renderFloorSuggestions } from './floor-suggestions.js';
+import { renderFloorSuggestions, suggestionsReadKey } from './floor-suggestions.js';
 
 const WINDOWS = [
   { days: 1, label: '24 hours' },
@@ -146,6 +146,8 @@ export function renderQueries(project) {
   if (q.projectId !== project.id) reset(project.id);
   const data = q.projectId === project.id ? q.data : null;
   const mayManage = project.access === 'manager';
+  // From the project, which the poll keeps current; the summary in `data` is read only when its filters change.
+  const current = { embeddingModel: project.embeddingModel, liveGeneration: project.liveGeneration };
 
   return el('section', { class: 'panel' }, [
     el('div', { class: 'panel-head' }, [
@@ -168,7 +170,9 @@ export function renderQueries(project) {
       body(data, q),
       foot(project, data, mayManage),
       floorLine(project, data, mayManage),
-      data?.scoreFloor ? renderFloorSuggestions(project, mayManage, () => loadQuerySummary(true)) : null,
+      data?.scoreFloor
+        ? renderFloorSuggestions(project, mayManage, () => loadQuerySummary(true), suggestionsReadKey(current, q.days), current)
+        : null,
     ]),
   ]);
 }

@@ -1,15 +1,15 @@
 // A project's golden questions: the questions its documentation must keep answering (FR-347).
 //
 // Each question names the file (and optionally the heading) that is the right answer. The set is stored
-// per project and read by the evaluation (`npm run eval -- --project <name>`), which asks every question
-// of the live index through the same search path an agent uses. The server has no route that runs the
-// evaluation (it is a command-line tool that reads DATABASE_URL), so the panel keeps the questions and
-// hands over the command; it never scores anything itself.
+// per project. The server asks it of the live index by itself and keeps the runs (`eval.js` draws them);
+// the same set is read by `npm run eval -- --project <name>` from a shell. The panel keeps the questions
+// and hands over the command; it never scores anything itself.
 //
 // Reading is for anybody who can see the project; adding, editing and deleting is an editor's.
 
 import { $, api, closeDialog, copyText, el, emit, fmt, openDialog, state, toast } from './core.js';
 import { canEdit } from './auth.js';
+import { watchEvalRuns } from './eval.js';
 
 /** The server's own limits (src/services/golden-questions.ts), checked here so a form says so before a round trip. */
 export const KEY_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
@@ -70,18 +70,29 @@ export function validateQuestion(question, { creating }) {
   return null;
 }
 
+/** What the form shows for a stored question, normalized the way a submit normalizes it. */
+function asTyped(stored) {
+  return normalizeForm({ ...stored, tags: (stored.tags ?? []).join(', ') });
+}
+
 /**
- * The PATCH body for an edit: only the fields that differ from the stored question, so saving cannot
- * overwrite a field somebody else changed meanwhile. `key` is never sent; it is the name a miss list cites.
+ * The PATCH body for an edit: only the fields the person changed, so saving cannot overwrite a field
+ * somebody else changed meanwhile. `key` is never sent; it is the name a miss list cites.
+ *
+ * "Changed" is measured against what the form showed, not against the stored bytes: the API and an
+ * import accept a path with padding or a tag with a comma in it, and the form trims the one and splits
+ * the other. Compared with the stored value, editing only the question would send the trimmed path and
+ * the split tags too and rewrite them without anybody asking.
  */
 export function questionPatch(stored, typed) {
+  const shown = asTyped(stored);
   const patch = {};
-  if (typed.lang !== stored.lang) patch.lang = typed.lang;
-  if (typed.query !== stored.query) patch.query = typed.query;
-  if (typed.expectFile !== stored.expectFile) patch.expectFile = typed.expectFile;
-  if (typed.expectHeading !== (stored.expectHeading ?? null)) patch.expectHeading = typed.expectHeading;
-  if (typed.tags.join('\n') !== (stored.tags ?? []).join('\n')) patch.tags = typed.tags;
-  if (typed.note !== (stored.note ?? null)) patch.note = typed.note;
+  if (typed.lang !== shown.lang) patch.lang = typed.lang;
+  if (typed.query !== shown.query) patch.query = typed.query;
+  if (typed.expectFile !== shown.expectFile) patch.expectFile = typed.expectFile;
+  if (typed.expectHeading !== shown.expectHeading) patch.expectHeading = typed.expectHeading;
+  if (typed.tags.join('\n') !== shown.tags.join('\n')) patch.tags = typed.tags;
+  if (typed.note !== shown.note) patch.note = typed.note;
   return patch;
 }
 
@@ -193,13 +204,17 @@ function askDelete(q) {
 async function removeQuestion(project, q) {
   const g = state.golden;
   g.confirmDelete = null;
+  let deleted = false;
   try {
     await api(`/api/projects/${project.id}/golden-questions/${q.id}`, { method: 'DELETE' });
     toast(`Deleted ${q.key}`);
+    deleted = true;
   } catch (err) {
     toast(err.message);
   }
   await loadGolden(true);
+  // After the set is read back: the Eval panel opens no watch for a set it knows to be empty.
+  if (deleted) watchEvalRuns();
 }
 
 function evalHint(project) {
@@ -207,7 +222,7 @@ function evalHint(project) {
   return el('div', { class: 'golden-eval' }, [
     el('p', {
       class: 'field-hint',
-      text: 'The evaluation asks every question of the live index and reports recall. It is run from a shell that can reach the database; the panel does not run it. Export JSONL gives the same set as a file, for --golden.',
+      text: 'The server asks every question of the live index after the index or the set changes (see Eval runs below). The same evaluation can be run from a shell that can reach the database, and Export JSONL gives the set as a file, for --golden.',
     }),
     el('div', { class: 'golden-command' }, [
       el('code', { text: command }),
@@ -368,6 +383,9 @@ export function initGoldenUi() {
       closeDialog(dialog);
       toast(dialogStored ? `Saved ${typed.key}` : `Added ${typed.key}`);
       await loadGolden(true);
+      // After the set is read back, not before: the first question added to an empty set would find it still
+      // "empty" and open no watch. The server asks the set again a minute after the last change.
+      watchEvalRuns();
     } catch (err) {
       fail(err.message);
     } finally {

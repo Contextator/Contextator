@@ -61,6 +61,65 @@ describe('reading the quotas', () => {
   });
 });
 
+describe('answers that arrive out of order', () => {
+  const reply = (documents: number) => ({
+    status: 200,
+    ok: true,
+    text: async () => JSON.stringify({ id: 'p1', quotas: { ...QUOTAS, documents: { limit: 100, used: documents, inherited: true } } }),
+  });
+
+  it('keeps the newer answer when the older request answers last', async () => {
+    let releaseOld: (value: unknown) => void = () => {};
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseOld = resolve;
+        }),
+    );
+    fetchMock.mockImplementationOnce(async () => reply(41));
+    const old = loadQuotas();
+    state.projects[0].documentCount = 4; // an index run finished while the first read was in flight
+    await loadQuotas();
+    releaseOld(reply(40));
+    await old;
+    expect(state.quotas.data.documents.used).toBe(41);
+    expect(state.quotas.status).toBe('done');
+  });
+
+  it('keeps the newer answer for a forced read of the same key', async () => {
+    let releaseOld: (value: unknown) => void = () => {};
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseOld = resolve;
+        }),
+    );
+    fetchMock.mockImplementationOnce(async () => reply(41));
+    const old = loadQuotas();
+    await loadQuotas(true);
+    releaseOld(reply(40));
+    await old;
+    expect(state.quotas.data.documents.used).toBe(41);
+  });
+
+  it('does not let an older failure replace the newer answer either', async () => {
+    let failOld: (value: unknown) => void = () => {};
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          failOld = resolve;
+        }),
+    );
+    fetchMock.mockImplementationOnce(async () => reply(41));
+    const old = loadQuotas();
+    await loadQuotas(true);
+    failOld({ status: 500, ok: false, text: async () => JSON.stringify({ message: 'boom' }) });
+    await old;
+    expect(state.quotas.status).toBe('done');
+    expect(state.quotas.data.documents.used).toBe(41);
+  });
+});
+
 describe('the figures', () => {
   it('reads used against the limit, and says so when there is no limit or no measurement', () => {
     expect(quotaFigures(QUOTAS.documents, false)).toBe('40 of 100');

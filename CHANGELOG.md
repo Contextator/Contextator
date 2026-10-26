@@ -49,6 +49,12 @@ ships, that stops.
   `GET /api/projects/:id/queries/summary` gains `reportedGaps`. `/metrics` gains
   `contextator_mcp_gap_reports_total{outcome}` (`accepted`, `limited`, `disabled`, `failed`).
 
+- The dashboard has an Eval runs panel under the golden questions: the history of recall@5 and MRR as a chart,
+  the runs as a list with what each one lost or skipped, a warning naming the questions the newest good run lost
+  (and the ones skipped for the first time), and a "Run now" button for a manager. It draws the figures the
+  server recorded and scores nothing itself. A run the server starts by itself (after an index build, after the set
+  was edited by anyone) shows up on an open page within seconds, without a refresh.
+
 ### Changed
 
 - "Every tool is read-only" no longer holds: no tool writes to documentation, and `report_gap` writes to the query
@@ -108,6 +114,15 @@ ships, that stops.
 - A project import that refused a malformed line in `sources.ndjson`, `golden-questions.ndjson` or
   `documents.ndjson` named a line number that was too low whenever blank lines came before it; the number now
   counts every physical line, as an editor does.
+- The dashboard's suggested relevance floor was read once per project, so a model change, a new generation or a
+  different window on the questions panel left the old list on screen. It is read again when any of them changes, and
+  after a model or generation change it keeps being read until the suggestion the server stores for the new encoder is
+  there.
+- Editing a golden question in the dashboard sent every field back, not the ones that were changed: a file path
+  with padding or a tag that contains a comma, stored through the API or an import, was silently trimmed or split
+  by saving an edit to the question's text. Only the fields that differ from what the form showed are sent now.
+- The dashboard's quota panel could show old usage: when an index run moved the counts while a read was in
+  flight, the slower, older answer landed last. A read now yields to a newer one.
 - `docs/deployment.md` said a shared rate-limit key means nobody can guess faster than the budget allows. Anyone
   with an account of their own can reset the shared sign-in budget with a successful sign-in, so against other
   accounts only the per-account lockout bounds guessing; the text now says so.

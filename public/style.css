@@ -3007,3 +3007,251 @@ a.btn.ghost.small {
   font-size: 12px;
   overflow-wrap: anywhere;
 }
+
+/* ---------- eval runs (eval.js, ADR-0124) ---------- */
+
+/* Two header buttons beside the text do not fit on a phone: let the head and the buttons wrap. */
+#eval-panel > .sources-head {
+  flex-wrap: wrap;
+}
+
+#eval-panel > .sources-head .source-actions {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+#eval-panel > .hint,
+#eval-panel > .form-error,
+#eval-panel > .eval-wait {
+  padding: 12px 20px;
+}
+
+#eval-panel > .eval-notice {
+  margin: 14px 20px 0;
+}
+
+.eval-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 20px 20px;
+  min-width: 0;
+}
+
+.eval-banner {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--err-border);
+  background: var(--err-tint);
+  color: var(--err-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.eval-banner.skipped {
+  border-color: var(--border-strong);
+  background: var(--warn-tint);
+  color: var(--warn-text);
+}
+
+.eval-banner p {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.eval-keys {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+
+.eval-key-chip {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.eval-figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.eval-figure {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--neutral-tint);
+  border-radius: 10px;
+  min-width: 0;
+}
+
+.eval-figure-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.eval-figure-value {
+  font-size: 20px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.eval-chart {
+  margin: 0;
+  min-width: 0;
+}
+
+.eval-svg {
+  display: block;
+  width: 100%;
+  max-width: 560px;
+  height: auto;
+}
+
+.eval-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.eval-axis {
+  fill: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+}
+
+.eval-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.eval-line.recall {
+  stroke: var(--accent);
+}
+
+.eval-line.mrr {
+  stroke: var(--warn);
+  stroke-dasharray: 5 4;
+}
+
+.eval-dot.recall {
+  fill: var(--accent);
+}
+
+.eval-dot.mrr {
+  fill: var(--warn);
+}
+
+.eval-lost {
+  fill: none;
+  stroke: var(--err);
+  stroke-width: 2;
+}
+
+.eval-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.eval-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.eval-key::before {
+  content: "";
+  width: 18px;
+  height: 0;
+  border-top: 2px solid var(--accent);
+}
+
+.eval-key.mrr::before {
+  border-top: 2px dashed var(--warn);
+}
+
+.eval-key.lost::before {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--err);
+  border-radius: 50%;
+}
+
+.eval-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.eval-run {
+  padding: 8px 12px;
+  border: 1px solid var(--neutral-tint);
+  border-radius: 7px;
+}
+
+.eval-run.regressed {
+  border-color: var(--err-border);
+}
+
+.eval-run-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+
+.eval-when {
+  font-weight: 500;
+}
+
+.eval-trigger {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.eval-nums {
+  flex: 1 1 220px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.eval-run-body {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--neutral-tint);
+}
+
+.eval-run-body p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.eval-run-body .eval-keys {
+  align-items: baseline;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .eval-dot {
+    transition: r 0.15s;
+  }
+}

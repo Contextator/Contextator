@@ -110,6 +110,12 @@ export function describeApiError(err) {
 // ---------- loading ----------
 
 /**
+ * The number of the newest quota request. An index run moves the counts, and so the key, while a read
+ * is still in flight; the slower, older answer must not land last and put the old usage back on screen.
+ */
+let latestRequest = 0;
+
+/**
  * The quotas ride on the project's own detail route, not on the list, so this is its own request.
  * It refetches when the selection or the project's counts move (an index run changes both usage
  * figures) and otherwise stays quiet: the poll runs every couple of seconds.
@@ -129,14 +135,17 @@ export async function loadQuotas(force = false) {
   q.projectId = project.id;
   q.loadedKey = key;
   q.status = 'loading';
+  const request = ++latestRequest;
+  // Moved on meanwhile: another project, other counts, or the same key asked again by a forced read.
+  const superseded = () => request !== latestRequest || state.selectedId !== project.id;
   try {
     const detail = await api(`/api/projects/${project.id}`);
-    if (state.selectedId !== project.id) return; // selection moved on meanwhile
+    if (superseded()) return;
     q.data = detail.quotas ?? null;
     q.status = 'done';
     q.error = '';
   } catch (err) {
-    if (state.selectedId !== project.id) return;
+    if (superseded()) return;
     q.status = 'error';
     q.error = err.message;
   }
