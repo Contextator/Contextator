@@ -180,6 +180,13 @@ called. How they count, what the `429` looks like and what an upgrade changes ar
 `TRUST_PROXY` being exact: [the table](mcp-access.md#restricting-a-static-token-to-a-network) says what each value
 trusts. `TRUST_PROXY=1` (refused at startup since 0.5.0) is not among them.
 
+`MCP_REPORT_GAP_PER_HOUR` (default `20`, `0` turns the limit off) is the one limit that is on by default for a tool: how
+many `report_gap` reports one credential may have accepted per hour, with every anonymous caller of an open project
+sharing one bucket of the same size. It is counted from the `reported_gaps` table itself, and a report over it is
+answered as a success and dropped. What `report_gap` writes, and which switches stop it, are in
+[MCP access](mcp-access.md#reporting-what-the-documentation-does-not-answer); its rows are swept by
+`SEARCH_QUERY_LOG_RETENTION_DAYS`.
+
 ## Project quotas
 
 Three caps limit how much one project may hold, so a runaway source or upload cannot fill the disk or the

@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Received. Thank you — the documentation maintainers review these reports."
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

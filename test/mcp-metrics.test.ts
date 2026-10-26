@@ -50,18 +50,42 @@ describe('toolLabel', () => {
 });
 
 describe('MCP_TOOL_NAMES', () => {
-  it('is exactly the set of tools registerTools registers, in both eras', () => {
+  /**
+   * ADR-0125, decision 8: the list is the tools the server *knows*, and `tools/list` is a conditional subset of
+   * it. With the query log on they are equal; with it off they differ by exactly `report_gap`.
+   */
+  const registered = (ctx: Partial<ToolContext>, project: Partial<ProjectRow>, era: 'modern' | 'legacy'): string[] => {
+    const names: string[] = [];
+    // No low-level `server`: the legacy unknown-tool wrapper has nothing to wrap and steps aside.
+    const server = {
+      registerTool: (name: string) => {
+        names.push(name);
+      },
+    };
+    registerTools(
+      server as unknown as McpServer,
+      { config: { MCP_STRUCTURED_OUTPUT: false }, ...ctx } as ToolContext,
+      project as ProjectRow,
+      null,
+      era,
+    );
+    return names.sort();
+  };
+  const queryLog = {} as ToolContext['queryLog'];
+
+  it('is exactly the set of tools registerTools registers while the query log is on, in both eras', () => {
     for (const era of ['modern', 'legacy'] as const) {
-      const names: string[] = [];
-      // No low-level `server`: the legacy unknown-tool wrapper has nothing to wrap and steps aside.
-      const server = {
-        registerTool: (name: string) => {
-          names.push(name);
-        },
-      };
-      const ctx = { config: { MCP_STRUCTURED_OUTPUT: false } } as unknown as ToolContext;
-      registerTools(server as unknown as McpServer, ctx, { name: 'handbook' } as ProjectRow, null, era);
-      expect([...names].sort()).toEqual([...MCP_TOOL_NAMES].sort());
+      expect(registered({ queryLog }, { name: 'handbook', queryLogEnabled: true }, era)).toEqual([...MCP_TOOL_NAMES].sort());
+    }
+  });
+
+  it('differs by exactly report_gap while the query log is off for the instance or for the project', () => {
+    const without = MCP_TOOL_NAMES.filter((name) => name !== 'report_gap').sort();
+    for (const era of ['modern', 'legacy'] as const) {
+      // `SEARCH_QUERY_LOG=0`: there is no `ctx.queryLog` at all.
+      expect(registered({}, { name: 'handbook', queryLogEnabled: true }, era)).toEqual(without);
+      // The project's own switch.
+      expect(registered({ queryLog }, { name: 'handbook', queryLogEnabled: false }, era)).toEqual(without);
     }
   });
 });

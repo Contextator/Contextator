@@ -14,6 +14,7 @@ import { documentChanges, documentSources, projects, type ProjectRow } from '../
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
 import { chunkMarkdown, embeddingText, estimateTokens } from '../../src/services/chunker.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
+import { QueryLog } from '../../src/services/query-log.js';
 import { replaceDocument, storedDocumentContent, type NewChunk } from '../../src/services/vector-store.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
 
@@ -137,7 +138,9 @@ interface Fixture {
   strict: ProjectRow;
   changes: ProjectRow;
   young: ProjectRow;
-  ctx: (maxChars?: number) => ToolContext;
+  /** A project whose own query log is switched off: `report_gap` is not registered for it (ADR-0125). */
+  quiet: ProjectRow;
+  ctx: (maxChars?: number, queryLog?: boolean) => ToolContext;
 }
 
 let fx: Fixture;
@@ -227,8 +230,10 @@ interface Case {
   slug: string;
   tool: string;
   args: Record<string, unknown>;
-  project?: 'handbook' | 'empty' | 'strict' | 'changes' | 'young';
+  project?: 'handbook' | 'empty' | 'strict' | 'changes' | 'young' | 'quiet';
   maxChars?: number;
+  /** Hand the tools a query log, as the server does unless `SEARCH_QUERY_LOG=0`. Only `report_gap` reads it here. */
+  queryLog?: boolean;
 }
 
 const CASES: Case[] = [
@@ -291,6 +296,19 @@ const CASES: Case[] = [
   { slug: 'whats-new-error-invalid-since', tool: 'whats_new', args: { since: 'last tuesday' }, project: 'changes' },
   { slug: 'whats-new-error-future-since', tool: 'whats_new', args: { since: '2026-11-01' }, project: 'changes' },
   { slug: 'whats-new-error-invalid-arguments', tool: 'whats_new', args: { since: '', limit: 0 }, project: 'changes' },
+  // report_gap (ADR-0125). It answers "received" for a report that was stored, one over the limit and one
+  // for a project whose switch is off, so one record stands for all three; the integration test of the
+  // tool tells them apart by what reached the table. Absent, it is an unknown tool.
+  {
+    slug: 'report-gap-received',
+    tool: 'report_gap',
+    args: { query: 'How do I rotate the webhook secret?', note: 'The page only says how to create one.' },
+    queryLog: true,
+  },
+  { slug: 'report-gap-received-without-note', tool: 'report_gap', args: { query: 'How do I rotate the webhook secret?' }, queryLog: true },
+  { slug: 'report-gap-error-invalid-arguments', tool: 'report_gap', args: { query: '', note: 'x'.repeat(1001) }, queryLog: true },
+  { slug: 'report-gap-absent-instance-query-log-off', tool: 'report_gap', args: { query: 'anything' } },
+  { slug: 'report-gap-absent-project-query-log-off', tool: 'report_gap', args: { query: 'anything' }, project: 'quiet', queryLog: true },
   // No such tool: the protocol's answer, not a tool's.
   { slug: 'call-error-unknown-tool', tool: 'delete_everything', args: {} },
 ];
@@ -325,6 +343,7 @@ beforeAll(async () => {
   await db.update(projects).set({ documentCount: 15, chunkCount: 99 }).where(eq(projects.id, handbook.id));
 
   const [empty] = await db.insert(projects).values({ name: 'empty-project', embeddingModel: MODEL_ID }).returning();
+  const [quiet] = await db.insert(projects).values({ name: 'quiet-project', embeddingModel: MODEL_ID, queryLogEnabled: false }).returning();
 
   // A floor of its own, above anything the stub embedding scores: the refusal names the project's floor.
   const [strict] = await db.insert(projects).values({ name: 'strict-project', embeddingModel: MODEL_ID, scoreFloor: 0.99 }).returning();
@@ -387,14 +406,16 @@ beforeAll(async () => {
   await db.execute(sql`UPDATE settings SET value = ${TRACKING_SINCE} WHERE key = 'document_changes_tracking_since'`);
 
   const env = { DATABASE_URL: database.url, ALLOWED_DOC_ROOTS: path.dirname(root), DATA_DIR: path.join(root, '.data'), SECRET_KEY: '0'.repeat(64) };
-  const ctx = (maxChars?: number): ToolContext => ({
+  const ctx = (maxChars?: number, queryLog = false): ToolContext => ({
     db,
     embeddings,
     config: loadConfig(maxChars === undefined ? env : { ...env, SEARCH_MAX_RESULT_CHARS: String(maxChars) }),
     log: silentLogger,
+    // Absent unless a case asks, which is `SEARCH_QUERY_LOG=0`: what every record before `report_gap` was taken under.
+    ...(queryLog ? { queryLog: new QueryLog(db, silentLogger) } : {}),
     now: () => NOW,
   });
-  fx = { database, root, handbook, empty, strict, changes, young, ctx };
+  fx = { database, root, handbook, empty, strict, changes, young, quiet, ctx };
 });
 
 afterAll(async () => {
@@ -408,8 +429,21 @@ describe('the MCP tool surface, as recorded before structured output', () => {
     await expect(golden(list)).toMatchFileSnapshot(path.join(GOLDEN_DIR, 'tools-list.txt'));
   });
 
-  it.each(CASES)('$slug', async ({ slug, tool, args, project = 'handbook', maxChars }) => {
-    const [reply] = await session(fx[project], fx.ctx(maxChars), [{ method: 'tools/call', params: { name: tool, arguments: args } }]);
+  // With the query log on, which is how a server runs unless `SEARCH_QUERY_LOG=0`: the same four definitions,
+  // then `report_gap` ([ADR-0125](../../.ssot/ADR.md#adr-0125)), annotated as a tool that writes.
+  it('lists report_gap after the others while the query log is on', async () => {
+    const [list] = await session(fx.handbook, fx.ctx(undefined, true), [{ method: 'tools/list', params: {} }]);
+    await expect(golden(list)).toMatchFileSnapshot(path.join(GOLDEN_DIR, 'tools-list-query-log.txt'));
+  });
+
+  it('does not list report_gap for a project whose own query log is off', async () => {
+    const [list] = await session(fx.quiet, fx.ctx(undefined, true), [{ method: 'tools/list', params: {} }]);
+    const names = ((list as { result?: { tools?: Array<{ name: string }> } }).result?.tools ?? []).map((t) => t.name);
+    expect(names).toEqual(['search_docs', 'list_topics', 'read_document', 'whats_new']);
+  });
+
+  it.each(CASES)('$slug', async ({ slug, tool, args, project = 'handbook', maxChars, queryLog }) => {
+    const [reply] = await session(fx[project], fx.ctx(maxChars, queryLog), [{ method: 'tools/call', params: { name: tool, arguments: args } }]);
     await expect(golden(reply)).toMatchFileSnapshot(path.join(GOLDEN_DIR, `${slug}.txt`));
   });
 });

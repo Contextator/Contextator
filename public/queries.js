@@ -419,7 +419,7 @@ function tabs() {
 
 const table = (data) =>
   ({
-    questions: () => questionsTable(data),
+    questions: () => el('div', {}, [questionsTable(data), reportedGapsBlock(data)]),
     documents: () => documentsTable(data),
     chunks: () => chunksTable(data),
     volume: () => volumeTable(data),
@@ -470,6 +470,51 @@ function questionsTable(data) {
             : 'The best cosine similarity any of these askings ever reached.',
           text: score(row.bestScore),
         }),
+      ]),
+    ),
+  ]);
+}
+
+/**
+ * What agents said the documentation does not answer (`report_gap`, ADR-0125), in a block of its own under
+ * the ranked questions. **Never merged into them**: that ranking is built from scores, and a report is an
+ * agent's statement about an answer it read, which is a different thing and is shown as one.
+ *
+ * Every string here came from an agent, so every one goes through `text`, which sets `textContent`; none is
+ * ever handed to `innerHTML`, and neither the query nor the note is interpreted as markup or Markdown.
+ */
+export function reportedGapsBlock(data) {
+  const groups = data.reportedGaps;
+  if (!Array.isArray(groups)) return el('span');
+  const head = el('h4', { text: 'Reported by agents' });
+  if (groups.length === 0) {
+    return el('div', { class: 'queries-table' }, [head, el('p', { class: 'hint', text: 'No agent reported a gap in this window.' })]);
+  }
+  return el('div', { class: 'queries-table' }, [
+    head,
+    el('p', {
+      class: 'hint',
+      text:
+        'Questions an agent searched for, read what turned up and said the documentation does not answer. ' +
+        'They are the agents’ own words and are not ranked with the questions above.',
+    }),
+    el('div', { class: 'query-grid doc head' }, [
+      el('span', { text: 'Reported' }),
+      el('span', { class: 'right', text: 'Reports' }),
+      el('span', { class: 'right', text: 'Last' }),
+    ]),
+    ...groups.map((row) =>
+      el('div', { class: 'query-grid doc' }, [
+        el('span', { class: 'query-cell' }, [
+          el('span', { class: 'query-text', text: row.sample, title: row.queryNorm }),
+          ...(row.lastNote ? [el('span', { class: 'sub', text: `Note: ${row.lastNote}` })] : []),
+        ]),
+        el('span', {
+          class: 'right mono',
+          title: row.reporters > 0 ? `${row.reporters} distinct token${row.reporters === 1 ? '' : 's'}` : 'An open project verifies no token',
+          text: fmt(row.reports),
+        }),
+        el('span', { class: 'right sub', title: new Date(row.lastReportedAt).toLocaleString(), text: relativeTime(row.lastReportedAt) }),
       ]),
     ),
   ]);

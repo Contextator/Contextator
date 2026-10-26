@@ -239,6 +239,20 @@ export interface EvalRunSample {
   regressions: number;
 }
 
+/**
+ * What happened to one `report_gap` call ([ADR-0125](../../.ssot/ADR.md#adr-0125)): the closed set of
+ * `contextator_mcp_gap_reports_total{outcome}` ([ADR-0105](../../.ssot/ADR.md#adr-0105)). `disabled` is a
+ * project whose query log was switched off after the session began, `limited` a report over
+ * `MCP_REPORT_GAP_PER_HOUR`, `failed` one that could not be stored.
+ */
+export const GAP_REPORT_OUTCOMES = ['accepted', 'limited', 'disabled', 'failed'] as const;
+export type GapReportOutcome = (typeof GAP_REPORT_OUTCOMES)[number];
+
+/** Counts one `report_gap` call by outcome. Optional wherever it is taken, like the other observers. */
+export interface GapReportObserver {
+  countGapReport(outcome: GapReportOutcome): void;
+}
+
 /** Times one tool call, handler start to answer. */
 export interface McpToolObserver {
   observeToolDuration(tool: string, seconds: number): void;
@@ -310,6 +324,8 @@ export interface MetricsSnapshot {
   mcpRequests?: McpRequestSample[];
   /** Eval runs recorded since start, unlabelled (ADR-0124). Optional like `mcpGuard`. */
   evalRuns?: EvalRunSample;
+  /** `report_gap` calls since start by outcome (ADR-0125). Optional like `mcpGuard`. */
+  gapReports?: Record<GapReportOutcome, number>;
   /** Rendered after the gauges and counters, in the order given. Optional so a snapshot without any is still one. */
   histograms?: HistogramSnapshot[];
 }
@@ -322,7 +338,7 @@ export interface MetricsSnapshot {
  * reached for them would be a second place that knows how this application is wired.
  */
 export class MetricsRegistry
-  implements SearchCounter, SearchObserver, IndexerObserver, McpRequestCounter, McpToolObserver, McpGuardCounter, EvalRunObserver
+  implements SearchCounter, SearchObserver, IndexerObserver, McpRequestCounter, McpToolObserver, McpGuardCounter, EvalRunObserver, GapReportObserver
 {
   private readonly searches: Record<QueryActor, number> = { mcp: 0, dashboard: 0 };
   private readonly mcpRequestCounts = new Map<string, McpRequestSample>();
@@ -334,6 +350,7 @@ export class MetricsRegistry
   private evalRunCount = 0;
   private evalRunErrors = 0;
   private evalRegressions = 0;
+  private readonly gapReportCounts: Record<GapReportOutcome, number> = { accepted: 0, limited: 0, disabled: 0, failed: 0 };
   private readonly histogramFamilies = new Map<string, Histogram>();
   /** Read once per search, at the moment it is observed; see `watchIndexing`. */
   private indexingNow: () => boolean = () => false;
@@ -479,6 +496,15 @@ export class MetricsRegistry
     else if (regressed) this.evalRegressions++;
   }
 
+  countGapReport(outcome: GapReportOutcome): void {
+    this.gapReportCounts[outcome]++;
+  }
+
+  /** The `report_gap` counters as they stand; copied, so a caller cannot move them. */
+  gapReports(): Record<GapReportOutcome, number> {
+    return { ...this.gapReportCounts };
+  }
+
   /** The eval counters as they stand. */
   evalRuns(): EvalRunSample {
     return { runs: this.evalRunCount, errors: this.evalRunErrors, regressions: this.evalRegressions };
@@ -602,6 +628,18 @@ export function renderPrometheus(snapshot: MetricsSnapshot): string {
     family('contextator_eval_regressions_total', 'Eval runs that lost at least one question the previous good run answered.', 'counter', [
       ['', snapshot.evalRuns.regressions],
     ]);
+  }
+
+  // `report_gap` calls by what became of them (ADR-0125). A closed set of four and no project, token or
+  // text: ADR-0105 allows none of those as a label, and who reported what is in the table. `limited` and
+  // `disabled` are answered to the agent as a success, so this counter is the only place they are seen.
+  if (snapshot.gapReports) {
+    family(
+      'contextator_mcp_gap_reports_total',
+      'report_gap calls by outcome: accepted, limited (over MCP_REPORT_GAP_PER_HOUR), disabled (query log off for the project) or failed.',
+      'counter',
+      GAP_REPORT_OUTCOMES.map((outcome): [string, number] => [`{outcome="${outcome}"}`, snapshot.gapReports?.[outcome] ?? 0]),
+    );
   }
 
   // Every MCP message by what it asked for and which protocol generation asked it: the `era` split is

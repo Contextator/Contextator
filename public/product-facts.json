@@ -102,6 +102,20 @@
           "required": false
         }
       ]
+    },
+    {
+      "name": "report_gap",
+      "title": "Report a documentation gap",
+      "parameters": [
+        {
+          "name": "query",
+          "required": true
+        },
+        {
+          "name": "note",
+          "required": false
+        }
+      ]
     }
   ],
   "notMachineReadable": {

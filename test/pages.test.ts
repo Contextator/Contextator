@@ -252,6 +252,15 @@ describe('the shipped prose tells the truth about accounts and MCP', () => {
     expect(privacy).toContain('backup');
   });
 
+  // ADR-0125: `report_gap` is the first tool an agent writes with, so "what the server records about an agent is
+  // what it asked" needs the sentence that says there is one more thing. Pinned as text for the reason above.
+  it('says an agent can also write a gap report, and that it is kept and switched off like the queries', async () => {
+    const privacy = await readFile(new URL('../public/pages/privacy.html', import.meta.url), 'utf8');
+    expect(privacy).toContain('report_gap');
+    expect(privacy).toContain('MCP_REPORT_GAP_PER_HOUR');
+    expect(privacy).toContain('Gap reports from agents');
+  });
+
   it('says the same thing in the README and in the dashboard, where operators actually read it', async () => {
     const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
     const dashboard = await readFile(new URL('../public/index.html', import.meta.url), 'utf8');

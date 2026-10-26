@@ -794,6 +794,52 @@ export const searchQueryHits = pgTable(
 );
 
 /**
+ * What an agent said the documentation did not answer ([ADR-0125](../../.ssot/ADR.md#adr-0125)): the rows
+ * `report_gap` writes, and nothing else does.
+ *
+ * **Its own table and not a flagged row of `search_queries`.** Every reader of that table assumes a row is
+ * a search that ran, and its `result_limit`, `embedding_model` and `hit_count` would need made-up values
+ * for a row that is not one. Here nothing is invented.
+ *
+ * It follows the query log's policies: not written while the log is off for the instance or the project,
+ * swept by `SEARCH_QUERY_LOG_RETENTION_DAYS`, kept to a per-project row cap. `query` and `note` are an
+ * agent's words, so this is user content in the same sense `search_queries.query` is: in every `pg_dump`
+ * ([ADR-0046](../../.ssot/ADR.md#adr-0046)) and readable by every viewer of the project.
+ *
+ * The limit counts the rows themselves (`rate_key`, `created_at`), so no counter is kept anywhere else.
+ */
+export const reportedGaps = pgTable(
+  'reported_gaps',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** The MCP token the call presented, NULL for an `open` project. `ON DELETE SET NULL` for `search_queries`' reason. */
+    mcpTokenId: uuid('mcp_token_id'),
+    /** The limiter's bucket: `tok:<token id>`, or `anon` for every anonymous caller of an `open` project. No address is stored. */
+    rateKey: text('rate_key').notNull(),
+    /** What the agent was looking for, verbatim and bounded by `REPORT_GAP_QUERY_MAX_CHARS`. */
+    query: text('query').notNull(),
+    /** The same, folded as `search_queries.query_norm` is, so two spellings group together. */
+    queryNorm: text('query_norm').notNull(),
+    /** What the agent said was missing, bounded by `REPORT_GAP_NOTE_MAX_CHARS`. Agent text: rendered as text, never returned. */
+    note: text('note'),
+    /** The generation the project was serving when it was reported (ADR-0047's reason for the same column). */
+    liveGeneration: integer('live_generation').notNull(),
+  },
+  (t) => [
+    foreignKey({ name: 'reported_gaps_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    foreignKey({ name: 'reported_gaps_mcp_token_id_fkey', columns: [t.mcpTokenId], foreignColumns: [mcpTokens.id] }).onDelete('set null'),
+    // "The most recent reports of this project", the panel's read and the row cap's cut-off lookup.
+    index('reported_gaps_project_created_idx').on(t.projectId, t.createdAt.desc().nullsFirst()),
+    // The limit's count: one bucket's rows in the last hour.
+    index('reported_gaps_project_key_created_idx').on(t.projectId, t.rateKey, t.createdAt.desc().nullsFirst()),
+    // The retention sweep is instance-wide, as the query log's is.
+    index('reported_gaps_created_idx').on(t.createdAt),
+  ],
+);
+
+/**
  * A relevance floor an operator may adopt for one project ([ADR-0083](../../.ssot/ADR.md#adr-0083),
  * Faz 08 of 0.4.0): the highest floor that would still have answered a fragment of each of the project's
  * own chunks, measured with the encoder and the live generation named on the row.
@@ -1284,5 +1330,7 @@ export type SearchQueryRow = typeof searchQueries.$inferSelect;
 export type SearchQueryInsert = typeof searchQueries.$inferInsert;
 export type SearchQueryHitRow = typeof searchQueryHits.$inferSelect;
 export type SearchQueryHitInsert = typeof searchQueryHits.$inferInsert;
+export type ReportedGapRow = typeof reportedGaps.$inferSelect;
+export type ReportedGapInsert = typeof reportedGaps.$inferInsert;
 export type AuditEventRow = typeof auditEvents.$inferSelect;
 export type AuditEventInsert = typeof auditEvents.$inferInsert;

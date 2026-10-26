@@ -53,6 +53,10 @@ const TOOLS = [
     name: 'whats_new',
     text: 'What was added, changed or removed since a point in time, newest first; says how far back its record goes and whether the question reaches that far.',
   },
+  {
+    name: 'report_gap',
+    text: 'Tells the maintainers a question the documentation does not answer. The only tool that writes — to the query log, never to documentation; present while the query log is on.',
+  },
 ];
 
 const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN', confluence: 'CNF', web: 'WEB' };

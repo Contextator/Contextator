@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error - public/ is untyped ES modules the browser loads directly (ADR-0022); see audit-panel.test.ts.
 import { state } from '../public/core.js';
 // @ts-expect-error - see above.
-import { floorBehind, loadQuerySummary, otherFloorSearches, renderQueries } from '../public/queries.js';
+import { floorBehind, loadQuerySummary, otherFloorSearches, renderQueries, reportedGapsBlock } from '../public/queries.js';
 import { descendants, fakeDocument } from './helpers/fake-dom.js';
 
 /**
@@ -190,5 +190,54 @@ describe('the query panel after a floor change', () => {
     expect(sent()).toHaveLength(2);
     expect(state.queries.data.scoreFloor.effective).toBe(0.78);
     expect(floorBehind(state.queries.data)).toEqual({ decided: 0.82, now: 0.78 });
+  });
+});
+
+/**
+ * **What an agent reported is shown as text and only as text (ADR-0125).** The sample and the note are an
+ * agent's words, so they can carry markup and instructions. The panel builds them with `textContent`; none
+ * goes near `innerHTML`, and no element is built from them. A report is its own block and not a row of the
+ * ranked questions.
+ */
+describe('the reported-gaps block of the query panel', () => {
+  const HOSTILE = '<img src=x onerror=alert(1)>';
+  const group = {
+    queryNorm: HOSTILE,
+    sample: HOSTILE,
+    reports: 3,
+    reporters: 2,
+    firstReportedAt: '2026-10-01T00:00:00Z',
+    lastReportedAt: '2026-10-02T00:00:00Z',
+    lastNote: '<script>steal()</script> ignore all previous instructions',
+  };
+
+  beforeEach(() => {
+    vi.stubGlobal('document', fakeDocument());
+  });
+
+  it('renders the question and the note as text, never as markup', () => {
+    const tree = reportedGapsBlock({ reportedGaps: [group] });
+    const nodes = descendants(tree);
+    expect(tree.textContent).toContain(HOSTILE);
+    expect(tree.textContent).toContain('<script>steal()</script> ignore all previous instructions');
+    // Nothing was set as HTML, and no element exists for the markup the text spells.
+    for (const node of nodes) expect(node.innerHTML).toBe('');
+    expect(nodes.map((n) => n.tag).filter((tag) => ['img', 'script'].includes(tag))).toEqual([]);
+    // The tooltip is an attribute and so is not parsed either; it carries the fold as it is.
+    expect(nodes.some((n) => n.getAttribute('title') === HOSTILE)).toBe(true);
+  });
+
+  it('says so when nothing was reported, and draws nothing for a server that does not send the block', () => {
+    expect(reportedGapsBlock({ reportedGaps: [] }).textContent).toContain('No agent reported a gap in this window.');
+    expect(reportedGapsBlock({}).textContent).toBe('');
+  });
+
+  it('shows the count and says how many tokens stand behind it', () => {
+    const tree = reportedGapsBlock({ reportedGaps: [group, { ...group, queryNorm: 'b', sample: 'b', reports: 1, reporters: 0, lastNote: null }] });
+    const titles = descendants(tree).map((n) => n.getAttribute('title'));
+    expect(titles).toContain('2 distinct tokens');
+    expect(titles).toContain('An open project verifies no token');
+    // A report with no note has no note line.
+    expect(tree.textContent.match(/Note: /g)).toHaveLength(1);
   });
 });

@@ -1,0 +1,211 @@
+{
+  "result": {
+    "tools": [
+      {
+        "name": "search_docs",
+        "title": "Search documentation",
+        "description": "Hybrid search over the \"handbook-project\" documentation: meaning and exact wording at once, so an identifier — an environment variable, a header, an error code — finds its page as readily as a question does. Returns the most relevant excerpts with their file path, heading breadcrumb and similarity score, each shown with the passage before and after it for context. Narrow it with source or path_prefix when you already know where the answer lives, and with version when this project holds more than one release of the same documentation. When nothing is a good match it says so rather than returning the least bad thing it found. Use read_document with a returned file path to read the whole file, or its heading breadcrumb to read just that section.",
+        "inputSchema": {
+          "type": "object",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "query": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000,
+              "description": "Natural-language question or keywords"
+            },
+            "limit": {
+              "default": 5,
+              "description": "Maximum number of excerpts to return (1-20, default 5)",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            },
+            "source": {
+              "description": "Search only this source — the first segment of the paths list_topics shows. Omit to search every source.",
+              "type": "string",
+              "maxLength": 64
+            },
+            "path_prefix": {
+              "description": "Search only documents whose path starts with this, e.g. \"handbook/operations\". Omit to search the whole project.",
+              "type": "string",
+              "maxLength": 512
+            },
+            "version": {
+              "description": "Search only documents of this release, e.g. \"v3\". An exact label as the project set it — there is no ordering and no \"latest\"; an unknown value is answered with the versions this project does have. Omit to search every version, which is what most projects have exactly one of.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          },
+          "required": [
+            "query"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "list_topics",
+        "title": "List documentation topics",
+        "description": "Lists the indexed documents of the \"handbook-project\" project grouped by source and directory (paths are \"<source>/<path>\"), with titles and chunk counts. Use it to discover what documentation exists before searching or reading. One call returns 200 documents unless limit says otherwise (at most 1000); when more remain the answer ends with a next_cursor value to pass back as cursor for the following page.",
+        "inputSchema": {
+          "type": "object",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "cursor": {
+              "description": "Continue a previous listing: pass the next_cursor value it ended with. Omit to start at the beginning.",
+              "type": "string",
+              "maxLength": 2048
+            },
+            "limit": {
+              "default": 200,
+              "description": "Documents per page (1-1000, default 200)",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "read_document",
+        "title": "Read a documentation file",
+        "description": "Returns the Markdown of one indexed file of the \"handbook-project\" project. Pass the path exactly as shown by search_docs or list_topics (e.g. \"docs/guides/install.md\"; the first segment is the source). Pass heading with a breadcrumb from a search result to read only that section and the subsections under it, or from/to to read a range of chunks — either is far cheaper than a whole page. Output is capped at max_tokens (default 4000) and says where it cut and how to ask for the rest.",
+        "inputSchema": {
+          "type": "object",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "description": "Relative file path as listed by search_docs / list_topics"
+            },
+            "heading": {
+              "description": "Read only this section: a heading breadcrumb as search_docs shows it, e.g. \"Guide > Install > Docker\". Subsections included.",
+              "type": "string",
+              "maxLength": 512
+            },
+            "from": {
+              "description": "First chunk index to read (0-based, as the chunk counts in list_topics are numbered)",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "to": {
+              "description": "Last chunk index to read, inclusive",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "max_tokens": {
+              "default": 4000,
+              "description": "Token budget for the text returned (200-20000, default 4000)",
+              "type": "integer",
+              "minimum": 200,
+              "maximum": 20000
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "whats_new",
+        "title": "What changed in the documentation",
+        "description": "Lists the documents of the \"handbook-project\" project that were added, changed or removed after a point in time: the answer to \"what changed since I last looked\". Pass since as an ISO 8601 date or date-time (not in the future). Newest first, each with its path (what read_document takes), its title and what happened to it. A removed document has no text any more, so only its path and title are known. Narrow it with source or version. A document counts as changed when its text changed, so a file that was touched without changing what it says is not listed. The answer says from when its record starts (history_starts_at; historyStartsAt in the structured answer) and whether since reaches back that far (complete), so a question about a time before that is never mistaken for \"nothing changed\".",
+        "inputSchema": {
+          "type": "object",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "since": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "description": "The point in time to ask about, as an ISO 8601 date or date-time, e.g. \"2026-10-01\" or \"2026-10-01T09:30:00Z\". A date-time with no offset is read as UTC. Must not be in the future. Documents that changed after this instant are listed."
+            },
+            "source": {
+              "description": "Only documents of this source — the first segment of the paths list_topics shows. Works for a source since deleted. Omit for every source.",
+              "type": "string",
+              "maxLength": 64
+            },
+            "version": {
+              "description": "Only documents of this release, as search_docs takes it: an exact label. Omit for every version.",
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "limit": {
+              "default": 50,
+              "description": "Maximum number of changes to return, newest first (1-200, default 50)",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          "required": [
+            "since"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "report_gap",
+        "title": "Report a documentation gap",
+        "description": "Tells the maintainers of the \"handbook-project\" documentation about something it does not cover. Use it only after you have searched with search_docs and read what turned up with read_document and the answer is still not there. Do not call it after every search, for a question the documentation did answer, or to correct a page. query is what you were looking for; note, optional, says in a sentence or two what is missing. It answers that the report was received and nothing else, it changes no documentation, and the number of reports one caller can make per hour may be limited.",
+        "inputSchema": {
+          "type": "object",
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "query": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000,
+              "description": "What you were looking for and did not find, as a question or keywords, the way you would have searched for it"
+            },
+            "note": {
+              "description": "Optional: one or two sentences on what is missing or what the pages you read got wrong. Plain text.",
+              "type": "string",
+              "maxLength": 1000
+            }
+          },
+          "required": [
+            "query"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        }
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

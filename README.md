@@ -141,7 +141,9 @@ claude mcp add --transport http demo-docs http://localhost:3444/mcp/demo   --hea
 
 Four read-only tools are exposed: `search_docs` (hybrid search, ranked excerpts), `list_topics` (the indexed
 document list), `read_document` (one file's Markdown, by path or heading range) and `whats_new` (what was added,
-changed or removed since a point in time). Beside the tools, each
+changed or removed since a point in time). A fifth, `report_gap`, lets an agent tell the maintainers what the
+documentation did not answer; it writes to the query log, never to documentation, and is absent while the query log is
+off. Beside the tools, each
 project publishes its documents as MCP resources and two read-only **prompts**, `answer_from_docs` (argument
 `question`) and `explore_topic` (argument `topic`).
 
