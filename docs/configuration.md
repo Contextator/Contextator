@@ -17,9 +17,10 @@ AUTH_COOKIE_SECURE=1
 Full reasoning for each of the three, what breaks without them, and the "name the proxy, not the
 network your clients are on" rule for `TRUST_PROXY`: [Configuration](https://contextator.com/en/docs/configuration/#running-behind-a-reverse-proxy).
 
-`TRUST_PROXY=1`/`true` ("trust every hop") is deprecated in 0.4.1 and refused at startup from 0.5.0
-(ADR-0122). It still works until then and logs a warning at every start; name the proxy instead (`loopback`,
-its address or its CIDR block, or `0` when nothing is in front).
+`TRUST_PROXY=1`/`true` ("trust every hop") was deprecated in 0.4.1 and is refused at startup since 0.5.0
+(ADR-0122): the process exits with a message that names the value. Name the proxy instead (`loopback`, its
+address or its CIDR block), or use `0` when nothing is in front. An upgrade from 0.4.x with `TRUST_PROXY=1` set
+is therefore a one-line change to the environment, and it is needed before the new version will start.
 
 ## Embedding with a server of your own
 
@@ -177,7 +178,14 @@ answers `503` when the counter is unreachable) limit how often a token, an anony
 called. How they count, what the `429` looks like and what an upgrade changes are in
 [MCP access](mcp-access.md#limiting-how-much-a-client-may-ask-for). A per-token network allowlist depends on
 `TRUST_PROXY` being exact: [the table](mcp-access.md#restricting-a-static-token-to-a-network) says what each value
-trusts, and `TRUST_PROXY=1` (deprecated in 0.4.1, refused at startup from 0.5.0) refuses to save a list.
+trusts. `TRUST_PROXY=1` (refused at startup since 0.5.0) is not among them.
+
+`MCP_REPORT_GAP_PER_HOUR` (default `20`, `0` turns the limit off) is the one limit that is on by default for a tool: how
+many `report_gap` reports one credential may have accepted per hour, with every anonymous caller of an open project
+sharing one bucket of the same size. It is counted from the `reported_gaps` table itself, and a report over it is
+answered as a success and dropped. What `report_gap` writes, and which switches stop it, are in
+[MCP access](mcp-access.md#reporting-what-the-documentation-does-not-answer); its rows are swept by
+`SEARCH_QUERY_LOG_RETENTION_DAYS`.
 
 ## Project quotas
 
@@ -239,5 +247,66 @@ each part is inflated through a counter, so an archive that lies about its sizes
 and grows up to Node's default. Set it, in MiB, when Contextator runs in a memory-limited container: a file whose
 conversion needs more becomes one refused document whose reason names the heap limit, the thread is replaced, and
 the run carries on, instead of the kernel OOM-killing the whole process. Size it well below the container's limit.
+
+### Sizing `CONVERSION_WORKER_MAX_HEAP_MB` against the container's memory limit
+
+The product ships no default (ADR-0097): any number would refuse a file
+that indexes today on somebody's host. What follows is how to choose one, and the measurements it rests on.
+
+**Rule of thumb.** The cap counts the conversion thread's JavaScript heap only. The container sees more than that:
+the rest of the server (about 800 MiB resident with the fp32 embedding model warm, see the Helm chart's *Resource
+sizing*), the thread's own baseline, the file's bytes, and what the parser holds outside the heap. In the
+three largest runs below, with a cap just high enough to convert, resident memory ended 160 to 390 MiB above the cap. So:
+
+```
+CONVERSION_WORKER_MAX_HEAP_MB  <=  container memory limit  -  800 MiB (server)  -  400 MiB (outside the heap)
+```
+
+| Container memory limit | Suggested `CONVERSION_WORKER_MAX_HEAP_MB` | What it converts, from the table below |
+|---|---|---|
+| under 1.5 GiB | the formula's result (`80` at 1.25 GiB); nothing at or under 1200 MiB | spreadsheets of a few tens of thousands of rows and PDFs of a few hundred pages; raise the limit for more |
+| 2 GiB (the Helm chart's default `resources.limits.memory`) | `384` to `512` | every case measured, including a 2000-page PDF |
+| 3 GiB | `768` | the same, with room for bigger spreadsheets |
+| 4 GiB | `1024` to `1536` | the same; raising it further only helps files near `MAX_CONVERTED_FILE_BYTES` |
+
+A cap that is too low costs one refused file, and the refusal's reason names the setting, so it is safe to start at
+the low end and raise it when a refusal you care about appears. A cap higher than the formula allows is the case to
+avoid: it is a cap the kernel reaches first.
+
+**What the numbers are.** Each row is one file converted through `ConversionService` (the same thread the indexer
+uses), in a fresh process, against a build of `dist/`. *Peak RSS* is `process.resourceUsage().maxRSS` of that
+process with no cap set, which includes the thread, its libraries and the server-side client but not the rest of
+the server. *Smallest cap that converts* is the lowest of a ladder (4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192,
+256, 384, 512 MiB, whichever apply) at which the same file came back converted instead of refused, so it is an
+upper bound within one step. Measured on macOS arm64 with Node 24.20 (the image runs Node 22; expect the same order
+of magnitude, not the same digits).
+
+| File | Input | Markdown out | Peak RSS (no cap) | Smallest cap that converts | Time (no cap) |
+|---|---|---|---|---|---|
+| `test/fixtures/doc-types/platform-roadmap.pptx` | 7 KiB | 444 B | 72 MiB | 16 MiB | 0.05 s |
+| `test/fixtures/doc-types/warehouse-inventory.xlsx` | 4 KiB | 198 B | 72 MiB | 8 MiB | 0.03 s |
+| `test/fixtures/doc-types/support-handbook.pdf` (3 pages) | 4 KiB | 945 B | 92 MiB | 16 MiB | 0.07 s |
+| generated `.pptx`, 1000 slides | 0.55 MiB | 0.1 MiB | 100 MiB | 12 MiB | 0.07 s |
+| generated `.xlsx`, 20,000 rows x 6 columns | 0.56 MiB | 1.1 MiB | 136 MiB | 32 MiB | 0.13 s |
+| generated `.xlsx`, 200,000 rows x 6 columns | 5.7 MiB | 12 MiB | 517 MiB | 128 MiB | 0.9 s |
+| generated `.pdf`, 200 pages of text | 1.3 MiB | 0.9 MiB | 322 MiB | 48 MiB | 0.8 s |
+| generated `.pdf`, 2000 pages (`MAX_PDF_PAGES`) | 13 MiB | 9 MiB | 2089 MiB | 384 MiB | 44 s |
+
+The fixtures are a few kilobytes, so their rows measure the floor, not the cost of a real document: a thread that
+has loaded one converter sits at 70 to 90 MiB resident, and a cap under about 16 MiB refuses even them. The
+generated rows are built from the fixtures' own parts, repeated (the slides are identical, so that row understates
+a real deck; spreadsheet cells and PDF lines are varied text), to show how each type scales: PDFs are the expensive
+type, spreadsheets scale with row count, presentations are cheap.
+
+Two things in the measurements are worth knowing before choosing a number:
+
+- **A cap also bounds the resident size, at the price of time.** The 2000-page PDF peaked at 2089 MiB with no cap
+  and finished in 44 s; with the cap at 384 MiB it peaked at 640 MiB and took 75 s, because V8 collects far more
+  often when it has no room. That is the setting working as intended in a small container, and it is also why
+  `CONVERSION_TIMEOUT_MS` (default 120 s) matters more under a cap: on a slower host the same file can run into the
+  timeout before it runs into the heap.
+- **The cap does not bound everything.** Spreadsheet peaks were nearly the same capped at 128 MiB (514 MiB) as with
+  no cap (517 MiB): most of that memory is the inflated archive and the buffers around it, outside the heap. That
+  is what the 400 MiB allowance in the formula is for, and why a cap alone does not make a 512 MiB container safe.
 
 [File types](file-types.md) lists what each type keeps and drops.

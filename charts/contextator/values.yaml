@@ -114,7 +114,8 @@ config:
   # `ingress.enabled` — ADR-0060 requires an operator to name what is in front. If this chart is
   # installed behind an Ingress/reverse proxy, set it explicitly to a comma-separated list of
   # trusted proxy IPs/CIDRs/subnet names (loopback, linklocal, uniquelocal) to trust only those.
-  # "1"/"true" (trust every hop's X-Forwarded-For) is deprecated and refused from app 0.5.0 (ADR-0122).
+  # "1"/"true" (trust every hop's X-Forwarded-For) is refused by the app from 0.5.0 and by this chart's
+  # values schema from chart 2.0.0 (ADR-0122): `helm install`/`upgrade` fails on it before anything is rendered.
   trustProxy: ""
   # CONFLUENCE_ALLOWED_HOSTS (ADR-0088): host names — not URLs — a Confluence source may reach on a
   # private address (10/8, 172.16/12, 192.168/16, fc00::/7). Set it when Confluence Data Center is
@@ -169,6 +170,11 @@ config:
   # reached (a warning and the contextator_mcp_rate_limit_errors_total metric record it); false sets
   # MCP_RATE_LIMIT_FAIL_OPEN=0 and answers 503 instead.
   mcpRateLimitFailOpen: true
+  # MCP_REPORT_GAP_PER_HOUR (ADR-0125): how many `report_gap` reports one MCP credential may have accepted per
+  # hour; every anonymous caller of an `open` project shares one bucket of the same size. Counted from the
+  # database, so replicas agree. Null leaves the variable unset (the application default, 20); 0 turns the
+  # limit off. A report over the limit is answered as a success and dropped.
+  mcpReportGapPerHour: null
   # REINDEX_ON_MODEL_CHANGE: true makes the server queue one re-index at start-up for every project that
   # was indexed with a different embedding model than the one it now runs (and that has a source).
   # Off by default; `false` leaves the variable unset.

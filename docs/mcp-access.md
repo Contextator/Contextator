@@ -41,6 +41,73 @@ endpoint was public does not outlive the moment it stopped being.
 Deciding whether a project's documents are readable by anything that can reach the URL is the same class of decision
 as creating the project in the first place, which is why it sits with `admin` rather than `editor`.
 
+## The tools a client reaches
+
+Every project publishes the same four read-only tools, plus `report_gap` while its query log is on, and all of them sit
+behind the access mode above and the limits below. A token reads **everything indexed in that project**, and that
+includes what `whats_new` remembers. No tool writes to the documentation; `report_gap` is the one that writes at all,
+and what it writes is a report in the query log's own table ([below](#reporting-what-the-documentation-does-not-answer)).
+
+| Tool | What it answers | Arguments |
+|------|-----------------|-----------|
+| `search_docs` | Ranked excerpts for a question or an identifier | `query`; optional `limit`, `source`, `path_prefix`, `version` |
+| `list_topics` | The indexed documents, grouped by source and directory | optional `cursor`, `limit` |
+| `read_document` | One file's Markdown, whole or by section or chunk range | `path`; optional `heading`, `from`, `to`, `max_tokens` |
+| `whats_new` | What was added, changed or removed after a point in time | `since`; optional `source`, `version`, `limit` |
+| `report_gap` | Tells the maintainers a question the documentation does not answer. Writes; absent from `tools/list` while the query log is off | `query`; optional `note` |
+
+`whats_new` takes `since` as an ISO 8601 date or date-time (a date alone is midnight UTC; a date-time without an
+offset is UTC; a time in the future is refused). It answers newest first, 50 changes by default and 200 at most, and
+every answer carries two statements about the record itself:
+
+- `history_starts_at` (`historyStartsAt` in the structured answer) is the oldest moment the record can speak for:
+  90 days ago, the moment this instance began recording, or the moment the project came to exist on this instance
+  (an imported project has documents the record never saw), whichever is latest. The 90 days are fixed and are not
+  an environment variable. Starting the server with `RESET_VECTORS=1` deletes every document and forgets the record,
+  so it begins again from that moment.
+- `complete` is true when `since` is not before that moment. When it is false an empty list does not mean nothing
+  changed: it means nothing was recorded.
+
+A document counts as changed when its **text** changed. A force re-index of unchanged content, a changed `language` or
+`version` label on a source, and the other documents of an OpenAPI specification when one operation changed are not
+changes. A removed document returns only its path and title. Only the latest change of each path is kept, so
+"which documents did run X change" cannot be answered, and a path that was removed and came back inside the window is
+reported as added. A document that existed before the upgrade to `0.5.0` is reported as modified, never as added,
+because when it was added is not known. Deleting a source records its live documents as removed.
+
+## Reporting what the documentation does not answer
+
+`report_gap(query, note?)` is for an agent that searched, read what turned up and found the answer is not there: `query`
+is at most 2,000 characters and `note` at most 1,000. The tool's description says to use it only then, not after every
+search. It is annotated `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: false`, which is what a client
+that asks the user before a writing tool reads. A client that does ask will make the tool rare; the number of reports is
+`contextator_mcp_gap_reports_total`.
+
+- **It writes to its own table, `reported_gaps`**, and never to documentation or to `search_queries`. A report holds the
+  project, the time, the token that made it (if any), the question as written, its normalised form, the note and the
+  index generation the project was serving.
+- **It answers "received" and nothing else**, the same words and the same structured `{ "status": "received" }` whether
+  the report was stored, was over its limit or was dropped because the log is off. It never returns a report, a count or
+  an identity, so an agent cannot read what another one wrote.
+- **It follows the query log's switches.** It is not registered, so it is absent from `tools/list`, when
+  `SEARCH_QUERY_LOG=0` or when the project's query log is off. `tools/list` is only a convenience: **every call reads the
+  project's switch again**, so a report made after the switch was turned off, in a session that began before it, is not
+  written (the answer is the same, the outcome is counted as `disabled`).
+- **It has a limit of its own, on by default**: `MCP_REPORT_GAP_PER_HOUR` (default `20`, `0` switches the limit off) reports
+  per credential in the last hour. Every anonymous caller of an **open** project shares one bucket of the same size, not
+  one per address. The count is read from the table, so every replica agrees and there is no second counter; two calls
+  made at the same moment can both pass it. Over the limit the tool answers as it does on success, writes nothing and
+  counts `limited`. (An error would only teach an agent to retry; `MCP_RATE_LIMIT_TOOLS=report_gap=30` still gives one,
+  per minute, through the request limiter.)
+- **At most 2,000 reports are kept per project**, oldest removed first, whatever the limit says.
+- **Retention is the query log's**: `SEARCH_QUERY_LOG_RETENTION_DAYS`, swept on the maintenance timer, and the sweep also
+  runs while the query log is switched off, so switching it off does not stop the forgetting. **Purge** (`DELETE
+  /api/projects/:id/query-log`) removes a project's reports with its queries. Reports are not exported with a project.
+- **They are user content**: in every database dump, and readable by every viewer of the project in the Queries panel,
+  under **Reported by agents** on the Questions tab. They are grouped by normalised question and never mixed into the
+  ranking above them; an agent's note is shown as plain text.
+- Metrics: `contextator_mcp_gap_reports_total{outcome}`, `outcome` being `accepted`, `limited`, `disabled` or `failed`.
+
 ## Limiting how much a client may ask for
 
 Three optional limits sit in front of the tools, all counted per minute in a fixed one-minute window kept in the
@@ -93,7 +160,10 @@ The address checked is the one the server believes the client has, which depends
 | A list of proxy addresses or CIDRs | `X-Forwarded-For`, read right to left, skipping the listed proxies. A header sent by any other peer is ignored. | Yes. This is the setting meant for it: name the proxy, not your clients' network. |
 | `loopback`, `linklocal` | As a list, for the proxy on the same host or link. | Yes. |
 | `uniquelocal` | As a list, trusting every private (LAN) address as a proxy. | Only if no untrusted host can reach the server from those ranges, because any of them can write the header. |
-| `1` (deprecated in 0.4.1, refused at startup from 0.5.0) | Every hop of `X-Forwarded-For` is believed, so the **leftmost** value, which the client writes, becomes the address. | **No.** The server refuses to save a non-empty list while `TRUST_PROXY=1`, and answers `403` (and logs it) to a token that already carries one. |
+| `1`, `true` (refused at startup since 0.5.0) | The server does not start: `1` believed every hop of `X-Forwarded-For`, so the **leftmost** value, which the client writes, became the address. | Not applicable. Before 0.5.0 the server refused to save a non-empty list under it, and answered `403` to a token that already carried one; with the value refused there is no instance in which either can happen. |
+
+A request from an address that the list does not name, or from a peer the server does not trust that
+writes `X-Forwarded-For` anyway, is answered `403` as above: the header of an untrusted peer is never read.
 
 ## Account required, and connecting a browser-based client
 

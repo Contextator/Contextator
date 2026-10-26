@@ -41,6 +41,7 @@ import { ImportRefusedError } from '../services/transfer/manifest.js';
 import { scanFrom, selectionFrom } from '../services/vector-store.js';
 import { auditRoutes } from './audit-routes.js';
 import { authRoutes } from './auth-routes.js';
+import { evalRoutes } from './eval-routes.js';
 import { goldenRoutes } from './golden-routes.js';
 import { mcpRoutes } from './mcp-routes.js';
 import { memberRoutes } from './members-routes.js';
@@ -370,6 +371,10 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       mcpRequests: ctx.metrics.mcpRequests(),
       // Rate-limited requests, counter failures and network denials (`mcp/router.ts`, `services/rate-limit.ts`).
       mcpGuard: ctx.metrics.mcpGuard(),
+      // Eval runs, errors and regressions, with no project label (`services/eval-runs.ts`, ADR-0124).
+      evalRuns: ctx.metrics.evalRuns(),
+      // `report_gap` calls by outcome (`mcp/tools.ts`, ADR-0125).
+      gapReports: ctx.metrics.gapReports(),
       // Search phases, embedding batches and queue waits (`services/metrics.ts`), observed in the process.
       histograms: ctx.metrics.histograms(),
     };
@@ -628,6 +633,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
 
   await app.register(auditRoutes, { ctx });
   await app.register(goldenRoutes, { ctx });
+  await app.register(evalRoutes, { ctx });
   await app.register(authRoutes, { ctx });
   await app.register(usersRoutes, { ctx });
   await app.register(memberRoutes, { ctx });

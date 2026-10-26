@@ -373,12 +373,11 @@ async function readManifest(file: string): Promise<Manifest> {
   return result.data;
 }
 
-async function readSources(file: string): Promise<Array<z.infer<typeof ImportedSource>>> {
+/** Exported for `test/project-transfer.test.ts`; the import itself is the only caller. */
+export async function readSources(file: string): Promise<Array<z.infer<typeof ImportedSource>>> {
   const out: Array<z.infer<typeof ImportedSource>> = [];
   const seen = new Set<string>();
-  let lineNumber = 0;
-  for await (const line of lines(file)) {
-    lineNumber++;
+  for await (const { text: line, lineNumber } of lines(file)) {
     const result = ImportedSource.safeParse(parseLine(SOURCES_ENTRY, lineNumber, line));
     if (!result.success) throw new ImportRefusedError('bad_source', `${SOURCES_ENTRY}:${lineNumber}: ${z.prettifyError(result.error)}`);
     if (seen.has(result.data.name)) throw new ImportRefusedError('bad_source', `${SOURCES_ENTRY}: two sources named "${result.data.name}".`);
@@ -393,12 +392,10 @@ async function readSources(file: string): Promise<Array<z.infer<typeof ImportedS
  * before the table existed). Each line is `golden.jsonl`'s row, held to the same rules the admin API
  * holds a client to, so a question that could not have been stored here cannot arrive through a file.
  */
-async function readGoldenQuestions(file: string): Promise<GoldenQuestionInput[]> {
+export async function readGoldenQuestions(file: string): Promise<GoldenQuestionInput[]> {
   const out: GoldenQuestionInput[] = [];
   const seen = new Set<string>();
-  let lineNumber = 0;
-  for await (const line of lines(file)) {
-    lineNumber++;
+  for await (const { text: line, lineNumber } of lines(file)) {
     const row = GoldenRowSchema.safeParse(parseLine(GOLDEN_QUESTIONS_ENTRY, lineNumber, line));
     if (!row.success) throw new ImportRefusedError('bad_golden_question', `${GOLDEN_QUESTIONS_ENTRY}:${lineNumber}: ${z.prettifyError(row.error)}`);
     const { id, ...fields } = row.data;
@@ -540,7 +537,8 @@ async function carryUploadTrees(
  * file, and re-deriving it here is what makes an import into an instance with a different PostgreSQL
  * text search configuration land correctly rather than carrying the exporter's.
  */
-async function writeDocuments(
+/** Exported for `test/project-transfer.test.ts`, which drives it only as far as the first refused line. */
+export async function writeDocuments(
   deps: ImportDeps,
   projectId: string,
   file: string,
@@ -551,9 +549,7 @@ async function writeDocuments(
   let chunks = 0;
   const perSource = new Map<string, number>();
 
-  let lineNumber = 0;
-  for await (const line of lines(file)) {
-    lineNumber++;
+  for await (const { text: line, lineNumber } of lines(file)) {
     const result = ImportedDocument.safeParse(parseLine(DOCUMENTS_ENTRY, lineNumber, line));
     if (!result.success) throw new ImportRefusedError('bad_document', `${DOCUMENTS_ENTRY}:${lineNumber}: ${z.prettifyError(result.error)}`);
     const doc = result.data;
@@ -624,13 +620,17 @@ async function writeDocuments(
  * newline is the cheapest denial of service an upload can express, and a cap checked after the line
  * exists is a cap that has already been paid.
  *
+ * Each line carries its **physical** 1-based line number in the file. Blank lines are skipped but still
+ * counted, so an error message points at the line an editor would show rather than at the n-th non-blank one.
+ *
  * A missing file is an empty iteration — an export with no sources has an empty `sources.ndjson`, and
  * an export of a project that has never been indexed an empty `documents.ndjson`.
  */
-async function* lines(file: string): AsyncGenerator<string> {
+export async function* lines(file: string): AsyncGenerator<{ text: string; lineNumber: number }> {
   if (!(await fs.stat(file).catch(() => null))) return;
 
   let pending = '';
+  let lineNumber = 0;
   const stream = createReadStream(file, { encoding: 'utf8' });
   try {
     for await (const piece of stream) {
@@ -639,7 +639,8 @@ async function* lines(file: string): AsyncGenerator<string> {
       while (newline !== -1) {
         const line = pending.slice(0, newline);
         pending = pending.slice(newline + 1);
-        if (line.trim() !== '') yield line;
+        lineNumber++;
+        if (line.trim() !== '') yield { text: line, lineNumber };
         newline = pending.indexOf('\n');
       }
       if (pending.length > MAX_LINE_BYTES) {
@@ -649,7 +650,7 @@ async function* lines(file: string): AsyncGenerator<string> {
   } finally {
     stream.destroy();
   }
-  if (pending.trim() !== '') yield pending;
+  if (pending.trim() !== '') yield { text: pending, lineNumber: lineNumber + 1 };
 }
 
 /** `JSON.parse`, with the file and the line number in the failure instead of `Unexpected token`. */

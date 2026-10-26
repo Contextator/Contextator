@@ -25,12 +25,14 @@ Contextator {{ .Chart.AppVersion }} has been installed ({{ include "contextator.
    to match what actually sits in front of the Pod — see the chart README, "Ingress and reverse
    proxies". If 0 is deliberate, ignore this note.
 {{- end }}
-{{- if or (eq (lower (toString .Values.config.trustProxy)) "1") (eq (lower (toString .Values.config.trustProxy)) "true") }}
+{{- if .Release.IsUpgrade }}
 
-   DEPRECATED: config.trustProxy is "{{ .Values.config.trustProxy }}", which trusts every hop of X-Forwarded-For.
-   The app logs a warning for it at every start and will refuse to start with it from 0.5.0
-   (ADR-0122). Name the proxy instead (its address, its CIDR block, or "loopback") — see the chart
-   README, "Ingress and reverse proxies".
+   Upgrading from chart 1.x: since chart 2.0.0 the values schema rejects config.trustProxy "1" and "true"
+   (trust every hop of X-Forwarded-For), and application 0.5.0 refuses to start with them (ADR-0122).
+   A values file that still sets either fails `helm upgrade` before anything changes; name the proxy
+   instead (its address, its CIDR block, or "loopback"), or use "0" when nothing sits in front. Same
+   rule for env.TRUST_PROXY, which the schema cannot see but the application refuses. See the chart
+   README, "Upgrading to chart 2.0.0".
 {{- end }}
 
 3) Complete the first-run setup (needsSetup) in the dashboard.

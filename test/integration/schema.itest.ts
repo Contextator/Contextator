@@ -42,8 +42,12 @@ const EXPECTED_TABLES = [
   // thirty-day window because it is user content; this holds what an operator did, under a year's.
   'audit_events',
   'chunks',
+  // The latest change of every path a project has had: what `whats_new` answers from ([ADR-0123](../../../.ssot/ADR.md#adr-0123)).
+  'document_changes',
   'document_sources',
   'documents',
+  // The golden set's runs against the live index, the last hundred per project ([ADR-0124](../../../.ssot/ADR.md#adr-0124)).
+  'eval_runs',
   // Measured relevance-floor advice, applied only on a manager's say ([ADR-0083](../../../.ssot/ADR.md#adr-0083)).
   'floor_suggestions',
   // A project's own golden questions, the rows `npm run eval -- --project` asks (FR-347).
@@ -57,6 +61,8 @@ const EXPECTED_TABLES = [
   'oauth_clients',
   'project_members',
   'projects',
+  // What agents said the documentation did not answer, written by `report_gap` and by nothing else ([ADR-0125](../../../.ssot/ADR.md#adr-0125)).
+  'reported_gaps',
   // The query log ([ADR-0047](../../../.ssot/ADR.md#adr-0047)): what agents asked, and what came back.
   'search_queries',
   'search_query_hits',
@@ -103,6 +109,8 @@ describe('the bootstrap on an empty database', () => {
 
     const settings = await db.execute(sql`SELECT key, value FROM settings ORDER BY key`);
     expect(Object.fromEntries(settings.rows.map((r) => [(r as { key: string }).key, (r as { value: string }).value]))).toEqual({
+      // The instant the record of document changes began (ADR-0123): written by the bootstrap, so it is there, and a date.
+      document_changes_tracking_since: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
       embedding_dimensions: '384',
       schema_version: '5',
     });
@@ -264,7 +272,8 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     // ([ADR-0112](../../../.ssot/ADR.md#adr-0112), [ADR-0118](../../../.ssot/ADR.md#adr-0118)), one whole new table
     // anchored by `^mcp_rate_limits` and one nullable column on `mcp_tokens`; and `0024_floor_suggestions`
     // ([ADR-0083](../../../.ssot/ADR.md#adr-0083)), one whole new table anchored by `^floor_suggestions`; and `0025_golden_questions` (FR-347), one whole new
-    // table anchored by `^golden_questions`. So
+    // table anchored by `^golden_questions`; and `0026_document_changes` ([ADR-0123](../../../.ssot/ADR.md#adr-0123)), one whole new table anchored by
+    // `^document_changes`; and `0027_eval_runs` ([ADR-0124](../../../.ssot/ADR.md#adr-0124)), one whole new table anchored by `^eval_runs`; and `0028_reported_gaps` ([ADR-0125](../../../.ssot/ADR.md#adr-0125)), one whole new table anchored by `^reported_gaps`. So
     // the claim is no longer "nothing changed": it is that nothing changed *except* what those
     // migrations say they change, and the lines that moved are checked by name rather than counted.
     await applySchema(database);
@@ -273,7 +282,7 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     expect(
       changed.filter(
         (line) =>
-          !/chunks_embedding_hnsw|index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config|^user_federated_identities|user_sessions \| \d+ \| auth_method \||user_sessions_auth_method_check|projects \| \d+ \| score_floor \||projects_score_floor_check|mcp_credentials_epoch|last_legacy_sse_at|documents \| \d+ \| source_(url|modified_at) \||projects \| \d+ \| max_(documents|chunks|upload_bytes) \||projects_max_(documents|chunks|upload_bytes)_check|^mcp_rate_limits|mcp_tokens \| \d+ \| allowed_cidrs \||^floor_suggestions|^golden_questions/.test(
+          !/chunks_embedding_hnsw|index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config|^user_federated_identities|user_sessions \| \d+ \| auth_method \||user_sessions_auth_method_check|projects \| \d+ \| score_floor \||projects_score_floor_check|mcp_credentials_epoch|last_legacy_sse_at|documents \| \d+ \| source_(url|modified_at) \||projects \| \d+ \| max_(documents|chunks|upload_bytes) \||projects_max_(documents|chunks|upload_bytes)_check|^mcp_rate_limits|mcp_tokens \| \d+ \| allowed_cidrs \||^floor_suggestions|^golden_questions|^document_changes|^eval_runs|^reported_gaps/.test(
             line,
           ),
       ),

@@ -262,7 +262,7 @@ describe('a browser-based MCP client', () => {
     const { client, provider } = await connectThroughOAuth();
     try {
       const tools = await client.listTools();
-      expect(tools.tools.map((t) => t.name).sort()).toEqual(['list_topics', 'read_document', 'search_docs']);
+      expect(tools.tools.map((t) => t.name).sort()).toEqual(['list_topics', 'read_document', 'search_docs', 'whats_new']);
 
       const result = await client.callTool({ name: 'search_docs', arguments: { query: 'how do I install', limit: 3 } });
       const text = ((result.content as Array<{ type: string; text?: string }>) ?? []).find((c) => c.type === 'text')?.text ?? '';

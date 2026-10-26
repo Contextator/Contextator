@@ -52,25 +52,10 @@ const TRUST_PROXY_CONSEQUENCES =
  * That is evidence, it cannot fire on a deployment with no proxy, and it catches the case a startup
  * rule cannot see at all — a named list that does not match the proxy that is really there.
  *
- * `TRUST_PROXY=1` is the opposite failure and needs no evidence, because the danger is the setting
- * itself: it says nothing about traffic, so it is stated at startup and unconditionally.
- * It is also deprecated since 0.4.1 and refused from 0.5.0 ([ADR-0122](../.ssot/ADR.md#adr-0122)), and
- * the same line says so; the behaviour itself is unchanged until then.
+ * `TRUST_PROXY=1`/`true`, the opposite failure, is no longer a value this function can see: it is refused
+ * when the configuration is parsed ([ADR-0122](../.ssot/ADR.md#adr-0122)).
  */
-export function warnAboutProxyConfiguration(app: FastifyInstance, config: Config, warn: (message: string) => void): void {
-  if (config.TRUST_PROXY === true) {
-    warn(
-      'TRUST_PROXY=1 trusts every proxy, so req.ip and req.protocol come from X-Forwarded-* headers ' +
-        'whoever opened the socket wrote. That is only safe when nothing but your proxy can reach this ' +
-        'port; if the port is reachable directly, a caller chooses its own rate-limit key. A static MCP token ' +
-        'bound to a network allowlist is refused outright under this setting, because the address it would ' +
-        'be matched against is not a fact. TRUST_PROXY=1/true is deprecated and will be refused at startup from ' +
-        '0.5.0 (ADR-0122): name the proxy instead — TRUST_PROXY=loopback, its address or its CIDR block, or ' +
-        'TRUST_PROXY=0 when nothing sits in front of this server — and name the proxy rather than ' +
-        'the network your clients are on, because the list is applied to every hop.',
-    );
-    return;
-  }
+export function warnAboutProxyConfiguration(app: FastifyInstance, warn: (message: string) => void): void {
   // A list is installed too: naming the wrong range is exactly as silent as naming nothing, and it is
   // the case no startup rule could have detected.
   let reported = false;

@@ -1,0 +1,13 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "\"last tuesday\" is not an ISO 8601 date or date-time. Use a form such as \"2026-10-01\" or \"2026-10-01T09:30:00Z\"."
+      }
+    ],
+    "isError": true
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

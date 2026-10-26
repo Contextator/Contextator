@@ -85,12 +85,14 @@ authentication, and the templates are built around it:
 
 Every template runs behind the platform's reverse proxy, and **none of them sets `TRUST_PROXY`**. That is
 deliberate ([ADR-0060](https://contextator.com/en/docs/configuration/#running-behind-a-reverse-proxy)).
-`TRUST_PROXY=1` makes the client address the left-most `X-Forwarded-For` value, and unless the platform
-replaces what a caller sends (which these templates do not assume), a caller writes that value itself: it
-could then pick a new rate-limit key on every request and walk past the sign-in and first-run setup limits.
-The templates therefore keep the safe default, and set what does not depend on it:
-`AUTH_COOKIE_SECURE=1` (these platforms are HTTPS only) and `PUBLIC_BASE_URL`, so published URLs do not
-read a header.
+`TRUST_PROXY` is a list of the peers allowed to say where a request came from, and a template cannot know
+the address of a platform's proxy, which differs per platform and can change. The one value that would have
+needed no address, `1` ("trust every hop"), makes the client address the left-most `X-Forwarded-For` value, and
+unless the platform replaces what a caller sends (which these templates do not assume) a caller writes that
+value itself, picking a new rate-limit key on every request. Since 0.5.0 the server refuses to start with it
+(ADR-0122). The templates
+therefore keep the safe default, and set what does not depend on it: `AUTH_COOKIE_SECURE=1` (these platforms
+are HTTPS only) and `PUBLIC_BASE_URL`, so published URLs do not read a header.
 
 **The cost.** The server sees the platform's proxy as the client of every request, so everything that is
 limited per address is limited for the whole instance at once (or, if the platform uses several proxy
@@ -109,11 +111,15 @@ addresses, for a small set of them). Concretely:
 - **The audit log's `actor_ip` and the session's IP are the proxy's address**, which tells you nothing about who
   signed in.
 
-What the shared key does not do is let anyone guess faster than the budget allows, which is the property
-`TRUST_PROXY=1` would have lost. If you would rather have per-client limits, the choice is yours: set
-`TRUST_PROXY` to the **address or CIDR block of the platform's proxy** — check that range in the platform's own
-documentation, and name nothing wider, because the list applies to every hop and a range that includes your
-clients lets them write their own address again. Do not use `1`: it is deprecated and refused from 0.5.0.
+What the shared key does keep is that a caller cannot choose its own key: a request that writes
+`X-Forwarded-For` is still counted against the proxy's address. It does **not** mean nobody can guess faster than
+the budget allows. Anyone with an account of their own can sign in successfully to reset the shared budget
+whenever they like, so against *other* accounts what bounds guessing is the per-account lockout, not this
+budget. If you would rather have per-client limits, the choice is yours: set `TRUST_PROXY` to the **address or
+CIDR block of the platform's proxy** — check that range in the platform's own documentation, and name nothing
+wider, because the list applies to every hop and a range that includes your clients lets them write their own
+address again. `1` and `true` are not an alternative: the server refuses to start with either since 0.5.0, and
+says what to write instead.
 
 Two habits shrink the exposure on a hosted instance: **do not share the URL before the first account exists**,
 and **do the first-run setup right after the deploy** (step 2 below). After the first forwarded request the log

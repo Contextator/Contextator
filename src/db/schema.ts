@@ -619,6 +619,50 @@ export const indexRuns = pgTable(
 );
 
 /**
+ * The latest change of every path a project has had ([ADR-0123](../../.ssot/ADR.md#adr-0123)): what
+ * `whats_new` answers from.
+ *
+ * **One row per project and path, not one per change.** The table is bounded by the paths a project has
+ * had and not by the runs it has made, so a source that rewrites every page on every crawl cannot grow
+ * it. What that gives up is the intermediate history of a path, and so "what did run X change".
+ *
+ * `run_id` is deliberately **not** a foreign key: `index_runs` is pruned to twenty rows per project
+ * (`RUN_HISTORY_LIMIT`) and a cascade would take the change history with it. It is the id the run
+ * recorded itself under, and points at nothing once that row is pruned.
+ *
+ * `title` and `version` are the document's at the moment of the change, because a `removed` row is the
+ * only place left that remembers either.
+ */
+export const documentChanges = pgTable(
+  'document_changes',
+  {
+    projectId: uuid('project_id').notNull(),
+    /** `<source>/<path>`, the form `search_docs` and `list_topics` print. The source is its first segment. */
+    relativePath: text('relative_path').notNull(),
+    /** `added`, `modified` or `removed`. */
+    change: text('change').notNull(),
+    title: text('title').notNull(),
+    version: text('version').notNull().default(''),
+    /**
+     * When this path was last added; NULL for a path that existed before the table did, or whose row
+     * aged out. A NULL is never reported as `added`: when it was added is not known.
+     */
+    addedAt: timestamp('added_at', { withTimezone: true }),
+    changedAt: timestamp('changed_at', { withTimezone: true }).notNull(),
+    runId: uuid('run_id'),
+  },
+  (t) => [
+    primaryKey({ name: 'document_changes_pkey', columns: [t.projectId, t.relativePath] }),
+    foreignKey({ name: 'document_changes_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    check('document_changes_change_check', sql`${t.change} in ('added', 'modified', 'removed')`),
+    // `nullsFirst()` for the reason `index_runs_project_idx` has it: PostgreSQL's own default for DESC.
+    index('document_changes_project_changed_idx').on(t.projectId, t.changedAt.desc().nullsFirst()),
+    // The sweep is instance-wide, as the query log's is, so it cannot use the index above.
+    index('document_changes_changed_at_idx').on(t.changedAt),
+  ],
+);
+
+/**
  * What agents asked, and what they got back ([ADR-0047](../../.ssot/ADR.md#adr-0047)).
  *
  * One row per search that actually ran — through the MCP tool or through the dashboard's search panel.
@@ -750,6 +794,52 @@ export const searchQueryHits = pgTable(
 );
 
 /**
+ * What an agent said the documentation did not answer ([ADR-0125](../../.ssot/ADR.md#adr-0125)): the rows
+ * `report_gap` writes, and nothing else does.
+ *
+ * **Its own table and not a flagged row of `search_queries`.** Every reader of that table assumes a row is
+ * a search that ran, and its `result_limit`, `embedding_model` and `hit_count` would need made-up values
+ * for a row that is not one. Here nothing is invented.
+ *
+ * It follows the query log's policies: not written while the log is off for the instance or the project,
+ * swept by `SEARCH_QUERY_LOG_RETENTION_DAYS`, kept to a per-project row cap. `query` and `note` are an
+ * agent's words, so this is user content in the same sense `search_queries.query` is: in every `pg_dump`
+ * ([ADR-0046](../../.ssot/ADR.md#adr-0046)) and readable by every viewer of the project.
+ *
+ * The limit counts the rows themselves (`rate_key`, `created_at`), so no counter is kept anywhere else.
+ */
+export const reportedGaps = pgTable(
+  'reported_gaps',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /** The MCP token the call presented, NULL for an `open` project. `ON DELETE SET NULL` for `search_queries`' reason. */
+    mcpTokenId: uuid('mcp_token_id'),
+    /** The limiter's bucket: `tok:<token id>`, or `anon` for every anonymous caller of an `open` project. No address is stored. */
+    rateKey: text('rate_key').notNull(),
+    /** What the agent was looking for, verbatim and bounded by `REPORT_GAP_QUERY_MAX_CHARS`. */
+    query: text('query').notNull(),
+    /** The same, folded as `search_queries.query_norm` is, so two spellings group together. */
+    queryNorm: text('query_norm').notNull(),
+    /** What the agent said was missing, bounded by `REPORT_GAP_NOTE_MAX_CHARS`. Agent text: rendered as text, never returned. */
+    note: text('note'),
+    /** The generation the project was serving when it was reported (ADR-0047's reason for the same column). */
+    liveGeneration: integer('live_generation').notNull(),
+  },
+  (t) => [
+    foreignKey({ name: 'reported_gaps_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    foreignKey({ name: 'reported_gaps_mcp_token_id_fkey', columns: [t.mcpTokenId], foreignColumns: [mcpTokens.id] }).onDelete('set null'),
+    // "The most recent reports of this project", the panel's read and the row cap's cut-off lookup.
+    index('reported_gaps_project_created_idx').on(t.projectId, t.createdAt.desc().nullsFirst()),
+    // The limit's count: one bucket's rows in the last hour.
+    index('reported_gaps_project_key_created_idx').on(t.projectId, t.rateKey, t.createdAt.desc().nullsFirst()),
+    // The retention sweep is instance-wide, as the query log's is.
+    index('reported_gaps_created_idx').on(t.createdAt),
+  ],
+);
+
+/**
  * A relevance floor an operator may adopt for one project ([ADR-0083](../../.ssot/ADR.md#adr-0083),
  * Faz 08 of 0.4.0): the highest floor that would still have answered a fragment of each of the project's
  * own chunks, measured with the encoder and the live generation named on the row.
@@ -824,6 +914,74 @@ export const goldenQuestions = pgTable(
     check('golden_questions_lang_check', sql`${t.lang} in ('en', 'tr')`),
   ],
 );
+
+/** What asked for an eval run ([ADR-0124](../../.ssot/ADR.md#adr-0124)); a closed set, so a label or a column can be built on it. */
+export type EvalRunTrigger = 'index_rebuild' | 'index_incremental' | 'golden_set' | 'manual';
+
+/** One scored question of a run: its key, a digest of what was asked, and the 0-based rank of the right file in the page (null when absent). */
+export interface EvalRunResult {
+  key: string;
+  fp: string;
+  rank: number | null;
+}
+
+/**
+ * One run of a project's golden set against its live index ([ADR-0124](../../.ssot/ADR.md#adr-0124)), kept
+ * so that a change can be seen without anybody running anything: the figures, the questions lost since the
+ * last good run, and the ones that could not be asked.
+ *
+ * **`results` carries keys and ranks and never question text.** The text is in `golden_questions`, behind the
+ * same project access, and a question the operator later edits must not be readable here as it was.
+ * `fp` is what makes that edit visible to the next run's comparison: a question whose digest changed is not
+ * compared, so rewriting a question is not a regression.
+ *
+ * `compared_to` has no foreign key: the last hundred runs are kept, and the run it names may be pruned.
+ * Not exported with a project ([ADR-0051](../../.ssot/ADR.md#adr-0051) gives `index_runs` the same treatment):
+ * a run describes an index on this machine.
+ */
+export const evalRuns = pgTable(
+  'eval_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id').notNull(),
+    trigger: text('trigger').notNull().$type<EvalRunTrigger>(),
+    /** `ok` or `error`; an error carries no figures. */
+    status: text('status').notNull().$type<'ok' | 'error'>(),
+    error: text('error'),
+    /** The project's live generation when the run began; a run that saw it change is an error. */
+    generation: integer('generation').notNull(),
+    embeddingModel: text('embedding_model').notNull(),
+    /** Questions in the set when the run began. */
+    questionCount: integer('question_count').notNull(),
+    /** Questions asked: the denominator of the two figures below. */
+    scoredCount: integer('scored_count').notNull(),
+    recall5: doublePrecision('recall5'),
+    mrr: doublePrecision('mrr'),
+    regressed: boolean('regressed').notNull().default(false),
+    comparedTo: uuid('compared_to'),
+    lostKeys: text('lost_keys').array().notNull().default(sql`'{}'::text[]`),
+    /** Questions whose `expect_file` is not in the live generation: not asked, not in the denominator. */
+    skippedKeys: text('skipped_keys').array().notNull().default(sql`'{}'::text[]`),
+    /** The skipped ones that were asked in the run it was compared with: a page that went away, which is a warning and not a regression. */
+    newlySkippedKeys: text('newly_skipped_keys').array().notNull().default(sql`'{}'::text[]`),
+    results: jsonb('results').$type<EvalRunResult[]>(),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
+    finishedAt: timestamp('finished_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    foreignKey({ name: 'eval_runs_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    check('eval_runs_trigger_check', sql`${t.trigger} in ('index_rebuild', 'index_incremental', 'golden_set', 'manual')`),
+    check('eval_runs_status_check', sql`${t.status} in ('ok', 'error')`),
+    // A run either has its figures or says why it has none.
+    check(
+      'eval_runs_figures_check',
+      sql`(${t.status} = 'ok' and ${t.recall5} is not null and ${t.mrr} is not null) or (${t.status} = 'error' and ${t.error} is not null)`,
+    ),
+    // `nullsFirst()` for the reason `index_runs_project_idx` has it: PostgreSQL's own default for DESC.
+    index('eval_runs_project_started_idx').on(t.projectId, t.startedAt.desc().nullsFirst()),
+  ],
+);
+export type EvalRunRow = typeof evalRuns.$inferSelect;
 
 /** Dashboard accounts. `root` and `admin` reach every project; a `member` only its memberships. */
 export const users = pgTable(
@@ -1166,10 +1324,13 @@ export type DocumentSourceRow = typeof documentSources.$inferSelect;
 export type DocumentRow = typeof documents.$inferSelect;
 export type ChunkInsert = typeof chunks.$inferInsert;
 export type IndexRunRow = typeof indexRuns.$inferSelect;
+export type DocumentChangeRow = typeof documentChanges.$inferSelect;
 export type IndexRunInsert = typeof indexRuns.$inferInsert;
 export type SearchQueryRow = typeof searchQueries.$inferSelect;
 export type SearchQueryInsert = typeof searchQueries.$inferInsert;
 export type SearchQueryHitRow = typeof searchQueryHits.$inferSelect;
 export type SearchQueryHitInsert = typeof searchQueryHits.$inferInsert;
+export type ReportedGapRow = typeof reportedGaps.$inferSelect;
+export type ReportedGapInsert = typeof reportedGaps.$inferInsert;
 export type AuditEventRow = typeof auditEvents.$inferSelect;
 export type AuditEventInsert = typeof auditEvents.$inferInsert;

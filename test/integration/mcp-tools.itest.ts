@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { loadConfig } from '../../src/config.js';
 import type { Db } from '../../src/db/client.js';
 import { documents, documentSources, projects, type ProjectRow } from '../../src/db/schema.js';
-import { listTopicsOutput, readDocumentOutput, searchDocsOutput } from '../../src/mcp/output-schemas.js';
+import { listTopicsOutput, readDocumentOutput, searchDocsOutput, whatsNewOutput } from '../../src/mcp/output-schemas.js';
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
 import { chunkMarkdown, embeddingText, estimateTokens } from '../../src/services/chunker.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
@@ -876,7 +876,7 @@ describe('the plain text a client without structured output reads', () => {
     const client = await connect(fx.project, off);
     try {
       const { tools } = await client.listTools();
-      expect(tools.map((t) => t.name).sort()).toEqual(['list_topics', 'read_document', 'search_docs']);
+      expect(tools.map((t) => t.name).sort()).toEqual(['list_topics', 'read_document', 'search_docs', 'whats_new']);
       for (const tool of tools) expect(tool.outputSchema).toBeUndefined();
     } finally {
       await client.close();
@@ -982,7 +982,12 @@ describe('the plain text a client without structured output reads', () => {
  * structured answer is the only one — the ADR-0066 markers, the sentence that says what they mean, and
  * the server's own advice on a miss have to be in it or they are nowhere.
  */
-const SCHEMAS = { search_docs: searchDocsOutput, list_topics: listTopicsOutput, read_document: readDocumentOutput } as const;
+const SCHEMAS = {
+  search_docs: searchDocsOutput,
+  list_topics: listTopicsOutput,
+  read_document: readDocumentOutput,
+  whats_new: whatsNewOutput,
+} as const;
 
 async function structured(
   tool: keyof typeof SCHEMAS,
@@ -1027,6 +1032,24 @@ describe('the structured output', () => {
     const answer = await structured(tool as keyof typeof SCHEMAS, args);
     if (answer.isError) expect(answer.data).toBeUndefined();
     else expect(answer.data).toBeDefined();
+  });
+
+  it('whats_new: says it cannot speak for a time before its record, in the structured answer as in the text', async () => {
+    // This fixture wrote its documents without a record of them, so there is nothing to list; what the
+    // answer must still say is where its knowledge starts and that the question reaches before it.
+    const answer = await structured('whats_new', { since: '2020-01-01' });
+    const data = whatsNewOutput.parse(answer.data);
+    expect(data).toMatchObject({ project: 'handbook-project', since: '2020-01-01T00:00:00.000Z', complete: false, truncated: false, changes: [] });
+    expect(Date.parse(data.historyStartsAt)).toBeGreaterThan(Date.parse('2020-01-01'));
+    expect(answer.text).toContain(`history_starts_at: ${data.historyStartsAt} (incomplete)`);
+    expect(data.guidance).toContain('an empty list does not mean nothing changed');
+  });
+
+  it('whats_new: refuses a since it cannot read, as text only', async () => {
+    const answer = await structured('whats_new', { since: 'last tuesday' });
+    expect(answer.isError).toBe(true);
+    expect(answer.data).toBeUndefined();
+    expect(answer.text).toMatch(/not an ISO 8601 date or date-time/);
   });
 
   it('carries the search excerpts the text shows, in its order, fenced as the text fences them', async () => {

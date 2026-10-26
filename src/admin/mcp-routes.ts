@@ -3,7 +3,6 @@ import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import { requirePrincipal } from '../auth/plugin.js';
 import { createMcpToken, listMcpTokens, revokeMcpToken, setProjectMcpAuth, updateMcpTokenNetworks } from '../services/auth/mcp-tokens.js';
-import { ValidationError } from '../services/projects.js';
 import { parseAllowedCidrs } from '../services/token-networks.js';
 
 const ProjectParams = z.object({ id: z.uuid() });
@@ -38,22 +37,7 @@ export const expiryFromDays = (days: number | null, now: Date = new Date()): Dat
  * an editor's. Turning the requirement on and off is a manager's, and lives on the project itself.
  */
 export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
-  const { db, sessions, config } = ctx;
-
-  /**
-   * Validates a network list and refuses a non-empty one under `TRUST_PROXY=1`: there the client address
-   * is whatever the caller wrote in `X-Forwarded-For`, so a list could only ever fail closed.
-   */
-  const networksFrom = (input: readonly string[] | null): string[] | null => {
-    const cidrs = parseAllowedCidrs(input);
-    if (cidrs && config.TRUST_PROXY === true) {
-      throw new ValidationError(
-        'A network allowlist cannot be saved while TRUST_PROXY=1: the client address would come from a header the caller writes. ' +
-          "Point TRUST_PROXY at the reverse proxy's address or CIDR block first.",
-      );
-    }
-    return cidrs;
-  };
+  const { db, sessions } = ctx;
 
   app.get('/api/projects/:id/mcp-tokens', async (req) => {
     const { id } = ProjectParams.parse(req.params);
@@ -64,7 +48,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     const principal = requirePrincipal(req);
     const { id } = ProjectParams.parse(req.params);
     const { name, expiresInDays, allowedCidrs } = CreateBody.parse(req.body ?? {});
-    const cidrs = networksFrom(allowedCidrs);
+    const cidrs = parseAllowedCidrs(allowedCidrs);
     const { token, view } = await createMcpToken(db, id, name, principal.userId, expiryFromDays(expiresInDays), cidrs);
     // Returned once and never again: the database holds only its hash.
     return reply.code(201).send({ token: view, secret: token });
@@ -75,7 +59,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
   app.patch('/api/projects/:id/mcp-tokens/:tokenId', async (req) => {
     const { id, tokenId } = TokenParams.parse(req.params);
     const { allowedCidrs } = UpdateNetworksBody.parse(req.body ?? {});
-    return updateMcpTokenNetworks(db, id, tokenId, networksFrom(allowedCidrs));
+    return updateMcpTokenNetworks(db, id, tokenId, parseAllowedCidrs(allowedCidrs));
   });
 
   app.delete('/api/projects/:id/mcp-tokens/:tokenId', async (req, reply) => {

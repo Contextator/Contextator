@@ -222,6 +222,37 @@ export interface McpGuardCounter {
   countAccessDenied(reason: AccessDeniedReason): void;
 }
 
+/**
+ * What the eval runner reports about a run it has recorded ([ADR-0124](../../.ssot/ADR.md#adr-0124)). No
+ * project, no score and no key goes with it: the counters are the instance's, and a score per project would
+ * be a label per project ([ADR-0105](../../.ssot/ADR.md#adr-0105)). Optional wherever it is taken, like the
+ * other observers.
+ */
+export interface EvalRunObserver {
+  countEvalRun(status: 'ok' | 'error', regressed: boolean): void;
+}
+
+/** The `contextator_eval_runs_total`, `contextator_eval_run_errors_total` and `contextator_eval_regressions_total` values. */
+export interface EvalRunSample {
+  runs: number;
+  errors: number;
+  regressions: number;
+}
+
+/**
+ * What happened to one `report_gap` call ([ADR-0125](../../.ssot/ADR.md#adr-0125)): the closed set of
+ * `contextator_mcp_gap_reports_total{outcome}` ([ADR-0105](../../.ssot/ADR.md#adr-0105)). `disabled` is a
+ * project whose query log was switched off after the session began, `limited` a report over
+ * `MCP_REPORT_GAP_PER_HOUR`, `failed` one that could not be stored.
+ */
+export const GAP_REPORT_OUTCOMES = ['accepted', 'limited', 'disabled', 'failed'] as const;
+export type GapReportOutcome = (typeof GAP_REPORT_OUTCOMES)[number];
+
+/** Counts one `report_gap` call by outcome. Optional wherever it is taken, like the other observers. */
+export interface GapReportObserver {
+  countGapReport(outcome: GapReportOutcome): void;
+}
+
 /** Times one tool call, handler start to answer. */
 export interface McpToolObserver {
   observeToolDuration(tool: string, seconds: number): void;
@@ -291,6 +322,10 @@ export interface MetricsSnapshot {
   mcpGuard?: McpGuardSample;
   /** MCP messages by method, tool and era. Optional so a snapshot built before it existed is still one. */
   mcpRequests?: McpRequestSample[];
+  /** Eval runs recorded since start, unlabelled (ADR-0124). Optional like `mcpGuard`. */
+  evalRuns?: EvalRunSample;
+  /** `report_gap` calls since start by outcome (ADR-0125). Optional like `mcpGuard`. */
+  gapReports?: Record<GapReportOutcome, number>;
   /** Rendered after the gauges and counters, in the order given. Optional so a snapshot without any is still one. */
   histograms?: HistogramSnapshot[];
 }
@@ -302,7 +337,9 @@ export interface MetricsSnapshot {
  * read at scrape time by the route, which already has the composition root, and a registry that
  * reached for them would be a second place that knows how this application is wired.
  */
-export class MetricsRegistry implements SearchCounter, SearchObserver, IndexerObserver, McpRequestCounter, McpToolObserver, McpGuardCounter {
+export class MetricsRegistry
+  implements SearchCounter, SearchObserver, IndexerObserver, McpRequestCounter, McpToolObserver, McpGuardCounter, EvalRunObserver, GapReportObserver
+{
   private readonly searches: Record<QueryActor, number> = { mcp: 0, dashboard: 0 };
   private readonly mcpRequestCounts = new Map<string, McpRequestSample>();
   private readonly rateLimited: Record<RateLimitScope, number> = { token: 0, anonymous: 0, tool: 0 };
@@ -310,6 +347,10 @@ export class MetricsRegistry implements SearchCounter, SearchObserver, IndexerOb
   private readonly accessDenied: Record<AccessDeniedReason, number> = { network: 0 };
   private auditWritten = 0;
   private auditFailed = 0;
+  private evalRunCount = 0;
+  private evalRunErrors = 0;
+  private evalRegressions = 0;
+  private readonly gapReportCounts: Record<GapReportOutcome, number> = { accepted: 0, limited: 0, disabled: 0, failed: 0 };
   private readonly histogramFamilies = new Map<string, Histogram>();
   /** Read once per search, at the moment it is observed; see `watchIndexing`. */
   private indexingNow: () => boolean = () => false;
@@ -448,6 +489,27 @@ export class MetricsRegistry implements SearchCounter, SearchObserver, IndexerOb
     else this.auditFailed++;
   }
 
+  /** One recorded eval run; an `error` run counts in both the total and the error counter, a regression only when the run was `ok`. */
+  countEvalRun(status: 'ok' | 'error', regressed: boolean): void {
+    this.evalRunCount++;
+    if (status === 'error') this.evalRunErrors++;
+    else if (regressed) this.evalRegressions++;
+  }
+
+  countGapReport(outcome: GapReportOutcome): void {
+    this.gapReportCounts[outcome]++;
+  }
+
+  /** The `report_gap` counters as they stand; copied, so a caller cannot move them. */
+  gapReports(): Record<GapReportOutcome, number> {
+    return { ...this.gapReportCounts };
+  }
+
+  /** The eval counters as they stand. */
+  evalRuns(): EvalRunSample {
+    return { runs: this.evalRunCount, errors: this.evalRunErrors, regressions: this.evalRegressions };
+  }
+
   gauges(): { searches: Record<QueryActor, number>; audit: { written: number; failed: number }; pool: PoolGauges | null } {
     return {
       searches: { ...this.searches },
@@ -556,6 +618,29 @@ export function renderPrometheus(snapshot: MetricsSnapshot): string {
     // the one failure of this subsystem worth waking somebody for.
     ['{outcome="failed"}', snapshot.audit.failed],
   ]);
+
+  // The server's own eval runs (ADR-0124). Three counters with no label: the instance's, and never a score per
+  // project, which would be a label per project (ADR-0105). A regression is a lost question, so the number
+  // worth alerting on is `regressions`, and `errors` says the measurement itself did not complete.
+  if (snapshot.evalRuns) {
+    family('contextator_eval_runs_total', 'Golden-set eval runs recorded since start, errors included.', 'counter', [['', snapshot.evalRuns.runs]]);
+    family('contextator_eval_run_errors_total', 'Eval runs that recorded an error instead of figures.', 'counter', [['', snapshot.evalRuns.errors]]);
+    family('contextator_eval_regressions_total', 'Eval runs that lost at least one question the previous good run answered.', 'counter', [
+      ['', snapshot.evalRuns.regressions],
+    ]);
+  }
+
+  // `report_gap` calls by what became of them (ADR-0125). A closed set of four and no project, token or
+  // text: ADR-0105 allows none of those as a label, and who reported what is in the table. `limited` and
+  // `disabled` are answered to the agent as a success, so this counter is the only place they are seen.
+  if (snapshot.gapReports) {
+    family(
+      'contextator_mcp_gap_reports_total',
+      'report_gap calls by outcome: accepted, limited (over MCP_REPORT_GAP_PER_HOUR), disabled (query log off for the project) or failed.',
+      'counter',
+      GAP_REPORT_OUTCOMES.map((outcome): [string, number] => [`{outcome="${outcome}"}`, snapshot.gapReports?.[outcome] ?? 0]),
+    );
+  }
 
   // Every MCP message by what it asked for and which protocol generation asked it: the `era` split is
   // what says when the last 2025-era client is gone (ADR-0098). The family is stated even before the

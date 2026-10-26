@@ -230,9 +230,13 @@ function tools(): ToolFact[] {
       return undefined;
     },
   } as unknown as McpServer;
-  // `registerTools` reads `project.name` into each description and nothing else off the row.
+  // `registerTools` reads `project.name` into each description, and whether the query log is on (ADR-0125:
+  // `report_gap` is registered only while it is) off the row and the context. It is on by default, for the
+  // instance and for a project, so the facts describe the tools an instance answers out of the box. No
+  // handler is called, so the log itself is a placeholder.
   const config = { MCP_STRUCTURED_OUTPUT: defaultOf<boolean>('MCP_STRUCTURED_OUTPUT') } as ToolContext['config'];
-  registerTools(recorder, { config } as ToolContext, { name: 'example' } as ProjectRow);
+  const queryLog = {} as ToolContext['queryLog'];
+  registerTools(recorder, { config, queryLog } as ToolContext, { name: 'example', queryLogEnabled: true } as ProjectRow);
   return collected;
 }
 

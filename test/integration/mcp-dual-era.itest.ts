@@ -149,7 +149,8 @@ describe('a 2026-07-28 client', () => {
     try {
       expect(client.getProtocolEra()).toBe('modern');
       const { tools } = await client.listTools();
-      expect(tools.map((t) => t.name)).toEqual(['search_docs', 'list_topics', 'read_document']);
+      // `report_gap` too: this instance has a query log (set in `beforeAll`), and the tool is registered while there is one.
+      expect(tools.map((t) => t.name)).toEqual(['search_docs', 'list_topics', 'read_document', 'whats_new', 'report_gap']);
       const result = await client.callTool({ name: 'search_docs', arguments: { query: 'DISPATCH_WORKERS cores', limit: 3 } });
       expect(result.isError).toBeFalsy();
       expect(textOf(result)).toContain('handbook/guide.md');

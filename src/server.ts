@@ -24,13 +24,16 @@ import { MCP_EXPOSED_HEADERS, mcpRoutes } from './mcp/router.js';
 import { SessionRegistry } from './mcp/sessions.js';
 import { newChunkBudgetState, verifyChunkBudget } from './services/chunk-budget.js';
 import { createEmbeddingProvider, loadEmbeddingTokenizer } from './services/embeddings/index.js';
+import { EvalRunner } from './services/eval-runs.js';
 import { generateFloorSuggestion } from './services/floor-calibration.js';
 import { Indexer } from './services/indexer.js';
 import { KeyedMutex } from './services/locks.js';
 import { MetricsRegistry } from './services/metrics.js';
 import { listProjects } from './services/projects.js';
 import { AuditWriter, sweepAuditLog } from './services/audit.js';
+import { DOCUMENT_CHANGES_RETENTION_DAYS, sweepDocumentChanges } from './services/document-changes.js';
 import { QueryLog, sweepQueryLog } from './services/query-log.js';
+import { sweepReportedGaps } from './services/report-gap.js';
 import { startSyncScheduler } from './services/scheduler.js';
 import { scanFrom, selectionFrom } from './services/vector-store.js';
 import { initTracing } from './services/tracing.js';
@@ -60,7 +63,7 @@ async function main(): Promise<void> {
   // Both directions of a wrong `TRUST_PROXY` are silent ([ADR-0060](../.ssot/ADR.md#adr-0060)), and the
   // one that actually happens is diagnosed from traffic rather than from settings. Installed before the
   // route plugins so the hook sees every request.
-  warnAboutProxyConfiguration(app, config, (message) => log.warn(message));
+  warnAboutProxyConfiguration(app, (message) => log.warn(message));
 
   // Before anything that could be traced. A no-op unless OTEL_EXPORTER_OTLP_ENDPOINT is set, in which case
   // this is also the only point the OpenTelemetry modules are loaded.
@@ -99,7 +102,19 @@ async function main(): Promise<void> {
       log.info({ projectId, outcome: outcome.status }, 'no relevance floor suggestion stored');
     }
   };
-  const indexer = new Indexer({ db, embeddings, config, log, locks, metrics, onModelChangeRebuilt });
+  // The golden set asked of the live index after the index changes (ADR-0124). Built before the indexer, which
+  // calls it from its hook; it takes no part of the indexer's own locking, so a run never holds indexing up.
+  const evalRuns = new EvalRunner({ db, embeddings, scan: scanFrom(config), selection: selectionFrom(config), log, metrics });
+  const indexer = new Indexer({
+    db,
+    embeddings,
+    config,
+    log,
+    locks,
+    metrics,
+    onModelChangeRebuilt,
+    onIndexChanged: (projectId, trigger) => evalRuns.request(projectId, trigger),
+  });
   const uploads = new UploadService(config);
   const setup = new SetupGate();
   const loginLimiter = new SlidingWindow(config.AUTH_LOGIN_MAX_ATTEMPTS, config.AUTH_LOGIN_WINDOW_MIN * 60_000);
@@ -116,6 +131,7 @@ async function main(): Promise<void> {
     embeddings,
     chunkBudget: newChunkBudgetState(),
     indexer,
+    evalRuns,
     locks,
     uploads,
     sessions,
@@ -160,6 +176,8 @@ async function main(): Promise<void> {
     stopSessionReaper?.();
     stopSyncScheduler?.();
     await sessions.closeAll();
+    // Before the pool: a run that is asking stops at its next question and writes no row (ADR-0124).
+    await evalRuns.stop();
     // The conversion thread is the one piece of the indexer that outlives a run (ADR-0071); an
     // in-flight file is refused rather than left holding the process open.
     await indexer.stop();
@@ -249,6 +267,24 @@ async function main(): Promise<void> {
         if (deleted > 0) log.info({ deleted }, 'swept idle upload sessions');
       })
       .catch((err: unknown) => log.warn({ err }, 'upload session sweep failed'));
+    // The record of document changes behind `whats_new` ([ADR-0123](../.ssot/ADR.md#adr-0123)), ninety days.
+    // **Before the query log's `return` and not after it**: that table is not the query log and does not
+    // switch off with it, so an instance with `SEARCH_QUERY_LOG=0` must still forget what it recorded.
+    void sweepDocumentChanges(db)
+      .then((deleted) => {
+        if (deleted > 0) log.info({ deleted, retentionDays: DOCUMENT_CHANGES_RETENTION_DAYS }, 'swept expired document changes');
+      })
+      .catch((err: unknown) => log.warn({ err }, 'document changes sweep failed'));
+    // What agents reported through `report_gap` ([ADR-0125](../.ssot/ADR.md#adr-0125)), under the query log's
+    // retention. **Before the `return` below and not after it**, and that is the point of it: these rows are
+    // user content under a promise on the privacy page, and an instance that switched the query log off must
+    // not thereby keep what the log collected until somebody switches it back on. (`search_queries` itself
+    // is still swept after the `return`; moving it is a separate change.)
+    void sweepReportedGaps(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)
+      .then((deleted) => {
+        if (deleted > 0) log.info({ deleted, retentionDays: config.SEARCH_QUERY_LOG_RETENTION_DAYS }, 'swept expired reported gaps');
+      })
+      .catch((err: unknown) => log.warn({ err }, 'reported gaps sweep failed'));
     if (!config.SEARCH_QUERY_LOG) return;
     void sweepQueryLog(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)
       .then((deleted) => {

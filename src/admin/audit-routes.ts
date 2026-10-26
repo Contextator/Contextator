@@ -242,6 +242,7 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
   },
   'PATCH /api/projects/:id/quotas': { verb: 'changed the quotas', prep: 'of' },
   'POST /api/projects/:id/score-floor/suggestions': { verb: 'asked for a relevance floor suggestion', prep: 'for' },
+  'POST /api/projects/:id/eval-runs': { verb: 'asked for a golden set eval run', prep: 'for' },
   'POST /api/projects/:id/score-floor/suggestions/:suggestionId/apply': {
     verb: (detail) => `applied a relevance floor suggestion${floorChange(detail)}`,
     prep: 'to',

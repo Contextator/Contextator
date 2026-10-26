@@ -198,7 +198,7 @@ scripts/backup-archive.ts     the archive's format and every refusal in it: the 
 scripts/embedded-database.ts  how an operator command run through `docker exec` finds the container's own PostgreSQL — the entrypoint's PG* variables are not in that environment
 scripts/build-product-facts.ts `npm run build:facts` — writes public/product-facts.json by reading the declarations, never by restating them
 scripts/eval.ts               `npm run eval` — indexes eval/corpus, asks eval/golden.jsonl, prints recall@1, recall@5, MRR
-scripts/eval-scoring.ts       the scoring arithmetic and the report, with no database or model in it, so it can be unit-tested
+src/services/eval-scoring.ts the scoring arithmetic and the report, with no database or model in it, so it can be unit-tested
 scripts/cla/rules.ts          the licence gate's judgements — who authored a pull request, who may sign, what the record says — with no I/O in them
 scripts/cla/github.ts         the two GitHub surfaces it is handed: this repository, and the signatures repository behind its own narrow token
 scripts/cla/run.ts            the gate wired up: read the event, record a signature, judge, ask once, re-run the pull request's check

@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Project \"changes-project\": no changes since 2026-10-01T00:00:00.000Z.\nhistory_starts_at: 2026-09-01T00:00:00.000Z (complete)\n\nProject \"changes-project\" has no source named \"elsewhere\" now (its sources are: docs, notes); any change listed was recorded under that name while it existed."
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 /**
- * The `outputSchema` of each of the three tools, and so the shape of the `structuredContent` they
+ * The `outputSchema` of each of the tools, and so the shape of the `structuredContent` they
  * return beside their text (MCP spec 2025-06-18 and later; this server is built against the SDK's
  * 2025-11-25).
  *
@@ -156,6 +156,51 @@ export const readDocumentOutput = z.object({
     .describe("This server's own words about the answer — how to read the text, and where a budget cut it; the text answer's notes"),
 });
 
+export const whatsNewOutput = z.object({
+  project: z.string(),
+  since: z.string().describe('The instant asked about, as an ISO 8601 UTC timestamp'),
+  historyStartsAt: z
+    .string()
+    .describe(
+      'The oldest instant this record can speak for, as an ISO 8601 UTC timestamp: the retention horizon, when recording began, or when the project came to exist here, whichever is latest',
+    ),
+  complete: z.boolean().describe('True when since is not before historyStartsAt, so nothing the record would have shown is missing'),
+  truncated: z.boolean().describe('True when limit cut the list; the changes shown are the newest'),
+  changes: z
+    .array(
+      z.object({
+        path: z.string().describe('"<source>/<path>" — what read_document takes, for a change that is not removed'),
+        title: z.string(),
+        change: z.enum(['added', 'modified', 'removed']),
+        changedAt: z.string().describe('When the change was recorded, as an ISO 8601 UTC timestamp'),
+        version: z.string().optional().describe('Not on a removed document. The release label it carried; empty when unversioned'),
+        sourceUrl: z.string().nullable().optional().describe('Not on a removed document. Link to the original, or null when the source has none'),
+        sourceModifiedAt: z
+          .string()
+          .nullable()
+          .optional()
+          .describe('Not on a removed document. When it last changed at its origin, as an ISO 8601 timestamp, or null when the source does not say'),
+      }),
+    )
+    .describe('Newest first. A removed document has no text any more: only its path and title are known'),
+  note: z.string().optional().describe('Set when source names no source this project has now'),
+  guidance: z.string().optional().describe("This server's own words about the answer — an incomplete or cut list, and what to do about it"),
+});
+
+/**
+ * `report_gap`'s answer is one word and nothing else, on purpose ([ADR-0125](../../.ssot/ADR.md#adr-0125),
+ * SECURITY.md T16): no count, no other report, no identity. It is the same for a report that was stored, one
+ * over the limit and one for a project whose query log is off, so an agent cannot tell them apart and has
+ * nothing to retry on.
+ */
+export const reportGapOutput = z.object({
+  status: z
+    .literal('received')
+    .describe('Always "received": the report was handed to the maintainers, or dropped under a limit the server does not disclose'),
+});
+
 export type SearchDocsOutput = z.infer<typeof searchDocsOutput>;
 export type ListTopicsOutput = z.infer<typeof listTopicsOutput>;
 export type ReadDocumentOutput = z.infer<typeof readDocumentOutput>;
+export type WhatsNewOutput = z.infer<typeof whatsNewOutput>;
+export type ReportGapOutput = z.infer<typeof reportGapOutput>;

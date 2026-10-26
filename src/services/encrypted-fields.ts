@@ -111,10 +111,18 @@ export const UNENCRYPTED_SECRET_COLUMNS: Readonly<Record<string, string>> = {
   'api_tokens.token_hash': 'A one-way hash of an ADR-0076 API token, like mcp_tokens.token_hash. Revocable and optionally expiring besides.',
   'mcp_rate_limits.key':
     'A counter name ("tok:<token id>", "ip:<project id>:<address>"), not key material. The token id is not the token, and a row lives ten minutes at most. Here only because the guard test matches column names.',
+  'reported_gaps.rate_key':
+    'The limiter bucket of a report ("tok:<token id>" or "anon"), not key material. The token id is not the token, and no address is stored. Here only because the guard test matches column names.',
   'settings.key':
     'The name of a setting — "schema_version", not key material. It is here only because the guard test matches column names and would otherwise ask about it on every run.',
   'golden_questions.key':
     'The stable name of an eval question ("pricing-tiers"), the `id` of a golden.jsonl row — not key material. Here only because the guard test matches column names.',
+  'eval_runs.lost_keys':
+    'Names of golden questions ("pricing-tiers") that a run lost — the `golden_questions.key` values, not key material. Here only because the guard test matches column names.',
+  'eval_runs.skipped_keys':
+    'Names of golden questions a run could not ask, like eval_runs.lost_keys: not key material. Here only because the guard test matches column names.',
+  'eval_runs.newly_skipped_keys':
+    'Names of golden questions a run could no longer ask, like eval_runs.lost_keys: not key material. Here only because the guard test matches column names.',
 };
 
 /**

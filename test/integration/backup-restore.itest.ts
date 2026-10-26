@@ -1374,8 +1374,13 @@ describe('the backup command, and the instance it is asked to bring back', () =>
      * MinIO no longer publishes pullable images on Docker Hub (`minio/minio`) or Quay, so the default is the
      * Chainguard build of upstream MinIO, whose entrypoint is `minio`. `CONTEXTATOR_TEST_MINIO_IMAGE` swaps it
      * for any other S3-compatible server that takes `server /data` and `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`.
+     *
+     * Pinned by the multi-arch index digest (resolved 2026-10-25 from the repository's `latest` tag), so a
+     * moving tag cannot change what the suite runs against. Chainguard keeps only a rolling set of public tags;
+     * if the pull starts failing with "not found", re-resolve `latest`, run this describe, and bump the digest.
      */
-    const MINIO_IMAGE = process.env.CONTEXTATOR_TEST_MINIO_IMAGE || 'cgr.dev/chainguard/minio:latest';
+    const MINIO_IMAGE =
+      process.env.CONTEXTATOR_TEST_MINIO_IMAGE || 'cgr.dev/chainguard/minio@sha256:268d68a2a3b6fc65f905a61f84d7eab6345ce6bff14f551e2b028ec31e6a1341';
     const BUCKET = 'contextator-backups';
     const MINIO_USER = 'minio-access-key';
     const MINIO_PASSWORD = 'minio-secret-key-0123456789';

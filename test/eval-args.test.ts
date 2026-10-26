@@ -60,10 +60,46 @@ describe('eval command line', () => {
     expect(() => parseArgs(['--golden', 'q.jsonl', '--project', 'p'], CWD)).toThrow(/cannot be combined/);
   });
 
+  it('reads --strict for --project only, and takes it off by default (ADR-0124)', () => {
+    expect(parseArgs(['--project', 'p'], CWD).strict).toBe(false);
+    expect(parseArgs(['--project', 'p', '--strict'], CWD).strict).toBe(true);
+    expect(parseArgs([], CWD).strict).toBe(false);
+    // Nothing to be strict about without a project's own questions: refused rather than ignored.
+    expect(() => parseArgs(['--strict'], CWD)).toThrow(/applies to --project only/);
+    expect(() => parseArgs(['--project', 'p', '--strict=1'], CWD)).toThrow(/takes no value/);
+  });
+
   it('refuses a value flag with no value rather than swallowing the next flag', () => {
     expect(() => parseArgs(['--corpus'], CWD)).toThrow(/takes a value/);
     expect(() => parseArgs(['--corpus', '--json'], CWD)).toThrow(/takes a value/);
     expect(() => parseArgs(['--golden='], CWD)).toThrow(/takes a value/);
+  });
+
+  it('has no remote rerank unless --rerank-url asks for one', () => {
+    const o = parseArgs([], CWD);
+    expect(o.rerankUrl).toBeNull();
+    expect(o.rerankLatencyPath).toBeNull();
+  });
+
+  it('reads --rerank-url as "--flag value" or "--flag=value", normalised to the server base', () => {
+    expect(parseArgs(['--rerank-url', 'http://127.0.0.1:8089'], CWD).rerankUrl).toBe('http://127.0.0.1:8089/');
+    expect(parseArgs(['--rerank-url=http://127.0.0.1:8089/rerank'], CWD).rerankUrl).toBe('http://127.0.0.1:8089/');
+    // The remote arm is a retrieval measurement on the repository's own set, not a custom one.
+    expect(parseArgs(['--rerank-url', 'http://127.0.0.1:8089'], CWD).customSet).toBe(false);
+  });
+
+  it('refuses a --rerank-url that is not an http(s) URL, or has no value', () => {
+    expect(() => parseArgs(['--rerank-url', 'not a url'], CWD)).toThrow(/not a URL/);
+    expect(() => parseArgs(['--rerank-url', 'file:///etc/passwd'], CWD)).toThrow(/http or https/);
+    expect(() => parseArgs(['--rerank-url'], CWD)).toThrow(/takes a value/);
+    expect(() => parseArgs(['--rerank-url', '--json'], CWD)).toThrow(/takes a value/);
+  });
+
+  it('takes --rerank-latency only beside --rerank-url, resolved against the working directory', () => {
+    expect(parseArgs(['--rerank-url', 'http://127.0.0.1:8089', '--rerank-latency=lat.json'], CWD).rerankLatencyPath).toBe('/work/docs/lat.json');
+    expect(() => parseArgs(['--rerank-latency=lat.json'], CWD)).toThrow(/needs --rerank-url/);
+    expect(parseArgs(['--rerank-url', 'http://127.0.0.1:8089', '--rerank-latency', 'lat.json'], CWD).rerankLatencyPath).toBe('/work/docs/lat.json');
+    expect(() => parseArgs(['--rerank-url', 'http://127.0.0.1:8089', '--rerank-latency'], CWD)).toThrow(/takes a value/);
   });
 
   it('keeps the output and gate flags as they were', () => {

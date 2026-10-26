@@ -474,8 +474,9 @@ Enabling `ingress` does **not** make the application trust the Ingress controlle
 set only from `config.trustProxy`, never inferred from `ingress.enabled`: the chart cannot know what
 actually sits in front of the Pod (an ingress controller, a cloud load balancer, a CDN, or all three),
 and a trust setting that is guessed is one a caller can exploit. Left empty, the app's own default
-applies (`0`: `X-Forwarded-*` headers are ignored). `"1"`/`"true"` (trust every hop) is deprecated:
-the app warns about it at every start and refuses it from app 0.5.0 (ADR-0122), so name the proxy.
+applies (`0`: `X-Forwarded-*` headers are ignored). `"1"`/`"true"` (trust every hop) is refused: the app
+refuses to start with it from app 0.5.0 and the values schema rejects it from chart 2.0.0 (ADR-0122), so
+name the proxy. See [Upgrading to chart 2.0.0](#upgrading-to-chart-200).
 
 Behind an Ingress, set these together:
 
@@ -503,6 +504,26 @@ NetworkPolicy that lets nothing but the ingress controller reach this Pod's port
 it only when that NetworkPolicy exists. A hop count is not accepted. Also check that your ingress
 controller **replaces** an incoming `X-Forwarded-For` rather than appending to what the client sent;
 no setting here can tell the difference.
+
+### Upgrading to chart 2.0.0
+
+Chart 2.0.0 is a major version because the values schema newly rejects a value (ADR-0092):
+`config.trustProxy` set to `"1"` or `"true"` (any letter case, surrounding whitespace ignored), which told the
+application to believe the left-most `X-Forwarded-For` whoever wrote it. Application 0.5.0 refuses the same
+value at startup (ADR-0122), so a release that kept it would have gone into a CrashLoop; the schema stops
+`helm upgrade` instead, before anything changes.
+
+Before upgrading, if your values file or `--set` flags set it:
+
+- the proxy is on another host or in another Pod: set `config.trustProxy` to its address or CIDR block, for
+  example `"172.18.0.0/16"` (the narrowest range that holds the proxy, not the network your clients are on);
+- the proxy runs on the same host as the application: `"loopback"`;
+- nothing sits in front of the Pod: `"0"`, or leave it empty.
+
+`helm template t charts/contextator --set-string config.trustProxy=1` shows the refusal. Note `--set` turns `1`
+and `true` into a number and a boolean, which the schema already rejected as a type error; `--set-string` is
+the form that tests this rule. A `TRUST_PROXY` set through the free-form `env` map is not seen by the
+schema, but the application refuses it the same way when the Pod starts.
 
 ## Persistence
 
@@ -669,6 +690,14 @@ default `EMBEDDING_DTYPE=fp32`):
 If you change `env.EMBEDDING_DTYPE` to `fp16` or `q8` to shrink the model's memory footprint, lower
 `resources` accordingly — the figures above are for the fp32 default.
 
+- **Conversion thread cap (`env.CONVERSION_WORKER_MAX_HEAP_MB`, unset by default):** the chart sets no cap, so a
+  very large PDF or spreadsheet can grow the Pod toward `resources.limits.memory` and have it OOM-killed. To turn
+  that into one refused file instead, set the cap to at most `resources.limits.memory` minus 1200 MiB (800 MiB for the
+  server above, 400 MiB for what a conversion holds outside the heap): `384` to `512` under the default 2Gi limit,
+  which converts every file measured, including a 2000-page PDF (smallest cap that converted it: 384 MiB, peak RSS
+  640 MiB there against 2.1 GiB uncapped). The measurements and the full table are in
+  [`docs/configuration.md`](../../docs/configuration.md#sizing-conversion_worker_max_heap_mb-against-the-containers-memory-limit).
+
 ## Uninstall
 
 ```sh
@@ -742,6 +771,10 @@ checks them:
   set as `MCP_RATE_LIMIT_TOOLS`: a per-tool limit per minute and token. Empty (the default) leaves it unset.
 - `config.mcpRateLimitFailOpen` — `true` (the default) leaves `MCP_RATE_LIMIT_FAIL_OPEN` unset, so a request
   is served when the counter table cannot be reached; `false` sets it to `0` and answers 503 instead.
+- `config.mcpReportGapPerHour` — an integer, at least `0`, set as `MCP_REPORT_GAP_PER_HOUR`: how many `report_gap`
+  reports one MCP credential may have accepted per hour, with every anonymous caller of an `open` project sharing one
+  bucket of the same size. `null` (the default) leaves the variable unset, so the application default of `20`
+  applies; `0` turns the limit off. A report over the limit is answered as a success and dropped.
 - `config.reindexOnModelChange` — `true` sets `REINDEX_ON_MODEL_CHANGE=1`: at start-up the server queues
   one re-index for every project that was indexed with a different embedding model than it now runs and
   that has at least one source. `false` (the default) leaves it unset.

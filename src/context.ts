@@ -3,6 +3,7 @@ import type { Config } from './config.js';
 import type { Db } from './db/client.js';
 import type { EmbeddingProvider } from './services/embeddings/provider.js';
 import type { ChunkBudgetState } from './services/chunk-budget.js';
+import type { EvalRunner } from './services/eval-runs.js';
 import type { Indexer } from './services/indexer.js';
 import type { KeyedMutex } from './services/locks.js';
 import type { UploadService } from './services/uploads.js';
@@ -25,6 +26,12 @@ export interface AppContext {
   /** Whether CHUNK_MAX_TOKENS fits the model's window, filled in after warmup and sticky (ADR-0035). */
   chunkBudget: ChunkBudgetState;
   indexer: Indexer;
+  /**
+   * The server's own golden-set runs ([ADR-0124](../../.ssot/ADR.md#adr-0124)). Optional only because a test
+   * that registers the golden-question routes has no use for it; `server.ts` always builds one, and the eval
+   * routes answer `503` where there is none.
+   */
+  evalRuns?: EvalRunner;
   /** Per-project mutex shared by the indexer, upload commits and source deletion. */
   locks: KeyedMutex;
   uploads: UploadService;

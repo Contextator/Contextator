@@ -10,6 +10,144 @@ ships, that stops.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-26
+
+### Breaking
+
+- `TRUST_PROXY=1`/`true` (trust every hop of `X-Forwarded-For`) is refused at startup. The process exits with a
+  non-zero code and a message that names the value and the way out (ADR-0122, which amends ADR-0060). It was
+  deprecated in 0.4.1. **Before upgrading**, set `TRUST_PROXY` to `loopback` when the proxy runs on the same host,
+  to the proxy's address or CIDR block (the proxy, not the network your clients are on: the list applies to every
+  hop), or to `0` when nothing sits in front of the server. `0`, `false`, addresses, CIDR blocks and the subnet
+  names are unchanged.
+- Helm chart 2.0.0: the values schema rejects `config.trustProxy` set to `"1"` or `"true"` (any letter case), so
+  `helm upgrade` stops before anything changes instead of the Pod going into a CrashLoop. A `TRUST_PROXY` set
+  through the free-form `env` map is not seen by the schema; the application refuses it when the Pod starts. The
+  chart README has an "Upgrading to chart 2.0.0" section.
+
+### Added
+
+- `whats_new(since, source?, version?, limit?)`, a fourth read-only MCP tool in both protocol eras: the documents
+  added, changed or removed after a point in time, newest first, with the path `read_document` takes. Every answer
+  says from when its record starts (`history_starts_at`) and whether `since` reaches back that far (`complete`), so
+  an empty list is never mistaken for "nothing changed". A removed document returns only its path and title.
+- Migration `0026_document_changes`: the latest change of every path a project has had (ADR-0123). The indexer
+  writes it in the same transaction as the document, and a forced re-index records the difference between the
+  old and the new generation in the transaction that swaps them. A change is a change of the document's text, so a
+  force re-index of unchanged content, a changed source `language` or `version`, and the other documents of an
+  OpenAPI specification when one operation changed record nothing. Deleting a source records its documents as
+  removed. Changes are kept for 90 days (a constant, no new environment variable) and swept on the session
+  reaper's timer, including when `SEARCH_QUERY_LOG=0`.
+- The server asks a project's golden questions of its live index after the index changes, and keeps the answers
+  (ADR-0124). Migration `0027_eval_runs`; `GET /api/projects/:id/eval-runs` and `GET .../eval-runs/:runId` (viewer),
+  `POST /api/projects/:id/eval-runs` (manager, audited; `202`, or `409` while the project or the server is busy).
+  A run is triggered by a swap, by an incremental run that wrote chunks, removed files or recorded document
+  changes, by a change to the set (after 60 seconds without another) and by a manager. It is scored with the same
+  module as `npm run eval -- --project`, and `regressed` is true when at least one question that was in the top five
+  in the project's last good run is not now. The last 100 runs per project are kept, one run at a time on the
+  server and one waiting per project, and the project's own lock is not taken, so indexing is never held up by
+  one. `/metrics` gains `contextator_eval_runs_total`, `contextator_eval_run_errors_total` and
+  `contextator_eval_regressions_total`, with no label.
+- `report_gap(query, note?)`, the first MCP tool that writes, in both protocol eras (ADR-0125): an agent that
+  searched and found the answer is not there tells the maintainers. It writes to its own table, migration
+  `0028_reported_gaps`, never to documentation or to `search_queries`, and it answers `Received.` whether the report
+  was stored, was over its limit or was dropped, so it returns no report, count or identity. It follows the query
+  log: it is absent from `tools/list` under `SEARCH_QUERY_LOG=0` or when the project's query log is off, every call
+  reads the project's switch again (a report after the switch was turned off is not written and is counted as
+  `disabled`), rows are swept by `SEARCH_QUERY_LOG_RETENTION_DAYS` even while the log is off, and purging a
+  project's query log removes its reports (`reportedGapsDeleted` is added to the answer). At most 2,000 reports are
+  kept per project. `MCP_REPORT_GAP_PER_HOUR` (default `20`, `0` is off; Helm `config.mcpReportGapPerHour`) limits
+  reports per credential per hour, with an open project's anonymous callers sharing one bucket. The Queries panel
+  shows reports grouped by question in their own block on the Questions tab, as plain text, and
+  `GET /api/projects/:id/queries/summary` gains `reportedGaps`. `/metrics` gains
+  `contextator_mcp_gap_reports_total{outcome}` (`accepted`, `limited`, `disabled`, `failed`).
+- The dashboard has an Eval runs panel under the golden questions: the history of recall@5 and MRR as a chart,
+  the runs as a list with what each one lost or skipped, a warning naming the questions the newest good run lost
+  (and the ones skipped for the first time), and a "Run now" button for a manager. It draws the figures the
+  server recorded and scores nothing itself. A run the server starts by itself (after an index build, after the set
+  was edited by anyone) shows up on an open page within seconds, without a refresh.
+- `docs/configuration.md` has a guide to sizing `CONVERSION_WORKER_MAX_HEAP_MB` against the container's memory
+  limit, with the measurements it rests on (peak resident memory and the smallest working cap for `.pptx`,
+  `.xlsx` and `.pdf` inputs up to the 2000-page ceiling); the Helm chart README points to it next to
+  `resources.limits.memory`. The setting still has no default (ADR-0097).
+- `npm run eval -- --rerank-url <url>` (with `--rerank-latency <file>`) reranks the fused pool with a remote
+  cross-encoder behind a TEI-compatible `/rerank` endpoint, and `scripts/eval-rerank-remote.ts` compares two
+  reports. It is a measurement arm of the harness only: no remote reranker ships and the server's search path is
+  unchanged. The gate it implements was measured with `bge-reranker-v2-m3` and not passed (`eval/BASELINE.md`), so
+  the server does not offer remote reranking in 0.5.0.
+
+### Changed
+
+- "Every tool is read-only" no longer holds: no tool writes to documentation, and `report_gap` writes to the query
+  log. `MCP_TOOL_NAMES` is now the set of tools the server knows and `tools/list` a conditional subset of it, which
+  differ by exactly `report_gap` while the query log is off. `public/product-facts.json` lists the tool.
+- `npm run eval -- --project` now skips a question whose `expectFile` is not in the project's live index, lists it
+  and leaves it out of the figures, where it refused the run (ADR-0124). `--strict` keeps the refusal. The run
+  still refuses when no question can be asked. `--project` no longer applies `SEARCH_RERANK=on`, since the server's
+  search path does not rerank, so its figure is the one the server stores. The scoring module moved from
+  `scripts/eval-scoring.ts` to `src/services/eval-scoring.ts`, so the server and the CLI call one copy.
+- Starting with `RESET_VECTORS=1` now also forgets the record of document changes and starts it again from that
+  moment (ADR-0123), in the transaction that deletes the documents. Without it the next run would have recorded the
+  whole corpus as added.
+- The swap that publishes a rebuilt index now shares one transaction with the insert of the changes it publishes
+  (ADR-0123, which amends ADR-0039 decision 5). What a reader sees is unchanged: the old generation or the new one,
+  never between. The `projects` row is locked from the swap `UPDATE` to the commit, so a setting saved in the panel
+  at that instant waits for it.
+- `index_runs.id` is now the id the run was given when it started, so a change can name the run that made it. The
+  row is still written when the run finishes.
+- CI: a failing unit or integration run now keeps the name of the failed test: failures are annotated on the run,
+  and a JUnit report is uploaded as an artifact (90 days). The retrieval evaluation now also runs when a pull
+  request changes a file the eval harness imports (`src/config.ts`, `src/context.ts`, `src/db/`, and the
+  `src/auth/` and `src/mcp/` modules it reaches), not only `src/services/`; a unit test keeps that filter in step
+  with the harness's imports. The MinIO image used by the backup integration test is pinned by digest.
+
+### Removed
+
+- The two `TRUST_PROXY=1`-only paths of the MCP token network allowlist (ADR-0118): saving a list answered `400`
+  and a token that carried one answered `403` under that value. With the value refused there is no instance in
+  which either can run. A request from an address outside a token's list is still answered `403`.
+
+### Fixed
+
+- A project import that refused a malformed line in `sources.ndjson`, `golden-questions.ndjson` or
+  `documents.ndjson` named a line number that was too low whenever blank lines came before it; the number now
+  counts every physical line, as an editor does.
+- The dashboard's suggested relevance floor was read once per project, so a model change, a new generation or a
+  different window on the questions panel left the old list on screen. It is read again when any of them changes, and
+  after a model or generation change it keeps being read until the suggestion the server stores for the new encoder is
+  there.
+- Editing a golden question in the dashboard sent every field back, not the ones that were changed: a file path
+  with padding or a tag that contains a comma, stored through the API or an import, was silently trimmed or split
+  by saving an edit to the question's text. Only the fields that differ from what the form showed are sent now.
+- The dashboard's quota panel could show old usage: when an index run moved the counts while a read was in
+  flight, the slower, older answer landed last. A read now yields to a newer one.
+- `docs/deployment.md` said a shared rate-limit key means nobody can guess faster than the budget allows. Anyone
+  with an account of their own can reset the shared sign-in budget with a successful sign-in, so against other
+  accounts only the per-account lockout bounds guessing; the text now says so.
+
+### Upgrade notes
+
+**The one change that can stop an upgrade.** `TRUST_PROXY=1` (or `true`) is refused at startup, so an instance
+that still sets it does not come up until the value is changed (ADR-0122). Set `TRUST_PROXY=loopback` when the
+proxy runs on the same host, the proxy's address or CIDR block when it does not, or `0` when nothing sits in
+front. With Helm, `config.trustProxy` set to `"1"` or `"true"` fails `helm upgrade` against chart 2.0.0 before
+anything changes. Nothing else below needs a change from you before you upgrade.
+
+- **Three migrations run at start-up, in order:** `0026_document_changes`, `0027_eval_runs` and
+  `0028_reported_gaps`. They only add tables and rewrite no existing row. Take a backup first, as for any upgrade
+  (`npm run backup`).
+- **`whats_new` starts with an empty record.** `history_starts_at` is the moment the migration ran (or the
+  project's creation, if later), and every answer says so, so a question about an earlier date is answered
+  `complete: false` rather than with an empty list.
+- **The server now scores a project's golden questions by itself** after the index changes. It adds embedding work
+  after an index build for projects that have questions, one run at a time on the server, and holds no project
+  lock.
+- **`tools/list` gains two tools**, `whats_new` and `report_gap`. `report_gap` is the first MCP tool that writes
+  (only to its own table) and is absent while the query log is off: set `SEARCH_QUERY_LOG=0`, or switch a
+  project's query log off, to keep it out.
+- **New environment variable, optional:** `MCP_REPORT_GAP_PER_HOUR` (default `20`, `0` is off; Helm
+  `config.mcpReportGapPerHour`).
+
 ## [0.4.2] - 2026-10-25
 
 ### Added
@@ -781,7 +919,8 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Contextator/Contextator/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/Contextator/Contextator/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/Contextator/Contextator/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/Contextator/Contextator/compare/v0.3.2...v0.4.0

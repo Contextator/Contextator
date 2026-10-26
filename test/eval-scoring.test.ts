@@ -22,7 +22,7 @@ import {
   type Report,
   type RunContext,
   type ScoredHit,
-} from '../scripts/eval-scoring.js';
+} from '../src/services/eval-scoring.js';
 
 /**
  * The instrument has to be trustworthy before its readings are (ADR-0034). Everything here runs without

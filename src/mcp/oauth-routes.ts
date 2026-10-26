@@ -191,10 +191,11 @@ export const oauthRoutes: FastifyPluginAsync<OauthRoutesOptions> = async (app, {
    *
    * **What it is and is not worth.** A "host" here is whatever `req.ip` resolves to, and that is
    * `TRUST_PROXY`'s answer ([ADR-0060](../../.ssot/ADR.md#adr-0060)): the socket's peer address by
-   * default, and the left-most `X-Forwarded-For` — which the client writes — on an instance set to
-   * `1`. Set to `1` on a directly reachable port, a single script rotating that header is a different
-   * "host" on every request and walks straight past this. That is a property of the instance's proxy
-   * configuration and it is not this plugin's to fix — `ctx.loginLimiter` rests on the same `req.ip`.
+   * default, and the forwarded address vouched for by a named proxy when it is set to one. A caller
+   * cannot write it, because the trust-every-hop value that would have let it is refused at startup
+   * ([ADR-0122](../../.ssot/ADR.md#adr-0122)). Behind a proxy that is not named, every caller shares the
+   * proxy's address — a property of the instance's proxy configuration and not this plugin's to fix;
+   * `ctx.loginLimiter` rests on the same `req.ip`.
    * Even configured correctly this is a limit on *ordinary* traffic, since an office behind one
    * address is one host. The thing that actually bounds the damage is the sweep: a client that
    * registers and never connects is dropped within a day, whatever address it claimed.

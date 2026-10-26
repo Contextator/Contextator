@@ -118,6 +118,10 @@ spec:
             - name: MCP_RATE_LIMIT_FAIL_OPEN
               value: "0"
             {{- end }}
+            {{- if not (kindIs "invalid" .Values.config.mcpReportGapPerHour) }}
+            - name: MCP_REPORT_GAP_PER_HOUR
+              value: {{ .Values.config.mcpReportGapPerHour | int64 | quote }}
+            {{- end }}
             {{- if .Values.config.reindexOnModelChange }}
             - name: REINDEX_ON_MODEL_CHANGE
               value: "1"

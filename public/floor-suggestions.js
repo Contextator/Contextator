@@ -72,21 +72,82 @@ export function describeBasis(suggestion) {
 
 // ---------- loading ----------
 
-export async function loadFloorSuggestions(project, force = false) {
+/**
+ * What the list was read against: the index the project has now (the server stores a `model_change`
+ * suggestion when the model moves, and each suggestion is current or stale by the model and generation)
+ * and the window the queries panel looks back over. A change of either is a reason to read again.
+ *
+ * `current` must come from what the poll refreshes (the project), not from the questions summary, which
+ * is read only when its own filters change and so keeps the old model for as long as the page is open.
+ */
+export const suggestionsReadKey = (current, days) => `${current ? `${current.embeddingModel}@${current.liveGeneration}` : ''}|${days}`;
+
+/** The index part of a read key: what a model or generation change moves and a change of window does not. */
+const indexPart = (key) => key.split('|')[0];
+
+/**
+ * The model of a read key, without the generation. A forced re-index with the same model moves the generation
+ * only, and the server stores a suggestion after a *model* change alone, so only that is worth waiting for.
+ * Split at the last `@`: a model id may carry one (`openai:m:384@host`).
+ */
+export const modelPart = (key) => {
+  const index = indexPart(key);
+  return index.slice(0, Math.max(0, index.lastIndexOf('@')));
+};
+
+/** How long, and how often, the list is read after the model or generation changed: the server measures and stores its suggestion after the re-index ends. */
+export const WATCH_MS = 3 * 60 * 1000;
+/** The poll runs at this pace meanwhile (app.js `POLL_WATCH_MS`), so it is also the fastest a read can follow another. */
+export const WATCH_EVERY_MS = 4 * 1000;
+
+/** Whether the suggestion the server stores after a model change is in the list for the index the project has now. */
+export const hasModelChangeSuggestion = (data, current) =>
+  Boolean(current) && (data?.suggestions ?? []).some((x) => x.trigger === 'model_change' && isCurrent(x, current));
+
+/**
+ * The number of the newest read. Two reads can share a key (a forced one after an apply asks what the
+ * one in flight asks), so the key alone cannot say which answer is the newer.
+ */
+let latestRead = 0;
+
+/**
+ * Reads the stored suggestions: when the project changes, when forced, and when `readKey` differs from
+ * the one the list in hand was read with. `readKey` is optional; without one the list is read once per
+ * project. A failed read keeps its key, so the poll does not ask again every two seconds.
+ */
+export async function loadFloorSuggestions(project, force = false, readKey = null) {
   const s = state.floorSuggestions;
   if (s.projectId !== project.id)
-    Object.assign(s, { projectId: project.id, status: 'idle', error: '', data: null, notice: '', busy: false, showAll: false });
-  if (!force && s.status !== 'idle') return;
+    Object.assign(s, {
+      projectId: project.id,
+      status: 'idle',
+      error: '',
+      data: null,
+      notice: '',
+      busy: false,
+      showAll: false,
+      readKey: null,
+      readAt: 0,
+      watchUntil: 0,
+    });
+  const changed = readKey !== null && s.readKey !== readKey;
+  if (!force && !changed && s.status !== 'idle') return;
+  // A different model than the last list was read for: the re-index is over, and its suggestion is still being measured.
+  if (changed && s.readKey !== null && modelPart(s.readKey) !== modelPart(readKey)) s.watchUntil = Date.now() + WATCH_MS;
+  if (readKey !== null) s.readKey = readKey;
+  s.readAt = Date.now();
   s.status = 'loading';
+  const read = ++latestRead;
+  const superseded = () => read !== latestRead || s.projectId !== project.id;
   try {
     const data = await api(`/api/projects/${project.id}/score-floor/suggestions`);
-    if (s.projectId !== project.id) return;
+    if (superseded()) return;
     s.data = data;
     s.status = 'done';
     s.error = '';
   } catch (err) {
     if (err instanceof ApiError && err.status === 401) return;
-    if (s.projectId !== project.id) return;
+    if (superseded()) return;
     s.status = 'error';
     s.error = err.message;
   }
@@ -103,7 +164,7 @@ async function measure(project) {
   try {
     const outcome = await api(`/api/projects/${project.id}/score-floor/suggestions`, { method: 'POST' });
     s.notice = describeOutcome(outcome);
-    await loadFloorSuggestions(project, true);
+    await loadFloorSuggestions(project, true, s.readKey);
   } catch (err) {
     // 409: busy, not indexed yet or model mismatch — the message is the remedy.
     s.notice = err.message;
@@ -121,12 +182,12 @@ async function apply(project, suggestion, onApplied) {
     await api(`/api/projects/${project.id}/score-floor/suggestions/${suggestion.id}/apply`, { method: 'POST' });
     toast(`${project.name}’s relevance floor is now ${suggestion.suggestedFloor}`);
     s.notice = '';
-    await loadFloorSuggestions(project, true);
+    await loadFloorSuggestions(project, true, s.readKey);
     await onApplied?.();
   } catch (err) {
     s.notice = err.message;
     toast(err.message);
-    await loadFloorSuggestions(project, true);
+    await loadFloorSuggestions(project, true, s.readKey);
   } finally {
     s.busy = false;
     emit('render');
@@ -203,9 +264,21 @@ function suggestionRow(project, suggestion, current, mayManage, onApplied) {
  * The suggested-floor block under the project's relevance floor: measure now (manager), and the stored
  * suggestions with Apply / Dismiss. `onApplied` lets the queries panel re-read the floor it shows.
  */
-export function renderFloorSuggestions(project, mayManage, onApplied) {
+export function renderFloorSuggestions(project, mayManage, onApplied, readKey = null, current = null) {
   const s = state.floorSuggestions;
-  if (s.projectId !== project.id || s.status === 'idle') void loadFloorSuggestions(project);
+  // After a re-index the server stores its suggestion for the new encoder a little later, so keep reading
+  // for a while after the model or generation moved, until it is there.
+  // What the watch waited for is in the list: the poll can go back to its idle pace.
+  if (s.watchUntil && hasModelChangeSuggestion(s.data, current)) s.watchUntil = 0;
+  const watching =
+    readKey !== null &&
+    s.projectId === project.id &&
+    s.status !== 'loading' &&
+    Date.now() < s.watchUntil &&
+    Date.now() - s.readAt >= WATCH_EVERY_MS &&
+    !hasModelChangeSuggestion(s.data, current);
+  if (s.projectId !== project.id || s.status === 'idle' || (readKey !== null && s.readKey !== readKey) || watching)
+    void loadFloorSuggestions(project, watching, readKey);
 
   const dismissed = readDismissed();
   const all = s.data?.suggestions ?? [];

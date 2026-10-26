@@ -122,11 +122,11 @@ docker run -d --name contextator -p 127.0.0.1:3444:3444 \
 Building the image from source instead of pulling it:
 [wiki/Installation#build-the-image-yourself](https://github.com/Contextator/Contextator/wiki/Installation#build-the-image-yourself).
 
-**Tags.** `latest` is the newest stable release; `0.4` tracks the latest patch inside the `0.4.x`
-line; `0.4.2` is one exact, immutable release. Pin a versioned tag for anything you upgrade
-deliberately by setting `CONTEXTATOR_TAG` in `.env` (e.g. `CONTEXTATOR_TAG=0.4.2`) and running
+**Tags.** `latest` is the newest stable release; `0.5` tracks the latest patch inside the `0.5.x`
+line; `0.5.0` is one exact, immutable release. Pin a versioned tag for anything you upgrade
+deliberately by setting `CONTEXTATOR_TAG` in `.env` (e.g. `CONTEXTATOR_TAG=0.5.0`) and running
 `docker compose up -d` — this reads at every start, not only the first. Every one of those tags from
-`0.2.0` on has a `-slim` twin — `latest-slim`, `0.4-slim`, `0.4.2-slim` — which is described in [Bringing your
+`0.2.0` on has a `-slim` twin — `latest-slim`, `0.5-slim`, `0.5.0-slim` — which is described in [Bringing your
 own PostgreSQL](docs/deployment.md#bringing-your-own-postgresql).
 
 ## Usage
@@ -139,8 +139,11 @@ one. For a project that requires a token:
 claude mcp add --transport http demo-docs http://localhost:3444/mcp/demo   --header "Authorization: Bearer ctxm_9f3a…"
 ```
 
-Three read-only tools are exposed: `search_docs` (hybrid search, ranked excerpts), `list_topics` (the indexed
-document list) and `read_document` (one file's Markdown, by path or heading range). Beside the tools, each
+Four read-only tools are exposed: `search_docs` (hybrid search, ranked excerpts), `list_topics` (the indexed
+document list), `read_document` (one file's Markdown, by path or heading range) and `whats_new` (what was added,
+changed or removed since a point in time). A fifth, `report_gap`, lets an agent tell the maintainers what the
+documentation did not answer; it writes to the query log, never to documentation, and is absent while the query log is
+off. Beside the tools, each
 project publishes its documents as MCP resources and two read-only **prompts**, `answer_from_docs` (argument
 `question`) and `explore_topic` (argument `topic`).
 
@@ -601,7 +604,7 @@ do not repeat the commands.
 
 ## Project Status
 
-**Beta.** Contextator is at `0.4.x`; it is not yet stable. Before `1.0.0` a minor version may change a public
+**Beta.** Contextator is at `0.5.x`; it is not yet stable. Before `1.0.0` a minor version may change a public
 contract — the HTTP and MCP APIs, the MCP tool names and their parameters, environment variable names — without
 a major bump. Breaking changes are listed in [`CHANGELOG.md`](CHANGELOG.md).
 
