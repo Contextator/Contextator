@@ -5,7 +5,7 @@ import path from 'node:path';
 import cookie from '@fastify/cookie';
 import { count, desc, eq } from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, inject, it, vi } from 'vitest';
 
 import { assembleReport, corpusFiles, evalTextSearchConfigs, indexCorpus, measureProject } from '../../scripts/eval.js';
 import { adminRoutes } from '../../src/admin/routes.js';
@@ -543,10 +543,47 @@ describe('a change to the golden set (debounced)', () => {
   it('asks the set once after the last of several edits', async () => {
     const project = await seedTwoPages('debounce');
     const base = `/api/projects/${project.id}/golden-questions`;
-    for (const question of TWO_QUESTIONS) {
-      const created = await app.inject({ method: 'POST', url: base, headers: ADMIN, payload: question });
-      expect(created.statusCode, created.body).toBe(201);
+
+    // Not left to the clock. The two POSTs are sequential requests through the real routes, and under a loaded
+    // machine the gap between them can exceed any small debounce, which would make two runs and fail this for a
+    // reason that is not the product's. So the window is set to a value no test waits for, the debounce timers
+    // are watched as they are created and cleared, and the one that is still live is fired by hand: what is
+    // asserted is "several edits leave exactly one pending timer, and it asks the set once", at any speed.
+    const WINDOW_MS = 7_654_321;
+    const deps = (runner as unknown as { deps: { goldenSetDebounceMs?: number } }).deps;
+    const realSet = globalThis.setTimeout;
+    const realClear = globalThis.clearTimeout;
+    const pending = new Map<unknown, () => void>();
+    const setSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number, ...args: unknown[]) => {
+      const handle = realSet(fn, ms, ...args);
+      if (ms === WINDOW_MS) pending.set(handle, fn);
+      return handle;
+    }) as unknown as typeof setTimeout);
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(((handle?: Parameters<typeof clearTimeout>[0]) => {
+      pending.delete(handle);
+      return realClear(handle);
+    }) as typeof clearTimeout);
+    const previous = deps.goldenSetDebounceMs;
+    let fire: (() => void) | undefined;
+    try {
+      deps.goldenSetDebounceMs = WINDOW_MS;
+      for (const question of TWO_QUESTIONS) {
+        const created = await app.inject({ method: 'POST', url: base, headers: ADMIN, payload: question });
+        expect(created.statusCode, created.body).toBe(201);
+      }
+      // Two edits, one timer: the first was cleared by the second, and nothing has been asked yet.
+      expect(pending.size).toBe(1);
+      expect(await rowsOf(project.id)).toHaveLength(0);
+      const [[handle, callback]] = [...pending.entries()];
+      realClear(handle as Parameters<typeof clearTimeout>[0]);
+      fire = callback;
+    } finally {
+      deps.goldenSetDebounceMs = previous;
+      setSpy.mockRestore();
+      clearSpy.mockRestore();
     }
+    fire?.();
+
     await until(async () => (await rowsOf(project.id)).length >= 1, 'the golden_set run');
     await sleep(150);
     await runner.settled();

@@ -35,7 +35,25 @@ ships, that stops.
   one. `/metrics` gains `contextator_eval_runs_total`, `contextator_eval_run_errors_total` and
   `contextator_eval_regressions_total`, with no label.
 
+- `report_gap(query, note?)`, the first MCP tool that writes, in both protocol eras (ADR-0125): an agent that
+  searched and found the answer is not there tells the maintainers. It writes to its own table, migration
+  `0028_reported_gaps`, never to documentation or to `search_queries`, and it answers `Received.` whether the report
+  was stored, was over its limit or was dropped, so it returns no report, count or identity. It follows the query
+  log: it is absent from `tools/list` under `SEARCH_QUERY_LOG=0` or when the project's query log is off, every call
+  reads the project's switch again (a report after the switch was turned off is not written and is counted as
+  `disabled`), rows are swept by `SEARCH_QUERY_LOG_RETENTION_DAYS` even while the log is off, and purging a
+  project's query log removes its reports (`reportedGapsDeleted` is added to the answer). At most 2,000 reports are
+  kept per project. `MCP_REPORT_GAP_PER_HOUR` (default `20`, `0` is off; Helm `config.mcpReportGapPerHour`) limits
+  reports per credential per hour, with an open project's anonymous callers sharing one bucket. The Queries panel
+  shows reports grouped by question in their own block on the Questions tab, as plain text, and
+  `GET /api/projects/:id/queries/summary` gains `reportedGaps`. `/metrics` gains
+  `contextator_mcp_gap_reports_total{outcome}` (`accepted`, `limited`, `disabled`, `failed`).
+
 ### Changed
+
+- "Every tool is read-only" no longer holds: no tool writes to documentation, and `report_gap` writes to the query
+  log. `MCP_TOOL_NAMES` is now the set of tools the server knows and `tools/list` a conditional subset of it, which
+  differ by exactly `report_gap` while the query log is off. `public/product-facts.json` lists the tool.
 
 - `npm run eval -- --project` now skips a question whose `expectFile` is not in the project's live index, lists it
   and leaves it out of the figures, where it refused the run (ADR-0124). `--strict` keeps the refusal. The run

@@ -33,6 +33,7 @@ import { listProjects } from './services/projects.js';
 import { AuditWriter, sweepAuditLog } from './services/audit.js';
 import { DOCUMENT_CHANGES_RETENTION_DAYS, sweepDocumentChanges } from './services/document-changes.js';
 import { QueryLog, sweepQueryLog } from './services/query-log.js';
+import { sweepReportedGaps } from './services/report-gap.js';
 import { startSyncScheduler } from './services/scheduler.js';
 import { scanFrom, selectionFrom } from './services/vector-store.js';
 import { initTracing } from './services/tracing.js';
@@ -274,6 +275,16 @@ async function main(): Promise<void> {
         if (deleted > 0) log.info({ deleted, retentionDays: DOCUMENT_CHANGES_RETENTION_DAYS }, 'swept expired document changes');
       })
       .catch((err: unknown) => log.warn({ err }, 'document changes sweep failed'));
+    // What agents reported through `report_gap` ([ADR-0125](../.ssot/ADR.md#adr-0125)), under the query log's
+    // retention. **Before the `return` below and not after it**, and that is the point of it: these rows are
+    // user content under a promise on the privacy page, and an instance that switched the query log off must
+    // not thereby keep what the log collected until somebody switches it back on. (`search_queries` itself
+    // is still swept after the `return`; moving it is a separate change.)
+    void sweepReportedGaps(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)
+      .then((deleted) => {
+        if (deleted > 0) log.info({ deleted, retentionDays: config.SEARCH_QUERY_LOG_RETENTION_DAYS }, 'swept expired reported gaps');
+      })
+      .catch((err: unknown) => log.warn({ err }, 'reported gaps sweep failed'));
     if (!config.SEARCH_QUERY_LOG) return;
     void sweepQueryLog(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)
       .then((deleted) => {

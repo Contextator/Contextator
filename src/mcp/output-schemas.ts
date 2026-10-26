@@ -187,7 +187,20 @@ export const whatsNewOutput = z.object({
   guidance: z.string().optional().describe("This server's own words about the answer — an incomplete or cut list, and what to do about it"),
 });
 
+/**
+ * `report_gap`'s answer is one word and nothing else, on purpose ([ADR-0125](../../.ssot/ADR.md#adr-0125),
+ * SECURITY.md T16): no count, no other report, no identity. It is the same for a report that was stored, one
+ * over the limit and one for a project whose query log is off, so an agent cannot tell them apart and has
+ * nothing to retry on.
+ */
+export const reportGapOutput = z.object({
+  status: z
+    .literal('received')
+    .describe('Always "received": the report was handed to the maintainers, or dropped under a limit the server does not disclose'),
+});
+
 export type SearchDocsOutput = z.infer<typeof searchDocsOutput>;
 export type ListTopicsOutput = z.infer<typeof listTopicsOutput>;
 export type ReadDocumentOutput = z.infer<typeof readDocumentOutput>;
 export type WhatsNewOutput = z.infer<typeof whatsNewOutput>;
+export type ReportGapOutput = z.infer<typeof reportGapOutput>;

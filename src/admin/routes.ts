@@ -373,6 +373,8 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       mcpGuard: ctx.metrics.mcpGuard(),
       // Eval runs, errors and regressions, with no project label (`services/eval-runs.ts`, ADR-0124).
       evalRuns: ctx.metrics.evalRuns(),
+      // `report_gap` calls by outcome (`mcp/tools.ts`, ADR-0125).
+      gapReports: ctx.metrics.gapReports(),
       // Search phases, embedding batches and queue waits (`services/metrics.ts`), observed in the process.
       histograms: ctx.metrics.histograms(),
     };

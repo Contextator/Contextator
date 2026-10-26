@@ -21,8 +21,16 @@ import {
 } from '../services/document-changes.js';
 import { chunksWithinBudget, joinChunks, truncateToTokens } from '../services/document-read.js';
 import { normalizeRelativePath } from '../services/fs-scan.js';
-import { type McpToolObserver, OTHER_LABEL, type SearchCounter, type SearchObserver, startTimer } from '../services/metrics.js';
+import {
+  type GapReportObserver,
+  type McpToolObserver,
+  OTHER_LABEL,
+  type SearchCounter,
+  type SearchObserver,
+  startTimer,
+} from '../services/metrics.js';
 import { getProjectById } from '../services/projects.js';
+import { REPORT_GAP_NOTE_MAX_CHARS, REPORT_GAP_QUERY_MAX_CHARS, reportGap } from '../services/report-gap.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
 import { formatSourceDate, normalizeSourceUrl, sourceFieldsOf, sourceLine } from '../services/source-url.js';
 import { SOURCE_VERSION_MAX_LENGTH, listSources } from '../services/sources.js';
@@ -44,10 +52,12 @@ import { MCP_TOOL_NAMES } from './tool-names.js';
 import {
   type ListTopicsOutput,
   type ReadDocumentOutput,
+  type ReportGapOutput,
   type SearchDocsOutput,
   type WhatsNewOutput,
   listTopicsOutput,
   readDocumentOutput,
+  reportGapOutput,
   searchDocsOutput,
   whatsNewOutput,
 } from './output-schemas.js';
@@ -251,7 +261,7 @@ export type ToolContext = Pick<AppContext, 'db' | 'embeddings' | 'config' | 'log
    * to build a counter registry to get a tool answered. The same registry times the search phases, so
    * agent searches feed the search histograms the dashboard's do.
    */
-  metrics?: SearchCounter & SearchObserver & Partial<McpToolObserver>;
+  metrics?: SearchCounter & SearchObserver & Partial<McpToolObserver> & Partial<GapReportObserver>;
   /**
    * The clock `whats_new` reads, for the two things it compares `since` with: the present, and the
    * retention horizon. Optional, and the system clock when absent; it exists so that the golden record
@@ -384,6 +394,29 @@ const whatsNewInput = {
     .default(WHATS_NEW_DEFAULT_LIMIT)
     .describe(`Maximum number of changes to return, newest first (1-${WHATS_NEW_MAX_LIMIT}, default ${WHATS_NEW_DEFAULT_LIMIT})`),
 };
+
+/** `report_gap` arguments. */
+const reportGapInput = {
+  // Trimmed first, so a query of only whitespace is refused here instead of spending a bucket slot on an empty row.
+  query: z
+    .string()
+    .trim()
+    .min(1)
+    .max(REPORT_GAP_QUERY_MAX_CHARS)
+    .describe('What you were looking for and did not find, as a question or keywords, the way you would have searched for it'),
+  note: z
+    .string()
+    .max(REPORT_GAP_NOTE_MAX_CHARS)
+    .optional()
+    .describe('Optional: one or two sentences on what is missing or what the pages you read got wrong. Plain text.'),
+};
+
+/**
+ * The one answer `report_gap` gives — for a report that was stored, one over the limit and one for a
+ * project whose query log is off ([ADR-0125](../../.ssot/ADR.md#adr-0125), decision 5). "Recorded" is not
+ * said, because for two of the three it would be untrue.
+ */
+const REPORT_GAP_RECEIVED = 'Received. Thank you — the documentation maintainers review these reports.';
 
 /** The token id the router put in `AuthInfo.extra` (`router.ts`), or NULL for a request that presented none. */
 export function tokenIdOf(auth: AuthInfo | undefined): string | null {
@@ -911,6 +944,48 @@ export function registerTools(
       }
     }),
   );
+
+  // The only tool that writes ([ADR-0125](../../.ssot/ADR.md#adr-0125)), and it writes to the query log's
+  // own table, never to documentation. It is **registered** only while the log is on, for the instance
+  // (`ctx.queryLog` is unset under `SEARCH_QUERY_LOG=0`) and for the project, so it is absent from
+  // `tools/list` otherwise. That is a convenience: the session's project row is as old as the session
+  // (legacy) or as old as a cached `tools/list` (modern), so the handler re-reads the switch at the write.
+  if (ctx.queryLog && project.queryLogEnabled) {
+    server.registerTool(
+      tool('report_gap'),
+      {
+        title: 'Report a documentation gap',
+        description:
+          `Tells the maintainers of the "${project.name}" documentation about something it does not cover. ` +
+          'Use it only after you have searched with search_docs and read what turned up with read_document and the answer is still not there. ' +
+          'Do not call it after every search, for a question the documentation did answer, or to correct a page. ' +
+          'query is what you were looking for; note, optional, says in a sentence or two what is missing. ' +
+          'It answers that the report was received and nothing else, it changes no documentation, and the number of reports one caller ' +
+          'can make per hour may be limited.',
+        inputSchema: reportGapInput,
+        ...(structuredOutput ? { outputSchema: reportGapOutput } : {}),
+        // It writes (so not read-only) but destroys nothing and replaces nothing; a second call adds a second report.
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      },
+      timed('report_gap', async ({ query, note }, call) => {
+        try {
+          // The credential of this call, as `queryLogFor` reads it: a legacy client may swap tokens mid-session.
+          const auth = call.http?.authInfo;
+          const outcome = await reportGap(
+            { db, log, limitPerHour: config.MCP_REPORT_GAP_PER_HOUR, metrics: ctx.metrics },
+            { projectId: project.id, tokenId: auth ? tokenIdOf(auth) : mcpTokenId, query, note },
+          );
+          // `limited` and `disabled` are a success on the wire; only a write that failed is not.
+          if (outcome === 'failed') return fail('report_gap failed: the report could not be stored. Try again later.');
+          const structured: ReportGapOutput = { status: 'received' };
+          return ok(REPORT_GAP_RECEIVED, structured);
+        } catch (err) {
+          log.error({ err, tool: 'report_gap', project: project.name }, 'tool failed');
+          return fail(`report_gap failed: ${message(err)}`);
+        }
+      }),
+    );
+  }
 
   if (era === 'legacy') keepLegacyUnknownToolShape(server, registered);
 

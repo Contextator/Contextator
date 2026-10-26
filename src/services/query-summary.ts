@@ -115,6 +115,26 @@ export interface RepeatedQuestion {
   paths: QuestionPath[];
 }
 
+/**
+ * What agents reported through `report_gap`, grouped on the same fold the questions are
+ * ([ADR-0125](../../.ssot/ADR.md#adr-0125)). **A separate signal, never fused into `repeatedQuestions`'s
+ * ranking** ([ADR-0050](../../.ssot/ADR.md#adr-0050): rank, do not classify): an agent's report says the
+ * answer was wrong where the floor cannot see it, and mixing it into a ranking built from scores would make
+ * every number in that ranking a mixture of two different things.
+ */
+export interface ReportedGapGroup {
+  queryNorm: string;
+  /** The most recent raw spelling — what an agent wrote, so text and never markup. */
+  sample: string;
+  reports: number;
+  /** Distinct MCP tokens behind them; `0` on an `open` project, which verifies none. */
+  reporters: number;
+  firstReportedAt: string;
+  lastReportedAt: string;
+  /** The most recent note an agent left on this question, or `null`. **Agent text: render it as text, never as HTML.** */
+  lastNote: string | null;
+}
+
 export interface NeverReturnedDocument {
   relativePath: string;
   title: string;
@@ -632,6 +652,54 @@ export async function previewScoreFloor(db: Db, scope: ModelScope, current: numb
     gainedSamples,
     lostSamples,
   };
+}
+
+// ---------- what agents reported ----------
+
+interface ReportedGapRowRaw extends Record<string, unknown> {
+  query_norm: string;
+  sample: string;
+  reports: number;
+  reporters: number;
+  first_at: Date;
+  last_at: Date;
+  last_note: string | null;
+}
+
+/**
+ * The reports of the window, most reported first and then most recent. No configuration, floor or actor
+ * scope applies: a report is not a search, so none of the columns that scope searches exists on it.
+ */
+export async function reportedGapGroups(
+  db: Db,
+  scope: { projectId: string; from: Date; to: Date; mcpTokenId?: string },
+  limit: number,
+): Promise<ReportedGapGroup[]> {
+  const result = await db.execute<ReportedGapRowRaw>(sql`
+    select
+      g.query_norm,
+      (array_agg(g.query order by g.created_at desc))[1] as sample,
+      count(*)::int as reports,
+      count(distinct g.mcp_token_id)::int as reporters,
+      min(g.created_at) as first_at,
+      max(g.created_at) as last_at,
+      (array_agg(g.note order by g.created_at desc) filter (where g.note is not null))[1] as last_note
+    from reported_gaps g
+    where g.project_id = ${scope.projectId}
+      and g.created_at >= ${scope.from.toISOString()}::timestamptz
+      and g.created_at < ${scope.to.toISOString()}::timestamptz${scope.mcpTokenId === undefined ? sql`` : sql` and g.mcp_token_id = ${scope.mcpTokenId}`}
+    group by g.query_norm
+    order by reports desc, last_at desc, g.query_norm
+    limit ${limit}`);
+  return result.rows.map((row) => ({
+    queryNorm: row.query_norm,
+    sample: row.sample,
+    reports: row.reports,
+    reporters: row.reporters,
+    firstReportedAt: new Date(row.first_at).toISOString(),
+    lastReportedAt: new Date(row.last_at).toISOString(),
+    lastNote: row.last_note,
+  }));
 }
 
 // ---------- the switch, and the purge ----------

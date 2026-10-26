@@ -606,6 +606,18 @@ export const EnvSchema = z
         return limits;
       }),
     /**
+     * How many `report_gap` reports one credential may have accepted per hour
+     * ([ADR-0125](../.ssot/ADR.md#adr-0125)); every anonymous caller of an `open` project shares one bucket of
+     * the same size. **On by default**, because this is the first tool an agent writes with and the token
+     * limit above is off by default: a looping agent would otherwise fill the project's row cap and push out
+     * every legitimate report. `0` switches this limit off (the row cap stays). Over the limit the tool answers
+     * as it does on success, writes nothing and counts it in `contextator_mcp_gap_reports_total`.
+     *
+     * The count is read from `reported_gaps` itself, so replicas agree and no counter is kept; two concurrent
+     * calls can both pass it, by a few rows.
+     */
+    MCP_REPORT_GAP_PER_HOUR: z.coerce.number().int().min(0).max(1_000_000).default(20),
+    /**
      * What a failed rate-limit counter does. `1` (default) serves the request, logs a warning and counts
      * `contextator_mcp_rate_limit_errors_total`: a limiter that takes the whole server down with its
      * database row is worse than the abuse it guards against. `0` answers 503 instead, for an instance

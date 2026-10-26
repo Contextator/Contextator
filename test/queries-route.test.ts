@@ -83,12 +83,14 @@ interface Body {
   questions?: unknown[];
   chunks?: unknown[];
   neverReturned?: unknown;
+  reportedGaps?: unknown[];
   queriesOutsideConfiguration?: number;
   current?: unknown;
   window?: { retentionDays: number; beyondRetention: boolean };
   queryLogEnabled?: boolean;
   deleted?: number;
   dumpsUnaffected?: boolean;
+  reportedGapsDeleted?: number;
 }
 
 async function call(
@@ -147,6 +149,8 @@ describe('a project whose log is empty', () => {
     expect(body.questions).toEqual([]);
     expect(body.chunks).toEqual([]);
     expect(body.neverReturned).toEqual({ documentsInGeneration: 0, rows: [] });
+    // What agents reported is a block of its own and does not wait for a configuration to exist (ADR-0125).
+    expect(body.reportedGaps).toEqual([]);
     expect(body.queriesOutsideConfiguration).toBe(0);
   });
 
@@ -180,6 +184,10 @@ describe('the two manager controls', () => {
   });
 
   it('reports what a purge deleted, and that it did not reach the dumps already taken', async () => {
-    expect((await call('DELETE', `/api/projects/${PROJECT_ID}/query-log`)).json()).toEqual({ deleted: 0, dumpsUnaffected: true });
+    expect((await call('DELETE', `/api/projects/${PROJECT_ID}/query-log`)).json()).toEqual({
+      deleted: 0,
+      dumpsUnaffected: true,
+      reportedGapsDeleted: 0,
+    });
   });
 });

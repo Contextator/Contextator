@@ -10,7 +10,8 @@ import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import type { ProjectRow } from '../../src/db/schema.js';
 import { MCP_PROMPT_NAMES } from '../../src/mcp/prompts.js';
 import { MCP_TOOL_NAMES } from '../../src/mcp/tools.js';
-import { applySchema, createTestDatabase, dropTestDatabase, type TestDatabase } from './support/postgres.js';
+import { QueryLog } from '../../src/services/query-log.js';
+import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, type TestDatabase } from './support/postgres.js';
 import { seedProject, startMcpInstance, type LiveInstance } from './support/mcp-instance.js';
 
 /**
@@ -367,10 +368,28 @@ describe('prompts', () => {
 });
 
 describe('/metrics', () => {
-  it('labels tools by exactly the names tools/list answers with', async () => {
+  // ADR-0125, decision 8: `MCP_TOOL_NAMES` is the tools the server knows and `tools/list` a conditional subset of
+  // it. Equal while the query log is on; with it off they differ by exactly `report_gap`, which is how a tool
+  // the log's switch removes from the list can still be counted by name when something calls it.
+  const listedNames = async (): Promise<string[]> => {
     const listed = await post(modern('tools/list'), headersFor('tools/list'));
-    const names = ((listed.json.result?.tools ?? []) as Array<{ name: string }>).map((t) => t.name);
-    expect([...names].sort()).toEqual([...MCP_TOOL_NAMES].sort());
+    return ((listed.json.result?.tools ?? []) as Array<{ name: string }>).map((t) => t.name).sort();
+  };
+
+  it('labels tools by exactly the names tools/list answers with while the query log is on', async () => {
+    const ctx = live.ctx as { queryLog?: QueryLog };
+    const before = ctx.queryLog;
+    ctx.queryLog = new QueryLog(database.db, silentLogger);
+    try {
+      expect(await listedNames()).toEqual([...MCP_TOOL_NAMES].sort());
+    } finally {
+      ctx.queryLog = before;
+    }
+  });
+
+  it('answers with every known tool but report_gap while the query log is off', async () => {
+    expect((live.ctx as { queryLog?: QueryLog }).queryLog).toBeUndefined();
+    expect(await listedNames()).toEqual(MCP_TOOL_NAMES.filter((name) => name !== 'report_gap').sort());
   });
 
   it('counts MCP traffic by method, tool and era, and times tool calls', async () => {

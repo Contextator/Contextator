@@ -5,6 +5,7 @@ import { applyFloorSuggestion, generateFloorSuggestion, listFloorSuggestions } f
 import { ConflictError, NotFoundError, getProjectById, setProjectScoreFloor } from '../services/projects.js';
 import { effectiveScoreFloor } from '../services/relevance.js';
 import { buildExport, toJsonl } from '../services/query-export.js';
+import { purgeProjectReportedGaps } from '../services/report-gap.js';
 import {
   DEFAULT_EXPORT_ROWS,
   DEFAULT_SUMMARY_DAYS,
@@ -23,6 +24,7 @@ import {
   previewScoreFloor,
   purgeProjectQueryLog,
   repeatedQuestions,
+  reportedGapGroups,
   setQueryLogEnabled,
   volumeOverTime,
 } from '../services/query-summary.js';
@@ -212,8 +214,15 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
       /** What the project runs now, so the panel can say when it is looking at an older configuration. */
       current: { embeddingModel: project?.embeddingModel ?? null, liveGeneration: project?.liveGeneration ?? 0 },
     };
+    // What agents reported through `report_gap` (ADR-0125), a block of its own. Not scoped to the
+    // configuration or the floor, which are properties of a search; a report is none, and the dashboard's
+    // own typing (`actor=dashboard`) is by definition not an agent's report.
+    const reportedGaps =
+      query.actor === 'dashboard'
+        ? []
+        : await reportedGapGroups(db, { projectId: id, from, to, ...(query.token === undefined ? {} : { mcpTokenId: query.token }) }, query.limit);
     if (!configuration) {
-      return { ...base, questions: [], neverReturned: { documentsInGeneration: 0, rows: [] }, chunks: [], volume: [] };
+      return { ...base, questions: [], neverReturned: { documentsInGeneration: 0, rows: [] }, chunks: [], volume: [], reportedGaps };
     }
 
     const scope: SummaryScope = {
@@ -232,7 +241,7 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
       mostReturnedChunks(db, scope, query.limit),
       volumeOverTime(db, scope),
     ]);
-    return { ...base, questions, neverReturned, chunks, volume };
+    return { ...base, questions, neverReturned, chunks, volume, reportedGaps };
   });
 
   /**
@@ -422,9 +431,11 @@ export const queriesRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app
     const project = await getProjectById(db, id);
     if (!project) throw new NotFoundError('Project not found');
     const deleted = await purgeProjectQueryLog(db, id);
-    req.log.info({ projectId: id, deleted }, 'query log purged');
+    // The reports agents wrote beside the log (ADR-0125) go with it, counted apart so `deleted` keeps its meaning.
+    const reportedGapsDeleted = await purgeProjectReportedGaps(db, id);
+    req.log.info({ projectId: id, deleted, reportedGapsDeleted }, 'query log purged');
     // The count, and the one consequence a `DELETE` cannot reach: the dumps already taken still hold
     // these rows (OPERATIONS §4.8).
-    return { deleted, dumpsUnaffected: true };
+    return { deleted, dumpsUnaffected: true, reportedGapsDeleted };
   });
 };
