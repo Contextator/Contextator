@@ -131,7 +131,7 @@ ships, that stops.
 that still sets it does not come up until the value is changed (ADR-0122). Set `TRUST_PROXY=loopback` when the
 proxy runs on the same host, the proxy's address or CIDR block when it does not, or `0` when nothing sits in
 front. With Helm, `config.trustProxy` set to `"1"` or `"true"` fails `helm upgrade` against chart 2.0.0 before
-anything changes. Everything else below changes nothing until you use it.
+anything changes. Nothing else below needs a change from you before you upgrade.
 
 - **Three migrations run at start-up, in order:** `0026_document_changes`, `0027_eval_runs` and
   `0028_reported_gaps`. They only add tables and rewrite no existing row. Take a backup first, as for any upgrade

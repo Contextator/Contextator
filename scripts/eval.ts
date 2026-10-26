@@ -227,7 +227,7 @@ const USAGE = `Usage: npm run eval [-- <options>]
   --rerank-url <url>       Rerank the fused pool with a remote cross-encoder behind a TEI-compatible
                            /rerank endpoint (e.g. http://127.0.0.1:8089) instead of the local model. A
                            measurement arm: scripts/eval-rerank-remote.ts compares it with a run without.
-                           Cannot be combined with SEARCH_RERANK=on.
+                           Cannot be combined with SEARCH_RERANK=on (with --project SEARCH_RERANK is ignored).
   --rerank-latency <file>  With --rerank-url: write the per-search rerank latency (p50, p95, max) as JSON.
   --markdown[=<file>]      Markdown tables. With a file, written there and the text report still prints.
   --json[=<file>]          The same numbers as JSON, same rule about the file.
@@ -1004,7 +1004,13 @@ async function runProject(options: Options): Promise<GateVerdict> {
   // No local reranker, whatever `SEARCH_RERANK` says: no search path of the server attaches one, and the server's own runs
   // (ADR-0124) are scored without. A project's figure from here is then the figure the server stores for it. Only the
   // explicit `--rerank-url` measurement arm (K-22) changes that.
-  if (config.SEARCH_RERANK === 'on') step('eval: SEARCH_RERANK=on is ignored with --project: the server does not rerank, so neither does this run');
+  if (config.SEARCH_RERANK === 'on') {
+    step(
+      options.rerankUrl === null
+        ? 'eval: SEARCH_RERANK=on is ignored with --project: the server does not rerank, so neither does this run'
+        : `eval: SEARCH_RERANK=on is ignored with --project; this run reranks with the remote reranker of --rerank-url only`,
+    );
+  }
   const { embeddings, reranker, modelLoadMs } = await warmModels(config, options, false);
   const { db, pool } = createDb(url);
   try {
