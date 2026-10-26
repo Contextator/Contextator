@@ -14,8 +14,8 @@ import {
 
 /**
  * **The panel keeps the questions; it does not score them.** It reads, validates and sends the stored
- * golden set the way the route takes it, and hands over the command that runs the evaluation, because
- * the server deliberately has no route that runs one (FR-347).
+ * golden set the way the route takes it, and hands over the command that runs the evaluation from a shell.
+ * The server's own runs of the set are the Eval panel's business (eval-panel.test.ts).
  */
 
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -104,6 +104,23 @@ describe('the form', () => {
     expect(questionPatch(STORED, { ...same, tags: ['account'] })).toEqual({ tags: ['account'] });
     expect(questionPatch(STORED, { ...same, note: 'new' })).toEqual({ note: 'new' });
     expect(questionPatch(STORED, { ...same, key: 'renamed' })).toEqual({}); // the key is never sent
+  });
+});
+
+describe('editing a record the form cannot reproduce', () => {
+  // The API and an import take a path with padding and a tag with a comma; the form trims the one and splits the other.
+  const ODD = { ...STORED, expectFile: ' guides/account.md ', expectHeading: ' Resetting ', tags: ['a,b', 'c'], note: ' kept ' };
+  const formOf = (stored: typeof ODD, over = {}) => normalizeForm({ ...stored, tags: stored.tags.join(', '), ...over });
+
+  it('does not rewrite the path, heading, tags or note the person never touched', () => {
+    expect(questionPatch(ODD, formOf(ODD, { query: 'Another?' }))).toEqual({ query: 'Another?' });
+    expect(questionPatch(ODD, formOf(ODD))).toEqual({});
+  });
+
+  it('still sends a field the person did change', () => {
+    expect(questionPatch(ODD, formOf(ODD, { expectFile: 'guides/other.md' }))).toEqual({ expectFile: 'guides/other.md' });
+    expect(questionPatch(ODD, formOf(ODD, { tags: 'a, c' }))).toEqual({ tags: ['a', 'c'] });
+    expect(questionPatch(ODD, formOf(ODD, { expectHeading: '' }))).toEqual({ expectHeading: null });
   });
 });
 

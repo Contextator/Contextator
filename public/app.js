@@ -15,6 +15,7 @@ import {
   formatBytes,
   formatDuration,
   icon,
+  isWatching,
   onBus,
   openDialog,
   postForm,
@@ -30,6 +31,7 @@ import { authHeaderFor, authModeBadge, initMcpUi, loadMcpTokens, renderMcpAccess
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
 import { loadQuerySummary, renderQueries } from './queries.js';
 import { renderSourceFreshness } from './freshness.js';
+import { loadEval, renderEval } from './eval.js';
 import { initGoldenUi, loadGolden, renderGolden } from './golden.js';
 import { describeApiError, initQuotasUi, loadQuotas, renderQuotas } from './quotas.js';
 import { captureSearchFocus, renderSearch } from './search.js';
@@ -38,6 +40,8 @@ import { initUsersUi, renderUsersView } from './users.js';
 
 const POLL_ACTIVE_MS = 2000;
 const POLL_IDLE_MS = 15000;
+/** While a panel waits for a run or a suggestion the server writes by itself (core.js `isWatching`). */
+const POLL_WATCH_MS = 4000;
 /** While the search box has focus. See schedule(). */
 const POLL_TYPING_MS = 30000;
 const ACTIVE_PHASES = new Set(['queued', 'scanning', 'embedding', 'finalizing']);
@@ -277,6 +281,7 @@ function select(id) {
   void loadQuerySummary();
   void loadQuotas();
   void loadGolden();
+  void loadEval();
 }
 
 /** Fetches the selected project's run history when the selection or the newest job changes. */
@@ -680,6 +685,8 @@ function renderDetail() {
   main.append(renderSources(p, busy));
   main.append(renderQuotas(p));
   main.append(renderGolden(p));
+  // Beside the questions it asks: the server's own runs of them and what they found.
+  main.append(renderEval(p));
   main.append(renderMembers(p));
   main.append(renderMcpAccess(p));
 
@@ -961,6 +968,8 @@ async function refresh() {
     // A no-op once the selected project's set is read: the first poll is what loads it when the page
     // opens straight on a project hash, where select() never runs.
     void loadGolden();
+    // Quiet unless the selection or the project's index moved, or a run asked for by hand has not shown up yet.
+    void loadEval();
   }
   // The account list is not part of a project poll; refresh it only while it is on screen.
   if (state.view === 'users') void loadUsers();
@@ -983,7 +992,8 @@ function schedule() {
   // …and the audit panel's filter bar is the same class of thing: a half-typed date, or a dropdown
   // the operator has open, does not survive #detail being replaced underneath it.
   const typing = state.search.focused || state.audit.focusKey !== null;
-  state.timer = setTimeout(refresh, typing ? POLL_TYPING_MS : active || modelLoading ? POLL_ACTIVE_MS : POLL_IDLE_MS);
+  const interval = active || modelLoading ? POLL_ACTIVE_MS : isWatching() ? POLL_WATCH_MS : POLL_IDLE_MS;
+  state.timer = setTimeout(refresh, typing ? POLL_TYPING_MS : interval);
 }
 
 async function reindex(project, force) {

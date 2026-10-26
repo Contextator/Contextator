@@ -133,6 +133,34 @@ export const state = {
     notice: '',
     busy: false,
     showAll: false,
+    /** What the list in hand was read against (floor-suggestions.js `suggestionsReadKey`); a different key reads again. */
+    readKey: null,
+    /** When the list was last read, and until when to keep reading it after the model or generation changed (the server stores its suggestion a little later). */
+    readAt: 0,
+    watchUntil: 0,
+  },
+  /** The eval runs of the open project (eval.js): the server's own runs of the golden set, newest first (ADR-0124). */
+  evalRuns: {
+    projectId: null,
+    status: 'idle', // 'idle' | 'loading' | 'done' | 'error'
+    error: '',
+    runs: [],
+    /** The project and the state of its index the runs in hand were read for; a change of either reads again. */
+    loadedKey: null,
+    /** A run is being asked for (the POST is in flight). */
+    busy: false,
+    /** What the last ask or wait said, when it was an outcome rather than a result (busy, no questions, no row came). */
+    notice: '',
+    /** A run asked for by hand and not yet in the list: `{ runId, since }`. */
+    pending: null,
+    shown: 10,
+    /** Ids of the runs whose details are open; held here because #detail is rebuilt on every poll. */
+    open: [],
+    /** When the newest run was last asked for on its own, and until when to ask faster (eval.js: the server starts runs by itself). */
+    peekedAt: 0,
+    watchUntil: 0,
+    /** The server time (ms) the thing the watch waits for a run after happened; a run that finished after it closes the watch. */
+    watchSince: 0,
   },
   /** The golden questions of the open project (golden.js): the stored set, how much of it is drawn, and which row awaits a delete confirmation. */
   golden: {
@@ -182,6 +210,13 @@ export const state = {
   timer: null,
   redirecting: false,
 };
+
+/**
+ * Whether a panel is waiting for something the server will write on its own (a run of the golden set, the
+ * floor suggestion measured after a re-index). The poll runs faster while one is, because a panel can only
+ * look when the poll calls it.
+ */
+export const isWatching = (now = Date.now()) => now < state.evalRuns.watchUntil || now < state.floorSuggestions.watchUntil;
 
 /** Feature modules `emit('refresh')`; app.js listens. Keeps the import graph a DAG. */
 export const bus = new EventTarget();
