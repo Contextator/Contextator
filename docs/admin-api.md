@@ -19,6 +19,40 @@ query parameters) and the audit log's guarantees and limits — what it records,
 does not (refused requests, actions that fail after committing), its performance at 200,004 rows,
 and that it is not tamper-evident: [Admin API](https://contextator.com/en/docs/admin-api/).
 
+## Golden-set eval runs
+
+A project's golden questions (`/api/projects/:id/golden-questions`) are asked of its live index by the server
+itself, and each run is kept, so a regression is visible without running anything. A run is started by a swap
+(a force or model-change re-index), by an incremental run that wrote chunks, removed files or recorded document
+changes, by a change to the set (after 60 seconds without another), and by a manager. A project with no golden
+questions does nothing and records nothing.
+
+| Method and path | Role | What it does |
+|---|---|---|
+| `GET /api/projects/:id/eval-runs?limit=` | viewer | The runs, newest first (`limit` 1 to 100, default 30), without per-question ranks. |
+| `GET /api/projects/:id/eval-runs/:runId` | viewer | One run, with `results`: `{ key, fp, rank }` per question asked (the 0-based rank of the right file in a page of ten, so `rank: 4` is fifth place; `null` when absent). Question text is never in a run. |
+| `POST /api/projects/:id/eval-runs` | manager | Starts a run now. `202 { runId }`; the run goes on in the background and is read back from the two routes above. The row is not guaranteed: a project deleted while it ran, a shutdown, or a failed write leave `runId` unwritten for good, so poll with a limit. A golden set emptied after the request is accepted records an `error` run. `409` when this project already has a run going or waiting, when the server is already running one (one at a time across the instance), or when the project has no golden questions. Audited. |
+
+A run carries `trigger` (`index_rebuild`, `index_incremental`, `golden_set`, `manual`), `status` (`ok` or `error`,
+with `error` saying why and no figures), `generation`, `embeddingModel`, `questionCount`, `scoredCount`, `recall5`,
+`mrr`, `regressed`, `comparedTo` and three lists of question keys: `lostKeys`, `skippedKeys` and `newlySkippedKeys`.
+
+- **Scored as `npm run eval -- --project` scores**: the same search with the floor off, no reranker (the server's
+  search path has none, and `--project` ignores `SEARCH_RERANK`) and the same scoring module, so the two figures
+  are one number.
+- **A question whose `expectFile` is not in the live index is skipped.** It leaves the denominator and is listed in
+  `skippedKeys`; one that the previous good run did ask is also in `newlySkippedKeys`, which is a warning and not
+  a regression. A run with nothing left to ask is an `error`.
+- **`regressed` is true when at least one question was lost** against the project's last `ok` run: it was in the
+  top five then, is asked now with the same text, expected file and heading, and is not in the top five now. The
+  count is gross, so a question gained elsewhere does not cancel a lost one. A question that was edited since is
+  not compared. The first run has nothing to be compared with.
+- **An index that changed during the run** (a swap) makes the run an `error`; the swap has already queued its own.
+- The last 100 runs per project are kept, and runs are not part of a project export.
+
+`/metrics` counts them without any label: `contextator_eval_runs_total`, `contextator_eval_run_errors_total` and
+`contextator_eval_regressions_total`. A project's score is never a metric.
+
 ## Scaling signals: when one process is no longer enough
 
 Contextator runs one process with one indexer queue on purpose. `/metrics` carries the histograms

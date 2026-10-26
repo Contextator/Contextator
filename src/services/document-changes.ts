@@ -455,3 +455,16 @@ export async function listDocumentChanges(db: Db, query: ListChangesQuery): Prom
   }
   return { changes, truncated: rows.length > limit };
 }
+
+/**
+ * How many paths a run recorded a change for. One of the three things that say an incremental run changed
+ * the index, and so that the golden set should be asked again ([ADR-0124](../../.ssot/ADR.md#adr-0124)
+ * rule 2); the other two are chunks written and files removed, which the run counts itself.
+ */
+export async function countChangesOfRun(db: Db, projectId: string, runId: string): Promise<number> {
+  const [row] = await db
+    .select({ total: sql<number>`count(*)::int` })
+    .from(documentChanges)
+    .where(and(eq(documentChanges.projectId, projectId), eq(documentChanges.runId, runId)));
+  return row?.total ?? 0;
+}

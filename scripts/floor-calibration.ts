@@ -28,7 +28,7 @@ import {
   type CorpusDocument,
   type XquadSet,
 } from './eval-corpora.js';
-import { aggregate, parseGoldenSet, parseNegativeSet, scoreRow, type GoldenRow } from './eval-scoring.js';
+import { aggregate, parseGoldenSet, parseNegativeSet, scoreRow, type GoldenRow } from '../src/services/eval-scoring.js';
 
 /**
  * `SEARCH_SCORE_FLOOR` over corpora of different shapes — the measurement Phase 17 asks for before the

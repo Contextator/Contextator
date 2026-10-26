@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { GOLDEN_ID_MESSAGE, GOLDEN_ID_RE, type GoldenRow, GoldenRowSchema } from '../src/services/golden-row.js';
+import { GOLDEN_ID_MESSAGE, GOLDEN_ID_RE, type GoldenRow, GoldenRowSchema } from './golden-row.js';
 
 /**
  * The scoring half of `npm run eval`, with nothing in it that touches a database, a model or a clock.
@@ -9,6 +9,11 @@ import { GOLDEN_ID_MESSAGE, GOLDEN_ID_RE, type GoldenRow, GoldenRowSchema } from
  * or whether the arithmetic did, and that question is only cheap to answer while the arithmetic can be
  * tested without a container and a 465 MB download. `test/eval-scoring.test.ts` is that test
  * ([ADR-0034](../../.ssot/ADR.md#adr-0034)).
+ *
+ * It lives in `src/services/` because two callers score with it: `scripts/eval.ts` and the server's own eval
+ * run (`eval-runs.ts`, [ADR-0124](../../.ssot/ADR.md#adr-0124)). One module is what keeps the figure the CLI prints and the
+ * figure the server stores the same number; a second copy of a measurement is how two numbers for one thing
+ * come to exist.
  */
 
 // The golden row's schema is shared with the project question set (`src/services/golden-row.ts`,
@@ -254,6 +259,18 @@ export interface Metrics {
    */
   gatedWithAnswer: number;
 }
+
+/**
+ * The page every eval question is asked with: ten rather than the product's default five. `recall@5` is the
+ * headline and needs only five, but a miss is far more informative when the report can say "rank 8" instead
+ * of "not found", and `MRR` over a window of five is mostly a restatement of `recall@5`. One constant for the
+ * CLI and the server's run ([ADR-0124](../../.ssot/ADR.md#adr-0124)), because a page of another size is
+ * another figure.
+ */
+export const EVAL_SEARCH_LIMIT = 10;
+
+/** Question ids in plain code-unit order: the same on every machine, which a collation is not. */
+export const byQuestionId = <T extends { row: { id: string } }>(a: T, b: T): number => (a.row.id < b.row.id ? -1 : a.row.id > b.row.id ? 1 : 0);
 
 const mean = (values: readonly number[]): number => (values.length === 0 ? 0 : values.reduce((a, b) => a + b, 0) / values.length);
 

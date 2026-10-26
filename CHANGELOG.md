@@ -24,8 +24,23 @@ ships, that stops.
   removed. Changes are kept for 90 days (a constant, no new environment variable) and swept on the session
   reaper's timer, including when `SEARCH_QUERY_LOG=0`.
 
+- The server asks a project's golden questions of its live index after the index changes, and keeps the answers
+  (ADR-0124). Migration `0027_eval_runs`; `GET /api/projects/:id/eval-runs` and `GET .../eval-runs/:runId` (viewer),
+  `POST /api/projects/:id/eval-runs` (manager, audited; `202`, or `409` while the project or the server is busy).
+  A run is triggered by a swap, by an incremental run that wrote chunks, removed files or recorded document
+  changes, by a change to the set (after 60 seconds without another) and by a manager. It is scored with the same
+  module as `npm run eval -- --project`, and `regressed` is true when at least one question that was in the top five
+  in the project's last good run is not now. The last 100 runs per project are kept, one run at a time on the
+  server and one waiting per project, and the project's own lock is not taken, so indexing is never held up by
+  one. `/metrics` gains `contextator_eval_runs_total`, `contextator_eval_run_errors_total` and
+  `contextator_eval_regressions_total`, with no label.
+
 ### Changed
 
+- `npm run eval -- --project` now skips a question whose `expectFile` is not in the project's live index, lists it
+  and leaves it out of the figures, where it refused the run (ADR-0124). `--strict` keeps the refusal. The run
+  still refuses when no question can be asked. `--project` no longer applies `SEARCH_RERANK=on`, since the server's search path does not rerank, so its figure is the one the server stores. The scoring module moved from `scripts/eval-scoring.ts` to
+  `src/services/eval-scoring.ts`, so the server and the CLI call one copy.
 - Starting with `RESET_VECTORS=1` now also forgets the record of document changes and starts it again from that
   moment (ADR-0123), in the transaction that deletes the documents. Without it the next run would have recorded the
   whole corpus as added.

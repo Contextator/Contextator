@@ -222,6 +222,23 @@ export interface McpGuardCounter {
   countAccessDenied(reason: AccessDeniedReason): void;
 }
 
+/**
+ * What the eval runner reports about a run it has recorded ([ADR-0124](../../.ssot/ADR.md#adr-0124)). No
+ * project, no score and no key goes with it: the counters are the instance's, and a score per project would
+ * be a label per project ([ADR-0105](../../.ssot/ADR.md#adr-0105)). Optional wherever it is taken, like the
+ * other observers.
+ */
+export interface EvalRunObserver {
+  countEvalRun(status: 'ok' | 'error', regressed: boolean): void;
+}
+
+/** The `contextator_eval_runs_total`, `contextator_eval_run_errors_total` and `contextator_eval_regressions_total` values. */
+export interface EvalRunSample {
+  runs: number;
+  errors: number;
+  regressions: number;
+}
+
 /** Times one tool call, handler start to answer. */
 export interface McpToolObserver {
   observeToolDuration(tool: string, seconds: number): void;
@@ -291,6 +308,8 @@ export interface MetricsSnapshot {
   mcpGuard?: McpGuardSample;
   /** MCP messages by method, tool and era. Optional so a snapshot built before it existed is still one. */
   mcpRequests?: McpRequestSample[];
+  /** Eval runs recorded since start, unlabelled (ADR-0124). Optional like `mcpGuard`. */
+  evalRuns?: EvalRunSample;
   /** Rendered after the gauges and counters, in the order given. Optional so a snapshot without any is still one. */
   histograms?: HistogramSnapshot[];
 }
@@ -302,7 +321,9 @@ export interface MetricsSnapshot {
  * read at scrape time by the route, which already has the composition root, and a registry that
  * reached for them would be a second place that knows how this application is wired.
  */
-export class MetricsRegistry implements SearchCounter, SearchObserver, IndexerObserver, McpRequestCounter, McpToolObserver, McpGuardCounter {
+export class MetricsRegistry
+  implements SearchCounter, SearchObserver, IndexerObserver, McpRequestCounter, McpToolObserver, McpGuardCounter, EvalRunObserver
+{
   private readonly searches: Record<QueryActor, number> = { mcp: 0, dashboard: 0 };
   private readonly mcpRequestCounts = new Map<string, McpRequestSample>();
   private readonly rateLimited: Record<RateLimitScope, number> = { token: 0, anonymous: 0, tool: 0 };
@@ -310,6 +331,9 @@ export class MetricsRegistry implements SearchCounter, SearchObserver, IndexerOb
   private readonly accessDenied: Record<AccessDeniedReason, number> = { network: 0 };
   private auditWritten = 0;
   private auditFailed = 0;
+  private evalRunCount = 0;
+  private evalRunErrors = 0;
+  private evalRegressions = 0;
   private readonly histogramFamilies = new Map<string, Histogram>();
   /** Read once per search, at the moment it is observed; see `watchIndexing`. */
   private indexingNow: () => boolean = () => false;
@@ -448,6 +472,18 @@ export class MetricsRegistry implements SearchCounter, SearchObserver, IndexerOb
     else this.auditFailed++;
   }
 
+  /** One recorded eval run; an `error` run counts in both the total and the error counter, a regression only when the run was `ok`. */
+  countEvalRun(status: 'ok' | 'error', regressed: boolean): void {
+    this.evalRunCount++;
+    if (status === 'error') this.evalRunErrors++;
+    else if (regressed) this.evalRegressions++;
+  }
+
+  /** The eval counters as they stand. */
+  evalRuns(): EvalRunSample {
+    return { runs: this.evalRunCount, errors: this.evalRunErrors, regressions: this.evalRegressions };
+  }
+
   gauges(): { searches: Record<QueryActor, number>; audit: { written: number; failed: number }; pool: PoolGauges | null } {
     return {
       searches: { ...this.searches },
@@ -556,6 +592,17 @@ export function renderPrometheus(snapshot: MetricsSnapshot): string {
     // the one failure of this subsystem worth waking somebody for.
     ['{outcome="failed"}', snapshot.audit.failed],
   ]);
+
+  // The server's own eval runs (ADR-0124). Three counters with no label: the instance's, and never a score per
+  // project, which would be a label per project (ADR-0105). A regression is a lost question, so the number
+  // worth alerting on is `regressions`, and `errors` says the measurement itself did not complete.
+  if (snapshot.evalRuns) {
+    family('contextator_eval_runs_total', 'Golden-set eval runs recorded since start, errors included.', 'counter', [['', snapshot.evalRuns.runs]]);
+    family('contextator_eval_run_errors_total', 'Eval runs that recorded an error instead of figures.', 'counter', [['', snapshot.evalRuns.errors]]);
+    family('contextator_eval_regressions_total', 'Eval runs that lost at least one question the previous good run answered.', 'counter', [
+      ['', snapshot.evalRuns.regressions],
+    ]);
+  }
 
   // Every MCP message by what it asked for and which protocol generation asked it: the `era` split is
   // what says when the last 2025-era client is gone (ADR-0098). The family is stated even before the

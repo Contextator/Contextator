@@ -214,7 +214,7 @@ with retrieval.
 ## Your own corpus and questions
 
 The same harness measures a corpus and a question set of your own. Nothing in `eval/` is touched, and the
-scoring is the one module `scripts/eval-scoring.ts`, so a figure from your set means the same thing as one
+scoring is the one module `src/services/eval-scoring.ts`, so a figure from your set means the same thing as one
 from ours.
 
 ```bash
@@ -236,7 +236,11 @@ DATABASE_URL=postgres://… npm run eval -- --project my-project   # a project's
   of that project's **live index**, through the same search path, instead of building a corpus. It reads
   the server's database from `DATABASE_URL`, writes nothing, and refuses to run, rather than print a number
   that means nothing, if the project has nothing indexed, was indexed with a different embedding model than
-  this process would use, has no questions, or has questions that expect a file its index does not hold.
+  this process would use, has no questions, or has none that can be asked. A question that expects a file
+  its live index does not hold is **skipped and listed**, and left out of the figures, as the server's own
+  runs do ([ADR-0124](../../.ssot/ADR.md#adr-0124)); `--strict` refuses the whole run for one, as `0.4.0` did.
+  It does not rerank even with `SEARCH_RERANK=on`: the server's search path does not, and the figure is the one the
+  server stores for the project.
   A project question's `expectFile` is the indexed document's path with its source name in front
   (`<source>/<path>`, e.g. `docs/guide/intro.md`), not a path inside the source.
   It cannot be combined with `--corpus` or `--golden`. A project's own relevance floor, when the instance

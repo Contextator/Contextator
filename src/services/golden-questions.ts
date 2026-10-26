@@ -13,10 +13,9 @@ export { type GoldenRow, GoldenRowSchema } from './golden-row.js';
  * really has instead of the repository's `eval/corpus/`.
  *
  * **This module stores and serves questions; it never scores them.** The arithmetic is
- * `scripts/eval-scoring.ts`, unchanged, and `npm run eval -- --project <name>` is the path that asks
- * these rows through `searchProject` and hands the answers to it. `src/` cannot import `scripts/`, so
- * the server has no route that runs an eval — it would need a second copy of the scoring, and a second
- * copy of a measurement is how two numbers for one thing come to exist.
+ * `eval-scoring.ts`, and the two paths that ask these rows through `searchProject` and hand the answers to it
+ * are `npm run eval -- --project <name>` and the server's own run after an index change (`eval-runs.ts`,
+ * [ADR-0124](../../.ssot/ADR.md#adr-0124)). Both call the one scoring module, so the two figures are one number.
  *
  * **Golden questions only.** A question whose right answer is nothing is a different row with a
  * different parser and never joins a golden denominator ([ADR-0045](../../.ssot/ADR.md#adr-0045)); the
@@ -233,7 +232,9 @@ export function formatGoldenJsonl(rows: readonly GoldenQuestionRow[]): string {
 /**
  * The questions whose `expectFile` is not a document of the project's live generation — the check
  * `parseGoldenSet` makes against the corpus directory, made against the index the question will be asked of.
- * A question pointing at a page nobody indexed would score zero for ever; the run refuses instead.
+ * A question pointing at a page nobody indexed would score zero for ever and read as a retrieval failure, so a
+ * run does not ask it: the server's run and the CLI both skip it and say so, and the CLI's `--strict` refuses
+ * the whole run as `0.4.0` did ([ADR-0124](../../.ssot/ADR.md#adr-0124)).
  */
 export async function findUnknownExpectFiles(db: Db, projectId: string, liveGeneration: number, rows: readonly GoldenRow[]): Promise<GoldenRow[]> {
   const wanted = [...new Set(rows.map((r) => r.expectFile))];
@@ -254,6 +255,21 @@ export async function findUnknownExpectFiles(db: Db, projectId: string, liveGene
     for (const f of found) known.add(f.path);
   }
   return rows.filter((r) => !known.has(r.expectFile));
+}
+
+/**
+ * The set split by whether each question can be asked of the live index: `scorable` expects a document the
+ * live generation holds, `skipped` expects one it does not ([ADR-0124](../../.ssot/ADR.md#adr-0124) rule 5).
+ * Both lists keep the order of `rows`, so the two callers, the server's run and the CLI, divide one set one way.
+ */
+export async function partitionByExpectFile(
+  db: Db,
+  projectId: string,
+  liveGeneration: number,
+  rows: readonly GoldenRow[],
+): Promise<{ scorable: GoldenRow[]; skipped: GoldenRow[] }> {
+  const unknown = new Set((await findUnknownExpectFiles(db, projectId, liveGeneration, rows)).map((r) => r.id));
+  return { scorable: rows.filter((r) => !unknown.has(r.id)), skipped: rows.filter((r) => unknown.has(r.id)) };
 }
 
 /** How many questions a project holds. */

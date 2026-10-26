@@ -33,7 +33,7 @@ import { UploadService } from '../../src/services/uploads.js';
 import { ImportRefusedError } from '../../src/services/transfer/manifest.js';
 import { exportProject } from '../../src/services/transfer/export.js';
 import { importProject } from '../../src/services/transfer/import.js';
-import { aggregate, type NegativeResult, NO_FLOORS, parseGoldenSet, parseNegativeSet, type RowResult } from '../../scripts/eval-scoring.js';
+import { aggregate, type NegativeResult, NO_FLOORS, parseGoldenSet, parseNegativeSet, type RowResult } from '../../src/services/eval-scoring.js';
 import { askQuestions, assembleReport, corpusFiles, evalTextSearchConfigs, indexCorpus, makeAsk, measureProject } from '../../scripts/eval.js';
 import { seedProject, STUB_MODEL_ID, stubEmbeddings } from './support/mcp-instance.js';
 import { applySchema, createTestDatabase, dropTestDatabase, silentLogger, TEST_EMBEDDING_DIMENSIONS, type TestDatabase } from './support/postgres.js';
@@ -325,15 +325,35 @@ describe('measureProject refuses what it cannot measure honestly', () => {
     await expect(measureProject(database.db, config, other, null, seeded.name, [])).rejects.toThrow(/was indexed with local:stub-bag-of-words:fp32/);
   });
 
-  it('questions that expect a file the live index does not hold', async () => {
+  it("questions that expect a file the live index does not hold, under --strict (0.4.0's refusal, ADR-0124)", async () => {
     const seeded = await seedProject(database.db, 'eval-missing-file', { path: 'a.md', body: '# A\n\nSome text about alpha.' });
     await replaceGoldenQuestions(database.db, seeded.id, [
       { key: 'present', lang: 'en', query: 'alpha', expectFile: 'a.md', tags: [] },
       { key: 'absent', lang: 'en', query: 'beta', expectFile: 'gone.md', tags: [] },
     ]);
-    await expect(measureProject(database.db, config, stubEmbeddings, null, seeded.name, [])).rejects.toThrow(
+    await expect(measureProject(database.db, config, stubEmbeddings, null, seeded.name, [], { strict: true })).rejects.toThrow(
       /1 of 2 questions expect a file the project's live index does not hold:\n {2}absent: gone\.md/,
     );
+  });
+
+  it('skips such a question and scores the rest, by default (ADR-0124)', async () => {
+    const seeded = await seedProject(database.db, 'eval-skips-file', { path: 'a.md', body: '# A\n\nSome text about alpha.' });
+    await replaceGoldenQuestions(database.db, seeded.id, [
+      { key: 'present', lang: 'en', query: 'alpha', expectFile: 'a.md', tags: [] },
+      { key: 'absent', lang: 'en', query: 'beta', expectFile: 'gone.md', tags: [] },
+    ]);
+    const measured = await measureProject(database.db, config, stubEmbeddings, null, seeded.name, []);
+    expect(measured.skipped.map((r) => r.id)).toEqual(['absent']);
+    expect(measured.golden.map((r) => r.id)).toEqual(['present']);
+    // The denominator is the questions asked: the skipped one is in neither the count nor the mean.
+    expect(measured.results).toHaveLength(1);
+    expect(aggregate(measured.results).questions).toBe(1);
+  });
+
+  it('refuses when nothing is left to ask', async () => {
+    const seeded = await seedProject(database.db, 'eval-all-skipped', { path: 'a.md', body: '# A\n\nSome text about alpha.' });
+    await replaceGoldenQuestions(database.db, seeded.id, [{ key: 'absent', lang: 'en', query: 'beta', expectFile: 'gone.md', tags: [] }]);
+    await expect(measureProject(database.db, config, stubEmbeddings, null, seeded.name, [])).rejects.toThrow(/has no question that can be asked/);
   });
 
   it('a project that does not exist', async () => {

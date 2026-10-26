@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GoldenRowSchema } from '../scripts/eval-scoring.js';
+import { GoldenRowSchema } from '../src/services/eval-scoring.js';
 import { buildExport, exportNote, questionId, toJsonl } from '../src/services/query-export.js';
 import { type RepeatedQuestion, rankQuestionsByGap } from '../src/services/query-summary.js';
 
