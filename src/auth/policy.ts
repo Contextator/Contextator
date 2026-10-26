@@ -102,6 +102,10 @@ const PROJECT_ROUTE_OVERRIDES: ReadonlyArray<{ method: string; url: string; need
   // suggestions is the `GET` default's (a viewer's).
   { method: 'POST', url: '/api/projects/:id/score-floor/suggestions', need: 'manager' },
   { method: 'POST', url: '/api/projects/:id/score-floor/suggestions/:suggestionId/apply', need: 'manager' },
+  // The golden set asked of the live index now ([ADR-0124](../../.ssot/ADR.md#adr-0124)). A run is up to a
+  // thousand searches in the one process that serves them, so asking for one is a manager's, as asking for a
+  // floor suggestion is; reading the stored runs is the `GET` default's (a viewer's).
+  { method: 'POST', url: '/api/projects/:id/eval-runs', need: 'manager' },
   // The project export ([ADR-0051](../../.ssot/ADR.md#adr-0051)). **A `GET`, and deliberately not a
   // viewer's.** A viewer can already read any one document, any excerpt and every source's settings
   // through the dashboard, which is the argument the `GET` default makes — and what the default cannot

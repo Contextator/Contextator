@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { Reranker } from '../src/services/reranker.js';
-import type { Report, RowResult } from './eval-scoring.js';
+import type { Report, RowResult } from '../src/services/eval-scoring.js';
 
 /**
  * The remote-rerank arm of the eval harness, and the gate it is judged by (K-22, the 0.5.0 measurement

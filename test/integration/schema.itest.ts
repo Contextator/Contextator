@@ -46,6 +46,8 @@ const EXPECTED_TABLES = [
   'document_changes',
   'document_sources',
   'documents',
+  // The golden set's runs against the live index, the last hundred per project ([ADR-0124](../../../.ssot/ADR.md#adr-0124)).
+  'eval_runs',
   // Measured relevance-floor advice, applied only on a manager's say ([ADR-0083](../../../.ssot/ADR.md#adr-0083)).
   'floor_suggestions',
   // A project's own golden questions, the rows `npm run eval -- --project` asks (FR-347).
@@ -269,7 +271,7 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     // anchored by `^mcp_rate_limits` and one nullable column on `mcp_tokens`; and `0024_floor_suggestions`
     // ([ADR-0083](../../../.ssot/ADR.md#adr-0083)), one whole new table anchored by `^floor_suggestions`; and `0025_golden_questions` (FR-347), one whole new
     // table anchored by `^golden_questions`; and `0026_document_changes` ([ADR-0123](../../../.ssot/ADR.md#adr-0123)), one whole new table anchored by
-    // `^document_changes`. So
+    // `^document_changes`; and `0027_eval_runs` ([ADR-0124](../../../.ssot/ADR.md#adr-0124)), one whole new table anchored by `^eval_runs`. So
     // the claim is no longer "nothing changed": it is that nothing changed *except* what those
     // migrations say they change, and the lines that moved are checked by name rather than counted.
     await applySchema(database);
@@ -278,7 +280,7 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
     expect(
       changed.filter(
         (line) =>
-          !/chunks_embedding_hnsw|index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config|^user_federated_identities|user_sessions \| \d+ \| auth_method \||user_sessions_auth_method_check|projects \| \d+ \| score_floor \||projects_score_floor_check|mcp_credentials_epoch|last_legacy_sse_at|documents \| \d+ \| source_(url|modified_at) \||projects \| \d+ \| max_(documents|chunks|upload_bytes) \||projects_max_(documents|chunks|upload_bytes)_check|^mcp_rate_limits|mcp_tokens \| \d+ \| allowed_cidrs \||^floor_suggestions|^golden_questions|^document_changes/.test(
+          !/chunks_embedding_hnsw|index_generation|live_generation|\| generation \||documents_project_path_uq|content_tsv|chunks_document_chunk_index_uq|documents \| \d+ \| content \||content_truncated|query_log_enabled|^search_quer|sync_interval_minutes|next_sync_at|document_sources_due_idx|index_runs \| \d+ \| trigger \||index_runs_trigger_check|webhook_verification_expires_at|webhook_due_at|webhook_min_interval_minutes|document_sources_webhook_due_idx|^oauth_clients|mcp_tokens \| \d+ \| (kind|user_id|client_id|expires_at) \||mcp_tokens_kind_check|mcp_tokens_user_id_fkey|mcp_tokens_client_id_fkey|mcp_tokens_user_idx|mcp_tokens_expires_idx|projects_mcp_auth_check|documents \| \d+ \| version \||^audit_events|^api_tokens|projects \| \d+ \| mcp_auth \||text_search_config|^user_federated_identities|user_sessions \| \d+ \| auth_method \||user_sessions_auth_method_check|projects \| \d+ \| score_floor \||projects_score_floor_check|mcp_credentials_epoch|last_legacy_sse_at|documents \| \d+ \| source_(url|modified_at) \||projects \| \d+ \| max_(documents|chunks|upload_bytes) \||projects_max_(documents|chunks|upload_bytes)_check|^mcp_rate_limits|mcp_tokens \| \d+ \| allowed_cidrs \||^floor_suggestions|^golden_questions|^document_changes|^eval_runs/.test(
             line,
           ),
       ),

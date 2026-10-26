@@ -60,6 +60,15 @@ describe('eval command line', () => {
     expect(() => parseArgs(['--golden', 'q.jsonl', '--project', 'p'], CWD)).toThrow(/cannot be combined/);
   });
 
+  it('reads --strict for --project only, and takes it off by default (ADR-0124)', () => {
+    expect(parseArgs(['--project', 'p'], CWD).strict).toBe(false);
+    expect(parseArgs(['--project', 'p', '--strict'], CWD).strict).toBe(true);
+    expect(parseArgs([], CWD).strict).toBe(false);
+    // Nothing to be strict about without a project's own questions: refused rather than ignored.
+    expect(() => parseArgs(['--strict'], CWD)).toThrow(/applies to --project only/);
+    expect(() => parseArgs(['--project', 'p', '--strict=1'], CWD)).toThrow(/takes no value/);
+  });
+
   it('refuses a value flag with no value rather than swallowing the next flag', () => {
     expect(() => parseArgs(['--corpus'], CWD)).toThrow(/takes a value/);
     expect(() => parseArgs(['--corpus', '--json'], CWD)).toThrow(/takes a value/);

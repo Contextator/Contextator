@@ -14,7 +14,7 @@ import type { QuestionPath, RepeatedQuestion } from './query-summary.js';
  *
  * ### The shape, and the cost that was chosen
  *
- * `scripts/eval-scoring.ts` validates a golden row with a **`z.strictObject`**: `id`, `lang`, `query`
+ * `eval-scoring.ts` validates a golden row with a **`z.strictObject`**: `id`, `lang`, `query`
  * and `expectFile` are required, `expectHeading`, `tags` and `note` optional, and any key the schema
  * does not name is rejected. An exported question has **no `expectFile`** — which document *should*
  * have answered it is a human judgement and the one thing the log cannot know — and no `lang`, because

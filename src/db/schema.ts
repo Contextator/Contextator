@@ -869,6 +869,74 @@ export const goldenQuestions = pgTable(
   ],
 );
 
+/** What asked for an eval run ([ADR-0124](../../.ssot/ADR.md#adr-0124)); a closed set, so a label or a column can be built on it. */
+export type EvalRunTrigger = 'index_rebuild' | 'index_incremental' | 'golden_set' | 'manual';
+
+/** One scored question of a run: its key, a digest of what was asked, and the 0-based rank of the right file in the page (null when absent). */
+export interface EvalRunResult {
+  key: string;
+  fp: string;
+  rank: number | null;
+}
+
+/**
+ * One run of a project's golden set against its live index ([ADR-0124](../../.ssot/ADR.md#adr-0124)), kept
+ * so that a change can be seen without anybody running anything: the figures, the questions lost since the
+ * last good run, and the ones that could not be asked.
+ *
+ * **`results` carries keys and ranks and never question text.** The text is in `golden_questions`, behind the
+ * same project access, and a question the operator later edits must not be readable here as it was.
+ * `fp` is what makes that edit visible to the next run's comparison: a question whose digest changed is not
+ * compared, so rewriting a question is not a regression.
+ *
+ * `compared_to` has no foreign key: the last hundred runs are kept, and the run it names may be pruned.
+ * Not exported with a project ([ADR-0051](../../.ssot/ADR.md#adr-0051) gives `index_runs` the same treatment):
+ * a run describes an index on this machine.
+ */
+export const evalRuns = pgTable(
+  'eval_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id').notNull(),
+    trigger: text('trigger').notNull().$type<EvalRunTrigger>(),
+    /** `ok` or `error`; an error carries no figures. */
+    status: text('status').notNull().$type<'ok' | 'error'>(),
+    error: text('error'),
+    /** The project's live generation when the run began; a run that saw it change is an error. */
+    generation: integer('generation').notNull(),
+    embeddingModel: text('embedding_model').notNull(),
+    /** Questions in the set when the run began. */
+    questionCount: integer('question_count').notNull(),
+    /** Questions asked: the denominator of the two figures below. */
+    scoredCount: integer('scored_count').notNull(),
+    recall5: doublePrecision('recall5'),
+    mrr: doublePrecision('mrr'),
+    regressed: boolean('regressed').notNull().default(false),
+    comparedTo: uuid('compared_to'),
+    lostKeys: text('lost_keys').array().notNull().default(sql`'{}'::text[]`),
+    /** Questions whose `expect_file` is not in the live generation: not asked, not in the denominator. */
+    skippedKeys: text('skipped_keys').array().notNull().default(sql`'{}'::text[]`),
+    /** The skipped ones that were asked in the run it was compared with: a page that went away, which is a warning and not a regression. */
+    newlySkippedKeys: text('newly_skipped_keys').array().notNull().default(sql`'{}'::text[]`),
+    results: jsonb('results').$type<EvalRunResult[]>(),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
+    finishedAt: timestamp('finished_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    foreignKey({ name: 'eval_runs_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    check('eval_runs_trigger_check', sql`${t.trigger} in ('index_rebuild', 'index_incremental', 'golden_set', 'manual')`),
+    check('eval_runs_status_check', sql`${t.status} in ('ok', 'error')`),
+    // A run either has its figures or says why it has none.
+    check(
+      'eval_runs_figures_check',
+      sql`(${t.status} = 'ok' and ${t.recall5} is not null and ${t.mrr} is not null) or (${t.status} = 'error' and ${t.error} is not null)`,
+    ),
+    // `nullsFirst()` for the reason `index_runs_project_idx` has it: PostgreSQL's own default for DESC.
+    index('eval_runs_project_started_idx').on(t.projectId, t.startedAt.desc().nullsFirst()),
+  ],
+);
+export type EvalRunRow = typeof evalRuns.$inferSelect;
+
 /** Dashboard accounts. `root` and `admin` reach every project; a `member` only its memberships. */
 export const users = pgTable(
   'users',

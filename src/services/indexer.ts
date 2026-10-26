@@ -8,7 +8,7 @@ import { chunkReserveTokens } from './chunk-budget.js';
 import { chunkMarkdown, embeddingText } from './chunker.js';
 import { ConversionService } from './conversion/client.js';
 import { checkFileSize, DocumentExtractionError, readFailure } from './doc-types/index.js';
-import { deleteDocumentsRecordingChanges, recordRebuildChanges } from './document-changes.js';
+import { countChangesOfRun, deleteDocumentsRecordingChanges, recordRebuildChanges } from './document-changes.js';
 import { assertRebuildDiskSpace, InsufficientDiskError } from './disk-space.js';
 import { QuotaExceededError } from './errors.js';
 import { resolveQuota } from './quotas.js';
@@ -161,6 +161,17 @@ export interface IndexerDeps {
    * runs after the swap has been committed, so nothing it does can fail the run or hold the queue.
    */
   onModelChangeRebuilt?: (projectId: string) => Promise<void>;
+  /**
+   * Told once for each run that **changed what the project's index holds**, which is the moment its golden
+   * set stops being answered by the index it was last asked of ([ADR-0124](../../.ssot/ADR.md#adr-0124)):
+   * a swap (`index_rebuild`, always), or an incremental run that wrote chunks, removed files or recorded
+   * document changes (`index_incremental`). A run that wrote nothing does not call it, and `files_updated`
+   * is not the test: it counts files that were read and wrote nothing, an empty document being re-read on every run.
+   *
+   * Optional, and unset it does nothing. Not awaited, and its failure is logged and swallowed, like
+   * {@link onModelChangeRebuilt}: it runs after the index has changed and must not hold or fail the run.
+   */
+  onIndexChanged?: (projectId: string, trigger: 'index_rebuild' | 'index_incremental') => void | Promise<void>;
 }
 
 const ACTIVE_PHASES: ReadonlySet<JobPhase> = new Set(['queued', 'syncing', 'scanning', 'embedding', 'finalizing']);
@@ -375,6 +386,27 @@ export class Indexer {
     void Promise.resolve()
       .then(() => hook(projectId))
       .catch((err: unknown) => log.warn({ err, projectId }, 'post-rebuild hook failed'));
+  }
+
+  /** Fire and forget: see {@link IndexerDeps.onIndexChanged}. */
+  private notifyIndexChanged(projectId: string, trigger: 'index_rebuild' | 'index_incremental', log: Logger): void {
+    const hook = this.deps.onIndexChanged;
+    if (!hook) return;
+    void Promise.resolve()
+      .then(() => hook(projectId, trigger))
+      .catch((err: unknown) => log.warn({ err, projectId, trigger }, 'index-changed hook failed'));
+  }
+
+  /**
+   * Whether an incremental run changed the index ([ADR-0124](../../.ssot/ADR.md#adr-0124) rule 2). A failed
+   * count is read as "yes": a run asked once too often costs a search per question, one never asked hides a regression.
+   */
+  private async changedIndex(job: JobState, projectId: string, runId: string): Promise<boolean> {
+    if (job.chunksDone > 0 || job.filesRemoved > 0) return true;
+    return countChangesOfRun(this.deps.db, projectId, runId).then(
+      (changes) => changes > 0,
+      () => true,
+    );
   }
 
   /** Persists a finished job to `index_runs`; failures are logged and never affect the indexing result. */
@@ -1206,6 +1238,10 @@ export class Indexer {
         );
         await this.recordRun(job, runId, log);
         if (modelChanged && !error) this.notifyModelChangeRebuilt(project.id, log);
+        // After the swap or the writes are committed, and for a run that finished with source errors too: what
+        // it published is served either way, so the golden set is asked of it.
+        if (rebuild) this.notifyIndexChanged(project.id, 'index_rebuild', log);
+        else if (await this.changedIndex(job, project.id, runId)) this.notifyIndexChanged(project.id, 'index_incremental', log);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         job.phase = 'error';
@@ -1237,6 +1273,9 @@ export class Indexer {
         // best-effort contract: if this fails the rows stay, and the next run collects them.
         if (generation !== live) await this.sweep(project.id, live, log);
         await this.recordRun(job, runId, log);
+        // An incremental run that failed part-way (a quota, a disk) wrote what it finished straight into the
+        // live generation, so the index did change; a failed rebuild published nothing and says nothing.
+        if (!rebuild && (job.chunksDone > 0 || job.filesRemoved > 0)) this.notifyIndexChanged(project.id, 'index_incremental', log);
       }
     });
   }

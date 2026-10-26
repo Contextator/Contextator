@@ -15,7 +15,7 @@ import { createEmbeddingProvider, type EmbeddingProvider } from '../src/services
 import { extractDocument } from '../src/services/doc-types/index.js';
 import { createReranker, type Reranker } from '../src/services/reranker.js';
 import { readAndHash } from '../src/services/fs-scan.js';
-import { findUnknownExpectFiles, listGoldenQuestions, toGoldenRow } from '../src/services/golden-questions.js';
+import { listGoldenQuestions, partitionByExpectFile, toGoldenRow } from '../src/services/golden-questions.js';
 import { getProjectById, getProjectByName } from '../src/services/projects.js';
 import { belowRelevanceFloor, effectiveScoreFloor } from '../src/services/relevance.js';
 import { searchProject, type SearchDeps } from '../src/services/search.js';
@@ -39,6 +39,8 @@ import {
 import {
   buildRefusalReport,
   buildReport,
+  byQuestionId,
+  EVAL_SEARCH_LIMIT,
   formatMarkdown,
   formatText,
   gateVerdict,
@@ -56,7 +58,7 @@ import {
   type RowResult,
   type RunContext,
   type ScoredHit,
-} from './eval-scoring.js';
+} from '../src/services/eval-scoring.js';
 import { createRemoteReranker, parseRerankUrl, RemoteReranker } from './eval-rerank-remote.js';
 
 /**
@@ -111,12 +113,8 @@ const DEFAULT_CORPUS_DIR = path.join(REPO_ROOT, 'eval', 'corpus');
 const DEFAULT_GOLDEN_PATH = path.join(REPO_ROOT, 'eval', 'golden.jsonl');
 const DEFAULT_NEGATIVE_PATH = path.join(REPO_ROOT, 'eval', 'negative.jsonl');
 
-/**
- * Ten rather than the product's default five. `recall@5` is the headline and needs only five, but a
- * miss is far more informative when the report can say "rank 8" instead of "not found", and `MRR` over
- * a window of five is mostly a restatement of `recall@5`.
- */
-const SEARCH_LIMIT = 10;
+/** The page every question is asked with; `EVAL_SEARCH_LIMIT` is shared with the server's run (ADR-0124), so the two figures describe one page. */
+const SEARCH_LIMIT = EVAL_SEARCH_LIMIT;
 
 const PROJECT_NAME = 'eval';
 
@@ -206,6 +204,8 @@ export interface Options {
   rerankUrl: string | null;
   /** Where to write the remote rerank's latency summary as JSON (`--rerank-latency`). Only with `--rerank-url`. */
   rerankLatencyPath: string | null;
+  /** `--project` only: refuse the run when a question expects a file the live index does not hold, as `0.4.0` did, instead of skipping it. */
+  strict: boolean;
 }
 
 const USAGE = `Usage: npm run eval [-- <options>]
@@ -218,7 +218,12 @@ const USAGE = `Usage: npm run eval [-- <options>]
                            none, because those rows describe the repository's corpus.
   --project <name|id>      Ask the question set stored for a project (the admin API's golden-questions)
                            of that project's live index, through the same search path. Reads DATABASE_URL
-                           and indexes nothing. Cannot be combined with --corpus or --golden.
+                           and indexes nothing. Cannot be combined with --corpus or --golden. A question
+                           whose expectFile is not in the live index is skipped, listed, and left out of
+                           the figures; the server's own runs do the same (ADR-0124). It never reranks
+                           with the local model, whatever SEARCH_RERANK says: the server's search path
+                           does not. Only --rerank-url reranks it.
+  --strict                 With --project: refuse the whole run when such a question exists, as 0.4.0 did.
   --rerank-url <url>       Rerank the fused pool with a remote cross-encoder behind a TEI-compatible
                            /rerank endpoint (e.g. http://127.0.0.1:8089) instead of the local model. A
                            measurement arm: scripts/eval-rerank-remote.ts compares it with a run without.
@@ -297,6 +302,7 @@ export function parseArgs(argv: readonly string[], cwd: string = invocationDirec
   let project: string | null = null;
   let rerankUrl: string | null = null;
   let rerankLatency: string | null = null;
+  let strict = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -340,6 +346,10 @@ export function parseArgs(argv: readonly string[], cwd: string = invocationDirec
         if (value === null) quietText = true;
         break;
       }
+      case '--strict':
+        if (value !== null) throw new Error('--strict takes no value');
+        strict = true;
+        break;
       case '--min-recall5':
         floors.recall5 = parseFloor(flag, value);
         break;
@@ -357,6 +367,8 @@ export function parseArgs(argv: readonly string[], cwd: string = invocationDirec
     throw new Error('--project asks the questions stored for a project of its live index; it cannot be combined with --corpus or --golden');
   }
   if (rerankLatency !== null && rerankUrl === null) throw new Error('--rerank-latency measures the remote rerank and needs --rerank-url');
+  if (strict && project === null)
+    throw new Error('--strict applies to --project only: it refuses a question that expects a file the live index does not hold');
   if (!quietText) outputs.unshift({ format: 'text', file: null });
 
   const corpusDir = corpus === null ? DEFAULT_CORPUS_DIR : path.resolve(cwd, corpus);
@@ -374,6 +386,7 @@ export function parseArgs(argv: readonly string[], cwd: string = invocationDirec
     customSet,
     rerankUrl,
     rerankLatencyPath: rerankLatency,
+    strict,
   };
 }
 
@@ -618,9 +631,6 @@ export async function askQuestions(
   return { results, negativeResults, searchMs: Date.now() - searchStart };
 }
 
-/** Question ids in plain code-unit order: the same on every machine, which a collation is not. */
-const byQuestionId = <T extends { row: { id: string } }>(a: T, b: T): number => (a.row.id < b.row.id ? -1 : a.row.id > b.row.id ? 1 : 0);
-
 /**
  * The report for a set of results, whatever order they were asked in.
  *
@@ -699,6 +709,7 @@ function labelFor(absolute: string): string {
 async function warmModels(
   config: Config,
   options: Options,
+  withLocalReranker = true,
 ): Promise<{ embeddings: EmbeddingProvider; reranker: Reranker | null; modelLoadMs: number }> {
   const embeddings = createEmbeddingProvider(config, evalLogger);
   step(`eval: loading ${embeddings.id} (a first run downloads it, which takes minutes)`);
@@ -710,7 +721,7 @@ async function warmModels(
   // here rather than on the first question so that its load does not land inside `searchMs` and read
   // as latency every search pays.
   if (options.rerankUrl !== null) {
-    if (config.SEARCH_RERANK === 'on') {
+    if (config.SEARCH_RERANK === 'on' && withLocalReranker) {
       throw new Error('--rerank-url and SEARCH_RERANK=on both name a reranker; a run measures one, so set only one of them');
     }
     const remote = createRemoteReranker({ url: options.rerankUrl });
@@ -718,7 +729,7 @@ async function warmModels(
     await remote.warmup();
     return { embeddings, reranker: remote, modelLoadMs };
   }
-  const reranker = createReranker(config, evalLogger);
+  const reranker = withLocalReranker ? createReranker(config, evalLogger) : null;
   if (reranker) {
     step(`eval: loading ${reranker.id} (a first run downloads it, which takes minutes)`);
     await reranker.warmup();
@@ -886,7 +897,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** What a project run measured: the two result lists, plus the facts the report needs about the index it asked. */
 export interface ProjectMeasurement {
   project: ProjectRow;
+  /** The questions that were asked: the set less `skipped`. */
   golden: GoldenRow[];
+  /** The questions left out because their `expectFile` is not in the live index (ADR-0124). */
+  skipped: GoldenRow[];
   results: RowResult[];
   negativeResults: NegativeResult[];
   /** The floor `refused` was decided against: the instance's, or the project's own (ADR-0083). */
@@ -907,8 +921,13 @@ async function findProject(db: Db, nameOrId: string): Promise<ProjectRow> {
  *
  * What it refuses, because each would produce a number nobody could stand behind: a project with no
  * questions; one with nothing indexed; one indexed by a model this instance does not run (the vectors
- * would be compared across models); and a question whose `expectFile` is not a document of the live
- * generation, which would score zero for ever and read as a retrieval failure.
+ * would be compared across models); and a project none of whose questions can be asked.
+ *
+ * **A question whose `expectFile` is not a document of the live generation is skipped, and said so**
+ * ([ADR-0124](../.ssot/ADR.md#adr-0124)): asked, it would score zero for ever and read as a retrieval
+ * failure, and refusing the run for it would blind the measurement of every other question until a person
+ * edited the set. It leaves the denominator, as it does in the server's own run, so the two figures stay one
+ * number. `strict` keeps `0.4.0`'s refusal, for an operator who wants a stale set to stop the run.
  *
  * `negative` is passed in by the caller and asked through the same loop as the corpus run's — a separate
  * list, a separate type, never merged into the project's questions (ADR-0045).
@@ -920,6 +939,7 @@ export async function measureProject(
   reranker: Reranker | null,
   nameOrId: string,
   negative: readonly NegativeRow[],
+  options: { strict?: boolean } = {},
 ): Promise<ProjectMeasurement> {
   const project = await findProject(db, nameOrId);
   if (project.chunkCount === 0) throw new Error(`Project ${project.name} has nothing indexed, so there is nothing to ask`);
@@ -932,14 +952,18 @@ export async function measureProject(
 
   const rows = await listGoldenQuestions(db, project.id);
   if (rows.length === 0) throw new Error(`Project ${project.name} has no golden questions; add some through the admin API first`);
-  const golden = rows.map(toGoldenRow);
-  const unknown = await findUnknownExpectFiles(db, project.id, project.liveGeneration, golden);
-  if (unknown.length > 0) {
-    throw new Error(
-      `${unknown.length} of ${golden.length} questions expect a file the project's live index does not hold:\n  ` +
-        unknown.map((r) => `${r.id}: ${r.expectFile}`).join('\n  '),
+  const { scorable: golden, skipped } = await partitionByExpectFile(db, project.id, project.liveGeneration, rows.map(toGoldenRow));
+  if (skipped.length > 0) {
+    const list = skipped.map((r) => `${r.id}: ${r.expectFile}`).join('\n  ');
+    if (options.strict) {
+      throw new Error(`${skipped.length} of ${rows.length} questions expect a file the project's live index does not hold:\n  ${list}`);
+    }
+    step(
+      `eval: skipping ${skipped.length} of ${rows.length} questions that expect a file the project's live index does not hold (--strict refuses instead):\n  ${list}`,
     );
   }
+  if (golden.length === 0)
+    throw new Error(`Project ${project.name} has no question that can be asked: every one expects a file its live index does not hold`);
 
   const refusalFloor = effectiveScoreFloor(config.SEARCH_SCORE_FLOOR, project.scoreFloor);
   const ask = makeAsk({ db, embeddings, config, reranker, projectId: project.id, refusalFloor });
@@ -964,7 +988,7 @@ export async function measureProject(
         'so this is real traffic on a live server unless it is a bug (ADR-0047).',
     );
   }
-  return { project, golden, ...asked, refusalFloor };
+  return { project, golden, skipped, ...asked, refusalFloor };
 }
 
 /** The project run: the same questions-and-scoring as the corpus run, against a live project's own index. */
@@ -977,16 +1001,22 @@ async function runProject(options: Options): Promise<GateVerdict> {
   const nameOrId = options.project ?? '';
 
   const negative = await readNegatives(options);
-  const { embeddings, reranker, modelLoadMs } = await warmModels(config, options);
+  // No local reranker, whatever `SEARCH_RERANK` says: no search path of the server attaches one, and the server's own runs
+  // (ADR-0124) are scored without. A project's figure from here is then the figure the server stores for it. Only the
+  // explicit `--rerank-url` measurement arm (K-22) changes that.
+  if (config.SEARCH_RERANK === 'on') step('eval: SEARCH_RERANK=on is ignored with --project: the server does not rerank, so neither does this run');
+  const { embeddings, reranker, modelLoadMs } = await warmModels(config, options, false);
   const { db, pool } = createDb(url);
   try {
-    const measured = await measureProject(db, config, embeddings, reranker, nameOrId, negative);
+    const measured = await measureProject(db, config, embeddings, reranker, nameOrId, negative, { strict: options.strict });
     await reportRerankLatency(reranker, options);
     const scan = scanFrom(config);
     const selection = selectionFrom(config);
     const context: RunContext = {
       commit: commitDescription(),
-      subject: `project ${measured.project.name} + its ${measured.golden.length} stored questions`,
+      subject:
+        `project ${measured.project.name} + its ${measured.golden.length} stored questions` +
+        (measured.skipped.length > 0 ? ` (${measured.skipped.length} skipped: file not in the live index)` : ''),
       providerId: embeddings.id,
       embeddingModel: embeddings.model,
       embeddingDtype: config.EMBEDDING_DTYPE,

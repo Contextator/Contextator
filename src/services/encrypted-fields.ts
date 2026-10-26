@@ -115,6 +115,12 @@ export const UNENCRYPTED_SECRET_COLUMNS: Readonly<Record<string, string>> = {
     'The name of a setting — "schema_version", not key material. It is here only because the guard test matches column names and would otherwise ask about it on every run.',
   'golden_questions.key':
     'The stable name of an eval question ("pricing-tiers"), the `id` of a golden.jsonl row — not key material. Here only because the guard test matches column names.',
+  'eval_runs.lost_keys':
+    'Names of golden questions ("pricing-tiers") that a run lost — the `golden_questions.key` values, not key material. Here only because the guard test matches column names.',
+  'eval_runs.skipped_keys':
+    'Names of golden questions a run could not ask, like eval_runs.lost_keys: not key material. Here only because the guard test matches column names.',
+  'eval_runs.newly_skipped_keys':
+    'Names of golden questions a run could no longer ask, like eval_runs.lost_keys: not key material. Here only because the guard test matches column names.',
 };
 
 /**

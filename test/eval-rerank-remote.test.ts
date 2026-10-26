@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { createRemoteReranker, formatGate, judgeRerankGate, parseRerankResponse, parseRerankUrl, percentile } from '../scripts/eval-rerank-remote.js';
-import type { Report, RowResult } from '../scripts/eval-scoring.js';
+import type { Report, RowResult } from '../src/services/eval-scoring.js';
 
 /**
  * The remote-rerank arm of the eval harness and its gate. The client has to be unable to hand the search a

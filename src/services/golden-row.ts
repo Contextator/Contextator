@@ -4,7 +4,7 @@ import { z } from 'zod';
  * The shape of one golden question, in the one place both halves of the eval can import it from
  * (Faz 09 of 0.4.0, FR-347).
  *
- * `scripts/eval-scoring.ts` reads `golden.jsonl` with it and `services/golden-questions.ts` stores and
+ * `eval-scoring.ts` reads `golden.jsonl` with it and `services/golden-questions.ts` stores and
  * serves the same rows, so a question set exported from a project is a file `npm run eval -- --golden`
  * reads and the other way round. It lives in a module of its own, with zod as its only import, because
  * `eval-scoring.ts` is deliberately a module nothing database-shaped can reach: a scoring bug has to

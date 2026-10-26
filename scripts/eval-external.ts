@@ -14,7 +14,7 @@ import {
   XQUAD_LANGUAGES,
   type XquadLanguage,
 } from './eval-corpora.js';
-import { aggregate, scoreRow, type Metrics, type RowResult } from './eval-scoring.js';
+import { aggregate, scoreRow, type Metrics, type RowResult } from '../src/services/eval-scoring.js';
 
 /**
  * Retrieval on the external set — XQuAD, tr and en — reported **apart from** `npm run eval`.

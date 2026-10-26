@@ -24,6 +24,7 @@ import { MCP_EXPOSED_HEADERS, mcpRoutes } from './mcp/router.js';
 import { SessionRegistry } from './mcp/sessions.js';
 import { newChunkBudgetState, verifyChunkBudget } from './services/chunk-budget.js';
 import { createEmbeddingProvider, loadEmbeddingTokenizer } from './services/embeddings/index.js';
+import { EvalRunner } from './services/eval-runs.js';
 import { generateFloorSuggestion } from './services/floor-calibration.js';
 import { Indexer } from './services/indexer.js';
 import { KeyedMutex } from './services/locks.js';
@@ -100,7 +101,19 @@ async function main(): Promise<void> {
       log.info({ projectId, outcome: outcome.status }, 'no relevance floor suggestion stored');
     }
   };
-  const indexer = new Indexer({ db, embeddings, config, log, locks, metrics, onModelChangeRebuilt });
+  // The golden set asked of the live index after the index changes (ADR-0124). Built before the indexer, which
+  // calls it from its hook; it takes no part of the indexer's own locking, so a run never holds indexing up.
+  const evalRuns = new EvalRunner({ db, embeddings, scan: scanFrom(config), selection: selectionFrom(config), log, metrics });
+  const indexer = new Indexer({
+    db,
+    embeddings,
+    config,
+    log,
+    locks,
+    metrics,
+    onModelChangeRebuilt,
+    onIndexChanged: (projectId, trigger) => evalRuns.request(projectId, trigger),
+  });
   const uploads = new UploadService(config);
   const setup = new SetupGate();
   const loginLimiter = new SlidingWindow(config.AUTH_LOGIN_MAX_ATTEMPTS, config.AUTH_LOGIN_WINDOW_MIN * 60_000);
@@ -117,6 +130,7 @@ async function main(): Promise<void> {
     embeddings,
     chunkBudget: newChunkBudgetState(),
     indexer,
+    evalRuns,
     locks,
     uploads,
     sessions,
@@ -161,6 +175,8 @@ async function main(): Promise<void> {
     stopSessionReaper?.();
     stopSyncScheduler?.();
     await sessions.closeAll();
+    // Before the pool: a run that is asking stops at its next question and writes no row (ADR-0124).
+    await evalRuns.stop();
     // The conversion thread is the one piece of the indexer that outlives a run (ADR-0071); an
     // in-flight file is refused rather than left holding the process open.
     await indexer.stop();

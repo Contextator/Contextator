@@ -106,6 +106,21 @@ describe('the Prometheus exposition', () => {
     expect(fresh).not.toMatch(/contextator_source[a-z_]*\{/);
   });
 
+  it('carries the eval counters unlabelled, a regression counted only for a run that produced figures (ADR-0124, ADR-0105)', () => {
+    const registry = new MetricsRegistry();
+    registry.countEvalRun('ok', false);
+    registry.countEvalRun('ok', true);
+    registry.countEvalRun('error', false);
+    const text = renderPrometheus({ ...SNAPSHOT, evalRuns: registry.evalRuns() });
+    expect(samplesOf(text, 'contextator_eval_runs_total')).toEqual(['contextator_eval_runs_total 3']);
+    expect(samplesOf(text, 'contextator_eval_run_errors_total')).toEqual(['contextator_eval_run_errors_total 1']);
+    expect(samplesOf(text, 'contextator_eval_regressions_total')).toEqual(['contextator_eval_regressions_total 1']);
+    // No project, question or score in any sample of the three.
+    expect(text).not.toMatch(/contextator_eval[a-z_]*\{/);
+    // A snapshot built without them states none of them.
+    expect(renderPrometheus(SNAPSHOT)).not.toContain('contextator_eval');
+  });
+
   it('states no lag while no scheduled source has synced, rather than a 0 that reads as fresh', () => {
     const none = renderPrometheus({ ...SNAPSHOT, sourceFreshness: { oldestSyncedAtSeconds: null, lagSeconds: null, neverSynced: 1 } });
     expect(samplesOf(none, 'contextator_source_freshness_lag_seconds')).toEqual([]);

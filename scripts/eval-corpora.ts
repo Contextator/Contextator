@@ -26,7 +26,7 @@ import {
   type RunningPostgres,
   type TestDatabase,
 } from '../test/integration/support/postgres.js';
-import { GoldenRowSchema, NegativeRowSchema, type GoldenRow, type NegativeRow } from './eval-scoring.js';
+import { GoldenRowSchema, NegativeRowSchema, type GoldenRow, type NegativeRow } from '../src/services/eval-scoring.js';
 
 /**
  * The corpora the measurements beside `npm run eval` read, and the one indexing loop they share.
