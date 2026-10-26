@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { adminRoutes } from '../src/admin/routes.js';
 import { oauthRoutes } from '../src/mcp/oauth-routes.js';
 import { EnvSchema, loadConfig, OAUTH_REGISTER_MAX_PER_HOST } from '../src/config.js';
@@ -137,12 +137,12 @@ describe('TRUST_PROXY decides what the rate-limited routes are keyed on', () => 
    * The same assertion from the other side: the setting has to actually *work* when an operator turns
    * it on, or the answer to the flaw would be "there is no way to run behind a proxy".
    */
-  it('reads X-Forwarded-For at TRUST_PROXY=1, so each claimed host gets its own budget', async () => {
-    const many = await buildApi({ TRUST_PROXY: '1' });
+  it('reads X-Forwarded-For from a loopback proxy at TRUST_PROXY=loopback, so each claimed host gets its own budget', async () => {
+    const many = await buildApi({ TRUST_PROXY: 'loopback' });
     expect(await fromManyClaimedHosts(many, MAX_ATTEMPTS + 2)).toEqual(Array.from({ length: MAX_ATTEMPTS + 2 }, () => 400));
     await many.close();
 
-    const one = await buildApi({ TRUST_PROXY: '1' });
+    const one = await buildApi({ TRUST_PROXY: 'loopback' });
     expect(await fromOneClaimedHost(one, MAX_ATTEMPTS + 1)).toEqual(spent(MAX_ATTEMPTS));
     await one.close();
   });
@@ -204,7 +204,7 @@ describe('TRUST_PROXY decides what the rate-limited routes are keyed on', () => 
     expect(refused.json().error).toBe('temporarily_unavailable');
     await app.close();
 
-    const trusting = await buildOauthApi({ TRUST_PROXY: '1' });
+    const trusting = await buildOauthApi({ TRUST_PROXY: 'loopback' });
     for (let i = 0; i <= OAUTH_REGISTER_MAX_PER_HOST; i++) {
       expect((await register(trusting, `198.51.100.${i % 254}`)).statusCode).toBe(400);
     }
@@ -238,7 +238,7 @@ describe('TRUST_PROXY decides req.protocol as well, which is what the published 
   it('reads https once the proxy is named, and still not for anybody else', async () => {
     expect(await protocolSeenBy({ TRUST_PROXY: '10.0.0.0/8' })).toBe('https');
     expect(await protocolSeenBy({ TRUST_PROXY: '10.0.0.0/8' }, '192.0.2.5')).toBe('http');
-    expect(await protocolSeenBy({ TRUST_PROXY: '1' })).toBe('https');
+    expect(await protocolSeenBy({ TRUST_PROXY: 'loopback' }, '127.0.0.1')).toBe('https');
   });
 
   /**
@@ -264,7 +264,7 @@ describe('a TRUST_PROXY that disagrees with the traffic says so, once', () => {
     const config = loadConfig({ DATABASE_URL: 'postgres://unused/unused', ...env });
     const app = Fastify({ logger: false, ...httpServerOptions(config) });
     const said: string[] = [];
-    warnAboutProxyConfiguration(app, config, (message) => said.push(message));
+    warnAboutProxyConfiguration(app, (message) => said.push(message));
     app.get('/probe', async () => ({ ok: true }));
     for (const r of requests) await app.inject({ method: 'GET', url: '/probe', remoteAddress: r.from ?? '10.1.2.3', headers: r.headers ?? {} });
     await app.close();
@@ -296,19 +296,9 @@ describe('a TRUST_PROXY that disagrees with the traffic says so, once', () => {
     expect(await runWith({}, [{ headers: {} }, { headers: {} }])).toEqual([]);
     expect(await runWith({ TRUST_PROXY: '10.0.0.0/8' }, [{ from: '10.1.2.3', headers: { 'x-forwarded-for': '203.0.113.9' } }])).toEqual([]);
   });
-
-  /** `TRUST_PROXY=1` is the danger the setting *is*, so it needs no evidence and waits for no request. */
-  it('states the risk of TRUST_PROXY=1 at startup, without waiting for traffic', async () => {
-    const said = await runWith({ TRUST_PROXY: '1' }, []);
-    expect(said).toHaveLength(1);
-    expect(said[0]).toContain('every hop');
-    // The deprecation (ADR-0122) rides on the same line, once per start.
-    expect(said[0]).toContain('0.5.0');
-    expect(said[0]).toContain('ADR-0122');
-  });
 });
 
-describe('TRUST_PROXY accepts three forms and refuses the rest', () => {
+describe('TRUST_PROXY accepts two forms and refuses the rest', () => {
   const parse = (value: string) => EnvSchema.safeParse({ DATABASE_URL: 'postgres://unused/unused', TRUST_PROXY: value });
   const parsed = (value: string) => {
     const result = parse(value);
@@ -320,9 +310,62 @@ describe('TRUST_PROXY accepts three forms and refuses the rest', () => {
     expect(EnvSchema.parse({ DATABASE_URL: 'postgres://unused/unused' }).TRUST_PROXY).toBe(false);
   });
 
-  it('takes both spellings of each boolean', () => {
+  it('takes both spellings of off', () => {
     for (const off of ['0', 'false', 'FALSE', ' false ']) expect(parsed(off)).toBe(false);
-    for (const on of ['1', 'true', 'TRUE', ' 1 ']) expect(parsed(on)).toBe(true);
+  });
+
+  /**
+   * [ADR-0122](../.ssot/ADR.md#adr-0122): `1`/`true` ("trust every hop") was deprecated in 0.4.1 and is refused
+   * since 0.5.0. The refusal has to carry the way out, or the operator whose container stopped starting is left
+   * to find it in the changelog: it names the value written and each of the three replacements.
+   */
+  it('refuses 1 and true in every spelling, and says what to write instead', () => {
+    for (const on of ['1', 'true', 'TRUE', 'True', ' 1 ', ' true ']) {
+      const result = parse(on);
+      expect(result.success, on).toBe(false);
+      if (result.success) continue;
+      const message = result.error.issues.map((issue) => issue.message).join('\n');
+      expect(message, on).toContain(`TRUST_PROXY=${on.trim()}`);
+      // ADR-0122 Decision 1: the refusal names the migration *and cites the entry*.
+      expect(message, on).toContain('ADR-0122');
+      expect(message, on).toContain('0.5.0');
+      expect(message, on).toContain('loopback');
+      expect(message, on).toContain("proxy's address or CIDR block");
+      expect(message, on).toContain('0 when nothing sits in front');
+    }
+  });
+
+  /** The whole text, once, so that a sentence cannot drop out of it unnoticed (the ADR citation nearly did). */
+  it('says exactly this for 1', () => {
+    const result = parse('1');
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.issues.map((issue) => issue.message)).toEqual([
+      'TRUST_PROXY=1 trusted every hop of X-Forwarded-For and is no longer accepted (refused since 0.5.0, ADR-0122). ' +
+        "Set TRUST_PROXY to the reverse proxy's address or CIDR block (for example 172.18.0.0/16), to loopback when the proxy " +
+        'runs on the same host, or to 0 when nothing sits in front of this server. Name the proxy, not the network your ' +
+        'clients are on: the list is applied to every hop.',
+    ]);
+  });
+
+  /** What `npm run start` does with it: the process ends, with a non-zero code, on the message above. */
+  it('ends the process at startup with a non-zero code and the migration message', () => {
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('exit');
+    }) as never);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      for (const on of ['1', 'true']) {
+        error.mockClear();
+        expect(() => loadConfig({ DATABASE_URL: 'postgres://unused/unused', TRUST_PROXY: on })).toThrow('exit');
+        expect(exit).toHaveBeenLastCalledWith(1);
+        expect(String(error.mock.calls[0]?.[0])).toContain(`TRUST_PROXY=${on} trusted every hop`);
+        expect(String(error.mock.calls[0]?.[0])).toContain('ADR-0122');
+      }
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+    }
   });
 
   it('takes addresses, CIDR blocks and the subnet names, as a list', () => {
@@ -339,7 +382,7 @@ describe('TRUST_PROXY accepts three forms and refuses the rest', () => {
 
   /**
    * A hop count is the form Fastify accepts and this product does not: the refusal is the decision, so
-   * `2` failing here is the assertion and `1` staying a boolean is its consequence.
+   * `2` failing here is the assertion, and `1` is refused as the "trust every hop" value rather than read as "one hop".
    */
   it('refuses a hop count, and everything that is not an address', () => {
     const refused = ['2', '10', 'yes', 'on', 'localhost', '10.0.0.0/33', 'fd00::/200', '10.0.0.0/255.0.0.0', '10.0.0.0/', '999.1.1.1'];

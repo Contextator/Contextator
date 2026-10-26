@@ -167,17 +167,11 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     // list and was waved through on another network would be a way round it. The answer names neither the
     // address nor the ranges; the log names the address.
     if (allowedCidrs && allowedCidrs.length > 0) {
-      // `X-Forwarded-For` is only a fact when the proxy in front of us is the one writing it. `TRUST_PROXY=1`
-      // takes the left-most entry, which the client chooses, so no address is worth comparing.
-      const untrusted = config.TRUST_PROXY === true;
-      if (untrusted || !isAddressAllowed(allowedCidrs, req.ip)) {
+      // `req.ip` is the socket's peer unless `TRUST_PROXY` names the proxy in front, so the comparison is
+      // against an address no caller writes ([ADR-0122](../../.ssot/ADR.md#adr-0122)).
+      if (!isAddressAllowed(allowedCidrs, req.ip)) {
         ctx.metrics.countAccessDenied('network');
-        log.warn(
-          { project: project.name, tokenId, address: req.ip },
-          untrusted
-            ? 'mcp token with a network allowlist refused: TRUST_PROXY=1 makes the client address untrustworthy, point TRUST_PROXY at the proxy address'
-            : 'mcp token refused: client address is outside its network allowlist',
-        );
+        log.warn({ project: project.name, tokenId, address: req.ip }, 'mcp token refused: client address is outside its network allowlist');
         return reply.code(403).send(rpcError(-32000, 'This token is not allowed from this network address.'));
       }
     }

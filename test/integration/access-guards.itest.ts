@@ -3,10 +3,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { eq, sql } from 'drizzle-orm';
-import { afterAll, beforeAll, beforeEach, describe, expect, inject, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, inject, it, vi } from 'vitest';
 
+import { SESSION_COOKIE } from '../../src/auth/cookies.js';
 import { auditEvents, mcpRateLimits, mcpTokens, projects, type ProjectRow } from '../../src/db/schema.js';
-import { createMcpToken } from '../../src/services/auth/mcp-tokens.js';
+import { createSession } from '../../src/services/auth/sessions.js';
+import { createUser } from '../../src/services/auth/users.js';
 import { McpRateLimiter } from '../../src/services/rate-limit.js';
 import { applySchema, createTestDatabase, dropTestDatabase, type TestDatabase } from './support/postgres.js';
 import { seedProject, startMcpInstance, type LiveInstance } from './support/mcp-instance.js';
@@ -20,8 +22,12 @@ import { seedProject, startMcpInstance, type LiveInstance } from './support/mcp-
  *   to a legacy client that sends no `Mcp-Name`; a failed authentication costs nothing; a counter that cannot be
  *   reached serves the request (and counts the failure) or refuses it with 503, as configured.
  * - **Token networks** ([ADR-0118](../../../.ssot/ADR.md#adr-0118)): a static token outside its allowlist is
- *   answered 403, the address comes from `X-Forwarded-For` only when the proxy is trusted, and under
- *   `TRUST_PROXY=1` a list can be neither saved nor honoured.
+ *   answered 403, and the address comes from `X-Forwarded-For` only when the proxy is trusted. `TRUST_PROXY=1`,
+ *   under which a list could be neither saved nor honoured, is refused at startup since 0.5.0
+ *   ([ADR-0122](../../../.ssot/ADR.md#adr-0122)), so those two paths are gone and the refusal is what is tested.
+ * - **Forwarded host** ([ADR-0122](../../../.ssot/ADR.md#adr-0122), FR-474): a peer the instance does not trust cannot
+ *   change the same-site decision of a cookie-authenticated write, or the `Origin` decision of `/mcp/*`, by
+ *   sending `X-Forwarded-Host`.
  *
  * Every request is a raw POST. The modern (2026-07-28) era is stateless, which makes it the cheap way to send
  * one counted message; the legacy era is used where the point is that it carries no `Mcp-Name` header.
@@ -51,11 +57,11 @@ const PER_TOOL = 2;
 
 let database: TestDatabase;
 let root: string;
-/** TRUST_PROXY=1, every limit on. The address a request comes from is whatever `X-Forwarded-For` says. */
+/** TRUST_PROXY=loopback (the harness default), every limit on. The test client connects from loopback, so it plays the proxy and the address is what `X-Forwarded-For` says. */
 let limited: LiveInstance;
 /** TRUST_PROXY=loopback, no token or tool limit; the default anonymous limit (60/min) applies. The address is read from `X-Forwarded-For` because the peer is trusted. */
 let proxied: LiveInstance;
-/** TRUST_PROXY=1, a token ceiling, and `MCP_RATE_LIMIT_FAIL_OPEN=0`. */
+/** TRUST_PROXY=loopback (the harness default), a token ceiling, and `MCP_RATE_LIMIT_FAIL_OPEN=0`. */
 let strict: LiveInstance;
 let guarded: ProjectRow;
 let open: ProjectRow;
@@ -304,8 +310,8 @@ describe('an open project', () => {
 
 /**
  * The claim the anonymous limit rests on ([ADR-0122](../../../.ssot/ADR.md#adr-0122)): under every supported
- * `TRUST_PROXY`, a caller cannot reset its own per-address budget by writing `X-Forwarded-For`. `1` is outside
- * this claim (it is deprecated, and 0.5.0 refuses it), which is why `limited` is not used here.
+ * `TRUST_PROXY`, a caller cannot reset its own per-address budget by writing `X-Forwarded-For`. `limited` is not
+ * used here only because its peer is a trusted proxy: the claim is about a peer that is not.
  */
 describe('a forged X-Forwarded-For', () => {
   const forged = (i: number) => `192.0.2.${i}`;
@@ -493,39 +499,126 @@ describe('a token network allowlist', () => {
   });
 });
 
-describe('a network allowlist under TRUST_PROXY=1', () => {
-  it('cannot be saved, by POST or by PATCH, and the existing list is left as it was', async () => {
-    const plain = await mint(limited, guarded, { name: 'plain' });
-    expect((await mint(limited, guarded, { name: 'listed', allowedCidrs: ['203.0.113.0/24'] })).status).toBe(400);
-    const patched = await limited.app.inject({
-      method: 'PATCH',
-      url: `/api/projects/${guarded.id}/mcp-tokens/${plain.json.token.id}`,
-      headers: admin,
-      payload: { allowedCidrs: ['203.0.113.0/24'] },
+/**
+ * What ADR-0118 used to answer with a `400` on save and a `403` on use. Under `TRUST_PROXY=1` the address was
+ * whatever the caller wrote, so a list could not be kept honest; since 0.5.0 the value is refused when the
+ * configuration is read ([ADR-0122](../../../.ssot/ADR.md#adr-0122)), so no instance exists in which those two
+ * paths could run. What is left to assert is the refusal, from the harness's own entry point.
+ */
+describe('TRUST_PROXY=1, where a network allowlist could be neither saved nor honoured', () => {
+  for (const value of ['1', 'true']) {
+    it(`is refused at startup (TRUST_PROXY=${value}), so there is no instance to save or serve a list on`, async () => {
+      const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
+        throw new Error('exit');
+      }) as never);
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        await expect(
+          startMcpInstance(database, { dataDir: path.join(root, `refused-${value}`), docRoot: root, env: { ADMIN_TOKEN, TRUST_PROXY: value } }),
+        ).rejects.toThrow('exit');
+        expect(exit).toHaveBeenCalledWith(1);
+        expect(String(error.mock.calls[0]?.[0])).toContain(`TRUST_PROXY=${value}`);
+      } finally {
+        exit.mockRestore();
+        error.mockRestore();
+      }
     });
-    expect(patched.statusCode).toBe(400);
-    expect(patched.body).toContain('TRUST_PROXY');
-    const [row] = await database.db.select({ allowedCidrs: mcpTokens.allowedCidrs }).from(mcpTokens).where(eq(mcpTokens.id, plain.json.token.id));
-    expect(row.allowedCidrs).toBeNull();
+  }
+});
 
-    // Removing a restriction is always allowed, and an empty list is not a restriction.
-    const cleared = await limited.app.inject({
-      method: 'PATCH',
-      url: `/api/projects/${guarded.id}/mcp-tokens/${plain.json.token.id}`,
-      headers: admin,
-      payload: { allowedCidrs: [] },
-    });
-    expect(cleared.statusCode).toBe(200);
+/**
+ * FR-474 ([ADR-0122](../../../.ssot/ADR.md#adr-0122)): `req.host` is the other thing a `trustProxy` setting decides,
+ * and two guards compare an `Origin` to it — the same-site check on a cookie-authenticated unsafe `/api/*` request
+ * (`src/auth/authorize.ts`) and the DNS-rebinding check on `/mcp/*` (`src/mcp/router.ts`). A peer the instance does
+ * not trust must not be able to move either by writing `X-Forwarded-Host`; the proxy it does trust can, which is
+ * what the control request in each case shows, so that the refusal is the setting's doing and not a dead route.
+ */
+describe('a forged X-Forwarded-Host', () => {
+  const EVIL = 'evil.example';
+  const forgedHost = { origin: `https://${EVIL}`, 'x-forwarded-host': EVIL };
+  /**
+   * Both ways of not trusting the peer, because they are different code in Fastify: `0` is `trustProxy: false`
+   * (the default and the commonest installation), and a list that does not hold the test client (loopback) is a
+   * trust function. Every request below comes from an untrusted peer.
+   */
+  const SETTINGS = ['0', '10.99.0.1'];
+  const untrusting = new Map<string, LiveInstance>();
+  let sessionCookie: string;
+
+  beforeAll(async () => {
+    for (const setting of SETTINGS) {
+      untrusting.set(
+        setting,
+        await startMcpInstance(database, {
+          dataDir: path.join(root, `untrusting-${setting === '0' ? 'off' : 'elsewhere'}`),
+          docRoot: root,
+          env: { ADMIN_TOKEN, TRUST_PROXY: setting },
+        }),
+      );
+    }
+    const operator = await createUser(database.db, { username: 'host-guard-admin', role: 'admin', password: 'guarding-the-host-header-1!' });
+    sessionCookie = (await createSession(database.db, operator.id, 1, { userAgent: 'probe' })).token;
   });
 
-  it('refuses a token that already carries a list, whatever address the header claims', async () => {
-    // Written under a trustworthy TRUST_PROXY and then served by an instance configured with `1`.
-    const { token } = await createMcpToken(database.db, guarded.id, 'carried over', null, null, ['203.0.113.0/24']);
-    const before = limited.ctx.metrics.mcpGuard().accessDenied.network;
-    const res = await post(limited, guarded, SEARCH(1), { ...bearer(token), 'x-forwarded-for': '203.0.113.9' });
-    expect(res.status).toBe(403);
-    expect(limited.ctx.metrics.mcpGuard().accessDenied.network).toBe(before + 1);
+  afterAll(async () => {
+    await Promise.all([...untrusting.values()].map((instance) => instance.close()));
   });
+
+  const unsafeApiCall = (instance: LiveInstance, headers: Record<string, string>) =>
+    instance.app.inject({
+      method: 'PATCH',
+      url: `/api/projects/${open.id}/quotas`,
+      cookies: { [SESSION_COOKIE]: sessionCookie },
+      headers,
+      payload: { maxDocuments: 10 },
+    });
+
+  for (const setting of SETTINGS) {
+    it(`does not make a cookie-authenticated write same-site, because the untrusted peer cannot speak for the host (TRUST_PROXY=${setting})`, async () => {
+      const instance = untrusting.get(setting) as LiveInstance;
+      const refused = await unsafeApiCall(instance, forgedHost);
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json().error).toBe('csrf_blocked');
+
+      // An Origin that really is the host passes, so the 403 above is about the forged one and not about the route.
+      const honest = await unsafeApiCall(instance, { host: 'contextator.example', origin: 'https://contextator.example' });
+      expect(honest.statusCode).toBe(200);
+
+      // Control: the same forged pair from a proxy the instance trusts is believed, which is what naming a proxy means.
+      const trusted = await unsafeApiCall(proxied, forgedHost);
+      expect(trusted.statusCode).toBe(200);
+    });
+  }
+
+  const mcpCall = (instance: LiveInstance, headers: Record<string, string>) =>
+    instance.app.inject({
+      method: 'POST',
+      url: `/mcp/${open.name}`,
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        'mcp-protocol-version': MODERN_VERSION,
+        'mcp-method': 'tools/call',
+        'mcp-name': 'list_topics',
+        ...headers,
+      },
+      payload: TOPICS(1),
+    });
+
+  for (const setting of SETTINGS) {
+    it(`does not make a foreign Origin acceptable to /mcp/*, because the untrusted peer cannot speak for the host (TRUST_PROXY=${setting})`, async () => {
+      const instance = untrusting.get(setting) as LiveInstance;
+      const refused = await mcpCall(instance, forgedHost);
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json().error?.message).toBe('Forbidden origin');
+
+      const honest = await mcpCall(instance, { host: 'contextator.example', origin: 'https://contextator.example' });
+      expect(honest.statusCode).toBe(200);
+
+      const trusted = await mcpCall(proxied, forgedHost);
+      expect(trusted.statusCode).toBe(200);
+    });
+  }
 });
 
 describe('a counter that cannot be reached', () => {

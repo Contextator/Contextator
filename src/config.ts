@@ -109,14 +109,26 @@ function isTrustProxyEntry(entry: string): boolean {
 }
 
 /**
+ * Whether `TRUST_PROXY` is one of the two "trust every hop" spellings, which are refused
+ * ([ADR-0122](../.ssot/ADR.md#adr-0122), which amends ADR-0060). Kept apart from `parseTrustProxy` so the
+ * refusal can say what the operator wrote and what to write instead, which a bare `undefined` cannot.
+ */
+const isTrustEveryHop = (value: string): boolean => {
+  const lowered = value.trim().toLowerCase();
+  return lowered === '1' || lowered === 'true';
+};
+
+/**
  * Turns `TRUST_PROXY` into the value Fastify takes, or `undefined` when it is not a value we accept
  * ([ADR-0060](../.ssot/ADR.md#adr-0060)).
  *
- * **Three forms, and the fourth is refused on purpose.** `0`/`false` trusts nothing, `1`/`true` trusts
- * every proxy, and a comma-separated list of addresses, CIDR blocks and subnet names trusts exactly
- * those peers. **`1`/`true` is deprecated since 0.4.1 and this function will refuse it from 0.5.0**
- * ([ADR-0122](../.ssot/ADR.md#adr-0122), which amends ADR-0060): it is still `true` here so that nothing
- * changes under an operator in a patch release, and `warnAboutProxyConfiguration` says so at every start.
+ * **Two forms, and the rest is refused on purpose.** `0`/`false` trusts nothing, and a comma-separated list
+ * of addresses, CIDR blocks and subnet names trusts exactly those peers. **`1`/`true` ("trust every
+ * proxy") was deprecated in 0.4.1 and is refused since 0.5.0** ([ADR-0122](../.ssot/ADR.md#adr-0122)):
+ * it is the one value that lets whoever opened the socket write `req.ip` and `req.protocol`, and a
+ * setting that is only safe when something else guarantees nothing but the proxy can reach the port is
+ * not a setting this server should accept on the strength of the operator's memory. The refusal is made
+ * in the schema's transform below, where it can name the migration.
  * Fastify also accepts a **hop count**, and this does not: a number is a claim about how
  * many proxies are in front of the instance that the server cannot check, and it goes silently wrong
  * the day somebody puts a CDN in front of the reverse proxy — which is the class of failure this whole
@@ -130,17 +142,13 @@ function isTrustProxyEntry(entry: string): boolean {
  * example worth remembering: a client at `192.168.1.77` is inside the range, so it is walked past, and
  * `X-Forwarded-For: 203.0.113.99` puts that value straight into `req.ip`. Name the proxy, not the
  * network the callers are on.
- *
- * Refusing the hop count is also what keeps `1` unambiguous: it is `true` here, as it is for every
- * other flag in this file, and not "one hop".
  */
-function parseTrustProxy(value: string): boolean | string[] | undefined {
+function parseTrustProxy(value: string): false | string[] | undefined {
   // Lowercased once, for the whole value rather than for the booleans only: `Loopback` and `FD00::/8`
   // are the same entries as their lowercase spellings, and an operator who writes one and is refused
   // learns nothing from the refusal. Addresses are case-insensitive, so nothing is lost by folding.
   const lowered = value.trim().toLowerCase();
   if (lowered === '0' || lowered === 'false') return false;
-  if (lowered === '1' || lowered === 'true') return true;
   const entries = csv(lowered);
   if (entries.length === 0) return undefined;
   return entries.every(isTrustProxyEntry) ? entries : undefined;
@@ -319,11 +327,10 @@ export const OAUTH_CLIENT_UNUSED_MS = 24 * 60 * 60_000;
  * and the common deployment puts a department behind one.
  *
  * It is deliberately **not** the thing that bounds abuse. `req.ip` is only as trustworthy as
- * `TRUST_PROXY` makes it ([ADR-0060](../.ssot/ADR.md#adr-0060)): at `1` it is the left-most
- * `X-Forwarded-For` and a script can write it, and even named to the proxy it is one address for a
- * whole office. What bounds abuse is `OAUTH_CLIENT_UNUSED_MS` — a row that never connects is gone
- * within a day, whatever address claimed it — and this is what keeps ordinary traffic and ordinary
- * mistakes from reaching the ceiling at all.
+ * `TRUST_PROXY` makes it ([ADR-0060](../.ssot/ADR.md#adr-0060)): off it is the socket's peer, and
+ * even named to the proxy it is one address for a whole office. What bounds abuse is
+ * `OAUTH_CLIENT_UNUSED_MS` — a row that never connects is gone within a day, whatever address claimed
+ * it — and this is what keeps ordinary traffic and ordinary mistakes from reaching the ceiling at all.
  */
 export const OAUTH_REGISTER_MAX_PER_HOST = 60;
 export const OAUTH_REGISTER_WINDOW_MS = 60 * 60_000;
@@ -356,12 +363,12 @@ export const EnvSchema = z
      *
      * `req.ip` is the key of both sliding windows in this product — the sign-in budget and
      * `/oauth/register`'s per-host budget — and of the address stored beside an audit event. With this
-     * on, `req.ip` is the left-most `X-Forwarded-For` value; with it off, it is the socket's own peer
-     * address, which no header can change.
+     * on, `req.ip` is the first `X-Forwarded-For` hop the list does not trust; with it off, it is the
+     * socket's own peer address, which no header can change.
      *
      * **`0` is the default, and it is the default because of the shape this product ships in.**
-     * `docker-compose.yml` publishes 3444 with nothing in front of it, and there `1` would have bought
-     * nothing at all while letting any caller write its own rate-limit key — a limiter that looks like
+     * `docker-compose.yml` publishes 3444 with nothing in front of it, and there trusting every hop would
+     * have bought nothing at all while letting any caller write its own rate-limit key — a limiter that looks like
      * it is working and is not. The cost of `0` is real and lands the other way: **behind a reverse
      * proxy, left unset, every request appears to come from the proxy**, so the per-IP sign-in budget
      * becomes an instance-wide one and ten failures can shut the sign-in page for everybody. That is a
@@ -376,22 +383,35 @@ export const EnvSchema = z
      * `AUTH_COOKIE_SECURE=auto` loses its `Secure` flag for the same reason. **Set `PUBLIC_BASE_URL`
      * as well as this**, and the two URL-shaped failures stop depending on the header at all.
      *
-     * Set it to the proxy, not to `1` — `1`/`true` is deprecated since 0.4.1 and refused from 0.5.0
-     * ([ADR-0122](../.ssot/ADR.md#adr-0122)) — and to the **proxy**, not to the
-     * network the callers sit on: the list is applied to every hop, so a range that holds clients as
-     * well as proxies is walked past and the caller writes `req.ip` again. `1` is "trust whoever wrote
-     * the header", which is only safe when nothing but the proxy can open a socket to this port.
+     * Set it to the **proxy**, not to the network the callers sit on: the list is applied to every hop,
+     * so a range that holds clients as well as proxies is walked past and the caller writes `req.ip`
+     * again. `1`/`true` ("trust whoever wrote the header") was deprecated in 0.4.1 and is refused since
+     * 0.5.0 ([ADR-0122](../.ssot/ADR.md#adr-0122)): it was only safe when nothing but the proxy could
+     * open a socket to this port, and nothing here could check that.
      */
     TRUST_PROXY: z
       .string()
       .default('0')
       .transform((value, ctx) => {
+        if (isTrustEveryHop(value)) {
+          // Names the value, what it did and every way out, because the operator reading this is looking at a
+          // process that was fine one release ago ([ADR-0122](../.ssot/ADR.md#adr-0122)).
+          ctx.addIssue({
+            code: 'custom',
+            message:
+              `TRUST_PROXY=${value.trim()} trusted every hop of X-Forwarded-For and is no longer accepted (refused since 0.5.0, ADR-0122). ` +
+              "Set TRUST_PROXY to the reverse proxy's address or CIDR block (for example 172.18.0.0/16), to loopback when the proxy " +
+              'runs on the same host, or to 0 when nothing sits in front of this server. Name the proxy, not the network your ' +
+              'clients are on: the list is applied to every hop.',
+          });
+          return z.NEVER;
+        }
         const parsed = parseTrustProxy(value);
         if (parsed === undefined) {
           ctx.addIssue({
             code: 'custom',
             message:
-              'must be 0/false, 1/true, or a comma-separated list of IP addresses, CIDR blocks and the subnet names ' +
+              'must be 0/false or a comma-separated list of IP addresses, CIDR blocks and the subnet names ' +
               `${[...TRUST_PROXY_SUBNETS].join('/')} (for example "loopback" or "10.0.0.0/8,172.18.0.0/16"); ` +
               'a hop count is deliberately not accepted — name the proxy instead',
           });

@@ -10,6 +10,31 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Breaking
+
+- `TRUST_PROXY=1`/`true` (trust every hop of `X-Forwarded-For`) is refused at startup. The process exits with a
+  non-zero code and a message that names the value and the way out (ADR-0122, which amends ADR-0060). It was
+  deprecated in 0.4.1. **Before upgrading**, set `TRUST_PROXY` to `loopback` when the proxy runs on the same host,
+  to the proxy's address or CIDR block (the proxy, not the network your clients are on: the list applies to every
+  hop), or to `0` when nothing sits in front of the server. `0`, `false`, addresses, CIDR blocks and the subnet
+  names are unchanged.
+- Helm chart 2.0.0: the values schema rejects `config.trustProxy` set to `"1"` or `"true"` (any letter case), so
+  `helm upgrade` stops before anything changes instead of the Pod going into a CrashLoop. A `TRUST_PROXY` set
+  through the free-form `env` map is not seen by the schema; the application refuses it when the Pod starts. The
+  chart README has an "Upgrading to chart 2.0.0" section.
+
+### Removed
+
+- The two `TRUST_PROXY=1`-only paths of the MCP token network allowlist (ADR-0118): saving a list answered `400`
+  and a token that carried one answered `403` under that value. With the value refused there is no instance in
+  which either can run. A request from an address outside a token's list is still answered `403`.
+
+### Fixed
+
+- `docs/deployment.md` said a shared rate-limit key means nobody can guess faster than the budget allows. Anyone
+  with an account of their own can reset the shared sign-in budget with a successful sign-in, so against other
+  accounts only the per-account lockout bounds guessing; the text now says so.
+
 ## [0.4.2] - 2026-10-25
 
 ### Added

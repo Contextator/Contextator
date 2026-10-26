@@ -35,8 +35,9 @@ Two endpoints of the MCP-token group are worth knowing by name here. `POST /api/
 `PATCH /api/projects/:id/mcp-tokens/:tokenId` accept `allowedCidrs`, a list of at most 32 addresses or CIDR
 ranges that the static token is limited to (`[]` or `null` removes the limit; see
 [MCP access](mcp-access.md#restricting-a-static-token-to-a-network)). The PATCH answers with the token's view
-and is audited without writing the list into the audit event. Both answer `400` while `TRUST_PROXY=1`, because
-the address would be client-controlled. The PATCH also updates a token that has already expired, so its network list can
+and is audited without writing the list into the audit event. (Up to 0.4.x both answered `400` while
+`TRUST_PROXY=1`, because the address would be client-controlled; 0.5.0 refuses that value at startup, so the case
+no longer exists.) The PATCH also updates a token that has already expired, so its network list can
 be changed before or after the expiry date; only a revoked token answers `404`.
 
 The query log's summary (`GET /api/projects/:id/queries/summary`) and export take an optional `token` (a token id)

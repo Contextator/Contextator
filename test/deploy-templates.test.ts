@@ -104,7 +104,10 @@ describe('deploy templates keep the proxy-trust default (ADR-0060)', () => {
 
   it('a Render env that sets TRUST_PROXY at all names a proxy rather than trusting everything', () => {
     const value = renderService.envVars.find((v) => v.key === 'TRUST_PROXY')?.value;
-    if (value !== undefined) expect(loadConfig({ ...baseEnv, TRUST_PROXY: value }).TRUST_PROXY).not.toBe(true);
+    if (value === undefined) return;
+    // `loadConfig` ends the process on `1`/`true` since 0.5.0 (ADR-0122), so reaching the assertion at all is half of it.
+    const parsed = loadConfig({ ...baseEnv, TRUST_PROXY: value }).TRUST_PROXY;
+    expect(parsed === false || Array.isArray(parsed)).toBe(true);
   });
 
   it('both templates that set cookies say they are HTTPS only, since the proxy is not trusted for the scheme', () => {
