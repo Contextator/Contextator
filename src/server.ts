@@ -30,6 +30,7 @@ import { KeyedMutex } from './services/locks.js';
 import { MetricsRegistry } from './services/metrics.js';
 import { listProjects } from './services/projects.js';
 import { AuditWriter, sweepAuditLog } from './services/audit.js';
+import { DOCUMENT_CHANGES_RETENTION_DAYS, sweepDocumentChanges } from './services/document-changes.js';
 import { QueryLog, sweepQueryLog } from './services/query-log.js';
 import { startSyncScheduler } from './services/scheduler.js';
 import { scanFrom, selectionFrom } from './services/vector-store.js';
@@ -249,6 +250,14 @@ async function main(): Promise<void> {
         if (deleted > 0) log.info({ deleted }, 'swept idle upload sessions');
       })
       .catch((err: unknown) => log.warn({ err }, 'upload session sweep failed'));
+    // The record of document changes behind `whats_new` ([ADR-0123](../.ssot/ADR.md#adr-0123)), ninety days.
+    // **Before the query log's `return` and not after it**: that table is not the query log and does not
+    // switch off with it, so an instance with `SEARCH_QUERY_LOG=0` must still forget what it recorded.
+    void sweepDocumentChanges(db)
+      .then((deleted) => {
+        if (deleted > 0) log.info({ deleted, retentionDays: DOCUMENT_CHANGES_RETENTION_DAYS }, 'swept expired document changes');
+      })
+      .catch((err: unknown) => log.warn({ err }, 'document changes sweep failed'));
     if (!config.SEARCH_QUERY_LOG) return;
     void sweepQueryLog(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)
       .then((deleted) => {

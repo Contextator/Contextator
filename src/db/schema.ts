@@ -619,6 +619,50 @@ export const indexRuns = pgTable(
 );
 
 /**
+ * The latest change of every path a project has had ([ADR-0123](../../.ssot/ADR.md#adr-0123)): what
+ * `whats_new` answers from.
+ *
+ * **One row per project and path, not one per change.** The table is bounded by the paths a project has
+ * had and not by the runs it has made, so a source that rewrites every page on every crawl cannot grow
+ * it. What that gives up is the intermediate history of a path, and so "what did run X change".
+ *
+ * `run_id` is deliberately **not** a foreign key: `index_runs` is pruned to twenty rows per project
+ * (`RUN_HISTORY_LIMIT`) and a cascade would take the change history with it. It is the id the run
+ * recorded itself under, and points at nothing once that row is pruned.
+ *
+ * `title` and `version` are the document's at the moment of the change, because a `removed` row is the
+ * only place left that remembers either.
+ */
+export const documentChanges = pgTable(
+  'document_changes',
+  {
+    projectId: uuid('project_id').notNull(),
+    /** `<source>/<path>`, the form `search_docs` and `list_topics` print. The source is its first segment. */
+    relativePath: text('relative_path').notNull(),
+    /** `added`, `modified` or `removed`. */
+    change: text('change').notNull(),
+    title: text('title').notNull(),
+    version: text('version').notNull().default(''),
+    /**
+     * When this path was last added; NULL for a path that existed before the table did, or whose row
+     * aged out. A NULL is never reported as `added`: when it was added is not known.
+     */
+    addedAt: timestamp('added_at', { withTimezone: true }),
+    changedAt: timestamp('changed_at', { withTimezone: true }).notNull(),
+    runId: uuid('run_id'),
+  },
+  (t) => [
+    primaryKey({ name: 'document_changes_pkey', columns: [t.projectId, t.relativePath] }),
+    foreignKey({ name: 'document_changes_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    check('document_changes_change_check', sql`${t.change} in ('added', 'modified', 'removed')`),
+    // `nullsFirst()` for the reason `index_runs_project_idx` has it: PostgreSQL's own default for DESC.
+    index('document_changes_project_changed_idx').on(t.projectId, t.changedAt.desc().nullsFirst()),
+    // The sweep is instance-wide, as the query log's is, so it cannot use the index above.
+    index('document_changes_changed_at_idx').on(t.changedAt),
+  ],
+);
+
+/**
  * What agents asked, and what they got back ([ADR-0047](../../.ssot/ADR.md#adr-0047)).
  *
  * One row per search that actually ran — through the MCP tool or through the dashboard's search panel.
@@ -1166,6 +1210,7 @@ export type DocumentSourceRow = typeof documentSources.$inferSelect;
 export type DocumentRow = typeof documents.$inferSelect;
 export type ChunkInsert = typeof chunks.$inferInsert;
 export type IndexRunRow = typeof indexRuns.$inferSelect;
+export type DocumentChangeRow = typeof documentChanges.$inferSelect;
 export type IndexRunInsert = typeof indexRuns.$inferInsert;
 export type SearchQueryRow = typeof searchQueries.$inferSelect;
 export type SearchQueryInsert = typeof searchQueries.$inferInsert;

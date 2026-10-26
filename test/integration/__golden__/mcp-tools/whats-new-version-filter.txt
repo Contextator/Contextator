@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Project \"changes-project\": 1 change since 2026-10-01T00:00:00.000Z, newest first.\nhistory_starts_at: 2026-09-01T00:00:00.000Z (complete)\n\n• modified — docs/changelog.md — Changelog (2026-10-24T07:30:00.000Z) [version v2]"
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

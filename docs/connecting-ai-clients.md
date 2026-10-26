@@ -2,9 +2,10 @@
 
 Point Claude Code, Cursor, Claude Desktop or any other MCP client at `http://localhost:3444/mcp/<project>`
 — the dashboard's **Connect** panel prints the exact snippet, token header included when the project
-requires one. Three read-only tools are exposed: `search_docs` (hybrid search, ranked excerpts),
-`list_topics` (the indexed document list) and `read_document` (one file's Markdown, by path or heading
-range). See [MCP access](mcp-access.md) for the auth modes.
+requires one. Four read-only tools are exposed: `search_docs` (hybrid search, ranked excerpts),
+`list_topics` (the indexed document list), `read_document` (one file's Markdown, by path or heading
+range) and `whats_new` (what was added, changed or removed since a point in time). See
+[MCP access](mcp-access.md) for the auth modes and the tools' arguments.
 
 Beside the tools, each project publishes its documents as MCP resources and two read-only **prompts**,
 `answer_from_docs` (argument `question`) and `explore_topic` (argument `topic`). A prompt reads nothing and

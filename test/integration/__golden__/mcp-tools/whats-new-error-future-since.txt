@@ -1,0 +1,13 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "\"since\" (2026-11-01T00:00:00.000Z) is in the future; the server's time is 2026-10-25T12:00:00.000Z. Ask about a point in the past."
+      }
+    ],
+    "isError": true
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

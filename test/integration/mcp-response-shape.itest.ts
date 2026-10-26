@@ -32,7 +32,7 @@ import { seedProject, startMcpInstance, type LiveInstance } from './support/mcp-
 const baseUrl = inject('postgresBaseUrl');
 const MODERN_VERSION = '2026-07-28';
 const LEGACY_VERSION = '2025-11-25';
-const TOOL_NAMES = ['search_docs', 'list_topics', 'read_document'];
+const TOOL_NAMES = ['search_docs', 'list_topics', 'read_document', 'whats_new'];
 const CACHE_FIELDS = ['ttlMs', 'cacheScope'];
 const MODERN_ONLY_FIELDS = ['resultType', ...CACHE_FIELDS];
 
@@ -153,7 +153,7 @@ async function legacy(instance: LiveInstance, requests: Array<{ method: string; 
   }
 }
 
-/** The tool definitions of a `tools/list` answer — all three, or the test fails here rather than passing on none. */
+/** The tool definitions of a `tools/list` answer — all four, or the test fails here rather than passing on none. */
 function toolsOf(reply: JsonRpcReply): Array<{ name: string; outputSchema?: unknown }> {
   const tools = (reply.result?.tools ?? []) as Array<{ name: string; outputSchema?: unknown }>;
   expect(tools.map((t) => t.name)).toEqual(TOOL_NAMES);

@@ -8,6 +8,7 @@ import {
 } from '../config.js';
 import type { Db } from '../db/client.js';
 import { chunks, documents, type DocumentRow } from '../db/schema.js';
+import { recordWriteChange } from './document-changes.js';
 import { RRF_K } from './rrf.js';
 import { DEFAULT_TEXT_SEARCH_CONFIG, type TextSearchConfig } from './text-search.js';
 
@@ -1057,6 +1058,16 @@ export async function getDocumentBySuffix(db: Db, projectId: string, generation:
 
 const INSERT_BATCH = 200;
 
+export interface ReplaceDocumentOptions {
+  /**
+   * Record what this write changes in `document_changes`, in the write's own transaction
+   * ([ADR-0123](../../.ssot/ADR.md#adr-0123)). Set by an incremental run, which writes into the live
+   * generation; a rebuild leaves it unset and records its changes at the swap. Unset for a test and
+   * the evaluation harness, which have no `whats_new` to feed.
+   */
+  recordChange?: { runId: string | null };
+}
+
 /**
  * Upserts the document row and atomically replaces all of its chunks. Returns the document id.
  *
@@ -1070,9 +1081,25 @@ export async function replaceDocument(
   doc: DocumentInput,
   newChunks: NewChunk[],
   textSearchConfig: TextSearchConfig = DEFAULT_TEXT_SEARCH_CONFIG,
+  options: ReplaceDocumentOptions = {},
 ): Promise<string> {
   return db.transaction(async (tx) => {
     const now = new Date();
+    // Before the upsert, so the row it reads is the one being replaced, and in the same transaction, so a
+    // write that cannot record its change does not happen (ADR-0123 decision 3).
+    if (options.recordChange) {
+      await recordWriteChange(tx, {
+        projectId: doc.projectId,
+        generation: doc.indexGeneration,
+        relativePath: doc.relativePath,
+        title: doc.title,
+        version: doc.version,
+        contentHash: doc.contentHash,
+        content: doc.content,
+        contentTruncated: doc.contentTruncated,
+        runId: options.recordChange.runId,
+      });
+    }
     const [row] = await tx
       .insert(documents)
       .values({ ...doc, chunkCount: newChunks.length, indexedAt: now })

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import type { Config, WebLimits } from '../config.js';
 import type { Logger } from '../context.js';
@@ -7,6 +8,7 @@ import { chunkReserveTokens } from './chunk-budget.js';
 import { chunkMarkdown, embeddingText } from './chunker.js';
 import { ConversionService } from './conversion/client.js';
 import { checkFileSize, DocumentExtractionError, readFailure } from './doc-types/index.js';
+import { deleteDocumentsRecordingChanges, recordRebuildChanges } from './document-changes.js';
 import { assertRebuildDiskSpace, InsufficientDiskError } from './disk-space.js';
 import { QuotaExceededError } from './errors.js';
 import { resolveQuota } from './quotas.js';
@@ -376,10 +378,10 @@ export class Indexer {
   }
 
   /** Persists a finished job to `index_runs`; failures are logged and never affect the indexing result. */
-  private async recordRun(job: JobState, log: Logger): Promise<void> {
+  private async recordRun(job: JobState, runId: string, log: Logger): Promise<void> {
     if (job.phase !== 'done' && job.phase !== 'error') return;
     try {
-      await recordIndexRun(this.deps.db, { ...job, phase: job.phase });
+      await recordIndexRun(this.deps.db, { ...job, phase: job.phase, runId });
     } catch (err) {
       log.error({ err }, 'failed to record index run');
     }
@@ -528,6 +530,10 @@ export class Indexer {
         return;
       }
       const live = current.liveGeneration;
+      // The id this run records itself under in `index_runs` and stamps on every `document_changes` row it
+      // writes ([ADR-0123](../../.ssot/ADR.md#adr-0123)). It exists before the run does anything, because the
+      // run's own row is written last and the changes are written along the way.
+      const runId = randomUUID();
 
       // Housekeeping before anything else, and under the same mutex: a previous run that was killed
       // between writing rows and swapping left a generation nobody will ever serve, and this is what
@@ -542,6 +548,13 @@ export class Indexer {
       // choice is the whole of ADR-0039 at this layer — everything below reads `generation`.
       const generation = rebuild ? live + 1 : live;
       if (rebuild) job.generation = generation;
+      /**
+       * Where a stored document is deleted. An incremental run records the removal in the deletion's own
+       * transaction; a rebuild deletes nothing from the generation it writes (it starts empty) and records
+       * its removals at the swap, so it must not record here ([ADR-0123](../../.ssot/ADR.md#adr-0123)).
+       */
+      const removeDocuments = (paths: string[]): Promise<void> =>
+        rebuild ? deleteDocuments(db, project.id, generation, paths) : deleteDocumentsRecordingChanges(db, project.id, generation, paths, runId);
       if (modelChanged) log.warn({ from: current.embeddingModel, to: embeddings.id }, 'embedding model changed; full re-index');
       log.info({ project: project.name, force: job.force, rebuild, live, generation }, 'indexing started');
 
@@ -980,7 +993,7 @@ export class Indexer {
                 // specification loses its document — nothing here has to know it was ever there.
                 const stale = existing.get(doc.relativePath);
                 if (stale) {
-                  await deleteDocuments(db, project.id, generation, [doc.relativePath]);
+                  await removeDocuments([doc.relativePath]);
                   releaseChunks(stale.id);
                   releasedInAdvance.delete(stale.id);
                 }
@@ -1050,6 +1063,9 @@ export class Indexer {
                 },
                 rows,
                 file.textSearchConfig,
+                // An incremental run writes into the live generation and records what it changes there; a
+                // rebuild writes into one nobody can see, and its changes are the swap's (ADR-0123).
+                rebuild ? {} : { recordChange: { runId } },
               );
               seen.add(doc.relativePath);
               written++;
@@ -1081,7 +1097,7 @@ export class Indexer {
         const removed = [...existing.entries()].filter(([p, d]) => !seen.has(p) && !(d.sourceId && protectedSources.has(d.sourceId))).map(([p]) => p);
         job.filesRemoved = removed.length;
         if (removed.length > 0) {
-          await deleteDocuments(db, project.id, generation, removed);
+          await removeDocuments(removed);
           log.info({ count: removed.length }, 'removed documents no longer on disk');
         }
 
@@ -1135,22 +1151,33 @@ export class Indexer {
           ]
             .filter((part): part is string => part !== null)
             .join('. ') || null;
-        // **One row, one statement, and that is the entire atomicity mechanism** (ADR-0039). Under
-        // read-committed a concurrent reader either sees this row before the update or after it, so it
-        // reads the old generation or the new one and never a project between the two. `live_generation`
-        // and the counters that describe it move together because they are in the same `SET`.
-        await db
-          .update(projects)
-          .set({
-            status: error ? 'error' : 'idle',
-            chunkCount: counts.chunkCount,
-            documentCount: counts.documentCount,
-            lastIndexedAt: new Date(),
-            embeddingModel: embeddings.id,
-            liveGeneration: generation,
-            lastError: error ? error.slice(0, 2000) : null,
-          })
-          .where(eq(projects.id, project.id));
+        // **One row, one statement is what makes the swap atomic for a reader** (ADR-0039 decision 5, as
+        // ADR-0123 amends it). Under read-committed a concurrent reader either sees this row before the
+        // update or after it, so it reads the old generation or the new one and never a project between
+        // the two. `live_generation` and the counters that describe it move together because they are in
+        // the same `SET`.
+        //
+        // What ADR-0123 changed is that the statement is no longer alone: on a rebuild, the changes the
+        // swap publishes are inserted in the same transaction, so they become visible with the new
+        // generation or not at all, and a diff that fails stops the swap. The diff goes **first** so that
+        // the `projects` row is locked only from the `UPDATE` to the commit, not for as long as the diff
+        // takes; anything else that writes that row (a setting saved in the panel, the query-log switch, a
+        // floor change) waits for that, and for nothing longer.
+        await db.transaction(async (tx) => {
+          if (rebuild) await recordRebuildChanges(tx, project.id, live, generation, runId);
+          await tx
+            .update(projects)
+            .set({
+              status: error ? 'error' : 'idle',
+              chunkCount: counts.chunkCount,
+              documentCount: counts.documentCount,
+              lastIndexedAt: new Date(),
+              embeddingModel: embeddings.id,
+              liveGeneration: generation,
+              lastError: error ? error.slice(0, 2000) : null,
+            })
+            .where(eq(projects.id, project.id));
+        });
 
         // 5. Reclaim what the swap superseded — after it, outside its transaction, in batches. A
         // failure here costs disk and nothing else, so it is logged and never fails the run.
@@ -1177,7 +1204,7 @@ export class Indexer {
           },
           error ? 'indexing finished with source errors' : 'indexing finished',
         );
-        await this.recordRun(job, log);
+        await this.recordRun(job, runId, log);
         if (modelChanged && !error) this.notifyModelChangeRebuilt(project.id, log);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1209,7 +1236,7 @@ export class Indexer {
         // Drop the half-built generation now rather than leaving it for the next run's sweep. Same
         // best-effort contract: if this fails the rows stay, and the next run collects them.
         if (generation !== live) await this.sweep(project.id, live, log);
-        await this.recordRun(job, log);
+        await this.recordRun(job, runId, log);
       }
     });
   }

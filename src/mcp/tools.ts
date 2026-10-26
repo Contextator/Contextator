@@ -11,12 +11,20 @@ import {
   READ_DOCUMENT_MIN_MAX_TOKENS,
 } from '../config.js';
 import type { DocumentRow, ProjectRow } from '../db/schema.js';
+import {
+  WHATS_NEW_DEFAULT_LIMIT,
+  WHATS_NEW_MAX_LIMIT,
+  historyStartsAt,
+  listDocumentChanges,
+  parseSince,
+  readTrackingSince,
+} from '../services/document-changes.js';
 import { chunksWithinBudget, joinChunks, truncateToTokens } from '../services/document-read.js';
 import { normalizeRelativePath } from '../services/fs-scan.js';
 import { type McpToolObserver, OTHER_LABEL, type SearchCounter, type SearchObserver, startTimer } from '../services/metrics.js';
 import { getProjectById } from '../services/projects.js';
 import { DEFAULT_SEARCH_LIMIT, searchProject } from '../services/search.js';
-import { formatSourceDate, sourceFieldsOf, sourceLine } from '../services/source-url.js';
+import { formatSourceDate, normalizeSourceUrl, sourceFieldsOf, sourceLine } from '../services/source-url.js';
 import { SOURCE_VERSION_MAX_LENGTH, listSources } from '../services/sources.js';
 import { namedLanguageOf } from '../services/text-search.js';
 import {
@@ -37,9 +45,11 @@ import {
   type ListTopicsOutput,
   type ReadDocumentOutput,
   type SearchDocsOutput,
+  type WhatsNewOutput,
   listTopicsOutput,
   readDocumentOutput,
   searchDocsOutput,
+  whatsNewOutput,
 } from './output-schemas.js';
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; structuredContent?: Record<string, unknown>; isError?: boolean };
@@ -242,6 +252,12 @@ export type ToolContext = Pick<AppContext, 'db' | 'embeddings' | 'config' | 'log
    * agent searches feed the search histograms the dashboard's do.
    */
   metrics?: SearchCounter & SearchObserver & Partial<McpToolObserver>;
+  /**
+   * The clock `whats_new` reads, for the two things it compares `since` with: the present, and the
+   * retention horizon. Optional, and the system clock when absent; it exists so that the golden record
+   * can hold a date-dependent answer still.
+   */
+  now?: () => Date;
 };
 
 // The tools `registerTools` registers, by name, live in `tool-names.ts` so that `config.ts` can validate
@@ -335,6 +351,38 @@ const readDocumentInput = {
     .describe(
       `Token budget for the text returned (${READ_DOCUMENT_MIN_MAX_TOKENS}-${READ_DOCUMENT_MAX_MAX_TOKENS}, default ${READ_DOCUMENT_DEFAULT_MAX_TOKENS})`,
     ),
+};
+
+/** `whats_new` arguments. */
+const whatsNewInput = {
+  since: z
+    .string()
+    .min(1)
+    .max(64)
+    .describe(
+      'The point in time to ask about, as an ISO 8601 date or date-time, e.g. "2026-10-01" or "2026-10-01T09:30:00Z". A date-time with ' +
+        'no offset is read as UTC. Must not be in the future. Documents that changed after this instant are listed.',
+    ),
+  source: z
+    .string()
+    .max(64)
+    .optional()
+    .describe(
+      'Only documents of this source — the first segment of the paths list_topics shows. Works for a source since deleted. Omit for every source.',
+    ),
+  version: z
+    .string()
+    .min(1)
+    .max(SOURCE_VERSION_MAX_LENGTH)
+    .optional()
+    .describe('Only documents of this release, as search_docs takes it: an exact label. Omit for every version.'),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(WHATS_NEW_MAX_LIMIT)
+    .default(WHATS_NEW_DEFAULT_LIMIT)
+    .describe(`Maximum number of changes to return, newest first (1-${WHATS_NEW_MAX_LIMIT}, default ${WHATS_NEW_DEFAULT_LIMIT})`),
 };
 
 /** The token id the router put in `AuthInfo.extra` (`router.ts`), or NULL for a request that presented none. */
@@ -739,6 +787,127 @@ export function registerTools(
       } catch (err) {
         log.error({ err, tool: 'read_document', project: project.name }, 'tool failed');
         return fail(`read_document failed: ${message(err)}`);
+      }
+    }),
+  );
+
+  server.registerTool(
+    tool('whats_new'),
+    {
+      title: 'What changed in the documentation',
+      description:
+        `Lists the documents of the "${project.name}" project that were added, changed or removed after a point in time: ` +
+        'the answer to "what changed since I last looked". Pass since as an ISO 8601 date or date-time (not in the future). ' +
+        'Newest first, each with its path (what read_document takes), its title and what happened to it. A removed document has no text ' +
+        'any more, so only its path and title are known. Narrow it with source or version. A document counts as changed when its text ' +
+        'changed, so a file that was touched without changing what it says is not listed. The answer says from when its record starts ' +
+        '(history_starts_at; historyStartsAt in the structured answer) and whether since reaches back that far (complete), so a question about a time before that is never ' +
+        'mistaken for "nothing changed".',
+      inputSchema: whatsNewInput,
+      ...(structuredOutput ? { outputSchema: whatsNewOutput } : {}),
+      annotations: readOnly,
+    },
+    timed('whats_new', async ({ since, source, version, limit }) => {
+      try {
+        const sinceAt = parseSince(since);
+        if (sinceAt === null) {
+          return fail(`"${since}" is not an ISO 8601 date or date-time. Use a form such as "2026-10-01" or "2026-10-01T09:30:00Z".`);
+        }
+        const now = (ctx.now ?? (() => new Date()))();
+        if (sinceAt.getTime() > now.getTime()) {
+          return fail(
+            `"since" (${sinceAt.toISOString()}) is in the future; the server's time is ${now.toISOString()}. Ask about a point in the past.`,
+          );
+        }
+
+        // Re-read for the live generation, as `list_topics` does: the origin of a document is read from it.
+        const live = await getProjectById(db, project.id);
+        if (!live) return fail(`Project "${project.name}" no longer exists.`);
+
+        const startsAt = historyStartsAt(now, await readTrackingSince(db), live.createdAt);
+        const complete = sinceAt.getTime() >= startsAt.getTime();
+
+        // An unknown source is not an error, because it may have been deleted and its documents' removals are
+        // exactly what is being asked about; it is a note, so that a misspelt name does not read as "nothing changed".
+        let note: string | undefined;
+        if (source !== undefined) {
+          const names = (await listSources(db, project.id)).map((s) => s.name);
+          if (!names.includes(source)) {
+            note =
+              `Project "${project.name}" has no source named "${source}" now${names.length > 0 ? ` (its sources are: ${names.join(', ')})` : ''}; ` +
+              'any change listed was recorded under that name while it existed.';
+          }
+        }
+
+        const { changes, truncated } = await listDocumentChanges(db, {
+          projectId: project.id,
+          liveGeneration: live.liveGeneration,
+          since: sinceAt,
+          source,
+          version,
+          limit,
+        });
+
+        const guidance: string[] = [];
+        if (!complete) {
+          guidance.push(
+            `The record starts at ${startsAt.toISOString()}, after the time asked about, so changes before it are not shown and an empty list does not mean nothing changed.`,
+          );
+        }
+        if (truncated) {
+          guidance.push(
+            `[…truncated: the ${changes.length} newest changes are shown. Ask again with a later since, or with a larger limit (at most ${WHATS_NEW_MAX_LIMIT}), to see the rest.]`,
+          );
+        }
+        if (note) guidance.push(note);
+
+        // Re-validated on the way out, as `sourceFieldsOf` does for a search result: a row written by an older
+        // build or an import is not trusted to be a safe link.
+        const originOf = (c: { sourceUrl: string | null; sourceModifiedAt: Date | null }) => ({
+          sourceUrl: normalizeSourceUrl(c.sourceUrl),
+          sourceModifiedAt: c.sourceModifiedAt ? c.sourceModifiedAt.toISOString() : null,
+        });
+        const structured: WhatsNewOutput = {
+          project: project.name,
+          since: sinceAt.toISOString(),
+          historyStartsAt: startsAt.toISOString(),
+          complete,
+          truncated,
+          // A removed document has no text and no origin left: its path and title are what is known.
+          changes: changes.map((c) =>
+            c.change === 'removed'
+              ? { path: c.path, title: c.title, change: c.change, changedAt: c.changedAt.toISOString() }
+              : {
+                  path: c.path,
+                  title: c.title,
+                  change: c.change,
+                  changedAt: c.changedAt.toISOString(),
+                  version: c.version,
+                  ...originOf(c),
+                },
+          ),
+          ...(note ? { note } : {}),
+          ...(guidance.length > 0 ? { guidance: guidance.join('\n') } : {}),
+        };
+        const lines = [
+          `Project "${project.name}": ${changes.length === 0 ? 'no changes' : `${changes.length} change${changes.length === 1 ? '' : 's'}`} since ${structured.since}${changes.length > 0 ? ', newest first' : ''}.`,
+          `history_starts_at: ${structured.historyStartsAt} (${complete ? 'complete' : 'incomplete'})`,
+        ];
+        if (changes.length > 0) lines.push('');
+        for (const c of changes) {
+          const label = c.version !== '' && c.change !== 'removed' ? ` [version ${c.version}]` : '';
+          lines.push(`• ${c.change} — ${c.path} — ${c.title} (${c.changedAt.toISOString()})${label}`);
+          if (c.change !== 'removed') {
+            const origin = originOf(c);
+            if (origin.sourceUrl) lines.push(`  Source: ${origin.sourceUrl}`);
+            if (c.sourceModifiedAt) lines.push(`  Modified at origin: ${formatSourceDate(c.sourceModifiedAt)}`);
+          }
+        }
+        if (guidance.length > 0) lines.push('', ...guidance);
+        return ok(lines.join('\n'), structured);
+      } catch (err) {
+        log.error({ err, tool: 'whats_new', project: project.name }, 'tool failed');
+        return fail(`whats_new failed: ${message(err)}`);
       }
     }),
   );

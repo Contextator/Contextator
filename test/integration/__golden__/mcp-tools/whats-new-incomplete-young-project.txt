@@ -1,0 +1,12 @@
+{
+  "result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Project \"young-project\": no changes since 2026-10-01T00:00:00.000Z.\nhistory_starts_at: 2026-10-10T08:00:00.000Z (incomplete)\n\nThe record starts at 2026-10-10T08:00:00.000Z, after the time asked about, so changes before it are not shown and an empty list does not mean nothing changed."
+      }
+    ]
+  },
+  "jsonrpc": "2.0",
+  "id": 1
+}

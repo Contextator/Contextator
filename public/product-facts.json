@@ -80,6 +80,28 @@
           "required": false
         }
       ]
+    },
+    {
+      "name": "whats_new",
+      "title": "What changed in the documentation",
+      "parameters": [
+        {
+          "name": "since",
+          "required": true
+        },
+        {
+          "name": "source",
+          "required": false
+        },
+        {
+          "name": "version",
+          "required": false
+        },
+        {
+          "name": "limit",
+          "required": false
+        }
+      ]
     }
   ],
   "notMachineReadable": {

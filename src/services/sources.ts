@@ -2,7 +2,8 @@ import { and, asc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { PROJECT_NAME_RE, SYNC_MAX_INTERVAL_MINUTES, SYNC_MIN_INTERVAL_MINUTES } from '../config.js';
 import type { Db } from '../db/client.js';
-import { documents, documentSources, type DocumentSourceRow } from '../db/schema.js';
+import { documents, documentSources, projects, type DocumentSourceRow } from '../db/schema.js';
+import { recordSourceRemoval } from './document-changes.js';
 import { decryptWebhookSecret, encryptSecret, encryptWebhookSecret, randomSecret, type SecretKeyring } from './crypto.js';
 import { isCredentialSourceType } from './encrypted-fields.js';
 import { allowedExtensionsFor, FLAVOR_ONLY_EXTENSIONS, FLAVORS, type Flavor } from './flavors.js';
@@ -698,11 +699,27 @@ export async function disableWebhook(db: Db, projectId: string, sourceId: string
   return row;
 }
 
-/** Deletes the row (documents/chunks cascade). The caller removes the materialised directory afterwards. */
+/**
+ * Deletes the row (documents/chunks cascade). The caller removes the materialised directory afterwards.
+ *
+ * The documents go by cascade and never pass through the indexer, so this is the one place that can say
+ * they are gone: it records `removed` for the source's live documents in the transaction that deletes the
+ * source ([ADR-0123](../../.ssot/ADR.md#adr-0123) decision 3). Without it a deleted source would leave
+ * `whats_new` with no sign that anything was removed.
+ *
+ * **The caller holds the project's lock** (the indexer's `KeyedMutex`, as `DELETE /api/projects/:id/sources/:sid`
+ * does), which is what keeps a swap from publishing between the read of `live_generation` here and the
+ * deletion: without it the removal could be written against a generation that has just been superseded, or be
+ * overwritten by the swap's diff as `modified`.
+ */
 export async function deleteSource(db: Db, projectId: string, sourceId: string): Promise<DocumentSourceRow> {
   const existing = await getSource(db, projectId, sourceId);
   if (!existing) throw new NotFoundError('Source not found');
-  await db.delete(documentSources).where(eq(documentSources.id, sourceId));
+  await db.transaction(async (tx) => {
+    const [project] = await tx.select({ liveGeneration: projects.liveGeneration }).from(projects).where(eq(projects.id, projectId));
+    if (project) await recordSourceRemoval(tx, projectId, sourceId, project.liveGeneration);
+    await tx.delete(documentSources).where(eq(documentSources.id, sourceId));
+  });
   return existing;
 }
 

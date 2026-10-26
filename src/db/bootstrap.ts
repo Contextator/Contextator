@@ -7,6 +7,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import type pg from 'pg';
 
 import type { Logger } from '../context.js';
+import { ensureTrackingSince, restartRecording } from '../services/document-changes.js';
 import { TEXT_SEARCH_CONFIGS } from '../services/text-search.js';
 import type { Db } from './client.js';
 import { dropAllProjectVectorIndexes, LEGACY_VECTOR_INDEX, reconcileProjectVectorIndexes } from './vector-indexes.js';
@@ -87,6 +88,10 @@ export async function bootstrapDatabase(db: Db, opts: BootstrapOptions): Promise
       await adoptBaselineIfNeeded(db, opts.log);
       await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
       await settleDimensionAndIndex(db, dims, opts);
+      // When the record of document changes began, written once and never again: `whats_new` says from
+      // here how far back it can speak (ADR-0123). A setting and not a line of the migration, because
+      // migrations are generated.
+      await ensureTrackingSince(db);
       await backfillContentTsv(db, opts.log);
       await reconcileTextSearchConfigs(db, opts.log);
     } finally {
@@ -146,6 +151,9 @@ async function settleDimensionAndIndex(db: Db, dims: number, opts: BootstrapOpti
       await dropAllProjectVectorIndexes(tx);
       await run(`TRUNCATE chunks`);
       await run(`DELETE FROM documents`);
+      // No run is there to record this deletion, and the next one would record the whole corpus as added
+      // (ADR-0123): forget what was recorded and start again from now.
+      await restartRecording(tx);
       await run(`ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(${dims})`);
       await run(
         `UPDATE projects SET chunk_count = 0, document_count = 0, status = 'idle', last_indexed_at = NULL, embedding_model = NULL, last_error = NULL`,

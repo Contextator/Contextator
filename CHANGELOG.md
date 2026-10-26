@@ -10,6 +10,32 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Added
+
+- `whats_new(since, source?, version?, limit?)`, a fourth read-only MCP tool in both protocol eras: the documents
+  added, changed or removed after a point in time, newest first, with the path `read_document` takes. Every answer
+  says from when its record starts (`history_starts_at`) and whether `since` reaches back that far (`complete`), so
+  an empty list is never mistaken for "nothing changed". A removed document returns only its path and title.
+- Migration `0026_document_changes`: the latest change of every path a project has had (ADR-0123). The indexer
+  writes it in the same transaction as the document, and a forced re-index records the difference between the
+  old and the new generation in the transaction that swaps them. A change is a change of the document's text, so a
+  force re-index of unchanged content, a changed source `language` or `version`, and the other documents of an
+  OpenAPI specification when one operation changed record nothing. Deleting a source records its documents as
+  removed. Changes are kept for 90 days (a constant, no new environment variable) and swept on the session
+  reaper's timer, including when `SEARCH_QUERY_LOG=0`.
+
+### Changed
+
+- Starting with `RESET_VECTORS=1` now also forgets the record of document changes and starts it again from that
+  moment (ADR-0123), in the transaction that deletes the documents. Without it the next run would have recorded the
+  whole corpus as added.
+- The swap that publishes a rebuilt index now shares one transaction with the insert of the changes it publishes
+  (ADR-0123, which amends ADR-0039 decision 5). What a reader sees is unchanged: the old generation or the new one,
+  never between. The `projects` row is locked from the swap `UPDATE` to the commit, so a setting saved in the panel
+  at that instant waits for it.
+- `index_runs.id` is now the id the run was given when it started, so a change can name the run that made it. The
+  row is still written when the run finishes.
+
 ### Breaking
 
 - `TRUST_PROXY=1`/`true` (trust every hop of `X-Forwarded-For`) is refused at startup. The process exits with a
