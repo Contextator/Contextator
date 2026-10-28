@@ -741,6 +741,10 @@ but each entry must be exactly `{secretName, secretKey}`.
 These application settings have typed keys under `config` rather than going through `env`, so the schema
 checks them:
 
+- `config.oidcGroupsClaim` — joined into `OIDC_GROUPS_CLAIM` (ADR-0134): the top-level ID-token claim that lists
+  a person's groups, which turns on mapping provider groups to project memberships. It needs `OIDC_ISSUER_URL`
+  (through `env`); a provider that needs a scope to emit the claim gets it through `OIDC_SCOPES`. Empty leaves
+  the variable unset.
 - `config.sourceAllowedHosts` — a list of host names (not URLs), joined into `SOURCE_ALLOWED_HOSTS`: the hosts
   a Confluence, S3 or GitHub Enterprise Server source may reach on a private address (ADR-0126). It does not
   admit a host for a web or git source. Empty leaves the variable unset.

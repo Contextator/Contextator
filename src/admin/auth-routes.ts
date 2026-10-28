@@ -23,6 +23,13 @@ import { createSession, listSessionsOfUser, revokeSession, revokeSessionsOfUser 
 import { revokeApiTokensOfUser } from '../services/auth/api-tokens.js';
 import { membershipMap } from '../services/auth/memberships.js';
 import {
+  auditMembershipChanges,
+  type GroupsUnavailableReason,
+  readGroupsClaim,
+  reconcileGroupMemberships,
+  removeGroupMemberships,
+} from '../services/auth/oidc-groups.js';
+import {
   countUsers,
   createUser,
   getUserById,
@@ -57,6 +64,14 @@ const SetupBody = z.object({
 const SessionsQuery = z.object({ scope: z.enum(['others', 'all']).default('others') });
 
 const ADVISORY_LOCK_SETUP = 7213002;
+
+/** Carries a failure of the group reconciliation out of the sign-in transaction, so the callback can tell it from any other. */
+class GroupSyncFailed extends Error {
+  constructor(override readonly cause: unknown) {
+    super('oidc group reconciliation failed');
+    this.name = 'GroupSyncFailed';
+  }
+}
 
 /** Authentication and first-run setup. Registered inside adminRoutes, so it shares the error handler. */
 export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
@@ -181,6 +196,28 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
     }
     if (!user.isActive) throw new ForbiddenError('account_disabled', 'This account is disabled');
 
+    // [ADR-0134](../../.ssot/ADR.md#adr-0134) decision 6: no group claim arrives on this path, so whatever a
+    // group granted this account stops here and the next SSO sign-in restores what its groups still grant.
+    // Before the failure counter is cleared and before the session opens, so a failure here fails the
+    // sign-in as a whole rather than leaving access nothing vouches for. Only while the feature is on:
+    // switched off, the rows stay until an administrator acts. The role is read again under the account's
+    // row lock, as the SSO callback does, not taken from the lookup above.
+    if (config.OIDC_GROUPS_CLAIM !== undefined) {
+      await withUserRowLock(db, user.id, async (tx) => {
+        const fresh = await getUserById(tx, user.id);
+        if (fresh?.role !== 'member') return;
+        const removed = await removeGroupMemberships(tx, user.id);
+        await auditMembershipChanges(tx, user.id, removed, {
+          action: 'POST /api/auth/login',
+          principal: { kind: 'session', role: fresh.role, userId: fresh.id, username: fresh.username, sessionId: '', mustChangePassword: false },
+          ip: clientIp(req),
+          statusCode: 200,
+          provider: providerName(config),
+          reason: 'password_sign_in',
+        });
+      });
+    }
+
     // Parameters may have been raised since this hash was made; quietly bring it up to date.
     const rehashed = needsRehash(user.passwordHash) ? await hashPassword(body.password) : undefined;
     await recordLoginSuccess(db, user.id, rehashed);
@@ -202,7 +239,9 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
     // logged-out login page ([MAJOR-2], tur 3 review of [ADR-0077](../../.ssot/ADR.md#adr-0077)). Root
     // never gets `canLink: true`: it stays local by design (see `POST /api/auth/oidc/link` below), so
     // the account page has nothing to base a link control's visibility on other than this flag.
-    const oidc = { enabled: isOidcEnabled(config), buttonLabel: config.OIDC_BUTTON_LABEL };
+    // `groups`: whether SSO group mapping is on ([ADR-0134](../../.ssot/ADR.md#adr-0134)), so the dashboard can lock the
+    // members of a project that a group granted.
+    const oidc = { enabled: isOidcEnabled(config), buttonLabel: config.OIDC_BUTTON_LABEL, groups: config.OIDC_GROUPS_CLAIM !== undefined };
     if (principal.kind === 'token') {
       return {
         id: null,
@@ -376,6 +415,17 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
         }
         const removed = await unlinkFederatedIdentity(tx, principal.userId);
         if (removed === 0) return { refused: false, revokedMcpCredentials: 0 };
+        // [ADR-0134](../../.ssot/ADR.md#adr-0134) decision 6: this account will not sign in through SSO again, so
+        // nothing would ever reconcile the memberships its groups granted. Not gated on the feature: a person
+        // detaching their own identity is not a typo in the environment.
+        await auditMembershipChanges(tx, principal.userId, await removeGroupMemberships(tx, principal.userId), {
+          action: 'DELETE /api/auth/oidc/link',
+          principal,
+          ip: clientIp(req),
+          statusCode: 204,
+          provider: providerName(config),
+          reason: 'unlink',
+        });
         await revokeSessionsOfUser(tx, principal.userId);
         await revokeApiTokensOfUser(tx, principal.userId);
         const revokedMcpCredentials = await revokeMcpCredentialsOfUser(tx, principal.userId);
@@ -506,6 +556,12 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
         return reply.header('cache-control', 'no-store').redirect(safeNext(flow.next), 302);
       }
 
+      // [ADR-0134](../../.ssot/ADR.md#adr-0134): the groups, read once from the ID token, before anything is
+      // written. Whether this account is one that reconciliation applies to (`member`) is only known on the
+      // fresh read under the row lock below, so a claim that cannot be read is held here and acted on there.
+      const groupsClaim = config.OIDC_GROUPS_CLAIM;
+      const groupsRead = groupsClaim === undefined ? null : readGroupsClaim(claims as Record<string, unknown>, groupsClaim);
+
       const emailClaim = typeof claims.email === 'string' ? claims.email : undefined;
       const preferredUsernameClaim = typeof claims.preferred_username === 'string' ? claims.preferred_username : undefined;
       const nameClaim = typeof claims.name === 'string' ? claims.name : undefined;
@@ -516,6 +572,12 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
       let isNewAccount = false;
       if (!user) {
         if (!config.OIDC_AUTO_PROVISION) return refuse('no_account');
+        // An account this would mint as a `member` is reconciled in the lock that opens its session, and
+        // an unreadable claim stops that: refuse before the account exists, so "nothing changes" holds.
+        if (groupsRead && !groupsRead.ok && config.OIDC_DEFAULT_ROLE === 'member') {
+          log.warn({ reason: groupsRead.reason }, 'oidc group claim is not readable; refusing to provision an account');
+          return refuse('groups_unavailable');
+        }
         try {
           const provisioned = await provisionFederatedUser(db, {
             provider,
@@ -547,7 +609,9 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
       type LoginOutcome =
         | { ok: true; user: UserRow }
         | { ok: false; code: 'no_account' | 'account_disabled' }
-        | { ok: false; code: 'root_local_only'; user: UserRow };
+        | { ok: false; code: 'root_local_only'; user: UserRow }
+        | { ok: false; code: 'groups_unavailable'; user: UserRow; reason: GroupsUnavailableReason }
+        | { ok: false; code: 'sync_failed' };
       const lookedUp = user;
       const outcome = await withUserRowLock(db, lookedUp.id, async (tx): Promise<LoginOutcome> => {
         // Re-confirms the identity resolved above is still linked to this account: a concurrent unlink
@@ -571,6 +635,39 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
         // needed either way.
         if (stillLinked.role === 'root') return { ok: false, code: 'root_local_only', user: stillLinked };
 
+        // Group mapping ([ADR-0134](../../.ssot/ADR.md#adr-0134) decisions 4 and 5): after the root refusal and
+        // before the session opens, under this same lock, so a person moved out of a group never signs in
+        // holding the access it granted. `member` accounts only — `admin` already reaches every project and
+        // no group changes an instance role. A claim that cannot be trusted as complete stops the sign-in
+        // and changes nothing, since removing on known-incomplete data would be wrong and keeping it
+        // would be fail-open.
+        if (groupsRead && stillLinked.role === 'member') {
+          if (!groupsRead.ok) return { ok: false, code: 'groups_unavailable', user: stillLinked, reason: groupsRead.reason };
+          try {
+            const changes = await reconcileGroupMemberships(tx, stillLinked.id, groupsRead.groups);
+            await auditMembershipChanges(tx, stillLinked.id, changes, {
+              action: 'GET /api/auth/oidc/callback',
+              principal: ssoPrincipal(stillLinked, ''),
+              ip: clientIp(req),
+              statusCode: 302,
+              provider,
+            });
+            log.info(
+              {
+                groups: groupsRead.groups.length,
+                added: changes.filter((c) => c.change === 'added').length,
+                updated: changes.filter((c) => c.change === 'role_changed').length,
+                removed: changes.filter((c) => c.change === 'removed').length,
+              },
+              groupsRead.groups.length === 0
+                ? 'oidc sign-in carried no groups; group-granted memberships reconciled'
+                : 'oidc group memberships reconciled',
+            );
+          } catch (err) {
+            throw new GroupSyncFailed(err);
+          }
+        }
+
         // Deterministic pause point for the race test ([T6-MAJOR-1], tur 7): everything above has
         // already re-read its own fresh state under the lock, so this is equivalent to pausing anywhere
         // between "still linked" and "session written" — and it is the last point before the write. A
@@ -584,9 +681,28 @@ export const authRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, {
         await recordLoginSuccess(tx, stillLinked.id);
         await touchFederatedIdentityLogin(tx, { issuer, subject });
         return { ok: true, user: stillLinked };
+      }).catch((err: unknown): LoginOutcome => {
+        // The transaction is already rolled back: no membership changed, no session was written.
+        if (!(err instanceof GroupSyncFailed)) throw err;
+        log.error({ err: err.cause }, 'oidc group reconciliation failed; the sign-in was refused');
+        return { ok: false, code: 'sync_failed' };
       });
 
       if (!outcome.ok) {
+        if (outcome.code === 'groups_unavailable') {
+          log.warn({ reason: outcome.reason }, 'oidc group claim is not readable; the sign-in was refused and no membership changed');
+          auditCallbackAfterResponse(
+            req,
+            {
+              action: 'GET /api/auth/oidc/callback',
+              projectId: null,
+              targetType: 'user',
+              targetId: outcome.user.id,
+              detail: { provider, refused: 'groups_unavailable', reason: outcome.reason },
+            },
+            ssoPrincipal(outcome.user, ''),
+          );
+        }
         if (outcome.code === 'root_local_only') {
           auditCallbackAfterResponse(
             req,

@@ -70,6 +70,10 @@ spec:
             - name: TRUST_PROXY
               value: {{ .Values.config.trustProxy | quote }}
             {{- end }}
+            {{- with .Values.config.oidcGroupsClaim }}
+            - name: OIDC_GROUPS_CLAIM
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.config.sourceAllowedHosts }}
             - name: SOURCE_ALLOWED_HOSTS
               value: {{ join "," . | quote }}

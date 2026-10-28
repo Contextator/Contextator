@@ -108,6 +108,9 @@ const OIDC_ERROR_MESSAGES = {
   root_local_only: 'The root account signs in with its password only; single sign-on cannot be used or linked for it.',
   link_conflict: 'That single sign-on identity is already linked to a different account.',
   link_requires_session: 'Linking single sign-on needs the same signed-in session that started it. Sign in and start again from your account page.',
+  groups_unavailable:
+    'The identity provider did not send a complete list of your groups, so sign-in was stopped and nothing was changed. Ask an administrator to review the provider group settings.',
+  sync_failed: 'Could not apply your group memberships, so sign-in was stopped. Try again, or ask an administrator.',
 };
 
 /** The codes a *linking* flow ends with: the visitor may still be signed in, so offer the way back. */

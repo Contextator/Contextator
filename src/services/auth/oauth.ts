@@ -53,6 +53,7 @@ export interface RegisterClientInput {
  * | `7213001` | `src/db/bootstrap.ts`, and the frozen ladder in `test/integration/fixtures/ensure-schema-v5.ts` | session |
  * | `7213002` | `ADVISORY_LOCK_SETUP` in `src/admin/auth-routes.ts` — the first-run account | transaction |
  * | `7213003` | this one | transaction |
+ * | `7213011` | `ADVISORY_LOCK_GROUP_MAPPINGS` in `src/services/auth/oidc-groups.ts` — SSO group mappings against sign-in reconciliation (shared and exclusive) | transaction |
  *
  * `7213002` put every `/oauth/register` behind whichever `POST /api/setup` was in flight and every
  * setup behind a registration — two unrelated unauthenticated endpoints silently serialising each

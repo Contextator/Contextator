@@ -12,6 +12,21 @@ ships, that stops.
 
 ### Added
 
+- **OIDC groups grant project memberships** (ADR-0134, amending ADR-0077; migration `0031_oidc_group_mappings`): set
+  `OIDC_GROUPS_CLAIM` to the ID-token claim that lists a person's groups, and map groups to projects and a role
+  (`viewer` or `editor`) under **Users → SSO group mappings** or `GET`/`POST /api/oidc/group-mappings` and
+  `DELETE /api/oidc/group-mappings/:id` (`admin`; `409 mapping_exists`). Each SSO sign-in of a `member` account
+  makes its group-granted memberships exactly the projects its groups map to (the higher role where two groups
+  disagree); a person who has left a group loses the membership at their next sign-in. A membership added by hand
+  wins and is never touched. A missing claim (omitted, `null`, `[]`, `{}`) means no groups; a claim that cannot be
+  read (Entra's `_claim_names.groups` overage, not a list of strings, over 1 000 entries or a name over 256
+  characters) stops a `member`'s sign-in with `groups_unavailable` and changes nothing. `admin` and `root` are
+  skipped and no group changes an instance role. A group-granted membership is also removed when its mapping is
+  deleted (recomputed in the same request), when its account unlinks SSO, and when a linked account signs in with
+  its password. While the setting is on, the members API answers `409 membership_managed_by_group` for such a row;
+  `GET /api/projects/:id/members` returns `origin` and `groups`. Every membership a sign-in changes is one audit
+  event. Switching the setting off removes nothing. `GET /api/auth/me` carries `oidc.groups`. Helm chart 2.1.0:
+  `config.oidcGroupsClaim`.
 - **Token scope** (ADR-0133, amending ADR-0027; migration `0030_mcp_token_scope`): a static `ctxm_` token can be bound to
   a list of its project's sources, and a source outside the list does not exist for it in `search_docs`,
   `read_document` (by path and by suffix), `list_topics`, `whats_new` (added, modified and removed rows),

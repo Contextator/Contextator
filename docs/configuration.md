@@ -294,6 +294,31 @@ On Helm, put the id in `env` and the secret in `envSecret` (`NOTION_OAUTH_CLIENT
 secrets the chart does not model one by one. What the connection does, how it differs from a token and how to
 register it: [Two ways to authorise a Notion source](document-sources.md#two-ways-to-authorise-a-notion-source).
 
+## Single sign-on groups
+
+Single sign-on itself is `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` and their companions
+(`OIDC_SCOPES`, `OIDC_AUTO_PROVISION`, `OIDC_DEFAULT_ROLE`); see
+[Accounts and permissions](accounts-and-permissions.md). One more variable maps provider groups to project
+memberships:
+
+| Variable | Notes |
+| --- | --- |
+| `OIDC_GROUPS_CLAIM` | The top-level claim of the **ID token** that lists a person's groups, for example `groups`. 1–128 characters of letters, digits and `_ : . - /`. Unset (the default), nothing here runs and sign-in is unchanged. |
+
+Startup is refused when it is set without `OIDC_ISSUER_URL`. The claim is read from the ID token only: there
+is no request to the userinfo endpoint, and a nested claim path is not supported, so a provider that nests the
+groups (Keycloak's `realm_access.roles`) must map them to a flat claim. A provider that needs a scope to emit
+the claim gets it through `OIDC_SCOPES` (`openid profile email groups`). Which group grants which project is
+set under **Users → SSO group mappings**; what each sign-in then does, and what it does when the claim is
+missing or cannot be read, is in
+[Single sign-on groups](accounts-and-permissions.md#single-sign-on-groups).
+
+Turning `OIDC_GROUPS_CLAIM` off again removes no membership: the rows a group granted stay, marked as such,
+until an administrator removes them or edits them into manual ones.
+
+On Helm it is `config.oidcGroupsClaim`; the rest of the single sign-on variables go through `env` and
+`envSecret`.
+
 ## Project quotas
 
 Three caps limit how much one project may hold, so a runaway source or upload cannot fill the disk or the

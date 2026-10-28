@@ -50,6 +50,9 @@ export const satisfies = (have: ProjectAccess, need: ProjectAccess): boolean => 
 /** Routes that are not about one project: the instance role they need, or null for any account. */
 export function requiredRole(method: string, url: string): UserRole | null {
   if (url.startsWith('/api/users')) return 'admin';
+  // Which provider group grants which project ([ADR-0134](../../.ssot/ADR.md#adr-0134)). A mapping is an
+  // access decision about every person in a group, so it asks for the standing user management does.
+  if (url.startsWith('/api/oidc/')) return 'admin';
   // Reading the audit log ([ADR-0055](../../.ssot/ADR.md#adr-0055)). It is **not** a project route and
   // must not become one: the log records deleting a project, so its rows outlive the membership that
   // would otherwise decide, and there is nothing for a `member` to be a member of. What it holds is
@@ -255,6 +258,8 @@ const AUDIT_DETAIL: ReadonlyArray<{ url: string; field: string; values: readonly
   // A role granted or changed on a project, and an instance role granted to an account. Both are the
   // substance of the event rather than a detail of it.
   { url: '/api/projects/:id/members/:userId', field: 'role', values: ['viewer', 'editor'] },
+  // The role a provider group is mapped to; the group's own name is typed text and is not recorded.
+  { url: '/api/oidc/group-mappings', field: 'role', values: ['viewer', 'editor'] },
   { url: '/api/users', field: 'role', values: ['root', 'admin', 'member'] },
   { url: '/api/users/:id', field: 'role', values: ['root', 'admin', 'member'] },
   // Whether the person approved the connector or refused it. The whole substance of the event, and
@@ -284,6 +289,7 @@ const AUDIT_CREATED: ReadonlyArray<{ method: string; url: string; type: string; 
   { method: 'POST', url: '/api/projects/:id/mcp-tokens', type: 'tokenId', path: ['token', 'id'] },
   { method: 'POST', url: '/api/tokens', type: 'tokenId', path: ['token', 'id'] },
   { method: 'POST', url: '/api/users', type: 'userId', path: ['user', 'id'] },
+  { method: 'POST', url: '/api/oidc/group-mappings', type: 'mappingId', path: ['id'] },
   // The first account. `POST /api/setup` is the one request in this product that creates its own
   // actor, and the account it creates is both the target and the person the row names.
   { method: 'POST', url: '/api/setup', type: 'userId', path: ['user', 'id'] },

@@ -226,6 +226,10 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
   'DELETE /api/projects/:id/mcp-tokens/:tokenId': { verb: 'revoked an MCP credential', prep: 'of', target: 'credential' },
   'PUT /api/projects/:id/members/:userId': { verb: 'granted access', prep: 'to', target: 'account' },
   'DELETE /api/projects/:id/members/:userId': { verb: 'revoked access', prep: 'to', target: 'account' },
+  // Provider group → project mappings ([ADR-0134](../../.ssot/ADR.md#adr-0134)). The delete's counts say what it did to the
+  // memberships that rested on the group; the memberships a sign-in changes are their own events.
+  'POST /api/oidc/group-mappings': { verb: 'mapped a single sign-on group to a project', target: 'mapping' },
+  'DELETE /api/oidc/group-mappings/:id': { verb: 'deleted a single sign-on group mapping', target: 'mapping' },
   // A self-service API token ([ADR-0076](../../.ssot/ADR.md#adr-0076)) — never project-scoped as an
   // *action*, even when the token itself is scoped to one: minting and revoking are things an
   // account does to its own credentials, not to a project.

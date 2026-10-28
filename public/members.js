@@ -56,16 +56,35 @@ export function renderMembers(project) {
   const members = state.membersFor === project.id ? state.members : [];
   const manage = canManageMembers();
 
-  const rows = members.map((m) =>
-    el('div', { class: 'user-row member-row' }, [
+  // ADR-0134: a row an SSO group granted is the group's to change while group mapping is on — the next
+  // sign-in of that person would put it back — so it is shown with its groups and cannot be edited here.
+  const groupsOn = Boolean(state.me?.oidc?.groups);
+
+  const rows = members.map((m) => {
+    const fromGroup = m.origin === 'oidc_group';
+    const locked = fromGroup && groupsOn;
+    const lockWhy = 'Granted by a single sign-on group. Change the group mapping under Users, or disable the account to cut access now.';
+    return el('div', { class: 'user-row member-row' }, [
       el('span', { class: 'user-glyph member', 'aria-hidden': 'true', text: (m.displayName || m.username).slice(0, 2).toUpperCase() }),
-      el('span', { class: 'source-cell' }, [el('code', { text: m.username }), el('span', { class: 'sub', text: m.displayName || '—' })]),
+      el('span', { class: 'source-cell' }, [
+        el('code', { text: m.username }),
+        el('span', { class: 'sub', text: m.displayName || '—' }),
+        fromGroup
+          ? el('span', {
+              class: 'sub',
+              text: `group: ${(m.groups ?? []).join(', ')}${groupsOn ? '' : ' (group mapping is off; editing makes this a manual membership)'}`,
+              title: lockWhy,
+            })
+          : null,
+      ]),
       manage
         ? el(
             'select',
             {
               class: 'role-select',
               'aria-label': `Project role of ${m.username}`,
+              disabled: locked || undefined,
+              title: locked ? lockWhy : undefined,
               onchange: (event) => setMemberRole(project, m, event.target.value, event.target),
             },
             ['viewer', 'editor'].map((r) => el('option', { value: r, selected: m.role === r || undefined, text: r })),
@@ -75,10 +94,21 @@ export function renderMembers(project) {
       el(
         'span',
         { class: 'source-actions' },
-        manage ? [el('button', { type: 'button', class: 'danger small', text: 'Remove', onclick: () => removeMember(project, m) })] : [],
+        manage
+          ? [
+              el('button', {
+                type: 'button',
+                class: 'danger small',
+                disabled: locked || undefined,
+                title: locked ? lockWhy : undefined,
+                text: 'Remove',
+                onclick: () => removeMember(project, m),
+              }),
+            ]
+          : [],
       ),
-    ]),
-  );
+    ]);
+  });
 
   return el('section', { class: 'panel' }, [
     el('div', { class: 'sources-head' }, [
@@ -109,6 +139,8 @@ async function setMemberRole(project, member, role, select) {
     member.role = previous;
     select.value = previous;
     toast(err.message);
+    // A 409 means the row is group-managed; reload so it shows as locked instead of inviting the same edit.
+    if (err instanceof ApiError && err.status === 409) await loadMembers(true);
   }
 }
 
@@ -119,6 +151,7 @@ async function removeMember(project, member) {
     await loadMembers(true);
   } catch (err) {
     toast(err.message);
+    if (err instanceof ApiError && err.status === 409) await loadMembers(true);
   }
 }
 

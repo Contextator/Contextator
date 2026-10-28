@@ -508,6 +508,21 @@ export const EnvSchema = z
      * identity is refused an SSO sign-in from then on, the same as one that was never anything but root.
      */
     OIDC_DEFAULT_ROLE: z.enum(['admin', 'member']).default('member'),
+    /**
+     * The top-level ID-token claim that lists a person's groups ([ADR-0134](../../.ssot/ADR.md#adr-0134)) —
+     * its presence is the switch for mapping provider groups to project memberships.
+     *
+     * Unset (the default), nothing of this runs and a sign-in is what ADR-0077 describes. Set, every SSO
+     * sign-in of a `member` account makes that account's group-granted memberships exactly the projects
+     * its groups map to (`oidc_group_mappings`). The claim is read from the ID token only — there is no
+     * userinfo request — so a provider that needs a scope to emit it gets it through `OIDC_SCOPES`.
+     * Requires `OIDC_ISSUER_URL`; a name outside the character set below is refused here rather than
+     * silently never matching a claim.
+     */
+    OIDC_GROUPS_CLAIM: z
+      .string()
+      .regex(/^[A-Za-z0-9_:.\-/]{1,128}$/, 'must be 1-128 characters of letters, digits and _ : . - /')
+      .optional(),
 
     // MCP OAuth 2.1 (ADR-0054). What these switch on is a *second* way to present a credential at
     // /mcp/*, never a second set of rights: what an OAuth session reaches is the membership of the
@@ -1546,6 +1561,14 @@ export const EnvSchema = z
       if (!c.OIDC_CLIENT_SECRET) {
         ctx.addIssue({ code: 'custom', path: ['OIDC_CLIENT_SECRET'], message: 'required when OIDC_ISSUER_URL is set' });
       }
+    }
+    // Group mapping ([ADR-0134](../.ssot/ADR.md#adr-0134)) reads the ID token of a sign-in, which needs the provider.
+    if (c.OIDC_GROUPS_CLAIM !== undefined && c.OIDC_ISSUER_URL === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['OIDC_GROUPS_CLAIM'],
+        message: 'requires OIDC_ISSUER_URL: the groups come from the provider’s ID token',
+      });
     }
     // Notion OAuth ([ADR-0129](../.ssot/ADR.md#adr-0129)): the id and the secret are one credential, so
     // one without the other is a half-finished edit that must fail now rather than at the first click.

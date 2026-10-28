@@ -339,6 +339,7 @@
       "required": [
         "publicBaseUrl",
         "trustProxy",
+        "oidcGroupsClaim",
         "sourceAllowedHosts",
         "confluenceAllowedHosts",
         "webAllowedHosts",
@@ -356,6 +357,11 @@
           "not": {
             "pattern": "^[\\s\\x0b]*([1]|[Tt][Rr][Uu][Ee])[\\s\\x0b]*$"
           }
+        },
+        "oidcGroupsClaim": {
+          "description": "OIDC_GROUPS_CLAIM (ADR-0134): the top-level ID-token claim that lists a person's groups; setting it turns on mapping provider groups to project memberships. Mirrors the application's startup check (src/config.ts): 1-128 characters of letters, digits and _ : . - /. The application also needs OIDC_ISSUER_URL (set through `env`). Empty leaves it unset.",
+          "type": "string",
+          "pattern": "^([A-Za-z0-9_:.\\-/]{1,128})?$"
         },
         "sourceAllowedHosts": {
           "description": "SOURCE_ALLOWED_HOSTS: host names or IP addresses (not URLs: no scheme, port or path) that a Confluence, S3 or GitHub Enterprise Server source may reach on a private address (ADR-0126, amending ADR-0088). It does not admit a host for a web or git source (ADR-0107). Mirrors the application's startup check (src/config.ts): a DNS-style name (letters, digits, '_' and inner '-', optional trailing dot) or an IP address, IPv6 optionally in brackets. Empty leaves it unset.",

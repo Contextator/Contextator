@@ -117,6 +117,11 @@ config:
   # "1"/"true" (trust every hop's X-Forwarded-For) is refused by the app from 0.5.0 and by this chart's
   # values schema from chart 2.0.0 (ADR-0122): `helm install`/`upgrade` fails on it before anything is rendered.
   trustProxy: ""
+  # OIDC_GROUPS_CLAIM (ADR-0134): the top-level ID-token claim that lists a person's groups; setting it turns
+  # on mapping provider groups to project memberships (`/api/oidc/group-mappings`). It needs OIDC_ISSUER_URL,
+  # which still goes through `env` below, and a provider that needs a scope to emit the claim gets it
+  # through OIDC_SCOPES. Empty leaves the variable unset and sign-in unchanged.
+  oidcGroupsClaim: ""
   # SOURCE_ALLOWED_HOSTS (ADR-0126, amending ADR-0088): host names — not URLs — that sources whose host an
   # operator names and which call an API (Confluence, S3, the GitHub Enterprise Server host of a GitHub
   # source) may reach on a private address (10/8, 172.16/12, 192.168/16, fc00::/7). Set it when Confluence

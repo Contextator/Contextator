@@ -1257,6 +1257,14 @@ export const projectMembers = pgTable(
     role: text('role').notNull().$type<ProjectMemberRole>(),
     createdBy: uuid('created_by'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * Where this membership came from ([ADR-0134](../../.ssot/ADR.md#adr-0134)): `manual` — every row
+     * that existed before 0.6 and every row the members API writes — or `oidc_group`, one an SSO
+     * sign-in reconciled from the provider's group claim. Reconciliation touches `oidc_group` rows only.
+     */
+    origin: text('origin').notNull().default('manual').$type<ProjectMemberOrigin>(),
+    /** The provider groups that produced an `oidc_group` row, so a deleted mapping can recompute it; `NULL` on a `manual` row. */
+    oidcGroups: text('oidc_groups').array(),
   },
   // PK order is (user_id, project_id): the hot queries are "this account's projects" and the point
   // lookup, both served by that index. The reverse direction gets its own.
@@ -1266,7 +1274,39 @@ export const projectMembers = pgTable(
     foreignKey({ name: 'project_members_created_by_fkey', columns: [t.createdBy], foreignColumns: [users.id] }).onDelete('set null'),
     primaryKey({ name: 'project_members_pkey', columns: [t.userId, t.projectId] }),
     check('project_members_role_check', sql`${t.role} in ('viewer', 'editor')`),
+    // ADR-0134: a `manual` row names no group, an `oidc_group` row names at least one.
+    check(
+      'project_members_origin_check',
+      sql`(${t.origin} = 'manual' and ${t.oidcGroups} is null) or (${t.origin} = 'oidc_group' and cardinality(${t.oidcGroups}) > 0)`,
+    ),
     index('project_members_project_idx').on(t.projectId),
+  ],
+);
+
+/**
+ * Which provider group grants which project, and how far ([ADR-0134](../../.ssot/ADR.md#adr-0134)).
+ * An administrator's rows; an SSO sign-in reads them and writes `project_members` from them. A
+ * mapping carries no instance role: no group makes anybody an `admin`.
+ */
+export const oidcGroupMappings = pgTable(
+  'oidc_group_mappings',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** Matched exactly and case-sensitively against the ID token's group claim. */
+    groupName: text('group_name').notNull(),
+    projectId: uuid('project_id').notNull(),
+    /** `viewer` | `editor`, enforced by `oidc_group_mappings_role_check` below. */
+    role: text('role').notNull().$type<ProjectMemberRole>(),
+    createdBy: uuid('created_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({ name: 'oidc_group_mappings_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    foreignKey({ name: 'oidc_group_mappings_created_by_fkey', columns: [t.createdBy], foreignColumns: [users.id] }).onDelete('set null'),
+    unique('oidc_group_mappings_group_project_key').on(t.groupName, t.projectId),
+    check('oidc_group_mappings_role_check', sql`${t.role} in ('viewer', 'editor')`),
+    check('oidc_group_mappings_group_name_check', sql`char_length(${t.groupName}) between 1 and 256`),
+    index('oidc_group_mappings_project_idx').on(t.projectId),
   ],
 );
 
@@ -1429,12 +1469,15 @@ export type McpTokenKind = 'static' | 'access' | 'refresh';
  */
 export type AuditActorKind = 'user' | 'token' | 'api_token';
 export type ProjectMemberRole = 'viewer' | 'editor';
+/** Where a `project_members` row came from ([ADR-0134](../../.ssot/ADR.md#adr-0134)). */
+export type ProjectMemberOrigin = 'manual' | 'oidc_group';
 /** How a `user_sessions` row was opened — a password sign-in, or an OIDC provider. */
 export type SessionAuthMethod = 'password' | 'sso';
 
 export type UserRow = typeof users.$inferSelect;
 export type UserSessionRow = typeof userSessions.$inferSelect;
 export type ProjectMemberRow = typeof projectMembers.$inferSelect;
+export type OidcGroupMappingRow = typeof oidcGroupMappings.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 export type FloorSuggestionRow = typeof floorSuggestions.$inferSelect;
 export type GoldenQuestionRow = typeof goldenQuestions.$inferSelect;
