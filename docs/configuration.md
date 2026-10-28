@@ -185,6 +185,19 @@ across several sources, or raise the setting. The freshness check still lists ev
 over `MAX_CONVERTED_FILE_BYTES` is refused by name whatever the ceiling, and `DATA_DIR_MIN_FREE_BYTES` is checked
 before a sync downloads anything. See [Document sources](document-sources.md#s3-buckets-a-prefix-a-key-pair-and-a-listing-per-check).
 
+## File ceiling for Google Drive sources
+
+| Setting | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `GDRIVE_MAX_FILES` | `5000` | 1 – 100 000 | Files one Google Drive source indexes at most: the first ones in walk order (the folders in the order listed on the source, depth first, each folder's children by name and then by id) among those whose type the source reads |
+
+Past the ceiling the walk stops, the run indexes what it has, logs a warning, and its note says in capitals that the
+rest are **not** indexed. A service account can read everything shared with it, so a folder shared by mistake is
+the usual cause: narrow the source's folders, split it across several sources, or raise the setting. The
+freshness check is one request whatever the ceiling. A Google file over the 10 MB export limit and a stored file
+over `MAX_CONVERTED_FILE_BYTES` are refused by name whatever the ceiling, and `DATA_DIR_MIN_FREE_BYTES` is checked
+before a sync downloads anything. See [Document sources](document-sources.md#google-drive-folders-shared-with-a-service-account).
+
 ## Source links and the "unchanged for a long time" mark
 
 Search and `read_document` answers carry the link to the original document (`sourceUrl`) and the date it last

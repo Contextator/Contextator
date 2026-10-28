@@ -11,6 +11,7 @@ import { adminRoutes } from './admin/routes.js';
 import { webhookRoutes } from './admin/webhooks.js';
 // Source drivers register themselves on import.
 import './services/sources/confluence.js';
+import './services/sources/gdrive.js';
 import './services/sources/git.js';
 import './services/sources/notion.js';
 import './services/sources/s3.js';

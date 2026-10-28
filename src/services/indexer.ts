@@ -133,6 +133,7 @@ export interface IndexerDeps {
         | 'CONFLUENCE_MAX_PAGES'
         | 'NOTION_MAX_PAGES'
         | 'S3_MAX_OBJECTS'
+        | 'GDRIVE_MAX_FILES'
         | 'DATA_DIR_MIN_FREE_BYTES'
         | 'CONTEXTATOR_EMBEDDED_PGDATA'
         | 'CONVERSION_WORKER_MAX_HEAP_MB'

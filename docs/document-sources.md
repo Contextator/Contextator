@@ -13,6 +13,7 @@ The name is the mount point, so it cannot change after creation; everything else
 | **Notion** | Every page shared with an internal integration (or the configured root pages/databases and their descendants), rendered to Markdown, nested by parent page. | The Notion API, re-rendering only pages whose `last_edited_time` changed |
 | **Confluence** | **Cloud, or Data Center 7.9 and later** (see below). Every page in the chosen spaces — or in every space the account can read — rendered from Confluence's storage format to Markdown, nested the way it is in the wiki: `<name>/<space>/<parent page>/<page>.md`. | The Confluence REST API, re-rendering only pages whose version number changed; a signed webhook on Data Center, or the sync interval below |
 | **Documentation site** | **Public pages only** (see below). A published site, found through its `sitemap.xml`, its `llms.txt` or a crawl from one start URL, written under the site's own paths: `<name>/guide/install.html`, converted to Markdown by the same transform `.html` files use. | Conditional GETs against the site (`ETag`/`Last-Modified`), inside the five crawl ceilings below |
+| **Google Drive** | The files under the folders you share with a Google **service account** (see below), written under each folder's own name: `<name>/Handbook/Guide.md`. Google Docs become Markdown, Sheets `.xlsx` and Slides `.pptx`; other files are downloaded as they are. The account's key is stored encrypted. | One `changes.list` request for the freshness check; a run walks the folders and downloads only files whose Google version or checksum changed; the sync interval below |
 | **S3 bucket** | The objects under one prefix of an S3-compatible bucket (AWS S3, MinIO, Ceph, Cloudflare R2…) whose file type the source reads, written under the prefix-relative key: `<name>/guides/install.md`. A key pair is stored encrypted (see below). | `ListObjectsV2`, downloading only objects whose ETag or size changed; the sync interval below |
 
 Sources are synced at the start of every index run, one after another; a source that fails to sync is
@@ -105,6 +106,73 @@ run's note counts the ones that matter.
 - **Export and import.** A project export carries the source's settings and not its key pair; an imported S3
   source arrives unscheduled and needs its credential entered again.
 
+## Google Drive: folders shared with a service account
+
+A **Google Drive** source indexes the trees under the folders you name (up to 50) that are **shared with a Google
+service account**. The account is the only identity the source has: no user signs in, nothing is read through
+domain-wide delegation, and the only scope requested is `drive.readonly`.
+
+**Setting it up**
+
+1. In a Google Cloud project, enable the **Google Drive API** (APIs & Services → Library).
+2. Create a **service account** (IAM & Admin → Service accounts) and, under its **Keys** tab, add a key of type
+   **JSON**. Google downloads the key file; this is the only time it can be fetched.
+3. **Share each folder with the account's e-mail address** (`…@…iam.gserviceaccount.com`, the `client_email` of the
+   key file) in Drive, as *Viewer*.
+4. In the dashboard choose **Add source → Google Drive**, paste the folder links (or their ids), and load or paste
+   the key file. The dialog shows the address to share with as soon as it reads the key.
+
+**If you cannot create a key.** A Google Cloud organisation created on or after 3 May 2024 enforces the
+`iam.managed.disableServiceAccountKeyCreation` policy by default, and creating a key then fails until an
+organisation administrator relaxes the policy for the project. A standalone Google account's project is not
+affected. This product has no other way in: workload identity federation and user OAuth are not supported.
+
+- **The key** is stored encrypted with `SECRET_KEY` as one document holding the account's e-mail, the key id and
+  the private key; the rest of the key file (its `token_uri` included) is not kept and never used, and nothing is
+  ever returned by the API or shown again. Over the API the `secret` is the key file's JSON, as Google issued it.
+  The e-mail is also written to the source's settings (`serviceAccountEmail`, read-only) so the dialog can say whom
+  to share with. **Use one service account per source**: the account can read everything shared with it, and the
+  list of folders only bounds what is indexed, not what the account can see. Replacing the key makes the next
+  check run the source.
+- **Export formats.** A Google Doc is exported as Markdown, a Sheet as `.xlsx` (every sheet, not only the first)
+  and a Slides deck as `.pptx`; the last two are then converted like any uploaded file. Each is read only while its
+  extension is ticked under **File types** (`.md`, `.xlsx`, `.pptx`). Other Google files — Forms, Drawings, Sites —
+  are skipped and counted in the run's note, as are shortcuts, which are not followed.
+- **Google refuses to export a file over 10 MB.** That file is named in the run's note (as over the size limit),
+  the rest of the source is indexed, and the run still succeeds. A stored file listed over
+  `MAX_CONVERTED_FILE_BYTES` is refused the same way and not downloaded.
+- **Paths.** A file's path is its folder's name, then the names of the folders under it, then its own name, with `/`
+  in a name replaced by `_`. Two siblings that share a name, and two root folders that share a name, all get
+  ` (<first 8 characters of the id>)` added, so no two files meet in one path. A name that is empty, `.` or `..`,
+  contains a NUL, or is over 255 bytes once suffixed is skipped and counted — with everything under it when it is
+  a folder — and so are names starting with a dot, which the indexer never scans. A rename shows in `whats_new` as
+  one removal and one addition.
+- **What a check costs.** One `changes.list` request (page size 1) from the position the last successful run took,
+  plus at most one sign-in an hour; nothing is listed or downloaded. Anything the account can see changing wakes
+  the source — including a change in another source's folders when two sources share an account, which costs a
+  walk and never a wrong answer. The run lists every folder (`files.list`, one request per folder) and fetches only
+  files whose Google `version` (Docs, Sheets, Slides) or `md5Checksum` (stored files) changed, so a tree of
+  thousands of folders makes a run, not a check, slow.
+- **Bounds.** One source indexes at most `GDRIVE_MAX_FILES` files (5 000 by default, see
+  [Configuration](configuration.md#file-ceiling-for-google-drive-sources)): the first ones in walk order (the
+  folders in the order listed, depth first, each folder's children by name), and the note says in capitals that the
+  rest are not indexed. A run that would leave less than `DATA_DIR_MIN_FREE_BYTES` free fails with
+  `insufficient_disk` before it downloads anything; an export counts as 10 MiB for that check.
+- **Network.** Requests go only to `oauth2.googleapis.com` and `www.googleapis.com`, over `https`, through the same
+  egress guard as the other sources; a redirect to any other host is refused, and no allowlist setting applies.
+  A server that reaches the internet through a proxy that rewrites TLS must trust that proxy's certificate.
+- **Failures.** `429`, a `403` that says `rateLimitExceeded` or `userRateLimitExceeded`, a `5xx` and a network
+  error are retried up to five times with a growing, jittered wait that honours `Retry-After`; each throttling
+  answer is counted in `contextator_source_throttled_total{source_type="gdrive"}` (see
+  [Observability](observability.md#source-throttling)). A folder that is not shared with the account is reported as
+  `<folder id> is not shared with <account>`; a key Google no longer accepts (deleted, disabled, or a wrong clock
+  on this server) says so; a project without the Drive API enabled says to enable it. A failed run moves neither
+  the manifest nor the freshness check, and nothing is deleted until every download has succeeded.
+- **Shared drives.** Requests carry the shared-drive parameters, so folders in a shared drive that the account is a
+  member of should work, but this is **not verified**: treat it as unsupported until it is.
+- **Export and import.** A project export carries the source's folders and settings, not its key or its position in
+  Google's change feed; an imported Drive source arrives unscheduled and needs its key entered again.
+
 ## Keeping a source fresh on its own
 
 A source can carry a **sync interval** — the *Sync every* field in its dialog — and the server checks it
@@ -118,6 +186,7 @@ index run only happens when the answer moved since the last successful sync:
 | Git | `git ls-remote` on the tracked branch — one ref advertisement, no objects | A fetch |
 | Notion | One `search`, newest edit first, one result | A page read per page, 350 ms apart |
 | Confluence | One CQL search over the same spaces the run indexes: how many pages there are, and when the newest was touched | A listing plus a body read per page |
+| Google Drive | One `changes.list` request (page size 1) from the position the last run took | A walk of every folder |
 | Documentation site | Two requests — `robots.txt`, then the `sitemap.xml`: how many URLs it lists, and the newest `<lastmod>` among them | A conditional GET per page |
 | Local, Upload | The file count and the newest modification time | Reading and hashing every file |
 

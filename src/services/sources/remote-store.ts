@@ -38,6 +38,13 @@ export interface RemoteObject {
   version: string;
   /** Listed size in bytes. */
   size: number;
+  /**
+   * What the disk check counts for this object when the listing cannot say how big the download will be
+   * (a Google-native file has no size until it is exported; [ADR-0127](../../../.ssot/ADR.md#adr-0127)
+   * decision 7 counts it as its ceiling). Unset: {@link RemoteObject.size}. The size limit and the manifest
+   * still use `size`.
+   */
+  reserveBytes?: number;
 }
 
 export interface RemoteDownload {
@@ -204,7 +211,12 @@ export interface RemoteSyncResult {
   note: string;
 }
 
-class ObjectTooLarge extends Error {}
+/**
+ * Thrown by the stream the sync writes, and by a store's `download` that learns the object is over the limit
+ * before any byte arrives (Drive refuses an export over 10 MB): either way the object is named in the note
+ * as over the size limit and the run goes on.
+ */
+export class ObjectTooLarge extends Error {}
 
 function targetFor(root: string, key: string): string | null {
   const target = path.join(root, ...key.split('/'));
@@ -392,7 +404,7 @@ export async function syncRemoteTree(options: SyncRemoteTreeOptions): Promise<Re
   }
 
   // Before a byte is fetched: the run that would fill the disk fails here, downloading nothing.
-  const toDownload = changed.reduce((sum, o) => sum + o.size, 0);
+  const toDownload = changed.reduce((sum, o) => sum + (o.reserveBytes ?? o.size), 0);
   if (options.minFreeBytes && changed.length > 0) {
     const space = await (options.readDisk ?? readDiskSpace)(dataDir).catch(() => null);
     if (space && space.freeBytes - toDownload < options.minFreeBytes) {
@@ -418,8 +430,9 @@ export async function syncRemoteTree(options: SyncRemoteTreeOptions): Promise<Re
         continue;
       }
       const tmp = path.join(tmpDir, randomBytes(8).toString('hex'));
-      const download = await store.download(object);
+      let download: RemoteDownload;
       try {
+        download = await store.download(object);
         await writeDownload(download, tmp, options.maxObjectBytes);
       } catch (err) {
         await fs.rm(tmp, { force: true });

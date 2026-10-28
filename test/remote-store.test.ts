@@ -8,6 +8,7 @@ import { PROBE_TOKEN_KEY } from '../src/services/sources.js';
 import {
   applyCeiling,
   ceilingNote,
+  ObjectTooLarge,
   probeRemoteTree,
   remoteManifestPath,
   remoteRevisionToken,
@@ -433,6 +434,34 @@ describe('syncRemoteTree', () => {
       const result = await run({ maxObjectBytes: 10 });
       expect(result.removed).toEqual(['a.md']);
       expect(await files()).toEqual([]);
+    });
+  });
+
+  describe('an object whose size the listing cannot give (a Drive export, ADR-0127)', () => {
+    it('counts its reserve, not its listed size, against the disk', async () => {
+      remote.put('doc.md', 'tiny');
+      const listing = remote.list.bind(remote);
+      remote.list = async () => (await listing()).map((o) => ({ ...o, size: 0, reserveBytes: 10_000 }));
+      await expect(run({ minFreeBytes: 1, readDisk: async () => ({ freeBytes: 5000, totalBytes: 10 ** 9 }) })).rejects.toBeInstanceOf(
+        InsufficientDiskError,
+      );
+      expect(remote.downloads).toEqual([]);
+      const ok = await run({ minFreeBytes: 1, readDisk: async () => ({ freeBytes: 50_000, totalBytes: 10 ** 9 }) });
+      expect(ok.downloaded).toEqual(['doc.md']);
+    });
+
+    it('names an object a download refuses as too large, and carries on with the rest', async () => {
+      remote.put('a.md', 'A').put('big.md', 'B');
+      const download = remote.download.bind(remote);
+      remote.download = async (object) => {
+        if (object.key === 'big.md') throw new ObjectTooLarge();
+        return download(object);
+      };
+      const result = await run();
+      expect(result.skipped.too_large).toEqual(['big.md']);
+      expect(result.downloaded).toEqual(['a.md']);
+      expect(result.note).toContain('1 over the size limit and not indexed (big.md)');
+      expect(await files()).toEqual(['a.md']);
     });
   });
 

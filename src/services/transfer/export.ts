@@ -20,7 +20,7 @@ import {
 } from '../../db/schema.js';
 import { sourceCurrentDir } from '../data-dir.js';
 import { formatGoldenJsonl, listGoldenQuestions } from '../golden-questions.js';
-import { PROBE_TOKEN_KEY, type SourceType, withoutUrlCredentials } from '../sources.js';
+import { GDRIVE_SERVER_KEYS, PROBE_TOKEN_KEY, type SourceType, withoutUrlCredentials } from '../sources.js';
 import {
   DATA_PREFIX,
   DOCUMENTS_ENTRY,
@@ -128,6 +128,9 @@ export function exportedSource(row: DocumentSourceRow): Record<string, unknown> 
   const config = { ...row.config };
   delete config[PROBE_TOKEN_KEY];
   delete config.lastCommit;
+  // A Drive source's change-feed position belongs to the service account that took it, and the e-mail was read
+  // from a key that does not travel; the destination writes both when it has a key of its own (ADR-0127).
+  if (row.type === 'gdrive') for (const key of GDRIVE_SERVER_KEYS) delete config[key];
   if (row.type === 'git' && typeof config.url === 'string') config.url = withoutUrlCredentials(config.url);
   return {
     type: row.type,

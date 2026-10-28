@@ -25,8 +25,8 @@ export interface DriverContext {
    * sources' egress.
    * `GIT_MAX_PACK_BYTES` is optional for the same reason; absent reads as `GIT_MAX_PACK_BYTES_DEFAULT`.
    * `CONFLUENCE_MAX_PAGES` and `NOTION_MAX_PAGES` are optional for the same reason; absent reads as
-   * `SOURCE_PAGE_LIMIT_DEFAULTS`. `S3_MAX_OBJECTS`, `MAX_CONVERTED_FILE_BYTES` and `DATA_DIR_MIN_FREE_BYTES`
-   * are optional likewise: an `s3` sync reads them, and a context built for a probe or another driver need not
+   * `SOURCE_PAGE_LIMIT_DEFAULTS`. `S3_MAX_OBJECTS`, `GDRIVE_MAX_FILES`, `MAX_CONVERTED_FILE_BYTES` and `DATA_DIR_MIN_FREE_BYTES`
+   * are optional likewise: an `s3` or `gdrive` sync reads them, and a context built for a probe or another driver need not
    * carry them (the ceiling and size limit then read as their defaults, the disk check as off).
    */
   config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS'> &
@@ -41,6 +41,7 @@ export interface DriverContext {
         | 'CONFLUENCE_MAX_PAGES'
         | 'NOTION_MAX_PAGES'
         | 'S3_MAX_OBJECTS'
+        | 'GDRIVE_MAX_FILES'
         | 'MAX_CONVERTED_FILE_BYTES'
         | 'DATA_DIR_MIN_FREE_BYTES'
       >

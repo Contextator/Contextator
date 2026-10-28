@@ -27,7 +27,17 @@ ships, that stops.
   session tokens are refused); an endpoint on a private address needs `SOURCE_ALLOWED_HOSTS`. New setting
   `S3_MAX_OBJECTS` (default 5 000). Panel: an **S3 bucket** tab. The `s3` type joins the credential-bearing types
   of the backup's key check and the project export's manifest.
-- `/metrics`: `contextator_source_throttled_total{source_type}`, the throttling answers a source's remote gave (S3 `503 SlowDown`), counted per answer whether or not a retry then succeeded. The label set is closed (`s3`, `gdrive`) and every value is exported from start at `0` (ADR-0126 decision 9).
+- **Google Drive source** (`gdrive`; ADR-0127): the files under folders shared with a Google service account.
+  Docs are exported as Markdown, Sheets as `.xlsx` and Slides as `.pptx` (the last two converted like any upload);
+  other files are downloaded as they are, and a Google file over Google's 10 MB export limit is refused by name
+  while the run goes on. A scheduled check is one `changes.list` request; a run walks the folders and fetches only
+  files whose Google version or checksum changed. No Google client library: the sign-in (RS256 JWT) and the Drive
+  calls are the product's own, sent only to `oauth2.googleapis.com` and `www.googleapis.com` through the egress
+  guard, which gained a `pinnedHosts` option for it. The key file is stored as one encrypted `secret_enc` document
+  (e-mail, key id, private key). New setting `GDRIVE_MAX_FILES` (default 5 000). Panel: a **Google Drive** tab. The
+  `gdrive` type joins the credential-bearing types of the backup's key check and the project export's manifest.
+  Shared drives are not verified.
+- `/metrics`: `contextator_source_throttled_total{source_type}`, the throttling answers a source's remote gave (S3 `503 SlowDown`, Drive `429` and rate-limit `403`), counted per answer whether or not a retry then succeeded. The label set is closed (`s3`, `gdrive`) and every value is exported from start at `0` (ADR-0126 decision 9).
 
 ### Deprecated
 

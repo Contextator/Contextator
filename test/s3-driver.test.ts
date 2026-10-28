@@ -344,7 +344,7 @@ describe('the s3 settings', () => {
     const opts = { allowedRoots: [], keys: { current: KEY } };
     await expect(
       createSource(db, PROJECT_ID, { type: 'web', name: 'w', config: { entryUrl: 'https://docs.example.com/' }, secret: 'x' }, opts),
-    ).rejects.toThrow('A web source takes no secret; only git, notion, confluence and s3 sources use one.');
+    ).rejects.toThrow('A web source takes no secret; only git, notion, confluence, s3 and gdrive sources use one.');
     // A credential that is not the document is refused before anything is stored.
     await expect(createSource(db, PROJECT_ID, { type: 's3', name: 'b', config: { bucket: BUCKET }, secret: 'just-a-token' }, opts)).rejects.toThrow(
       /valid JSON/,

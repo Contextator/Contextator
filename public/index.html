@@ -118,6 +118,7 @@
           <button type="button" class="tab" role="tab" data-kind="confluence">Confluence</button>
           <button type="button" class="tab" role="tab" data-kind="web">Documentation site</button>
           <button type="button" class="tab" role="tab" data-kind="s3">S3 bucket</button>
+          <button type="button" class="tab" role="tab" data-kind="gdrive">Google Drive</button>
         </div>
         <div class="dialog-body">
           <div class="field-row">
@@ -339,6 +340,25 @@
             <label class="check-inline" id="s3-clear-secret-row" hidden>
               <input type="checkbox" id="s3-clear-secret" />
               <span>Remove the stored key pair</span>
+            </label>
+          </div>
+
+          <div class="kind-only" data-kind="gdrive">
+            <label class="field">
+              <span class="field-label">Folders</span>
+              <textarea name="gdriveFolders" rows="3" placeholder="Folder links or ids, one per line" spellcheck="false"></textarea>
+              <span class="field-hint">Paste the link of each Drive folder (or its id); up to 50. Everything inside is indexed, with the folder's name as the first part of the path. Google Docs become Markdown, Sheets <code>.xlsx</code> and Slides <code>.pptx</code>; a Google file over 10&nbsp;MB cannot be exported and is named on the source. Shortcuts are not followed.</span>
+            </label>
+            <div class="field">
+              <span class="field-label">Service account key</span>
+              <input type="file" id="gdrive-key-file" accept="application/json,.json" />
+              <textarea name="gdriveKey" rows="3" placeholder="…or paste the JSON key file" autocomplete="off" spellcheck="false"></textarea>
+              <span class="field-hint">The key file of a Google service account, created under IAM &amp; Admin → Service accounts → Keys. Only its e-mail address, key id and private key are kept, encrypted with <code>SECRET_KEY</code> and never shown again. The account can read everything shared with it, so use one account for this source alone.</span>
+            </div>
+            <p class="field-hint" id="gdrive-share-hint" hidden>Share the folders with <code id="gdrive-sa-email"></code> — Viewer is enough.</p>
+            <label class="check-inline" id="gdrive-clear-secret-row" hidden>
+              <input type="checkbox" id="gdrive-clear-secret" />
+              <span>Remove the stored key</span>
             </label>
           </div>
 

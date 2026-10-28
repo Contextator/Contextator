@@ -63,7 +63,7 @@ const TOOLS = [
   },
 ];
 
-const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN', confluence: 'CNF', web: 'WEB', s3: 'S3' };
+const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN', confluence: 'CNF', web: 'WEB', s3: 'S3', gdrive: 'GDR' };
 const SOURCE_TITLE = {
   local: 'Local directory',
   git: 'Git repository',
@@ -72,6 +72,7 @@ const SOURCE_TITLE = {
   confluence: 'Confluence site',
   web: 'Documentation site',
   s3: 'S3 bucket',
+  gdrive: 'Google Drive',
 };
 
 /**
@@ -108,6 +109,11 @@ const SOURCE_KINDS = {
     title: 'S3 bucket',
     subtitle: 'Objects under a bucket prefix on AWS S3 or an S3-compatible server. Only objects that changed are downloaded.',
   },
+  gdrive: {
+    type: 'gdrive',
+    title: 'Google Drive',
+    subtitle: 'Folders shared with a Google service account. Docs, Sheets and Slides are exported; only files that changed are downloaded.',
+  },
 };
 
 /**
@@ -118,7 +124,12 @@ const SOURCE_KINDS = {
  * every page and then drop all of them at the indexer's extension filter — reporting a successful run
  * over an empty index.
  */
-const KIND_EXTENSIONS = { web: ['html', 'md', 'txt'], s3: ['md', 'mdx', 'txt'] };
+const KIND_EXTENSIONS = {
+  web: ['html', 'md', 'txt'],
+  s3: ['md', 'mdx', 'txt'],
+  // A Doc is exported as .md, a Sheet as .xlsx and a Slides deck as .pptx, so each is read only while ticked.
+  gdrive: ['md', 'txt', 'pdf', 'docx', 'xlsx', 'pptx'],
+};
 
 /**
  * The source types that hold a credential, and the form field each one's token is typed into.
@@ -127,7 +138,7 @@ const KIND_EXTENSIONS = { web: ['html', 'md', 'txt'], s3: ['md', 'mdx', 'txt'] }
  * the patch below all mean the same thing by it, and a new type that was added to two of the three is
  * exactly the bug this shape removes.
  */
-const SECRET_FIELD = { git: 'secret', notion: 'notionSecret', confluence: 'confluenceSecret', s3: 's3SecretAccessKey' };
+const SECRET_FIELD = { git: 'secret', notion: 'notionSecret', confluence: 'confluenceSecret', s3: 's3SecretAccessKey', gdrive: 'gdriveKey' };
 /** An S3 credential has two parts; `SECRET_FIELD.s3` is the half that is a secret, this is the other one. */
 const S3_KEY_ID_FIELD = 's3AccessKeyId';
 const CREDENTIALLED = new Set(Object.keys(SECRET_FIELD));
@@ -147,6 +158,7 @@ const CLEAR_SECRET_ROWS = () => ({
   notion: $('#notion-clear-secret-row'),
   confluence: $('#confluence-clear-secret-row'),
   s3: $('#s3-clear-secret-row'),
+  gdrive: $('#gdrive-clear-secret-row'),
 });
 const clearSecretRow = (type) => CLEAR_SECRET_ROWS()[type];
 
@@ -886,7 +898,7 @@ function renderSources(project, busy) {
       : el('p', {
           class: 'sources-empty',
           text: mayEdit
-            ? 'No sources yet. Add a local directory, a git repository, an upload, a Notion workspace, a Confluence site or an S3 bucket to give this project something to index.'
+            ? 'No sources yet. Add a local directory, a git repository, an upload, a Notion workspace, a Confluence site, an S3 bucket or a Google Drive folder to give this project something to index.'
             : 'No sources yet. An editor on this project can add one.',
         }),
   ]);
@@ -901,6 +913,7 @@ function sourceOrigin(s) {
   if (s.type === 'confluence') return c.baseUrl || '—';
   if (s.type === 'web') return c.entryUrl || '—';
   if (s.type === 's3') return `s3://${c.bucket || '—'}/${c.prefix ? `${c.prefix}/` : ''}`;
+  if (s.type === 'gdrive') return `${(c.folderIds || []).length} Drive folder(s)`;
   return `${s.name}/`;
 }
 
@@ -1278,6 +1291,8 @@ function openSourceDialog(project, source) {
   srcForm.elements.confluenceSecret.placeholder = 'ATATT…';
   srcForm.elements[S3_KEY_ID_FIELD].placeholder = 'AKIA…';
   srcForm.elements[SECRET_FIELD.s3].placeholder = '';
+  srcForm.elements[SECRET_FIELD.gdrive].placeholder = '…or paste the JSON key file';
+  showGdriveEmail(''); // a reset form names no account until a key is pasted or a source is opened
   $('#secret-hint').innerHTML = SECRET_HINT_HTML; // static markup restored, never user data
   renderSrcRootPrefix();
 
@@ -1365,7 +1380,39 @@ function fillSourceForm(s) {
       srcForm.elements[SECRET_FIELD.s3].placeholder = 'unchanged — type to replace';
     }
   }
+  if (s.type === 'gdrive') {
+    srcForm.elements.gdriveFolders.value = (c.folderIds || []).join('\n');
+    // The key file is one encrypted document the server never returns; what it does return is whom to share with.
+    if (s.hasSecret) srcForm.elements[SECRET_FIELD.gdrive].placeholder = 'unchanged — paste a key file to replace';
+    showGdriveEmail(s.hasSecret ? c.serviceAccountEmail : '');
+  }
   updateProviderHint();
+}
+
+/** Says whom the Drive folders are to be shared with, from the stored source or from the key being pasted. */
+function showGdriveEmail(email) {
+  $('#gdrive-share-hint').hidden = !email;
+  $('#gdrive-sa-email').textContent = email || '';
+}
+
+/** The e-mail in a pasted key file, or nothing. Only this one field is read; the key itself stays in the form. */
+function gdriveEmailOf(text) {
+  try {
+    const email = JSON.parse(text)?.client_email;
+    return typeof email === 'string' ? email : '';
+  } catch {
+    return '';
+  }
+}
+
+/** Accepts folder links or ids, one per line. */
+function parseDriveFolderIds(text) {
+  return String(text || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.match(/\/folders\/([A-Za-z0-9_-]+)/)?.[1] ?? line.match(/[?&]id=([A-Za-z0-9_-]+)/)?.[1] ?? line)
+    .slice(0, 50);
 }
 
 /** A hint with one fragment in monospace, built as nodes so no string ever reaches `innerHTML`. */
@@ -1640,6 +1687,11 @@ function configForKind(kind) {
       ...common,
     };
   }
+  if (type === 'gdrive') {
+    const folderIds = parseDriveFolderIds(srcForm.elements.gdriveFolders.value);
+    if (folderIds.length === 0) throw new Error('Name at least one Drive folder');
+    return { folderIds, ...common };
+  }
   return { ...common };
 }
 
@@ -1662,6 +1714,7 @@ function secretPatchForKind(kind) {
     return { secret: JSON.stringify({ v: 1, accessKeyId, secretAccessKey }) };
   }
   const value = srcForm.elements[SECRET_FIELD[type]].value.trim();
+  if (type === 'gdrive' && !value && !srcUi.editing?.hasSecret) throw new Error('The service account key file is required');
   return value ? { secret: value } : {};
 }
 
@@ -1851,6 +1904,18 @@ for (const tab of srcTabs)
     if (wanted && !srcUi.editing) for (const box of srcForm.querySelectorAll('input[name="ext"]')) box.checked = wanted.includes(box.value);
   });
 srcForm.elements.url.addEventListener('input', updateProviderHint);
+// A key file is read into the field, in the browser: it is sent once, with the form, and nowhere else.
+$('#gdrive-key-file').addEventListener('change', async (event) => {
+  const [file] = event.target.files;
+  if (!file) return;
+  srcForm.elements[SECRET_FIELD.gdrive].value = await file.text();
+  event.target.value = '';
+  showGdriveEmail(gdriveEmailOf(srcForm.elements[SECRET_FIELD.gdrive].value));
+});
+srcForm.elements[SECRET_FIELD.gdrive].addEventListener('input', () => {
+  const email = gdriveEmailOf(srcForm.elements[SECRET_FIELD.gdrive].value);
+  if (email || !srcUi.editing?.config?.serviceAccountEmail) showGdriveEmail(email);
+});
 for (const box of srcForm.querySelectorAll('input[name="ext"]')) box.addEventListener('change', () => renderQueue());
 $('#source-cancel').addEventListener('click', closeSourceDialog);
 srcDialog.addEventListener('close', () => {

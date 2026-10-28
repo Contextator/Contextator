@@ -10,11 +10,12 @@ import { allowedExtensionsFor, FLAVOR_ONLY_EXTENSIONS, FLAVORS, type Flavor } fr
 import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './fs-scan.js';
 import { ConflictError, NotFoundError, ValidationError } from './projects.js';
 import { S3_SECRET } from './s3/client.js';
+import { GDRIVE_SECRET } from './sources/gdrive-client.js';
 import { sanitizeGitUrl } from './sources/git-auth.js';
 import type { SecretBlob } from './sources/secret-blob.js';
 import { TEXT_SEARCH_CONFIGS } from './text-search.js';
 
-export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion', 'confluence', 'web', 's3'] as const;
+export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion', 'confluence', 'web', 's3', 'gdrive'] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
 
 /**
@@ -22,7 +23,7 @@ export type SourceType = (typeof SOURCE_TYPES)[number];
  * ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 8). A type joins here with its own entry; the document is
  * validated and stored in canonical form, and an error names the field, never a value.
  */
-const SECRET_BLOBS: Readonly<Partial<Record<string, SecretBlob<unknown>>>> = { s3: S3_SECRET };
+const SECRET_BLOBS: Readonly<Partial<Record<string, SecretBlob<unknown>>>> = { s3: S3_SECRET, gdrive: GDRIVE_SECRET };
 
 /**
  * Refuses a secret on a source type that never uses one ([ADR-0091](../../.ssot/ADR.md#adr-0091)).
@@ -361,6 +362,38 @@ export const S3Config = z.object({
   syncProbeToken: ProbeToken,
 });
 
+/**
+ * Google Drive ([ADR-0127](../../.ssot/ADR.md#adr-0127)): the trees under `folderIds`, folders shared with the
+ * source's service account. The key file is not here: it is the source's one `secret_enc` document.
+ *
+ * **Two keys are the server's.** `serviceAccountEmail` is written from the stored key when a credential is
+ * saved, so the panel can say whom to share the folders with, and `changesCursor` is the Drive change feed
+ * position the last successful sync took, which the probe compares against. Neither can be set by a client:
+ * `createSource` and `updateSource` overwrite them ({@link GDRIVE_SERVER_KEYS}), and an export leaves them out.
+ */
+export const GdriveConfig = z.object({
+  /** Folder ids, not URLs (the panel extracts the id from a pasted link). Each tree is walked; a folder reached twice is walked once. */
+  folderIds: z
+    .array(z.string().regex(/^[A-Za-z0-9_-]{10,128}$/, 'must be a Google Drive folder id (letters, digits, "-" and "_")'))
+    .min(1, 'name at least one folder')
+    .max(50)
+    .transform((ids) => [...new Set(ids)]),
+  serviceAccountEmail: z.string().max(320).optional(),
+  changesCursor: z.string().max(500).optional(),
+  /**
+   * Which files are read. A Google Doc is exported as `.md`, a Sheet as `.xlsx` and a Slides deck as `.pptx`
+   * ([ADR-0127](../../.ssot/ADR.md#adr-0127) decision 6), so each of those is in scope only while its extension is
+   * listed; a stored file is in scope by its own extension.
+   */
+  extensions: Extensions.default(['md', 'txt', 'pdf', 'docx', 'xlsx', 'pptx']),
+  language: Language,
+  version: Version,
+  syncProbeToken: ProbeToken,
+});
+
+/** The `gdrive` config keys only the server writes. */
+export const GDRIVE_SERVER_KEYS = ['serviceAccountEmail', 'changesCursor'] as const;
+
 export const SourceConfigByType = {
   local: LocalConfig,
   git: GitConfig,
@@ -369,6 +402,7 @@ export const SourceConfigByType = {
   confluence: ConfluenceConfig,
   web: WebConfig,
   s3: S3Config,
+  gdrive: GdriveConfig,
 } as const;
 export type LocalConfig = z.infer<typeof LocalConfig>;
 export type GitConfig = z.infer<typeof GitConfig>;
@@ -377,6 +411,7 @@ export type NotionConfig = z.infer<typeof NotionConfig>;
 export type ConfluenceConfig = z.infer<typeof ConfluenceConfig>;
 export type WebConfig = z.infer<typeof WebConfig>;
 export type S3Config = z.infer<typeof S3Config>;
+export type GdriveConfig = z.infer<typeof GdriveConfig>;
 
 export interface SourceView {
   id: string;
@@ -647,6 +682,11 @@ export async function createSource(db: Db, projectId: string, input: CreateSourc
   checkSecretAllowed(input.type, input.secret);
   const stored = secretToStore(input.type, input.secret);
   const secretEnc = stored ? encryptSecret(stored, opts.keys) : null;
+  if (input.type === 'gdrive') {
+    // Whatever the client sent for these two is dropped: the email comes from the key just validated.
+    for (const key of GDRIVE_SERVER_KEYS) delete config[key];
+    if (stored) config.serviceAccountEmail = GDRIVE_SECRET.parse(stored).clientEmail;
+  }
   // Encrypted when the instance has a key and stored in the clear when it has none — a git source on a
   // public repository must not be the thing that forces SECRET_KEY on an operator (ADR-0017), and
   // `npm run rotate-secret` seals such a value the day a key appears.
@@ -718,6 +758,13 @@ export async function updateSource(
     // nothing changed into a re-sync of the source, and the route below reads exactly this comparison
     // to decide whether to queue a run at all.
     delete merged[PROBE_TOKEN_KEY];
+    // The server's own keys stay as stored, whatever the client sent ([ADR-0127](../../.ssot/ADR.md#adr-0127) decision 2).
+    if (existing.type === 'gdrive') {
+      for (const key of GDRIVE_SERVER_KEYS) {
+        if (existing.config[key] === undefined) delete merged[key];
+        else merged[key] = existing.config[key];
+      }
+    }
     const nextConfig = await validateConfig(existing.type as SourceType, merged, opts);
     const previous = { ...existing.config };
     const token = previous[PROBE_TOKEN_KEY];
@@ -756,6 +803,16 @@ export async function updateSource(
     checkSecretAllowed(existing.type, input.secret);
     const stored = secretToStore(existing.type, input.secret);
     patch.secretEnc = stored ? encryptSecret(stored, opts.keys) : null;
+    if (existing.type === 'gdrive') {
+      // A different key is a different view of Drive: the change-feed position and the token that rests on it
+      // belong to the account that took them, so the next scheduled check runs the source instead of trusting them.
+      const config = { ...((patch.config as Record<string, unknown> | undefined) ?? existing.config) };
+      delete config.changesCursor;
+      delete config[PROBE_TOKEN_KEY];
+      if (stored) config.serviceAccountEmail = GDRIVE_SECRET.parse(stored).clientEmail;
+      else delete config.serviceAccountEmail;
+      patch.config = config;
+    }
   }
   if (input.syncIntervalMinutes !== undefined && input.syncIntervalMinutes !== existing.syncIntervalMinutes) {
     patch.syncIntervalMinutes = input.syncIntervalMinutes;

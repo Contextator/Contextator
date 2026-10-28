@@ -60,6 +60,7 @@ export interface SchedulerDeps {
         | 'CONFLUENCE_MAX_PAGES'
         | 'NOTION_MAX_PAGES'
         | 'S3_MAX_OBJECTS'
+        | 'GDRIVE_MAX_FILES'
         | 'MAX_CONVERTED_FILE_BYTES'
         | 'DATA_DIR_MIN_FREE_BYTES'
       >

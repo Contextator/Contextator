@@ -161,7 +161,7 @@ export const Manifest = z.object({
       name: z.string().min(1).max(64),
       /**
        * `confluence` joined the set in [ADR-0059](../../../.ssot/ADR.md#adr-0059) and `web` in
-       * [ADR-0070](../../../.ssot/ADR.md#adr-0070), and `s3` in [ADR-0126](../../../.ssot/ADR.md#adr-0126);
+       * [ADR-0070](../../../.ssot/ADR.md#adr-0070), `s3` in [ADR-0126](../../../.ssot/ADR.md#adr-0126) and `gdrive` in [ADR-0127](../../../.ssot/ADR.md#adr-0127);
        * `manifestVersion` deliberately did **not** move with any of them — the same decision, for the same reason, that `account` got above. This is a value added to a field, not a field that changed
        * meaning, and bumping the format would make every new export unreadable by builds that could
        * have read all of it but one enum member.
@@ -174,7 +174,7 @@ export const Manifest = z.object({
        * importing something it does not understand. Nothing is silently dropped and nothing lands
        * half-configured.
        */
-      type: z.enum(['local', 'git', 'upload', 'notion', 'confluence', 'web', 's3']),
+      type: z.enum(['local', 'git', 'upload', 'notion', 'confluence', 'web', 's3', 'gdrive']),
       needs: z.array(z.enum(SOURCE_NEEDS)),
     }),
   ),

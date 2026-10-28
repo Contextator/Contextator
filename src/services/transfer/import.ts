@@ -16,7 +16,7 @@ import { GoldenRowSchema } from '../golden-row.js';
 import { allowedExtensionsFor, FLAVORS, type Flavor } from '../flavors.js';
 import { createProject } from '../projects.js';
 import { normalizeSourceUrl, parseSourceDate } from '../source-url.js';
-import { SOURCE_TYPES, type SourceType, parseSourceConfig, sourceVersion } from '../sources.js';
+import { GDRIVE_SERVER_KEYS, SOURCE_TYPES, type SourceType, parseSourceConfig, sourceVersion } from '../sources.js';
 import { textSearchConfigFor } from '../text-search.js';
 import { recountProject, replaceDocument } from '../vector-store.js';
 import {
@@ -373,6 +373,23 @@ async function readManifest(file: string): Promise<Manifest> {
   return result.data;
 }
 
+/**
+ * The settings an imported source is created with: parsed like any client's, minus the keys the server owns.
+ * The server's own keys are never an archive's to set (ADR-0127 decision 2): a Drive source's e-mail names whom
+ * to share folders with, and its cursor is a position in a feed this instance has not read.
+ * Exported for `test/gdrive-driver.test.ts`.
+ */
+export function importedSourceConfig(source: Pick<z.infer<typeof ImportedSource>, 'type' | 'config'>): Record<string, unknown> {
+  let config: Record<string, unknown>;
+  try {
+    config = parseSourceConfig(source.type, source.config) as Record<string, unknown>;
+  } catch (err) {
+    throw new ImportRefusedError('bad_source', `${SOURCES_ENTRY}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (source.type === 'gdrive') for (const key of GDRIVE_SERVER_KEYS) delete config[key];
+  return config;
+}
+
 /** Exported for `test/project-transfer.test.ts`; the import itself is the only caller. */
 export async function readSources(file: string): Promise<Array<z.infer<typeof ImportedSource>>> {
   const out: Array<z.infer<typeof ImportedSource>> = [];
@@ -451,12 +468,7 @@ async function insertImportedSource(
 ): Promise<{ id: string; type: string; config: Record<string, unknown> }> {
   const flavor = source.flavor as Flavor;
   if (!FLAVORS.includes(flavor)) throw new ImportRefusedError('bad_source', `${SOURCES_ENTRY}: unknown flavor "${source.flavor}".`);
-  let config: Record<string, unknown>;
-  try {
-    config = parseSourceConfig(source.type, source.config) as Record<string, unknown>;
-  } catch (err) {
-    throw new ImportRefusedError('bad_source', `${SOURCES_ENTRY}: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  const config = importedSourceConfig(source);
   const [row] = await db
     .insert(documentSources)
     .values({

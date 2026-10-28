@@ -78,6 +78,14 @@ export interface EgressOptions {
    * ([ADR-0107](../../../.ssot/ADR.md#adr-0107)).
    */
   methods?: readonly ('GET' | 'POST')[];
+  /**
+   * The only host names this egress connects to, on the first request and on every redirect hop; anything
+   * else is refused before a socket is opened ([ADR-0127](../../../.ssot/ADR.md#adr-0127) decision 4).
+   * Unset is no pin. For a source whose host is fixed by the product, not typed by an editor (Google Drive):
+   * a key file or a redirect cannot lead a credential anywhere but the listed hosts. The address checks
+   * still apply to a pinned host.
+   */
+  pinnedHosts?: readonly string[];
 }
 
 /**
@@ -100,7 +108,7 @@ export type EgressFetch = (
 export class EgressRefusedError extends Error {
   constructor(
     message: string,
-    readonly rule: RefusedRule | 'scheme',
+    readonly rule: RefusedRule | 'scheme' | 'pinned',
   ) {
     super(message);
     this.name = 'EgressRefusedError';
@@ -313,6 +321,7 @@ export function egressFetch(options: EgressOptions): EgressFetch {
   };
 
   const methods = new Set<string>(options.methods ?? ['GET']);
+  const pinned = options.pinnedHosts ? new Set(options.pinnedHosts.map(normalizeHost)) : null;
 
   const send = (
     url: URL,
@@ -331,6 +340,15 @@ export function egressFetch(options: EgressOptions): EgressFetch {
       return Promise.reject(new EgressRefusedError(`refused: ${where} a \`${url.protocol}\` address; only https is allowed`, 'scheme'));
     }
     const host = normalizeHost(url.hostname);
+    if (pinned && !pinned.has(host)) {
+      const where = redirected ? 'the server redirected to' : 'the request goes to';
+      return Promise.reject(
+        new EgressRefusedError(
+          `refused: ${where} \`${host}\`, which is not one of the hosts ${label} is limited to (${[...pinned].join(', ')})`,
+          'pinned',
+        ),
+      );
+    }
     if (net.isIP(host)) {
       const rule = judge(host, host);
       if (rule) return Promise.reject(new EgressRefusedError(refusal(host, rule, true, redirected, allowListName), rule));
