@@ -280,6 +280,25 @@ describe('the refusals, decided from the manifest before a byte of data is read'
   });
 });
 
+describe('the reported gaps the manifest counts', () => {
+  const excluded = manifest().excluded;
+
+  it('keeps the count a manifest carries', () => {
+    expect(manifest({ excluded: { ...excluded, reportedGaps: 7 } }).excluded.reportedGaps).toBe(7);
+  });
+
+  it('still parses a manifest written before the field existed', () => {
+    const { reportedGaps: _absent, ...older } = { ...excluded, reportedGaps: 0 };
+    const parsed = Manifest.parse({ ...manifest(), excluded: older });
+    expect(parsed.excluded.reportedGaps).toBeUndefined();
+  });
+
+  it('refuses a negative or fractional count', () => {
+    expect(() => manifest({ excluded: { ...excluded, reportedGaps: -1 } })).toThrow();
+    expect(() => manifest({ excluded: { ...excluded, reportedGaps: 1.5 } })).toThrow();
+  });
+});
+
 describe('the prose the tarball carries', () => {
   const text = readmeFor(manifest());
 
@@ -293,6 +312,12 @@ describe('the prose the tarball carries', () => {
     expect(text).toContain('2 MCP token(s)');
     expect(text).toContain('9 index run record(s)');
     expect(text).toContain('3 viewer and 1 editor membership(s)');
+  });
+
+  it('counts the reported gaps too, and says nothing about them for a manifest that predates the field', () => {
+    const withGaps = readmeFor(manifest({ excluded: { ...manifest().excluded, reportedGaps: 7 } }));
+    expect(withGaps).toContain('7 reported gap(s)');
+    expect(text).not.toContain('reported gap');
   });
 
   it('mentions golden questions only when the export carries some', () => {
@@ -386,6 +411,18 @@ describe('the line numbers an import refusal quotes', () => {
     return out;
   };
 
+  /** What `lines` throws with the given cap, or `null` when it does not. */
+  const refusalOf = async (file: string, cap: number): Promise<unknown> => {
+    try {
+      for await (const _ of lines(file, cap)) {
+        // drained
+      }
+      return null;
+    } catch (err) {
+      return err;
+    }
+  };
+
   it('counts the blank lines it skips, so the number is the one an editor shows', async () => {
     const file = await ndjson('x.ndjson', '{"a":1}\n\n   \n{"a":2}\n\n{"a":3}');
     expect(await collect(file)).toEqual([
@@ -411,6 +448,19 @@ describe('the line numbers an import refusal quotes', () => {
     const file = await ndjson('documents.ndjson', '\n\n\n\n{ not json\n');
     // A malformed line is refused by the parse, which runs before anything in `deps` is read.
     await expect(writeDocuments({} as ImportDeps, 'project-id', file, new Map(), new Map())).rejects.toThrow('documents.ndjson:5: not valid JSON');
+  });
+
+  it('names the physical line that is too long, blank lines counted', async () => {
+    const file = await ndjson('documents.ndjson', `{"a":1}\n\n{"a":2}\n${'x'.repeat(64)}`);
+    const refusal = await refusalOf(file, 16);
+    expect(refusal).toBeInstanceOf(ImportRefusedError);
+    expect((refusal as ImportRefusedError).code).toBe('line_too_long');
+    expect((refusal as Error).message).toContain('documents.ndjson:4: has a line longer than 16 bytes');
+  });
+
+  it('names the line even when the oversized one is the first and has no newline at all', async () => {
+    const file = await ndjson('documents.ndjson', 'x'.repeat(64));
+    expect(((await refusalOf(file, 16)) as Error).message).toContain('documents.ndjson:1: has a line longer than 16 bytes');
   });
 
   it('is an empty iteration for a file that does not exist', async () => {

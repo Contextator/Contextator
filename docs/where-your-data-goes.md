@@ -1,6 +1,6 @@
 # Where your data goes
 
-Three things leave the machine, or stay on it, in ways worth knowing before a security review. Everything
+Four things leave the machine, or stay on it, in ways worth knowing before a security review. Everything
 else in this documentation happens inside your own deployment.
 
 1. **The default embedding model is downloaded once, on first start.** `Xenova/multilingual-e5-small` is
@@ -17,3 +17,12 @@ else in this documentation happens inside your own deployment.
    provision (`DATABASE_URL` is required), so where that server runs, who runs it and what backs it up decide
    where projects, documents, embeddings, accounts and logs live. See
    [Bringing your own PostgreSQL](deployment.md#bringing-your-own-postgresql).
+4. **The PII scan keeps where a secret is, not the secret.** By default (`PII_SCAN`, see
+   [Configuration](configuration.md#scanning-documents-for-secrets-and-personal-numbers)) the server looks through
+   the text it has stored for AWS keys, GitHub tokens, private key headers, JWTs, citizen numbers and IBANs, and
+   writes `document_findings` and `document_scans`. A finding holds the document, the line and column, a masked
+   preview (a fixed prefix and at most four characters of the value) and, when `SECRET_KEY` is set, an HMAC of the
+   value under a key derived from it. **The value and any plain hash of it are not stored.** Nothing leaves the
+   machine for it. The findings are in a backup, which is a full database dump, and are left out of a project
+   export; they are shown only to an `editor` of the project and above. The preview of a citizen number and the
+   HMAC are personal data in a derived form, and the findings are kept only as long as the document is.

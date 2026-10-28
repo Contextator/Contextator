@@ -230,6 +230,32 @@ answer marks the passage as unchanged for a long time (`stale: true`). It is a h
 
 Documents indexed before this feature have neither value until their source runs again.
 
+## Scanning documents for secrets and personal numbers
+
+`PII_SCAN` (default `1`, `0` turns it off) looks through the stored text of every document for six kinds of
+value: an AWS access key id, a GitHub token, the header of a PEM private key, a JWT, a Turkish citizen number (only
+with valid check digits) and an IBAN (only with its country's length and a valid mod-97). It **reports and does
+nothing else**: a document is indexed, searched and read exactly as written, never masked and never skipped, and
+search results are the same with the scan on and off.
+
+A finding is where the value is (document, line, column), a masked preview that shows at most four characters of it
+beyond a fixed prefix, and, when `SECRET_KEY` is set, an HMAC of the value under a key derived from `SECRET_KEY` for
+this purpose alone. The HMAC only lets the dashboard say "the same value appears in N documents"; it is never
+returned whole. **Without `SECRET_KEY` the findings are written without it** and nothing is grouped; when a key is
+set later, or changed, the documents are scanned again and the HMACs are filled. Neither the value nor a plain hash
+of it is stored anywhere.
+
+The scan runs in the background after an index run changes a project, and once at startup for everything that has not
+been scanned yet, so documents indexed before an upgrade are scanned without being indexed again. A document is
+scanned again when its text, the rule set or the key changes. Findings are listed by
+`GET /api/projects/:id/findings` for a project `editor` and above (a `viewer` gets `403`); there is no route that takes a
+value and says whether it was found, and nothing is on the MCP surface.
+
+`PII_SCAN=0` stops new scanning and **leaves the findings that exist in place**. They go away with the document that
+holds them, with the generation a rebuild replaces and with the project. A project export leaves them out (its
+manifest counts them under `excluded.documentFindings`); a backup is a full database dump and contains them, as the
+masked preview and the keyed HMAC, never the value. `/metrics` counts documents scanned by outcome and findings by rule.
+
 ## MCP rate limits and token networks
 
 `MCP_RATE_LIMIT_PER_MINUTE` (default `0`, off), `MCP_RATE_LIMIT_ANON_PER_MINUTE` (default `60`),

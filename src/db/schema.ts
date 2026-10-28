@@ -13,6 +13,7 @@ import {
   pgEnum,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -562,6 +563,93 @@ export const chunks = pgTable(
     // index over a `tsvector` needs no fixed dimension and blocks no `ALTER COLUMN … TYPE`, so none of
     // the reasons that keep the HNSW index in the bootstrap apply to it.
     index('chunks_content_tsv_idx').using('gin', t.contentTsv),
+  ],
+);
+
+/**
+ * What the PII scan found in a stored document ([ADR-0130](../../.ssot/ADR.md#adr-0130)): one row per finding.
+ *
+ * **The value is nowhere in this table, and neither is a plain hash of it.** A finding is a place (`line`,
+ * `col`, `start_offset`, `length` in `documents.content`), a masked `preview` that shows at most four
+ * characters of the value beyond a fixed prefix, and `value_hmac` — the value keyed under a key derived from
+ * `SECRET_KEY` for this purpose alone, with that key's id. A citizen number has nine free digits, so a plain
+ * hash of one is reversed in minutes and a keyed hash whose key sat in this database would be no better; the
+ * key lives in the environment. **Without `SECRET_KEY` both are NULL**, and the report still says where.
+ *
+ * It follows its document: deleting a document, a generation swap and deleting a project take the findings
+ * with them through the cascades, and there is no other retention. Only the findings whose
+ * `document_scans.content_hash` equals the document's current `content_hash` are ever shown.
+ */
+export const documentFindings = pgTable(
+  'document_findings',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id').notNull(),
+    documentId: uuid('document_id').notNull(),
+    /** One of `PII_RULES` (`services/pii-rules.ts`); the CHECK below is the same closed set. */
+    rule: text('rule').notNull(),
+    /** 1-based. */
+    line: integer('line').notNull(),
+    /** 1-based, in code points and not in UTF-16 code units. */
+    col: integer('col').notNull(),
+    /** UTF-16 code unit offset into `documents.content`, so `content.slice(start_offset, start_offset + length)` is the match. */
+    startOffset: integer('start_offset').notNull(),
+    length: integer('length').notNull(),
+    /** Masked: a fixed prefix and at most four characters of the value. */
+    preview: text('preview').notNull(),
+    /** Hex HMAC-SHA-256 of the normalised value under the findings key; NULL when the instance has no `SECRET_KEY`. */
+    valueHmac: text('value_hmac'),
+    /** `secretKeyId(SECRET_KEY)` of the key `value_hmac` was made under; NULL with it. */
+    hmacKeyId: text('hmac_key_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({ name: 'document_findings_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    foreignKey({ name: 'document_findings_document_id_fkey', columns: [t.documentId], foreignColumns: [documents.id] }).onDelete('cascade'),
+    check('document_findings_rule_check', sql`${t.rule} in ('aws_access_key', 'github_token', 'private_key', 'jwt', 'tckn', 'iban')`),
+    index('document_findings_project_rule_idx').on(t.projectId, t.rule),
+    index('document_findings_document_idx').on(t.documentId),
+    // "The same value in N documents": the grouping the dashboard shows, which exists only where there is a key.
+    index('document_findings_project_hmac_idx').on(t.projectId, t.valueHmac).where(sql`value_hmac is not null`),
+  ],
+);
+
+/**
+ * Which documents the PII scan has looked at, and as what ([ADR-0130](../../.ssot/ADR.md#adr-0130)): one row per
+ * scanned document.
+ *
+ * It is the scanner's whole memory. A document is scanned when it has no row here, or when its `content_hash`,
+ * the rule-set version or the key id differs from the row's; a document whose text is not stored is marked
+ * `no_content` and not retried. `finding_count` is the real number even when `capped` says only the first
+ * findings were kept.
+ *
+ * **Not a column of `documents`**, on purpose ([ADR-0130](../../.ssot/ADR.md#adr-0130) decision 5): the indexer's
+ * write path does not change for a feature that does not affect search, and the scan state cascades away with the
+ * document it describes.
+ */
+export const documentScans = pgTable(
+  'document_scans',
+  {
+    documentId: uuid('document_id').primaryKey(),
+    projectId: uuid('project_id').notNull(),
+    /** `scanned` or `no_content` (the document's text is NULL: a row written before `documents.content` existed). */
+    status: text('status').notNull(),
+    /** `PII_RULESET_VERSION` at the time of the scan. */
+    ruleset: smallint('ruleset').notNull(),
+    /** The `documents.content_hash` the scan read; findings are shown only while it is still the document's. */
+    contentHash: text('content_hash').notNull(),
+    /** The key id the findings' HMACs were made under; NULL when there was no `SECRET_KEY`. */
+    hmacKeyId: text('hmac_key_id'),
+    findingCount: integer('finding_count').notNull(),
+    /** More findings than the per-document ceiling. Text cut at `MAX_STORED_DOCUMENT_BYTES` is `documents.content_truncated`, not this. */
+    capped: boolean('capped').notNull(),
+    scannedAt: timestamp('scanned_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({ name: 'document_scans_document_id_fkey', columns: [t.documentId], foreignColumns: [documents.id] }).onDelete('cascade'),
+    foreignKey({ name: 'document_scans_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    check('document_scans_status_check', sql`${t.status} in ('scanned', 'no_content')`),
+    index('document_scans_project_idx').on(t.projectId),
   ],
 );
 
@@ -1201,7 +1289,8 @@ export const auditEvents = pgTable(
     /**
      * The address the request appeared to come from — **a hint beside the actor, never the actor.**
      *
-     * What `req.ip` is worth here is `TRUST_PROXY`'s answer ([ADR-0060](../../.ssot/ADR.md#adr-0060)):
+     * What `req.ip` is worth here is `TRUST_PROXY`'s answer ([ADR-0060](../../.ssot/ADR.md#adr-0060),
+     * [ADR-0122](../../.ssot/ADR.md#adr-0122)):
      * the socket's own peer address by default, the left-most `X-Forwarded-For` — which the client
      * writes — on an instance set to `1`, and the forwarded address vouched for by a named proxy when
      * it is set to one. It is recorded because it is useful next to an identity that was established

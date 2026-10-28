@@ -42,6 +42,7 @@ import { scanFrom, selectionFrom } from '../services/vector-store.js';
 import { auditRoutes } from './audit-routes.js';
 import { authRoutes } from './auth-routes.js';
 import { evalRoutes } from './eval-routes.js';
+import { findingsRoutes } from './findings-routes.js';
 import { goldenRoutes } from './golden-routes.js';
 import { mcpRoutes } from './mcp-routes.js';
 import { memberRoutes } from './members-routes.js';
@@ -378,6 +379,8 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       gapReports: ctx.metrics.gapReports(),
       // Throttling answers from S3 (and Drive) remotes, by source type (`services/sources/s3.ts`, ADR-0126).
       sourceThrottled: ctx.metrics.sourceThrottled(),
+      // Documents scanned by outcome and findings by rule, with no project label (`services/pii-scan.ts`, ADR-0130).
+      piiScan: ctx.metrics.piiScan(),
       // Search phases, embedding batches and queue waits (`services/metrics.ts`), observed in the process.
       histograms: ctx.metrics.histograms(),
     };
@@ -637,6 +640,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
   await app.register(auditRoutes, { ctx });
   await app.register(goldenRoutes, { ctx });
   await app.register(evalRoutes, { ctx });
+  await app.register(findingsRoutes, { ctx });
   await app.register(authRoutes, { ctx });
   await app.register(usersRoutes, { ctx });
   await app.register(memberRoutes, { ctx });

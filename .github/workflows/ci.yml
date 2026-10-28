@@ -429,11 +429,18 @@ jobs:
           # `test/ci-eval-filter.test.ts` reads this pattern and asserts it covers every file the harness
           # imports, so a new import in `scripts/eval*.ts` that falls outside it fails the unit suite
           # instead of letting a change to it merge without ever being measured.
-          if printf '%s\n' "$changed" | grep -qE '^(src/services/|src/config\.ts$|src/context\.ts$|src/db/|src/auth/(csrf|policy|types)\.ts$|src/mcp/(sessions|tool-names)\.ts$|test/integration/support/postgres\.ts$|eval/|scripts/eval)'; then
+          #
+          # `package.json`, `package-lock.json` and `drizzle/` are in it on purpose (D3 of the 0.6.0 scope):
+          # a dependency bump can move what the harness measures (the embedding runtime, the reranker, the
+          # database driver) and a migration changes the schema it runs against. The cost is that every
+          # dependabot pull request starts this job; the model comes from the cache keyed below, but the
+          # Postgres container and the evaluation run on every one of them. The cache keys themselves are
+          # still not keyed on the lockfile, and that is a different decision.
+          if printf '%s\n' "$changed" | grep -qE '^(src/services/|src/config\.ts$|src/context\.ts$|src/db/|src/auth/(csrf|policy|types)\.ts$|src/mcp/(sessions|tool-names)\.ts$|test/integration/support/postgres\.ts$|package(-lock)?\.json$|drizzle/|eval/|scripts/eval)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo 'No retrieval evaluation: this change touches nothing the eval harness imports (`src/services/**`, `src/db/**`, `src/config.ts`, ...), `eval/**` or `scripts/eval*.ts`.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'No retrieval evaluation: this change touches nothing the eval harness imports (`src/services/**`, `src/db/**`, `src/config.ts`, ...), `eval/**`, `scripts/eval*.ts`, `package*.json` or `drizzle/**`.' >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0

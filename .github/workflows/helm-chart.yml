@@ -148,6 +148,10 @@ jobs:
           check 'sourceAllowedHosts' --set 'config.sourceAllowedHosts={minio.corp.example:9000}'
           check 'sourceAllowedHosts' --set 'config.sourceAllowedHosts={10.0.4.12:9000}'
           check 'sourceAllowedHosts' --set 'config.sourceAllowedHosts={https://minio.corp.example}'
+          # TRUST_PROXY=1/true (trust every hop) is refused by the application since 0.5.0 (ADR-0122), so
+          # the schema refuses it at install instead of leaving a Pod that exits at startup.
+          check 'trustProxy' --set-string config.trustProxy=1
+          check 'trustProxy' --set-string config.trustProxy=true
 
       # TRUST_PROXY must never be inferred from ingress.enabled (ADR-0060, ADR-0078) — it is only ever
       # rendered when config.trustProxy is set explicitly. This regression-tests the tur 2 fix against

@@ -10,7 +10,7 @@ import { documentSources, mcpTokens, projects, searchQueries, searchQueryHits } 
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
 import { chunkMarkdown, embeddingText, estimateTokens } from '../../src/services/chunker.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
-import { QueryLog, sweepQueryLog } from '../../src/services/query-log.js';
+import { QueryLog, sweepQueryLog, sweepQueryLogRetention } from '../../src/services/query-log.js';
 import { searchProject } from '../../src/services/search.js';
 import { type NewChunk, replaceDocument, storedDocumentContent } from '../../src/services/vector-store.js';
 import {
@@ -381,6 +381,25 @@ describe('retention', () => {
 
     // A day short of the window deletes nothing: the boundary is a boundary and not a rounding.
     expect(await sweepQueryLog(db, 30)).toBe(0);
+  });
+
+  // The reaper's step is what `server.ts` calls on its timer, and it takes no switch: this test holds what
+  // the step does to the database. That the tick calls it with the log off is held at the source of the tick,
+  // in `test/report-gap.test.ts` ("the reaper"), which is the only place the call can be seen.
+  it('sweeps rows past the window through the reaper step, which has no switch to consult', async () => {
+    const queryLog = new QueryLog(db, silentLogger);
+    await askThroughMcp(queryLog, projectId, 'logged before the log was switched off', tokenId);
+    await queryLog.flush();
+    const row = (await loggedQueries(projectId)).find((r) => r.query === 'logged before the log was switched off');
+    expect(row).toBeTruthy();
+    await db
+      .update(searchQueries)
+      .set({ createdAt: sql`now() - interval '31 days'` })
+      .where(eq(searchQueries.id, row?.id ?? ''));
+
+    await sweepQueryLogRetention(db, 30, silentLogger);
+
+    expect((await loggedQueries(projectId)).map((r) => r.query)).not.toContain('logged before the log was switched off');
   });
 });
 

@@ -59,6 +59,14 @@ ships, that stops.
   when neither a redirect URI nor `PUBLIC_BASE_URL` is set, or when `SECRET_KEY` is missing.
 - New routes `GET /api/sources/notion/oauth` (whether the flow is configured), `POST
   /api/projects/:id/sources/notion/oauth` and `GET /api/sources/notion/oauth/callback`.
+- The PII scan (ADR-0130): after an index run, and once at startup for the whole corpus, stored documents are looked
+  through for AWS access keys, GitHub tokens, PEM private key headers, JWTs, Turkish citizen numbers (valid check digits)
+  and IBANs (valid mod-97). It only reports: nothing is masked or skipped and search is unchanged. Findings are listed
+  by `GET /api/projects/:id/findings` for a project `editor` and above, as a masked preview and a short group id;
+  without `SECRET_KEY` they are written without an HMAC. `PII_SCAN=0` stops new scanning. Migration `0029` adds
+  `document_findings` and `document_scans`; `/metrics` gains `contextator_document_findings_total{rule}` and
+  `contextator_document_scans_total{outcome}`; a project export counts the findings it leaves out
+  (`excluded.documentFindings`).
 
 ### Deprecated
 
@@ -87,6 +95,22 @@ ships, that stops.
 - A Notion `secret` sent through `POST`/`PATCH /api/projects/:id/sources` that starts with `{` is refused with
   `400 invalid_request`: that is the shape of an OAuth connection, which only the dashboard flow creates. No real
   integration token starts with `{`.
+- A project export's manifest states, beside the other exclusions, how many `report_gap` reports stayed behind
+  (`excluded.reportedGaps`), and so does the README in the archive. A manifest from an earlier version, without the
+  field, is still read.
+
+### Fixed
+
+- With `SEARCH_QUERY_LOG=0`, `search_queries` rows older than `SEARCH_QUERY_LOG_RETENTION_DAYS` are now swept too. The
+  sweep sat behind the switch, so an instance that turned the log off kept what it had logged until somebody turned
+  it back on. `reported_gaps`, the audit log and `document_changes` were already swept regardless.
+- The CI `eval` job now also starts for a change to `package.json`, `package-lock.json` or `drizzle/`, so every
+  dependabot pull request runs it.
+- The Helm CI job checks that the values schema rejects `config.trustProxy` set to `1` and to `true`.
+- An import that refuses an over-long line in an NDJSON file names the line (`documents.ndjson:12: ...`).
+- The "three tools" wording in the dashboard's About page and in the demo docs now lists all five MCP tools, and
+  `report_gap` is described as writing to its own table under the query log's policies rather than "to the query
+  log".
 
 ## [0.5.0] - 2026-10-26
 

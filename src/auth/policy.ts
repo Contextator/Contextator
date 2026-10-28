@@ -121,6 +121,12 @@ const PROJECT_ROUTE_OVERRIDES: ReadonlyArray<{ method: string; url: string; need
   // see is that the entire corpus in one downloadable file is a different act from reading a page of
   // it. It is the `mcp-auth` class of decision: who may have this project's content, and where.
   { method: 'GET', url: '/api/projects/:id/export', need: 'manager' },
+  // Where the PII scan found secrets and personal numbers ([ADR-0130](../../.ssot/ADR.md#adr-0130) decision 6).
+  // **A `GET`, and deliberately an `editor`'s.** A viewer can read every document already, which is the argument the
+  // `GET` default makes — and what the default cannot see is that a list of where the credentials are is a different
+  // thing to hand to the widest audience, while the role that can act on it (correct or remove the source) is an
+  // editor. It is named in the coverage test's `EDITOR_READS` beside `MANAGER_READS`, so the next such read arrives argued.
+  { method: 'GET', url: '/api/projects/:id/findings', need: 'editor' },
 ];
 
 /**

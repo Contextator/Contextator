@@ -639,7 +639,7 @@ export async function writeDocuments(
  * A missing file is an empty iteration — an export with no sources has an empty `sources.ndjson`, and
  * an export of a project that has never been indexed an empty `documents.ndjson`.
  */
-export async function* lines(file: string): AsyncGenerator<{ text: string; lineNumber: number }> {
+export async function* lines(file: string, maxLineBytes: number = MAX_LINE_BYTES): AsyncGenerator<{ text: string; lineNumber: number }> {
   if (!(await fs.stat(file).catch(() => null))) return;
 
   let pending = '';
@@ -656,8 +656,10 @@ export async function* lines(file: string): AsyncGenerator<{ text: string; lineN
         if (line.trim() !== '') yield { text: line, lineNumber };
         newline = pending.indexOf('\n');
       }
-      if (pending.length > MAX_LINE_BYTES) {
-        throw new ImportRefusedError('line_too_long', `${path.basename(file)} has a line longer than ${MAX_LINE_BYTES} bytes.`);
+      if (pending.length > maxLineBytes) {
+        // `pending` is the line being assembled, which is the one after the last newline seen, so the
+        // physical number an editor would show for it is `lineNumber + 1` (as for the unterminated last line below).
+        throw new ImportRefusedError('line_too_long', `${path.basename(file)}:${lineNumber + 1}: has a line longer than ${maxLineBytes} bytes.`);
       }
     }
   } finally {
