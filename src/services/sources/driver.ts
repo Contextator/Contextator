@@ -54,6 +54,8 @@ export interface DriverContext {
         | 'SYNC_MAX_SKIP_HOURS'
         | 'MAX_CONVERTED_FILE_BYTES'
         | 'DATA_DIR_MIN_FREE_BYTES'
+        | 'NOTION_OAUTH_CLIENT_ID'
+        | 'NOTION_OAUTH_CLIENT_SECRET'
       >
     > &
     WebLimits;

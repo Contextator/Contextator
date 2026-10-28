@@ -65,6 +65,8 @@ export interface SchedulerDeps {
         | 'GITHUB_MAX_DISCUSSIONS'
         | 'MAX_CONVERTED_FILE_BYTES'
         | 'DATA_DIR_MIN_FREE_BYTES'
+        | 'NOTION_OAUTH_CLIENT_ID'
+        | 'NOTION_OAUTH_CLIENT_SECRET'
       >
     > &
     WebLimits;

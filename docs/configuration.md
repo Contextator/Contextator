@@ -247,6 +247,27 @@ answered as a success and dropped. What `report_gap` writes, and which switches 
 [MCP access](mcp-access.md#reporting-what-the-documentation-does-not-answer); its rows are swept by
 `SEARCH_QUERY_LOG_RETENTION_DAYS`.
 
+## Connect with Notion (OAuth)
+
+Three variables turn on **Connect with Notion** in the source dialog, as an alternative to pasting an
+internal integration token. Each operator registers a public connection of their own in Notion; there is no
+Contextator-owned one.
+
+| Variable | Notes |
+| --- | --- |
+| `NOTION_OAUTH_CLIENT_ID` | The public connection's client id. Set together with the secret. |
+| `NOTION_OAUTH_CLIENT_SECRET` | Its client secret. A process secret like `OIDC_CLIENT_SECRET`: never stored in the database, returned or logged. |
+| `NOTION_OAUTH_REDIRECT_URI` | The redirect URI registered on the connection. Defaults to `<PUBLIC_BASE_URL>/api/sources/notion/oauth/callback`. Use a domain name, or `localhost` for a local instance; not an IP address. |
+
+Startup is refused, with a message that names the variable, when only one of the id and the secret is set, when
+both are set with neither `NOTION_OAUTH_REDIRECT_URI` nor `PUBLIC_BASE_URL` (the redirect URI is never guessed
+from a request), or when both are set without `SECRET_KEY` (the tokens are stored encrypted with it). With none
+of them set nothing changes and the dashboard shows no button.
+
+On Helm, put the id in `env` and the secret in `envSecret` (`NOTION_OAUTH_CLIENT_SECRET`), like the other
+secrets the chart does not model one by one. What the connection does, how it differs from a token and how to
+register it: [Two ways to authorise a Notion source](document-sources.md#two-ways-to-authorise-a-notion-source).
+
 ## Project quotas
 
 Three caps limit how much one project may hold, so a runaway source or upload cannot fill the disk or the

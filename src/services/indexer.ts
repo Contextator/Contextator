@@ -137,6 +137,8 @@ export interface IndexerDeps {
         | 'GITHUB_MAX_ISSUES'
         | 'GITHUB_MAX_DISCUSSIONS'
         | 'SYNC_MAX_SKIP_HOURS'
+        | 'NOTION_OAUTH_CLIENT_ID'
+        | 'NOTION_OAUTH_CLIENT_SECRET'
         | 'DATA_DIR_MIN_FREE_BYTES'
         | 'CONTEXTATOR_EMBEDDED_PGDATA'
         | 'CONVERSION_WORKER_MAX_HEAP_MB'

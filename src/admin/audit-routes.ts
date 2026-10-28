@@ -192,6 +192,9 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
   'POST /api/projects/:id/reindex': { verb: 'queued a re-index', prep: 'of' },
   // Sources
   'POST /api/projects/:id/sources': { verb: 'added a source', prep: 'to', target: 'source' },
+  // Notion OAuth ([ADR-0129](../../.ssot/ADR.md#adr-0129)): this row is the click that sends the browser to Notion. The
+  // connection itself is recorded by the callback as the two rows above and below (`connection: notion-oauth`).
+  'POST /api/projects/:id/sources/notion/oauth': { verb: 'started connecting a Notion workspace', prep: 'for' },
   'PATCH /api/projects/:id/sources/:sid': { verb: 'changed a source', prep: 'of', target: 'source' },
   'DELETE /api/projects/:id/sources/:sid': { verb: 'deleted a source', prep: 'from', target: 'source' },
   'POST /api/projects/:id/sources/:sid/sync': { verb: 'queued a sync of a source', prep: 'of', target: 'source' },

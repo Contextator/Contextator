@@ -63,6 +63,15 @@ export function requiredRole(method: string, url: string): UserRole | null {
   // ([ADR-0051](../../.ssot/ADR.md#adr-0051)). It also writes into DATA_DIR from a file somebody
   // uploaded, which is a second reason and not the deciding one.
   if (url === '/api/projects/import' && method === 'POST') return 'admin';
+  // Notion OAuth's two instance-level routes ([ADR-0129](../../.ssot/ADR.md#adr-0129)): whether the
+  // flow is offered, and the page Notion sends the browser back to. Neither is about a project the
+  // route names — the callback reads its project from the flow cookie and checks the `editor` role
+  // live — so the only rule the table can state is "an account", which `member` is the floor of. The
+  // handlers go further and require a **session** (`requireSession`): an API token or `ADMIN_TOKEN`
+  // is machine access, and this is a browser round trip. The project route that starts the flow,
+  // `POST /api/projects/:id/sources/notion/oauth`, needs no row: a `POST` under a project already asks
+  // for an `editor`.
+  if (url.startsWith('/api/sources/notion/oauth')) return 'member';
   return null;
 }
 

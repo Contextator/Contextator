@@ -45,6 +45,7 @@ import { evalRoutes } from './eval-routes.js';
 import { goldenRoutes } from './golden-routes.js';
 import { mcpRoutes } from './mcp-routes.js';
 import { memberRoutes } from './members-routes.js';
+import { notionOAuthRoutes } from './notion-oauth-routes.js';
 import { queriesRoutes } from './queries-routes.js';
 import { sourceRoutes } from './sources-routes.js';
 import { tokensRoutes } from './tokens-routes.js';
@@ -642,6 +643,7 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
   await app.register(mcpRoutes, { ctx });
   await app.register(queriesRoutes, { ctx });
   await app.register(sourceRoutes, { ctx });
+  await app.register(notionOAuthRoutes, { ctx });
   await app.register(tokensRoutes, { ctx });
   await app.register(transferRoutes, { ctx });
 };

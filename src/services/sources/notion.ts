@@ -9,6 +9,16 @@ import { ValidationError } from '../projects.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig, type NotionConfig } from '../sources.js';
 import { registerDriver, type DocumentMeta, type DocumentMetaFile, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
 import { frontmatterMeta } from './frontmatter-meta.js';
+import {
+  databaseSecretStore,
+  isOAuthSecret,
+  notionApiBaseUrl,
+  notionOAuthCredentials,
+  NotionOAuthSession,
+  NotionAuthFailure,
+  parseOAuthSecret,
+  type NotionSecretStore,
+} from './notion-oauth.js';
 import { frontmatter, pageFileStem, pageTitle, renderBlocks, type NotionBlock } from './notion-render.js';
 
 /**
@@ -43,20 +53,43 @@ export class NotionDriver implements SourceDriver {
   /** Set by discovery when a page past `NOTION_MAX_PAGES` was seen and left out. */
   private truncated = false;
 
+  /** Built once for an OAuth source: its tokens, and the refresh state that goes with them, live as long as the driver. */
+  private oauthClient: Client | undefined;
+
   constructor(
     private readonly source: DocumentSourceRow,
     private readonly ctx: DriverContext,
     /** Stands in for the API in tests; in production one is built from the stored token. */
     private readonly injectedClient?: Client,
+    /** Where an OAuth refresh reads and compare-and-swaps the ciphertext; a test supplies an in-memory one. */
+    private readonly secretStore?: NotionSecretStore,
   ) {
     this.cfg = parseSourceConfig('notion', source.config);
   }
 
+  /**
+   * An internal integration token is the decrypted value itself and builds a client exactly as it always
+   * has. An OAuth connection is the JSON document [ADR-0129](../../../.ssot/ADR.md#adr-0129) §4 describes,
+   * told apart by its first character; its client refreshes the pair when Notion refuses it.
+   */
   private client(): Client {
     if (this.injectedClient) return this.injectedClient;
+    if (this.oauthClient) return this.oauthClient;
     if (!this.source.secretEnc) throw new SecretKeyMissingError();
-    const auth = decryptSecret(this.source.secretEnc, keyringOf(this.ctx.config));
-    return new Client({ auth });
+    const keys = keyringOf(this.ctx.config);
+    const plain = decryptSecret(this.source.secretEnc, keys);
+    if (!isOAuthSecret(plain)) return new Client({ auth: plain });
+    const secret = parseOAuthSecret(plain);
+    const session = new NotionOAuthSession({
+      sourceId: this.source.id,
+      secret,
+      keys,
+      credentials: notionOAuthCredentials(this.ctx.config),
+      store: this.secretStore ?? databaseSecretStore(this.ctx.db, keys),
+      log: this.ctx.log,
+    });
+    this.oauthClient = new Client({ auth: secret.accessToken, fetch: session.fetch, baseUrl: notionApiBaseUrl() });
+    return this.oauthClient;
   }
 
   private async throttle<T>(fn: () => Promise<T>): Promise<T> {
@@ -149,13 +182,16 @@ export class NotionDriver implements SourceDriver {
         const page = (await this.throttle(() => client.pages.retrieve({ page_id: clean }))) as AnyRecord;
         if (add(page)) queue.push({ id: clean, kind: 'page', depth: 0 });
         continue;
-      } catch {
+      } catch (err) {
+        // A connection that cannot be made to work is not "not a page id": the run must fail, or every page the walk did not reach would be taken for gone and its file deleted (ADR-0129).
+        if (err instanceof NotionAuthFailure) throw err;
         /* not a page id — it may name a database */
       }
       try {
         for (const page of await this.databasePages(client, clean, true))
           if (add(page)) queue.push({ id: page.id as string, kind: 'page', depth: 1 });
       } catch (err) {
+        if (err instanceof NotionAuthFailure) throw err;
         rootFailures.push(`${clean.slice(0, 8)}… (${err instanceof Error ? err.message : String(err)})`);
       }
     }
@@ -179,6 +215,7 @@ export class NotionDriver implements SourceDriver {
             const page = (await this.throttle(() => client.pages.retrieve({ page_id: child.id }))) as AnyRecord;
             if (add(page)) queue.push({ id: child.id, kind: 'page', depth: item.depth + 1 });
           } catch (err) {
+            if (err instanceof NotionAuthFailure) throw err;
             this.ctx.log.warn({ err, pageId: child.id }, 'notion child page not accessible');
           }
         } else if (child.type === 'child_database') {
@@ -206,7 +243,7 @@ export class NotionDriver implements SourceDriver {
       const db = await this.throttle(() => c.databases.retrieve({ database_id: databaseId }));
       dataSourceIds = ((db.data_sources as Array<{ id: string }> | undefined) ?? []).map((d) => d.id);
     } catch (err) {
-      if (required) throw err;
+      if (required || err instanceof NotionAuthFailure) throw err;
       this.ctx.log.warn({ err, databaseId }, 'notion database not accessible');
       this.partialFailures.push(`database ${databaseId.slice(0, 8)}… is not accessible`);
       return out;
