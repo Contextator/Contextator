@@ -1,9 +1,19 @@
-import type { FastifyPluginAsync } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import type { AppContext } from '../context.js';
 import { requirePrincipal } from '../auth/plugin.js';
-import { createMcpToken, listMcpTokens, revokeMcpToken, setProjectMcpAuth, updateMcpTokenNetworks } from '../services/auth/mcp-tokens.js';
+import {
+  createMcpToken,
+  listMcpTokens,
+  McpScopeError,
+  revokeMcpToken,
+  setMcpTokenSources,
+  setProjectMcpAuth,
+  updateMcpTokenNetworks,
+  type McpTokenView,
+} from '../services/auth/mcp-tokens.js';
 import { parseAllowedCidrs } from '../services/token-networks.js';
+import type { AuditDetail } from '../auth/policy.js';
 
 const ProjectParams = z.object({ id: z.uuid() });
 const TokenParams = ProjectParams.extend({ tokenId: z.uuid() });
@@ -20,16 +30,43 @@ export const CreateBody = z.object({
   expiresInDays: z.literal(TOKEN_LIFETIME_DAYS).nullable().default(null),
   /** Client networks allowed to present the token ([ADR-0118](../../.ssot/ADR.md#adr-0118)); `null`, absent or empty means anywhere. */
   allowedCidrs: z.array(z.string().max(64)).max(32).nullable().default(null),
+  /**
+   * Source **names** this token is bound to ([ADR-0133](../../.ssot/ADR.md#adr-0133)). Absent or `null` reads the
+   * whole project; `[]` is refused (`empty_scope`) and is **not** the same as absent. No `.default(null)`:
+   * the parsed body keeps the shape it had before this field, and the route reads absent as `null`.
+   */
+  sources: z.array(z.string().min(1).max(100)).max(200).nullable().optional(),
 });
 
 /** `PATCH .../mcp-tokens/:tokenId`: replaces the token's network list; `null` or `[]` removes the restriction. */
 export const UpdateNetworksBody = z.object({ allowedCidrs: z.array(z.string().max(64)).max(32).nullable() });
+
+/** `PATCH .../mcp-tokens/:tokenId/sources`: replaces the token's sources; `null` removes the scope, `[]` is `400 empty_scope`. */
+export const UpdateSourcesBody = z.object({ sources: z.array(z.string().min(1).max(100)).max(200).nullable() });
+
+/** Status per scope refusal; the error code is the `McpScopeError`'s own (ADR-0133 decision 6). */
+const SCOPE_STATUS = { empty_scope: 400, unknown_source: 400, not_static: 409 } as const;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** The moment a token minted at `now` with this lifetime stops being accepted; `null` for never. */
 export const expiryFromDays = (days: number | null, now: Date = new Date()): Date | null =>
   days === null ? null : new Date(now.getTime() + days * DAY_MS);
+
+/** The refusals of a source scope as their own status and error code; anything else is the error handler's. */
+function replyScopeError(reply: FastifyReply, err: unknown): FastifyReply {
+  if (!(err instanceof McpScopeError)) throw err;
+  return reply.code(SCOPE_STATUS[err.code]).send({ error: err.code, message: err.message });
+}
+
+/**
+ * What the audit row says about a scope: whether there is one and, when there is, the names of its sources
+ * as the database holds them — never the strings the request carried. An unscoped mint records nothing extra.
+ */
+function auditScope(req: { auditDetail?: AuditDetail | null; method: string }, view: McpTokenView): void {
+  if (view.sources !== null) req.auditDetail = { scoped: true, sources: view.sources };
+  else if (req.method === 'PATCH') req.auditDetail = { scoped: false };
+}
 
 /**
  * `/api/projects/:id/mcp-tokens/*`. The project guard in src/auth/plugin.ts has already decided
@@ -47,11 +84,16 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
   app.post('/api/projects/:id/mcp-tokens', async (req, reply) => {
     const principal = requirePrincipal(req);
     const { id } = ProjectParams.parse(req.params);
-    const { name, expiresInDays, allowedCidrs } = CreateBody.parse(req.body ?? {});
+    const { name, expiresInDays, allowedCidrs, sources } = CreateBody.parse(req.body ?? {});
     const cidrs = parseAllowedCidrs(allowedCidrs);
-    const { token, view } = await createMcpToken(db, id, name, principal.userId, expiryFromDays(expiresInDays), cidrs);
-    // Returned once and never again: the database holds only its hash.
-    return reply.code(201).send({ token: view, secret: token });
+    try {
+      const { token, view } = await createMcpToken(db, id, name, principal.userId, expiryFromDays(expiresInDays), cidrs, sources ?? null);
+      auditScope(req, view);
+      // Returned once and never again: the database holds only its hash.
+      return reply.code(201).send({ token: view, secret: token });
+    } catch (err) {
+      return replyScopeError(reply, err);
+    }
   });
 
   // Which networks may present one token. The list itself is not written to the audit trail: the event
@@ -60,6 +102,21 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     const { id, tokenId } = TokenParams.parse(req.params);
     const { allowedCidrs } = UpdateNetworksBody.parse(req.body ?? {});
     return updateMcpTokenNetworks(db, id, tokenId, parseAllowedCidrs(allowedCidrs));
+  });
+
+  // Which sources one static token may read, or `null` for the whole project ([ADR-0133](../../.ssot/ADR.md#adr-0133)).
+  // Takes effect on the token's next request: the token is resolved on every one (ADR-0099). The audit row carries
+  // the names, which is where this differs from the network list above on purpose.
+  app.patch('/api/projects/:id/mcp-tokens/:tokenId/sources', async (req, reply) => {
+    const { id, tokenId } = TokenParams.parse(req.params);
+    const { sources } = UpdateSourcesBody.parse(req.body ?? {});
+    try {
+      const view = await setMcpTokenSources(db, id, tokenId, sources);
+      auditScope(req, view);
+      return view;
+    } catch (err) {
+      return replyScopeError(reply, err);
+    }
   });
 
   app.delete('/api/projects/:id/mcp-tokens/:tokenId', async (req, reply) => {

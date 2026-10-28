@@ -10,6 +10,7 @@ import { allowedExtensionsFor, FLAVOR_ONLY_EXTENSIONS, FLAVORS, type Flavor } fr
 import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './fs-scan.js';
 import { ConflictError, NotFoundError, ValidationError } from './projects.js';
 import { S3_SECRET } from './s3/client.js';
+import { withinSourceScope } from './source-scope.js';
 import { GDRIVE_SECRET } from './sources/gdrive-client.js';
 import { canonicalGithubToken, GITHUB_API_DEFAULT } from './sources/github-client.js';
 import { sanitizeGitUrl } from './sources/git-auth.js';
@@ -745,8 +746,18 @@ export function slugifySourceName(input: string): string {
   return PROJECT_NAME_RE.test(name) ? name : '';
 }
 
-export async function listSources(db: Db, projectId: string): Promise<DocumentSourceRow[]> {
-  return db.select().from(documentSources).where(eq(documentSources.projectId, projectId)).orderBy(asc(documentSources.createdAt));
+/**
+ * The project's sources, oldest first. `sourceIds` is a token's source scope
+ * ([ADR-0133](../../.ssot/ADR.md#adr-0133)): `undefined` or `null` lists them all, and a list — an empty one
+ * included, which lists none — lists only those, so a scoped token is never told the name, type or label
+ * of a source outside it.
+ */
+export async function listSources(db: Db, projectId: string, sourceIds?: readonly string[] | null): Promise<DocumentSourceRow[]> {
+  return db
+    .select()
+    .from(documentSources)
+    .where(and(eq(documentSources.projectId, projectId), withinSourceScope(documentSources.id, sourceIds)))
+    .orderBy(asc(documentSources.createdAt));
 }
 
 export async function listAllSources(db: Db): Promise<DocumentSourceRow[]> {

@@ -142,6 +142,23 @@ function networkNote(token) {
   });
 }
 
+/**
+ * A token's source scope as a badge ([ADR-0133](../../.ssot/ADR.md#adr-0133)): nothing for a token that reads the
+ * whole project, the names for one bound to sources, and a red badge for a scope whose sources are all gone — that
+ * token reads nothing, and the list is where an operator looks for one that has stopped working.
+ */
+export function scopeBadge(token) {
+  if (token.scopeEmpty)
+    return el('span', {
+      class: 'pill small error token-scope empty',
+      text: 'scope empty',
+      title: 'Scope empty — this token reads no document: every source it was bound to has been deleted. Revoke it and mint a new one.',
+    });
+  if (!token.sources) return null;
+  const shown = token.sources.length > 2 ? `${token.sources.slice(0, 2).join(', ')} +${token.sources.length - 2}` : token.sources.join(', ');
+  return el('span', { class: 'pill small token-scope', text: `sources: ${shown}`, title: `Reads only: ${token.sources.join(', ')}` });
+}
+
 export function renderMcpAccess(project) {
   const mode = modeOf(project);
   const tokens = state.mcpTokensFor === project.id ? state.mcpTokens : [];
@@ -151,7 +168,12 @@ export function renderMcpAccess(project) {
   const rows = tokens.map((t) =>
     el('div', { class: 'user-row token-row mcp-token-row' }, [
       el('span', { class: 'source-glyph token', 'aria-hidden': 'true', text: 'KEY' }),
-      el('span', { class: 'source-cell' }, [el('code', { text: t.prefix }), el('span', { class: 'sub', text: t.name || 'unnamed' }), networkNote(t)]),
+      el('span', { class: 'source-cell' }, [
+        el('code', { text: t.prefix }),
+        el('span', { class: 'sub', text: t.name || 'unnamed' }),
+        networkNote(t),
+        scopeBadge(t),
+      ]),
       // Third, so it is still on screen when a narrow layout drops the columns after it.
       tokenExpiry(t),
       el('span', { class: 'sub', text: `created ${relativeTime(t.createdAt)}` }),
@@ -275,11 +297,44 @@ async function revoke(project, token) {
 
 let dialogProject = null;
 
+/** Shows the source checkboxes only while "Only these sources" is chosen. */
+function syncScopeChoice() {
+  const some = $('#token-form').elements.scope.value === 'some';
+  $('#token-sources-list').hidden = !some;
+}
+
+/** The project's sources as checkboxes, read fresh: the list the editor chooses from is the one the server will resolve names against. */
+async function fillScopeChoices(project) {
+  const list = $('#token-sources-list');
+  list.replaceChildren();
+  $('#token-scope-open-note').hidden = modeOf(project) !== 'open';
+  try {
+    const sources = await api(`/api/projects/${project.id}/sources`);
+    if (dialogProject !== project) return;
+    if (sources.length === 0) {
+      list.append(el('p', { class: 'field-hint', text: 'This project has no sources yet.' }));
+      return;
+    }
+    for (const source of sources) {
+      list.append(
+        el('label', { class: 'check' }, [
+          el('input', { type: 'checkbox', name: 'source', value: source.name }),
+          el('span', {}, [source.name, source.label ? el('span', { class: 'muted', text: ` — ${source.label}` }) : null]),
+        ]),
+      );
+    }
+  } catch (err) {
+    list.append(el('p', { class: 'form-error', text: err.message }));
+  }
+}
+
 function openTokenDialog(project) {
   dialogProject = project;
   const form = $('#token-form');
   form.reset();
   $('#token-error').hidden = true;
+  syncScopeChoice();
+  void fillScopeChoices(project);
   openDialog($('#token-dialog'));
   form.elements.name.focus();
 }
@@ -326,6 +381,7 @@ export function initMcpUi() {
   const errorNode = $('#token-error');
 
   $('#token-cancel').addEventListener('click', () => closeDialog(dialog));
+  for (const radio of form.elements.scope) radio.addEventListener('change', syncScopeChoice);
   $('#token-secret-close').addEventListener('click', () => closeDialog($('#token-secret-dialog')));
 
   form.addEventListener('submit', async (event) => {
@@ -342,9 +398,23 @@ export function initMcpUi() {
         errorNode.hidden = false;
         return;
       }
+      // "Every source" sends no `sources` at all; "Only these" sends the ticked names, and none ticked is
+      // refused here the way the server refuses `[]` — a token that reads nothing is never what was meant.
+      const scoped = data.get('scope') === 'some';
+      const sources = scoped ? data.getAll('source').map(String) : null;
+      if (scoped && sources.length === 0) {
+        errorNode.textContent = 'Tick at least one source, or choose every source.';
+        errorNode.hidden = false;
+        return;
+      }
       const { secret } = await api(`/api/projects/${dialogProject.id}/mcp-tokens`, {
         method: 'POST',
-        body: { name: String(data.get('name')).trim(), expiresInDays: TOKEN_LIFETIMES.includes(days) ? days : null, allowedCidrs: networks.value },
+        body: {
+          name: String(data.get('name')).trim(),
+          expiresInDays: TOKEN_LIFETIMES.includes(days) ? days : null,
+          allowedCidrs: networks.value,
+          ...(sources ? { sources } : {}),
+        },
       });
       closeDialog(dialog);
       showMcpSecret(dialogProject, secret);

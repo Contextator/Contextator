@@ -12,6 +12,12 @@ export interface ResolvedMcpCredential {
   tokenId: string | null;
   /** [ADR-0118](../../.ssot/ADR.md#adr-0118): the networks the static token may be presented from, or `null`. */
   allowedCidrs: string[] | null;
+  /**
+   * [ADR-0133](../../.ssot/ADR.md#adr-0133): the source ids a scoped static token may read, `null` for a
+   * credential that reads the whole project, and `[]` for a scope that holds nothing. Only a static token
+   * carries one; every other outcome here is `null`.
+   */
+  sourceScope: string[] | null;
 }
 
 /**
@@ -29,11 +35,11 @@ export interface ResolvedMcpCredential {
  * lives for an hour; an hour is far too long for "we removed their access" to mean nothing.
  */
 export async function resolveMcpCredential(db: Db, projectId: string, bearer: string): Promise<ResolvedMcpCredential> {
-  if (!bearer) return { credential: { kind: 'anonymous' }, tokenId: null, allowedCidrs: null };
+  if (!bearer) return { credential: { kind: 'anonymous' }, tokenId: null, allowedCidrs: null, sourceScope: null };
 
   const token = await verifyMcpToken(db, projectId, bearer);
-  if (!token) return { credential: { kind: 'unknown' }, tokenId: null, allowedCidrs: null };
-  if (!token.userId) return { credential: { kind: 'bearer' }, tokenId: token.id, allowedCidrs: token.allowedCidrs };
+  if (!token) return { credential: { kind: 'unknown' }, tokenId: null, allowedCidrs: null, sourceScope: null };
+  if (!token.userId) return { credential: { kind: 'bearer' }, tokenId: token.id, allowedCidrs: token.allowedCidrs, sourceScope: token.sourceScope };
 
   const [account] = await db
     .select({
@@ -54,7 +60,8 @@ export async function resolveMcpCredential(db: Db, projectId: string, bearer: st
   // that matters most — a person changing their own password because they think it leaked — clears
   // `mustChangePassword` and would have walked straight through a check that was the only gate. What
   // is left for this line to catch is a credential minted while a temporary password stands.
-  if (!account?.isActive || account.mustChangePassword) return { credential: { kind: 'unknown' }, tokenId: token.id, allowedCidrs: null };
+  if (!account?.isActive || account.mustChangePassword)
+    return { credential: { kind: 'unknown' }, tokenId: token.id, allowedCidrs: null, sourceScope: null };
 
   const principal: Principal = {
     kind: 'session',
@@ -67,5 +74,5 @@ export async function resolveMcpCredential(db: Db, projectId: string, bearer: st
     mustChangePassword: false,
   };
   const access = await resolveProjectAccess(db, principal, projectId);
-  return { credential: { kind: 'account', access }, tokenId: token.id, allowedCidrs: null };
+  return { credential: { kind: 'account', access }, tokenId: token.id, allowedCidrs: null, sourceScope: null };
 }

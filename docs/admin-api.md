@@ -74,5 +74,16 @@ and is audited without writing the list into the audit event. (Up to 0.4.x both 
 no longer exists.) The PATCH also updates a token that has already expired, so its network list can
 be changed before or after the expiry date; only a revoked token answers `404`.
 
+A static token can also be bound to some of the project's sources ([MCP access](mcp-access.md#binding-a-static-token-to-some-of-a-projects-sources)).
+`POST /api/projects/:id/mcp-tokens` takes `sources`, a list of source **names** (absent or `null`: the whole project);
+`PATCH /api/projects/:id/mcp-tokens/:tokenId/sources` (`editor`) takes `{ "sources": ["handbook"] }` to replace the
+scope or `{ "sources": null }` to remove it, and takes effect on the token's next request. Refusals, each with the
+error code in `error`: `400 empty_scope` for `[]` (a token that reads nothing is never created on purpose),
+`400 unknown_source` for a name this project does not have (the message lists the names it did not find),
+`409 not_static` for an OAuth credential, `404` for a token that is not this project's or is revoked. `GET
+/api/projects/:id/mcp-tokens` returns `sources` (`string[]` or `null`) and `scopeEmpty` (`true` for a scoped token whose
+sources are all gone) on every token. Both writes are audited with `detail: { scoped, sources }`, the names read back
+from the database.
+
 The query log's summary (`GET /api/projects/:id/queries/summary`) and export take an optional `token` (a token id)
 to show what one MCP token asked, on top of the existing filters.

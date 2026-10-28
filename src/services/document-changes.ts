@@ -390,6 +390,15 @@ export interface ListChangesQuery {
   source?: string;
   /** An exact release label ([ADR-0058](../../.ssot/ADR.md#adr-0058)). */
   version?: string;
+  /**
+   * A scoped token's source ids ([ADR-0133](../../.ssot/ADR.md#adr-0133)). `document_changes` carries no
+   * source id, so a row belongs to the scope when its path starts with a scoped source's name **and** it
+   * was written no earlier than that source was created, both read off `document_sources` in the same
+   * statement: a source deleted and re-created under the same name has a new id and a new `created_at`,
+   * and the deleted one's `removed` rows predate it. Applies to `added`, `modified` and `removed` alike.
+   * Unset or `null` is no scope; `[]` lists nothing.
+   */
+  sourceScope?: readonly string[] | null;
   limit: number;
 }
 
@@ -402,7 +411,7 @@ export interface ListChangesQuery {
  * `classifyChange`'s, written NULL-safe (`added_at` is NULL for a path older than the record).
  */
 export async function listDocumentChanges(db: Db, query: ListChangesQuery): Promise<{ changes: ListedChange[]; truncated: boolean }> {
-  const { projectId, liveGeneration, since, source, version, limit } = query;
+  const { projectId, liveGeneration, since, source, version, sourceScope, limit } = query;
   const rows = await db
     .select({
       path: documentChanges.relativePath,
@@ -432,6 +441,20 @@ export async function listDocumentChanges(db: Db, query: ListChangesQuery): Prom
         version === undefined ? undefined : eq(documentChanges.version, version),
         // `starts_with` rather than `LIKE`: a source name is `[a-z0-9_-]`, but a prefix is not a pattern and this needs no escaping.
         source === undefined ? undefined : sql`starts_with(${documentChanges.relativePath}, ${`${source}/`})`,
+        sourceScope === undefined || sourceScope === null
+          ? undefined
+          : sourceScope.length === 0
+            ? sql`false`
+            : sql`exists (
+                select 1 from document_sources ds
+                where ds.project_id = ${documentChanges.projectId}
+                  and ds.id in (${sql.join(
+                    sourceScope.map((id) => sql`${id}`),
+                    sql`, `,
+                  )})
+                  and starts_with(${documentChanges.relativePath}, ds.name || '/')
+                  and ${documentChanges.changedAt} >= ds.created_at
+              )`,
       ),
     )
     .orderBy(desc(documentChanges.changedAt), asc(documentChanges.relativePath))

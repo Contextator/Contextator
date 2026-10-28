@@ -648,6 +648,14 @@
             <textarea name="allowedCidrs" rows="3" spellcheck="false" autocomplete="off" placeholder="10.0.0.0/8&#10;203.0.113.7/32"></textarea>
             <span class="field-hint">One address or range (CIDR) per line, up to 32. The token is refused from anywhere else. Leave empty for no restriction. The address checked is the client's: the one the server's socket sees or, when <code>TRUST_PROXY</code> names the proxy in front, the one that proxy forwards.</span>
           </label>
+          <fieldset class="field token-scope-field" id="token-scope-field">
+            <legend class="field-label">Sources</legend>
+            <label class="check"><input type="radio" name="scope" value="all" checked /><span>Every source of this project</span></label>
+            <label class="check"><input type="radio" name="scope" value="some" /><span>Only these sources</span></label>
+            <div id="token-sources-list" hidden></div>
+            <span class="field-hint">A token bound to sources reads nothing outside them: they do not appear in a search, a listing or a change feed, and their names are not offered. It cannot be bound to none.</span>
+            <span id="token-scope-open-note" class="field-hint warn" hidden>This project is open, so a source scope is not a boundary here: a request without a token still reads the whole project.</span>
+          </fieldset>
           <p id="token-error" class="form-error" role="alert" hidden></p>
         </div>
         <div class="dialog-foot">

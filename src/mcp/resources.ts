@@ -5,13 +5,14 @@ import {
   type ReadResourceResult,
   type Resource,
   ResourceNotFoundError,
+  type ServerContext,
 } from '@modelcontextprotocol/server';
 import { LIST_TOPICS_DEFAULT_LIMIT } from '../config.js';
 import type { ProjectRow } from '../db/schema.js';
 import { normalizeRelativePath } from '../services/fs-scan.js';
 import { getProjectById } from '../services/projects.js';
 import { getDocument, listDocumentsForProject } from '../services/vector-store.js';
-import { type ToolContext, decodeCursor, encodeCursor } from './tools.js';
+import { type ToolContext, decodeCursor, encodeCursor, sourceScopeOf } from './tools.js';
 
 /**
  * The project's documents as MCP resources (spec 2025-06-18 / 2025-11-25, `resources/list`,
@@ -115,10 +116,16 @@ export function registerResources(
   server: McpServer,
   ctx: Pick<ToolContext, 'db' | 'log'>,
   project: ProjectRow,
-  opts: { pageSize?: number } = {},
+  opts: { pageSize?: number; fallbackScope?: string[] | null } = {},
 ): void {
   const { db, log } = ctx;
   const pageSize = opts.pageSize ?? RESOURCE_LIST_PAGE_SIZE;
+  // The source scope of the call's own credential, as `registerTools` reads it (ADR-0099, ADR-0133); the
+  // factory's is for a call with no HTTP request behind it.
+  const scopeOf = (call: ServerContext): string[] | null => {
+    const auth = call.http?.authInfo;
+    return auth ? sourceScopeOf(auth) : (opts.fallbackScope ?? null);
+  };
   server.server.registerCapabilities({ resources: { listChanged: false } });
 
   const unexpected = (err: unknown, method: string): ProtocolError => {
@@ -127,7 +134,7 @@ export function registerResources(
     return new ProtocolError(ProtocolErrorCode.InternalError, `${method} failed`);
   };
 
-  server.server.setRequestHandler('resources/list', async (request) => {
+  server.server.setRequestHandler('resources/list', async (request, call) => {
     try {
       const cursor = request.params?.cursor;
       const after = cursor === undefined ? undefined : decodeCursor(cursor);
@@ -137,7 +144,13 @@ export function registerResources(
       const live = await getProjectById(db, project.id);
       if (!live) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Project "${project.name}" no longer exists.`);
 
-      const rows = await listDocumentsForProject(db, project.id, live.liveGeneration, { limit: pageSize + 1, after });
+      const rows = await listDocumentsForProject(db, project.id, live.liveGeneration, {
+        limit: pageSize + 1,
+        after,
+        // In the WHERE, ahead of the keyset and the limit: a scope that holds nothing lists nothing, and a
+        // document outside the scope is on no page and in no cursor (ADR-0133).
+        sourceIds: scopeOf(call),
+      });
       const docs = rows.slice(0, pageSize);
       const resources: Resource[] = docs.map((doc) => ({
         uri: documentUri(project.name, doc.relativePath),
@@ -163,7 +176,7 @@ export function registerResources(
     ],
   }));
 
-  server.server.setRequestHandler('resources/read', async (request): Promise<ReadResourceResult> => {
+  server.server.setRequestHandler('resources/read', async (request, call): Promise<ReadResourceResult> => {
     const { uri } = request.params;
     try {
       const target = parseDocumentUri(uri);
@@ -173,7 +186,8 @@ export function registerResources(
       const live = await getProjectById(db, project.id);
       if (!live) throw notFound(uri);
       // Exact, and confined to the live generation: the whole of the access check (see the header).
-      const doc = await getDocument(db, project.id, live.liveGeneration, target.relativePath);
+      // Outside the token's scope is not found, the answer another project's URI gets (ADR-0133).
+      const doc = await getDocument(db, project.id, live.liveGeneration, target.relativePath, scopeOf(call));
       if (!doc) throw notFound(uri);
       if (doc.content === null) {
         // read_document's legacy row: indexed before the text was stored. There is nothing to serve,

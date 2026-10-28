@@ -10,6 +10,7 @@ import type { Db } from '../db/client.js';
 import { chunks, documents, type DocumentRow } from '../db/schema.js';
 import { recordWriteChange } from './document-changes.js';
 import { RRF_K } from './rrf.js';
+import { withinSourceScope } from './source-scope.js';
 import { DEFAULT_TEXT_SEARCH_CONFIG, type TextSearchConfig } from './text-search.js';
 
 /**
@@ -163,6 +164,13 @@ export interface SearchRequest {
    */
   sourceId?: string;
   /**
+   * The token's source scope ([ADR-0133](../../.ssot/ADR.md#adr-0133)): only documents of these source ids,
+   * **in the same `filtered_documents` CTE both retrievers share**, so neither candidate list can carry a
+   * chunk from outside it and the fused ranks are the scope's own. `sourceId` intersects it. `null` or
+   * unset is no scope and keeps the unfiltered statement; `[]` is a scope that reads nothing.
+   */
+  sourceIds?: readonly string[] | null;
+  /**
    * Only documents whose `relative_path` starts with this. Already normalised by the caller
    * (`normalizeRelativePath`), and escaped here, because the `_` in `docs/getting_started` is a `LIKE`
    * wildcard and an operator who typed it meant the character.
@@ -272,6 +280,7 @@ interface HybridRow extends Record<string, unknown> {
  */
 export async function searchChunks(db: Db, request: SearchRequest): Promise<SearchHit[]> {
   const { projectId, generation, queryEmbedding, queryText, limit, sourceId, pathPrefix, version, rerank } = request;
+  const sourceIds = request.sourceIds ?? undefined;
   const scan = request.scan ?? DEFAULT_HNSW_SCAN;
   const selection = request.selection ?? DEFAULT_RESULT_SELECTION;
 
@@ -279,7 +288,30 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
   // sometimes true: an unfiltered search must keep exactly the plan ADR-0040 and ADR-0041 measured,
   // and `and c.document_id in (select …)` over an unrestricted sub-select would not be free to the
   // planner even though it excludes nothing.
-  const filtered = sourceId !== undefined || pathPrefix !== undefined || version !== undefined;
+  const filtered = sourceId !== undefined || sourceIds !== undefined || pathPrefix !== undefined || version !== undefined;
+  // ADR-0133: a scoped token's sources, as one more predicate of the same CTE. An empty list matches nothing and
+  // is never "all". Built out here, not written into the statement, and **glued to the interpolation before it
+  // (no whitespace of its own when empty)**, so an unscoped search sends the text it always sent, byte for byte
+  // (`test/vector-store-sql.test.ts` holds that against a snapshot taken before the scope existed).
+  const scopePredicate =
+    sourceIds === undefined
+      ? sql``
+      : sourceIds.length === 0
+        ? sql` and false`
+        : sql` and source_id in (${sql.join(
+            sourceIds.map((id) => sql`${id}`),
+            sql`, `,
+          )})`;
+  // The same scope as a predicate on `chunks`, for the two places that read the whole project rather than a
+  // candidate list: the corpus count behind `common_at` and the probe in `question`. A scope is not a filter
+  // here. A filter (`source`, `path_prefix`, `version`) deliberately leaves them alone, because how common a
+  // term is is a fact about the project and not about the slice asked about (ADR-0042); a scope is what a token
+  // may know exists, so counted outside it a term's rarity would answer a question about content the token
+  // cannot see (ADR-0133 decision 5). Empty when there is no scope.
+  const scopedChunks =
+    sourceIds === undefined
+      ? sql``
+      : sql` and c.document_id in (select id from documents where project_id = ${projectId} and index_generation = ${generation}${scopePredicate})`;
   const documentScope = filtered
     ? sql`
       filtered_documents as materialized (
@@ -288,7 +320,7 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
         -- documents_project_generation_idx.
         select id from documents
         where project_id = ${projectId} and index_generation = ${generation}
-          ${sourceId === undefined ? sql`` : sql`and source_id = ${sourceId}`}
+          ${sourceId === undefined ? sql`` : sql`and source_id = ${sourceId}`}${scopePredicate}
           ${pathPrefix === undefined ? sql`` : sql`and relative_path like ${`${escapeLikePattern(pathPrefix)}%`} escape '\\'`}
           -- Equality, and no ordering (ADR-0058). A version is a label rather than a number, and the
           -- column is NOT NULL with the empty string standing for "unversioned" — so this is a plain
@@ -414,7 +446,7 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
             ceil(sum(count(*)) over () * ${LEXICAL_TERM_MAX_DOCUMENT_FREQUENCY}::float8),
             ${LEXICAL_TERM_MIN_DOCUMENT_FLOOR}::float8
           )::int as common_at
-        from chunks c where c.project_id = ${projectId} and c.index_generation = ${generation}
+        from chunks c where c.project_id = ${projectId} and c.index_generation = ${generation}${scopedChunks}
         group by c.text_search_config
       ),
       question as materialized (
@@ -443,7 +475,7 @@ export async function searchChunks(db: Db, request: SearchRequest): Promise<Sear
         where (
           select count(*) from (
             select 1 from chunks c
-            where c.project_id = ${projectId} and c.index_generation = ${generation}
+            where c.project_id = ${projectId} and c.index_generation = ${generation}${scopedChunks}
               and c.text_search_config = corpus.config
               and c.content_tsv @@ quote_literal(t.lexeme)::tsquery
             limit corpus.common_at
@@ -783,12 +815,14 @@ export async function listDocumentsForProject(
   db: Db,
   projectId: string,
   generation: number,
-  page: { limit?: number; after?: string } = {},
+  page: { limit?: number; after?: string; sourceIds?: readonly string[] | null } = {},
 ): Promise<DocumentSummary[]> {
   const where = and(
     eq(documents.projectId, projectId),
     eq(documents.indexGeneration, generation),
     page.after === undefined ? undefined : gt(documents.relativePath, page.after),
+    // ADR-0133: the scope is in the WHERE, ahead of the keyset and the limit, so a page is a page of the scope.
+    withinSourceScope(documents.sourceId, page.sourceIds),
   );
   const query = db
     .select({
@@ -866,11 +900,24 @@ export async function listDocumentHeadings(db: Db, documentId: string): Promise<
  * index on `version` and deliberately so, so that difference is a scan of one generation's documents
  * against a scan that stops immediately.
  */
-export async function documentVersionExists(db: Db, projectId: string, generation: number, version: string): Promise<boolean> {
+export async function documentVersionExists(
+  db: Db,
+  projectId: string,
+  generation: number,
+  version: string,
+  sourceIds?: readonly string[] | null,
+): Promise<boolean> {
   const [row] = await db
     .select({ one: sql<number>`1` })
     .from(documents)
-    .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation), eq(documents.version, version)))
+    .where(
+      and(
+        eq(documents.projectId, projectId),
+        eq(documents.indexGeneration, generation),
+        eq(documents.version, version),
+        withinSourceScope(documents.sourceId, sourceIds),
+      ),
+    )
     .limit(1);
   return row !== undefined;
 }
@@ -888,20 +935,79 @@ export async function documentVersionExists(db: Db, projectId: string, generatio
  * came later, and a list ordered as if it did would be the same lie as a `latest` filter. It is a
  * catalogue, not a timeline.
  */
-export async function listDocumentVersions(db: Db, projectId: string, generation: number): Promise<string[]> {
+export async function listDocumentVersions(db: Db, projectId: string, generation: number, sourceIds?: readonly string[] | null): Promise<string[]> {
   const rows = await db
     .selectDistinct({ version: documents.version })
     .from(documents)
-    .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation), ne(documents.version, '')))
+    .where(
+      and(
+        eq(documents.projectId, projectId),
+        eq(documents.indexGeneration, generation),
+        ne(documents.version, ''),
+        withinSourceScope(documents.sourceId, sourceIds),
+      ),
+    )
     .orderBy(asc(documents.version));
   return rows.map((row) => row.version);
 }
 
-export async function getDocument(db: Db, projectId: string, generation: number, relativePath: string): Promise<DocumentRow | undefined> {
+/**
+ * The document and chunk totals of a token's scope, for `list_topics`'s header ([ADR-0133](../../.ssot/ADR.md#adr-0133)):
+ * the project's own totals would say how much exists outside the scope. Read off `documents.chunk_count`, the
+ * column `recountProject` sums.
+ */
+export async function countDocumentsInScope(
+  db: Db,
+  projectId: string,
+  generation: number,
+  sourceIds: readonly string[],
+): Promise<{ documentCount: number; chunkCount: number }> {
+  const [row] = await db
+    .select({ documentCount: count(), chunkCount: sql<number>`coalesce(sum(${documents.chunkCount}), 0)::int` })
+    .from(documents)
+    .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation), withinSourceScope(documents.sourceId, sourceIds)));
+  return { documentCount: row?.documentCount ?? 0, chunkCount: row?.chunkCount ?? 0 };
+}
+
+/**
+ * Whether a token's scope holds a single indexed chunk. The question a scoped search asks before it spends an
+ * embedding: one bit, and it stops at the first document with a chunk, where `countDocumentsInScope` reads the
+ * whole scope to sum it ([ADR-0133](../../.ssot/ADR.md#adr-0133)).
+ */
+export async function scopeHoldsChunks(db: Db, projectId: string, generation: number, sourceIds: readonly string[]): Promise<boolean> {
+  const [row] = await db
+    .select({ one: sql<number>`1` })
+    .from(documents)
+    .where(
+      and(
+        eq(documents.projectId, projectId),
+        eq(documents.indexGeneration, generation),
+        gt(documents.chunkCount, 0),
+        withinSourceScope(documents.sourceId, sourceIds),
+      ),
+    )
+    .limit(1);
+  return row !== undefined;
+}
+
+export async function getDocument(
+  db: Db,
+  projectId: string,
+  generation: number,
+  relativePath: string,
+  sourceIds?: readonly string[] | null,
+): Promise<DocumentRow | undefined> {
   const [row] = await db
     .select()
     .from(documents)
-    .where(and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation), eq(documents.relativePath, relativePath)))
+    .where(
+      and(
+        eq(documents.projectId, projectId),
+        eq(documents.indexGeneration, generation),
+        eq(documents.relativePath, relativePath),
+        withinSourceScope(documents.sourceId, sourceIds),
+      ),
+    )
     .limit(1);
   return row;
 }
@@ -1044,13 +1150,27 @@ export function storedDocumentContent(text: string, maxBytes: number): { content
  * ends with `/<suffix>`, but only when exactly one matches — within the live generation, so a rebuild
  * in flight cannot turn one match into two and make the fallback stop resolving.
  */
-export async function getDocumentBySuffix(db: Db, projectId: string, generation: number, suffix: string): Promise<DocumentRow | undefined> {
+export async function getDocumentBySuffix(
+  db: Db,
+  projectId: string,
+  generation: number,
+  suffix: string,
+  sourceIds?: readonly string[] | null,
+): Promise<DocumentRow | undefined> {
   const pattern = `%/${escapeLikePattern(suffix)}`;
   const rows = await db
     .select()
     .from(documents)
     .where(
-      and(eq(documents.projectId, projectId), eq(documents.indexGeneration, generation), sql`${documents.relativePath} LIKE ${pattern} ESCAPE '\\'`),
+      and(
+        eq(documents.projectId, projectId),
+        eq(documents.indexGeneration, generation),
+        sql`${documents.relativePath} LIKE ${pattern} ESCAPE '\\'`,
+        // ADR-0133: in the WHERE, ahead of `limit(2)`, so "ambiguous" is counted among the scope's own
+        // documents. A match outside the scope that were counted would turn one answer into "ambiguous"
+        // and say that something else exists.
+        withinSourceScope(documents.sourceId, sourceIds),
+      ),
     )
     .limit(2);
   return rows.length === 1 ? rows[0] : undefined;

@@ -12,6 +12,17 @@ ships, that stops.
 
 ### Added
 
+- **Token scope** (ADR-0133, amending ADR-0027; migration `0030_mcp_token_scope`): a static `ctxm_` token can be bound to
+  a list of its project's sources, and a source outside the list does not exist for it in `search_docs`,
+  `read_document` (by path and by suffix), `list_topics`, `whats_new` (added, modified and removed rows),
+  `resources/list` and `resources/read`; the filter is in SQL, ahead of ranking, paging and counting. A source name
+  outside the scope is answered as an unknown source. A scope whose sources were all deleted reads nothing, never the
+  project. `POST /api/projects/:id/mcp-tokens` takes `sources` (names); the new
+  `PATCH /api/projects/:id/mcp-tokens/:tokenId/sources` sets or (`null`) removes it, with `400 empty_scope`,
+  `400 unknown_source` and `409 not_static`; `GET` returns `sources` and `scopeEmpty`; both writes are audited with the
+  names. Panel: source choice when minting, a scope badge per token (red when empty) and a note on `open` projects,
+  where a scope is not a boundary. OAuth credentials, API tokens and `/api/*` are unaffected. **Going back to a release
+  before 0.6.0 widens every scoped token to its whole project: revoke scoped tokens before a downgrade.**
 - `SOURCE_ALLOWED_HOSTS`: one allowlist of host names that Confluence sources (and the S3 and GitHub Enterprise
   Server sources of this release) may reach on a private address (ADR-0126, amending ADR-0088). Same format as
   the other allowlists; it does not admit a host for a web or git source. Helm chart: `config.sourceAllowedHosts`.

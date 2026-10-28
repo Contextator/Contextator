@@ -9,7 +9,15 @@ import { belowRelevanceFloor, effectiveScoreFloor } from './relevance.js';
 import { getSourceByName, listSources } from './sources.js';
 import type { Reranker } from './reranker.js';
 import { type TraceSpan, tracing } from './tracing.js';
-import { documentVersionExists, type HnswScan, listDocumentVersions, type ResultSelection, searchChunks, type SearchHit } from './vector-store.js';
+import {
+  documentVersionExists,
+  type HnswScan,
+  listDocumentVersions,
+  type ResultSelection,
+  scopeHoldsChunks,
+  searchChunks,
+  type SearchHit,
+} from './vector-store.js';
 
 /**
  * The one search path in the product (ROADMAP Item 3) — hybrid since
@@ -95,6 +103,13 @@ export interface SearchInput {
    * version this index does not carry is answered with the ones it does.
    */
   version?: string;
+  /**
+   * The source ids a scoped static MCP token may read ([ADR-0133](../../.ssot/ADR.md#adr-0133)). Unset or
+   * `null` is no scope and the search runs the statement it always ran. A list confines **every** step
+   * below to it: the source and version resolutions (so `unknown_source` and `unknown_version` list only
+   * what the scope holds), the not-indexed verdict, and the candidate statement itself. `[]` reads nothing.
+   */
+  sourceScope?: readonly string[] | null;
 }
 
 /**
@@ -176,6 +191,12 @@ async function runSearch(
   if (project.embeddingModel && project.embeddingModel !== embeddings.id) {
     return { status: 'model_mismatch', project, indexedWith: project.embeddingModel, serverUses: embeddings.id };
   }
+  // ADR-0133: `chunkCount` above is the project's. A scope that holds no chunk is "nothing indexed" to
+  // the token holding it, and answering "no match" instead would say that other content exists.
+  const sourceScope = input.sourceScope ?? undefined;
+  if (sourceScope !== undefined && !(await scopeHoldsChunks(db, project.id, project.liveGeneration, sourceScope))) {
+    return { status: 'not_indexed', project };
+  }
 
   // The filters are resolved before anything is embedded, because both of their refusals are answers
   // the caller can act on and neither needs a model to produce (ADR-0042). `source` becomes an id
@@ -185,8 +206,9 @@ async function runSearch(
   let sourceId: string | undefined;
   if (input.source !== undefined) {
     const source = await getSourceByName(db, project.id, input.source);
-    if (!source) {
-      const available = (await listSources(db, project.id)).map((row) => row.name);
+    // A source outside the token's scope is the answer a source that does not exist gets (ADR-0133).
+    if (!source || (sourceScope !== undefined && !sourceScope.includes(source.id))) {
+      const available = (await listSources(db, project.id, sourceScope)).map((row) => row.name);
       return { status: 'unknown_source', project, requested: input.source, available };
     }
     sourceId = source.id;
@@ -204,8 +226,8 @@ async function runSearch(
     // error message it does not produce. `version` carries no index, deliberately (ADR-0058), so the
     // difference is a scan that stops at the first matching document against one that reads every
     // document of the generation to fold them.
-    if (!(await documentVersionExists(db, project.id, project.liveGeneration, requested))) {
-      const available = await listDocumentVersions(db, project.id, project.liveGeneration);
+    if (!(await documentVersionExists(db, project.id, project.liveGeneration, requested, sourceScope))) {
+      const available = await listDocumentVersions(db, project.id, project.liveGeneration, sourceScope);
       return { status: 'unknown_version', project, requested: input.version, available };
     }
     version = requested;
@@ -249,6 +271,7 @@ async function runSearch(
       queryText: input.query,
       limit: input.limit ?? DEFAULT_SEARCH_LIMIT,
       sourceId,
+      sourceIds: sourceScope,
       pathPrefix,
       version,
       scan,

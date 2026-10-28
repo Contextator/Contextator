@@ -2856,6 +2856,18 @@ body.auth .gate-card a {
   font-size: 11.5px;
 }
 
+/* The source scope of a new token (ADR-0133): a fieldset for its semantics, with the browser's border taken off. */
+.token-scope-field {
+  border: 0;
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+}
+
+.token-scope-field legend {
+  padding: 0;
+}
+
 .token-limits {
   margin-top: 14px;
   line-height: 1.5;

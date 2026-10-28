@@ -278,6 +278,17 @@ export const mcpTokens = pgTable(
      * address is stored as `/32` or `/128`. Meaningless on the two OAuth kinds, which never carry one.
      */
     allowedCidrs: cidr('allowed_cidrs').array(),
+    /**
+     * Whether this **static** token is bound to a list of the project's sources
+     * ([ADR-0133](../../.ssot/ADR.md#adr-0133)); the list itself is `mcp_token_sources`.
+     *
+     * `false` is unrestricted and is every row that existed before the column did, so the migration
+     * changes what no token reads. `true` with rows is those sources only, and **`true` with no rows
+     * is no source at all, never every source**: the flag is what keeps a scope whose last source was
+     * deleted from widening to the project. The `allowedCidrs` rule beside it reads empty as
+     * "unrestricted" and must not be copied here.
+     */
+    sourceScoped: boolean('source_scoped').notNull().default(false),
   },
   (t) => [
     foreignKey({ name: 'mcp_tokens_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
@@ -285,6 +296,7 @@ export const mcpTokens = pgTable(
     foreignKey({ name: 'mcp_tokens_user_id_fkey', columns: [t.userId], foreignColumns: [users.id] }).onDelete('cascade'),
     foreignKey({ name: 'mcp_tokens_client_id_fkey', columns: [t.clientId], foreignColumns: [oauthClients.clientId] }).onDelete('cascade'),
     check('mcp_tokens_kind_check', sql`${t.kind} in ('static', 'access', 'refresh')`),
+    check('mcp_tokens_source_scope_static_check', sql`NOT ${t.sourceScoped} OR ${t.kind} = 'static'`),
     index('mcp_tokens_project_idx').on(t.projectId),
     // "This account's MCP credentials", which is what revoking a person's access has to be able to ask.
     index('mcp_tokens_user_idx').on(t.userId),
@@ -389,6 +401,27 @@ export const documentSources = pgTable(
     // claimed is due whether or not it is scheduled at all. Partial for the same reason — on an
     // installation with no Notion webhook it matches nothing and costs a catalogue row.
     index('document_sources_webhook_due_idx').on(t.webhookDueAt).where(sql`webhook_due_at is not null`),
+  ],
+);
+
+/**
+ * The sources a scoped static MCP token may read ([ADR-0133](../../.ssot/ADR.md#adr-0133)); meaningful
+ * only while `mcp_tokens.source_scoped` is true. Both keys cascade: deleting a source removes its row
+ * and the token keeps its flag, so a scope only ever narrows on its own. A source re-created under a
+ * deleted one's name has a new id and enters no scope.
+ */
+export const mcpTokenSources = pgTable(
+  'mcp_token_sources',
+  {
+    tokenId: uuid('token_id').notNull(),
+    sourceId: uuid('source_id').notNull(),
+  },
+  (t) => [
+    foreignKey({ name: 'mcp_token_sources_token_id_fkey', columns: [t.tokenId], foreignColumns: [mcpTokens.id] }).onDelete('cascade'),
+    foreignKey({ name: 'mcp_token_sources_source_id_fkey', columns: [t.sourceId], foreignColumns: [documentSources.id] }).onDelete('cascade'),
+    primaryKey({ name: 'mcp_token_sources_pkey', columns: [t.tokenId, t.sourceId] }),
+    // "Which tokens name this source", for the cascade on a source delete.
+    index('mcp_token_sources_source_idx').on(t.sourceId),
   ],
 );
 

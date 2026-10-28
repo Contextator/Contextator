@@ -81,6 +81,11 @@ const PROJECT_ROUTE_OVERRIDES: ReadonlyArray<{ method: string; url: string; need
   // Whether this project's documents are readable by anything that can reach the URL is the same
   // class of decision as creating the project in the first place, which is already admin-only.
   { method: 'PATCH', url: '/api/projects/:id/mcp-auth', need: 'manager' },
+  // Which sources a static MCP token may read ([ADR-0133](../../.ssot/ADR.md#adr-0133)). **An `editor`'s, as minting is**,
+  // and stated here although the default below would say the same: widening a token's scope is the same act as
+  // minting one with that scope, so the two must not be able to drift apart, and the row is where a later
+  // change of one has to argue with the other.
+  { method: 'PATCH', url: '/api/projects/:id/mcp-tokens/:tokenId/sources', need: 'editor' },
   { method: 'GET', url: '/api/projects/:id/members', need: 'viewer' },
   { method: 'PUT', url: '/api/projects/:id/members/:userId', need: 'manager' },
   { method: 'DELETE', url: '/api/projects/:id/members/:userId', need: 'manager' },
@@ -311,8 +316,11 @@ export const auditReadsResponse = (method: string, url: string): boolean => AUDI
  * `AUDIT_DETAIL` and its closed set of values; a value the handler computed itself (`req.auditDetail`) — a
  * count, the acting token's id; and a number read back from a row a CHECK constraint bounds
  * (`floorFrom` / `floorTo`). A number is never a value a caller sent.
+ *
+ * A list of strings is one more shape a handler may compute ([ADR-0133](../../.ssot/ADR.md#adr-0133)): the
+ * names of the sources a token was bound to, read back from `document_sources` and never from the request.
  */
-export type AuditDetail = Record<string, string | number | boolean>;
+export type AuditDetail = Record<string, string | number | boolean | readonly string[]>;
 
 /** What the policy layer decided to record about one request; `null` when the request is not an event. */
 export interface AuditSubject {

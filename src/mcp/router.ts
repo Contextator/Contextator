@@ -158,7 +158,7 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     // ([ADR-0047](../../.ssot/ADR.md#adr-0047)); the *account* behind it is what the decision now turns
     // on ([ADR-0054](../../.ssot/ADR.md#adr-0054)). An `open` project answered without a credential
     // still verifies nothing and still records nothing, which is what it means for it to be open.
-    const { credential, tokenId, allowedCidrs } = await resolveMcpCredential(ctx.db, project.id, bearer);
+    const { credential, tokenId, allowedCidrs, sourceScope } = await resolveMcpCredential(ctx.db, project.id, bearer);
     req.mcpTokenId = tokenId;
     req.mcpCredential = credential;
 
@@ -186,7 +186,9 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
         token: bearer,
         clientId: tokenId ?? 'anonymous',
         scopes: [],
-        extra: { tokenId },
+        // The scope beside the token id, resolved by the same query ([ADR-0133](../../.ssot/ADR.md#adr-0133)):
+        // each tool and resource handler reads it from its own call's `authInfo`, as it reads the token id.
+        extra: { tokenId, sourceScope },
       };
       return;
     }

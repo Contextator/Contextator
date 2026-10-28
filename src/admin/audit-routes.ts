@@ -215,6 +215,14 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
     prep: 'of',
     target: 'credential',
   },
+  // Which sources a token may read ([ADR-0133](../../.ssot/ADR.md#adr-0133)). The names are in `detail.sources`, which the
+  // verb leaves to the aside: they are what an investigation asks for, so they are shown rather than summarised.
+  'PATCH /api/projects/:id/mcp-tokens/:tokenId/sources': {
+    verb: (detail) => (detail.scoped === false ? 'removed the source scope of an MCP credential' : 'changed the sources an MCP credential may read'),
+    prep: 'of',
+    target: 'credential',
+    consumes: ['scoped'],
+  },
   'DELETE /api/projects/:id/mcp-tokens/:tokenId': { verb: 'revoked an MCP credential', prep: 'of', target: 'credential' },
   'PUT /api/projects/:id/members/:userId': { verb: 'granted access', prep: 'to', target: 'account' },
   'DELETE /api/projects/:id/members/:userId': { verb: 'revoked access', prep: 'to', target: 'account' },
