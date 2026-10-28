@@ -375,6 +375,8 @@ export const adminRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, 
       evalRuns: ctx.metrics.evalRuns(),
       // `report_gap` calls by outcome (`mcp/tools.ts`, ADR-0125).
       gapReports: ctx.metrics.gapReports(),
+      // Throttling answers from S3 (and Drive) remotes, by source type (`services/sources/s3.ts`, ADR-0126).
+      sourceThrottled: ctx.metrics.sourceThrottled(),
       // Search phases, embedding batches and queue waits (`services/metrics.ts`), observed in the process.
       histograms: ctx.metrics.histograms(),
     };

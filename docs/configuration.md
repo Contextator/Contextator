@@ -173,6 +173,18 @@ to `SOURCE_ALLOWED_HOSTS`; the old setting is removed no earlier than `1.0.0`, a
 stops the server from starting, with a message naming `SOURCE_ALLOWED_HOSTS`. With the Helm chart the settings
 are `config.sourceAllowedHosts` and `config.confluenceAllowedHosts`.
 
+## Object ceiling for S3 sources
+
+| Setting | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `S3_MAX_OBJECTS` | `5000` | 1 – 100 000 | Objects one S3 source indexes at most: the first ones in key order among those under its prefix whose file type it reads |
+
+Past the ceiling the run indexes up to it, logs a warning, and its note says in capitals that the rest are **not**
+indexed — a partial index that looks complete is the failure this prevents. Narrow the source's prefix, split it
+across several sources, or raise the setting. The freshness check still lists every key under the prefix. An object
+over `MAX_CONVERTED_FILE_BYTES` is refused by name whatever the ceiling, and `DATA_DIR_MIN_FREE_BYTES` is checked
+before a sync downloads anything. See [Document sources](document-sources.md#s3-buckets-a-prefix-a-key-pair-and-a-listing-per-check).
+
 ## Source links and the "unchanged for a long time" mark
 
 Search and `read_document` answers carry the link to the original document (`sourceUrl`) and the date it last

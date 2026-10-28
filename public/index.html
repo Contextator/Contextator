@@ -117,6 +117,7 @@
           <button type="button" class="tab" role="tab" data-kind="notion">Notion</button>
           <button type="button" class="tab" role="tab" data-kind="confluence">Confluence</button>
           <button type="button" class="tab" role="tab" data-kind="web">Documentation site</button>
+          <button type="button" class="tab" role="tab" data-kind="s3">S3 bucket</button>
         </div>
         <div class="dialog-body">
           <div class="field-row">
@@ -287,6 +288,58 @@
               <span class="field-hint">Detection reads the document rather than the URL. When it cannot tell — a sitemap that redirects to a landing page, an <code>llms.txt</code> served as HTML — the source refuses instead of guessing, and names this field. Only <code>sitemap.xml</code> can be checked for freshness in one request; the other two re-fetch on every scheduled run.</span>
             </label>
             <p class="field-hint">Every run is held to the instance's crawl ceilings — pages, depth, the gap between requests, a total time budget and <code>robots.txt</code> (<code>WEB_*</code> in <code>.env</code>). Reaching one stops the run and says so on the source.</p>
+          </div>
+
+          <div class="kind-only" data-kind="s3">
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Bucket</span>
+                <input name="s3Bucket" placeholder="my-docs" maxlength="63" autocomplete="off" spellcheck="false" />
+                <span class="field-hint">Only the objects with the file types ticked below are read.</span>
+              </label>
+              <label class="field">
+                <span class="field-label">Prefix <span class="muted">— optional</span></span>
+                <input name="s3Prefix" placeholder="guides/v2" maxlength="1024" autocomplete="off" spellcheck="false" />
+                <span class="field-hint">Objects under it are indexed with it removed from their names. Every key under the prefix is listed on each check, so keep it narrow.</span>
+              </label>
+            </div>
+            <label class="field">
+              <span class="field-label">Endpoint <span class="muted">— optional</span></span>
+              <input name="s3Endpoint" type="url" placeholder="https://minio.example.com:9000" autocomplete="off" spellcheck="false" />
+              <span class="field-hint">Empty is AWS S3 (<code>https</code> only). For MinIO, Ceph, Cloudflare R2 or another S3-compatible server, give its address; a server on a private address must be named in <code>SOURCE_ALLOWED_HOSTS</code> in <code>.env</code>.</span>
+            </label>
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Region</span>
+                <input name="s3Region" placeholder="us-east-1" maxlength="64" autocomplete="off" spellcheck="false" />
+                <span class="field-hint">Empty is <code>us-east-1</code>. AWS needs the bucket's own region; most other servers accept any.</span>
+              </label>
+              <label class="field">
+                <span class="field-label">Addressing</span>
+                <select name="s3PathStyle">
+                  <option value="">Default (path-style with an endpoint)</option>
+                  <option value="true">Path-style — host/bucket/key</option>
+                  <option value="false">Virtual-hosted — bucket.host/key</option>
+                </select>
+                <span class="field-hint">Leave the default unless the server asks for the other.</span>
+              </label>
+            </div>
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Access key ID</span>
+                <input name="s3AccessKeyId" placeholder="AKIA…" autocomplete="off" spellcheck="false" />
+                <span class="field-hint">A key pair with read access (<code>s3:ListBucket</code>, <code>s3:GetObject</code>). Temporary credentials (a session token) and instance roles are not supported.</span>
+              </label>
+              <label class="field">
+                <span class="field-label">Secret access key</span>
+                <input name="s3SecretAccessKey" type="password" autocomplete="off" />
+                <span class="field-hint">Stored encrypted with <code>SECRET_KEY</code> and never shown again.</span>
+              </label>
+            </div>
+            <label class="check-inline" id="s3-clear-secret-row" hidden>
+              <input type="checkbox" id="s3-clear-secret" />
+              <span>Remove the stored key pair</span>
+            </label>
           </div>
 
           <div class="kind-only" data-kind="obsidian">

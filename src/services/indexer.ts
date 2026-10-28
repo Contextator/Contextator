@@ -17,7 +17,7 @@ import { expandsToManyDocuments, allowedExtensionsFor, type Flavor } from './fla
 import { readAndHash, walkMarkdown } from './fs-scan.js';
 import { recordIndexRun } from './index-runs.js';
 import type { KeyedMutex } from './locks.js';
-import { type IndexerObserver, startTimer } from './metrics.js';
+import { type IndexerObserver, type SourceThrottleObserver, startTimer } from './metrics.js';
 import { checkSpecSize, type DerivedDocument } from './openapi.js';
 import { getProjectById } from './projects.js';
 import { driverFor, type DocumentMeta } from './sources/driver.js';
@@ -132,6 +132,7 @@ export interface IndexerDeps {
         | 'GIT_MAX_PACK_BYTES'
         | 'CONFLUENCE_MAX_PAGES'
         | 'NOTION_MAX_PAGES'
+        | 'S3_MAX_OBJECTS'
         | 'DATA_DIR_MIN_FREE_BYTES'
         | 'CONTEXTATOR_EMBEDDED_PGDATA'
         | 'CONVERSION_WORKER_MAX_HEAP_MB'
@@ -152,7 +153,7 @@ export interface IndexerDeps {
    * Where batch sizes, batch timings and queue waits go (`/metrics`). Optional, and unset it measures
    * nothing — the tests and the CLI build an indexer without one.
    */
-  metrics?: IndexerObserver;
+  metrics?: IndexerObserver & Partial<SourceThrottleObserver>;
   /**
    * Told once for each project whose index was **rebuilt because the embedding model changed** and
    * finished without a source error — the moment the project's relevance floor stops describing the
@@ -447,7 +448,7 @@ export class Indexer {
     const extensions = (source.config as { extensions?: string[] }).extensions;
     const textSearchConfig = textSearchConfigFor((source.config as { language?: unknown }).language);
     const version = sourceVersion(source.config);
-    const driver = driverFor(source, { db, log, config });
+    const driver = driverFor(source, { db, log, config, ...(this.deps.metrics ? { metrics: this.deps.metrics } : {}) });
 
     let syncError: string | undefined;
     let configPatch: Record<string, unknown> | undefined;

@@ -2,6 +2,7 @@ import type { Config, WebLimits } from '../../config.js';
 import type { Logger } from '../../context.js';
 import type { Db } from '../../db/client.js';
 import type { DocumentSourceRow } from '../../db/schema.js';
+import type { SourceThrottleObserver } from '../metrics.js';
 import { ValidationError } from '../projects.js';
 import type { SourceType } from '../sources.js';
 import { LocalDriver } from './local.js';
@@ -11,6 +12,11 @@ export interface DriverContext {
   db: Db;
   log: Logger;
   /**
+   * Where a throttling answer from the source's remote is counted (`contextator_source_throttled_total`,
+   * [ADR-0126](../../../.ssot/ADR.md#adr-0126) decision 9). Optional: a context built by a test or the CLI counts nothing.
+   */
+  metrics?: Partial<SourceThrottleObserver>;
+  /**
    * `SOURCE_ALLOWED_HOSTS` and the deprecated `CONFLUENCE_ALLOWED_HOSTS` are optional here only so that a
    * context built for another driver need not carry them; absent reads as the empty list, which is the
    * strictest the egress can be ([ADR-0126](../../../.ssot/ADR.md#adr-0126)). Confluence reads both
@@ -19,7 +25,9 @@ export interface DriverContext {
    * sources' egress.
    * `GIT_MAX_PACK_BYTES` is optional for the same reason; absent reads as `GIT_MAX_PACK_BYTES_DEFAULT`.
    * `CONFLUENCE_MAX_PAGES` and `NOTION_MAX_PAGES` are optional for the same reason; absent reads as
-   * `SOURCE_PAGE_LIMIT_DEFAULTS`.
+   * `SOURCE_PAGE_LIMIT_DEFAULTS`. `S3_MAX_OBJECTS`, `MAX_CONVERTED_FILE_BYTES` and `DATA_DIR_MIN_FREE_BYTES`
+   * are optional likewise: an `s3` sync reads them, and a context built for a probe or another driver need not
+   * carry them (the ceiling and size limit then read as their defaults, the disk check as off).
    */
   config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS'> &
     Partial<
@@ -32,6 +40,9 @@ export interface DriverContext {
         | 'GIT_MAX_PACK_BYTES'
         | 'CONFLUENCE_MAX_PAGES'
         | 'NOTION_MAX_PAGES'
+        | 'S3_MAX_OBJECTS'
+        | 'MAX_CONVERTED_FILE_BYTES'
+        | 'DATA_DIR_MIN_FREE_BYTES'
       >
     > &
     WebLimits;

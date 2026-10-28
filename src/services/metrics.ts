@@ -253,6 +253,21 @@ export interface GapReportObserver {
   countGapReport(outcome: GapReportOutcome): void;
 }
 
+/**
+ * The source types that report a throttling answer from their remote
+ * ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 9): the closed set of the `source_type` label of
+ * `contextator_source_throttled_total` ([ADR-0105](../../.ssot/ADR.md#adr-0105)). `s3` counts `503 SlowDown`,
+ * `gdrive` counts `429` and `403` with `rateLimitExceeded`/`userRateLimitExceeded`
+ * ([ADR-0127](../../.ssot/ADR.md#adr-0127) decision 9). Another source type joins the set only through its own entry.
+ */
+export const SOURCE_THROTTLE_TYPES = ['s3', 'gdrive'] as const;
+export type SourceThrottleType = (typeof SOURCE_THROTTLE_TYPES)[number];
+
+/** Counts one throttling answer a source's remote gave, retried or not. Optional wherever it is taken, like the other observers. */
+export interface SourceThrottleObserver {
+  countSourceThrottled(type: SourceThrottleType): void;
+}
+
 /** Times one tool call, handler start to answer. */
 export interface McpToolObserver {
   observeToolDuration(tool: string, seconds: number): void;
@@ -326,6 +341,8 @@ export interface MetricsSnapshot {
   evalRuns?: EvalRunSample;
   /** `report_gap` calls since start by outcome (ADR-0125). Optional like `mcpGuard`. */
   gapReports?: Record<GapReportOutcome, number>;
+  /** Throttling answers from a source's remote since start, by source type (ADR-0126). Optional like `mcpGuard`. */
+  sourceThrottled?: Record<SourceThrottleType, number>;
   /** Rendered after the gauges and counters, in the order given. Optional so a snapshot without any is still one. */
   histograms?: HistogramSnapshot[];
 }
@@ -338,7 +355,16 @@ export interface MetricsSnapshot {
  * reached for them would be a second place that knows how this application is wired.
  */
 export class MetricsRegistry
-  implements SearchCounter, SearchObserver, IndexerObserver, McpRequestCounter, McpToolObserver, McpGuardCounter, EvalRunObserver, GapReportObserver
+  implements
+    SearchCounter,
+    SearchObserver,
+    IndexerObserver,
+    McpRequestCounter,
+    McpToolObserver,
+    McpGuardCounter,
+    EvalRunObserver,
+    GapReportObserver,
+    SourceThrottleObserver
 {
   private readonly searches: Record<QueryActor, number> = { mcp: 0, dashboard: 0 };
   private readonly mcpRequestCounts = new Map<string, McpRequestSample>();
@@ -351,6 +377,7 @@ export class MetricsRegistry
   private evalRunErrors = 0;
   private evalRegressions = 0;
   private readonly gapReportCounts: Record<GapReportOutcome, number> = { accepted: 0, limited: 0, disabled: 0, failed: 0 };
+  private readonly sourceThrottledCounts: Record<SourceThrottleType, number> = { s3: 0, gdrive: 0 };
   private readonly histogramFamilies = new Map<string, Histogram>();
   /** Read once per search, at the moment it is observed; see `watchIndexing`. */
   private indexingNow: () => boolean = () => false;
@@ -500,6 +527,15 @@ export class MetricsRegistry
     this.gapReportCounts[outcome]++;
   }
 
+  countSourceThrottled(type: SourceThrottleType): void {
+    this.sourceThrottledCounts[type]++;
+  }
+
+  /** The throttling counters as they stand; copied, so a caller cannot move them. */
+  sourceThrottled(): Record<SourceThrottleType, number> {
+    return { ...this.sourceThrottledCounts };
+  }
+
   /** The `report_gap` counters as they stand; copied, so a caller cannot move them. */
   gapReports(): Record<GapReportOutcome, number> {
     return { ...this.gapReportCounts };
@@ -639,6 +675,18 @@ export function renderPrometheus(snapshot: MetricsSnapshot): string {
       'report_gap calls by outcome: accepted, limited (over MCP_REPORT_GAP_PER_HOUR), disabled (query log off for the project) or failed.',
       'counter',
       GAP_REPORT_OUTCOMES.map((outcome): [string, number] => [`{outcome="${outcome}"}`, snapshot.gapReports?.[outcome] ?? 0]),
+    );
+  }
+
+  // Throttling answers a source's remote gave (ADR-0126 decision 9), counted per answer whether or not a retry
+  // then succeeded. The label is the closed set of source types that report one and every value is stated from
+  // the start at 0, so a rate that has not happened yet is a flat line and not a missing series (ADR-0105).
+  if (snapshot.sourceThrottled) {
+    family(
+      'contextator_source_throttled_total',
+      'Throttling answers a source remote gave (S3 503 SlowDown, Drive 429 and rate-limit 403), by source type, retried or not.',
+      'counter',
+      SOURCE_THROTTLE_TYPES.map((type): [string, number] => [`{source_type="${type}"}`, snapshot.sourceThrottled?.[type] ?? 0]),
     );
   }
 

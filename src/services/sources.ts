@@ -5,15 +5,24 @@ import type { Db } from '../db/client.js';
 import { documents, documentSources, projects, type DocumentSourceRow } from '../db/schema.js';
 import { recordSourceRemoval } from './document-changes.js';
 import { decryptWebhookSecret, encryptSecret, encryptWebhookSecret, randomSecret, type SecretKeyring } from './crypto.js';
-import { isCredentialSourceType } from './encrypted-fields.js';
+import { CREDENTIAL_SOURCE_TYPES, isCredentialSourceType } from './encrypted-fields.js';
 import { allowedExtensionsFor, FLAVOR_ONLY_EXTENSIONS, FLAVORS, type Flavor } from './flavors.js';
 import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './fs-scan.js';
 import { ConflictError, NotFoundError, ValidationError } from './projects.js';
+import { S3_SECRET } from './s3/client.js';
 import { sanitizeGitUrl } from './sources/git-auth.js';
+import type { SecretBlob } from './sources/secret-blob.js';
 import { TEXT_SEARCH_CONFIGS } from './text-search.js';
 
-export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion', 'confluence', 'web'] as const;
+export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion', 'confluence', 'web', 's3'] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
+
+/**
+ * The credential types whose `secret_enc` is a JSON document rather than a single token
+ * ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 8). A type joins here with its own entry; the document is
+ * validated and stored in canonical form, and an error names the field, never a value.
+ */
+const SECRET_BLOBS: Readonly<Partial<Record<string, SecretBlob<unknown>>>> = { s3: S3_SECRET };
 
 /**
  * Refuses a secret on a source type that never uses one ([ADR-0091](../../.ssot/ADR.md#adr-0091)).
@@ -22,12 +31,26 @@ export type SourceType = (typeof SOURCE_TYPES)[number];
  * be read, rather than find it stored and counted by the backup's key check. `null`, and the empty
  * string a form sends for "no secret", carry no secret and so pass on every type — on an update they
  * clear whatever secret is stored, which is how a source of a type that takes none gets rid of one
- * written before this check existed.
+ * written before this check existed. The message names the types from {@link CREDENTIAL_SOURCE_TYPES}
+ * ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 8), so it cannot go stale when a type joins.
  */
 function checkSecretAllowed(type: string, secret: string | null | undefined): void {
   if (!secret) return;
   if (isCredentialSourceType(type)) return;
-  throw new ValidationError(`A ${type} source takes no secret; only git, notion and confluence sources use one.`);
+  const types = CREDENTIAL_SOURCE_TYPES;
+  const named = `${types.slice(0, -1).join(', ')} and ${types[types.length - 1]}`;
+  throw new ValidationError(`A ${type} source takes no secret; only ${named} sources use one.`);
+}
+
+/**
+ * The string to encrypt for a source's secret: the token as given, or — for a type that keeps a JSON
+ * document — that document validated and re-serialised canonically (`SecretBlobError`, a `ValidationError`,
+ * when it is not one). `null` stays `null`.
+ */
+function secretToStore(type: string, secret: string | null | undefined): string | null {
+  if (!secret) return null;
+  const blob = SECRET_BLOBS[type];
+  return blob ? blob.canonicalize(secret) : secret;
 }
 
 /**
@@ -265,6 +288,79 @@ export const WebConfig = z.object({
   syncProbeToken: ProbeToken,
 });
 
+/**
+ * An S3-compatible bucket ([ADR-0126](../../.ssot/ADR.md#adr-0126)): the objects under `prefix` whose
+ * extension the source reads, mirrored to `<source>/current/` with the prefix removed from their names.
+ * The key pair is not here: it is the source's one `secret_enc` document.
+ */
+export const S3Config = z.object({
+  /**
+   * Origin of an S3-compatible API (`https://minio.example.com:9000`, with a base path if it has one).
+   * Absent is AWS, `https://s3.<region>.amazonaws.com`, which takes `https` only; with an endpoint `http`
+   * is allowed too. A user or password in the URL is refused: the key pair has its own field, and a
+   * URL is what ends up in a log line. The empty string clears the setting (the form's blank field).
+   */
+  endpoint: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z
+      .url()
+      .max(2048)
+      .refine((value) => /^https?:\/\//i.test(value), 'must be an http:// or https:// URL')
+      .refine((value) => {
+        const url = new URL(value);
+        return url.username === '' && url.password === '';
+      }, 'must not carry a user or password; the access key goes in the credential')
+      .refine((value) => {
+        const url = new URL(value);
+        return url.search === '' && url.hash === '';
+      }, 'must not carry a query string or fragment')
+      .transform((value) => {
+        const url = new URL(value);
+        return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+      })
+      .optional(),
+  ),
+  /** Signs every request; AWS rejects a wrong one, most self-hosted servers accept any. */
+  region: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z
+      .string()
+      .max(64)
+      .regex(/^[a-z0-9-]+$/, 'must be a region name such as us-east-1')
+      .default('us-east-1'),
+  ),
+  bucket: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, 'must be a bucket name (3-63 lowercase letters, digits, dots and hyphens)'),
+  /**
+   * The "directory" in the bucket this source reads, without leading or trailing slash; empty is the whole
+   * bucket. Objects are mirrored with it removed from their names. A narrow prefix is cheaper: the probe lists
+   * every key under it.
+   */
+  prefix: z
+    .string()
+    .max(1024)
+    .default('')
+    .transform((value) => value.trim().replace(/^\/+|\/+$/g, ''))
+    .refine((value) => !value.includes('\0') && !value.split('/').some((segment) => segment === '.' || segment === '..'), {
+      message: 'must not contain "." or ".." segments',
+    }),
+  /**
+   * Path-style (`host/bucket/key`) or virtual-hosted (`bucket.host/key`) addressing. Unset takes the
+   * default of [ADR-0126](../../.ssot/ADR.md#adr-0126) decision 2 (path-style with an endpoint, and on AWS
+   * for a bucket name with a dot; otherwise virtual-hosted), computed where it is used. `null` — the form's
+   * "default" — clears it.
+   */
+  pathStyle: z
+    .boolean()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? undefined),
+  /** Only objects with one of these extensions are in scope, for the probe and the sync alike. */
+  extensions: Extensions.default(['md', 'mdx', 'txt']),
+  language: Language,
+  version: Version,
+  syncProbeToken: ProbeToken,
+});
+
 export const SourceConfigByType = {
   local: LocalConfig,
   git: GitConfig,
@@ -272,6 +368,7 @@ export const SourceConfigByType = {
   notion: NotionConfig,
   confluence: ConfluenceConfig,
   web: WebConfig,
+  s3: S3Config,
 } as const;
 export type LocalConfig = z.infer<typeof LocalConfig>;
 export type GitConfig = z.infer<typeof GitConfig>;
@@ -279,6 +376,7 @@ export type UploadConfig = z.infer<typeof UploadConfig>;
 export type NotionConfig = z.infer<typeof NotionConfig>;
 export type ConfluenceConfig = z.infer<typeof ConfluenceConfig>;
 export type WebConfig = z.infer<typeof WebConfig>;
+export type S3Config = z.infer<typeof S3Config>;
 
 export interface SourceView {
   id: string;
@@ -547,7 +645,8 @@ export async function createSource(db: Db, projectId: string, input: CreateSourc
   const config = await validateConfig(input.type, input.config, opts);
   checkExtensions(flavor, config);
   checkSecretAllowed(input.type, input.secret);
-  const secretEnc = input.secret ? encryptSecret(input.secret, opts.keys) : null;
+  const stored = secretToStore(input.type, input.secret);
+  const secretEnc = stored ? encryptSecret(stored, opts.keys) : null;
   // Encrypted when the instance has a key and stored in the clear when it has none — a git source on a
   // public repository must not be the thing that forces SECRET_KEY on an operator (ADR-0017), and
   // `npm run rotate-secret` seals such a value the day a key appears.
@@ -655,7 +754,8 @@ export async function updateSource(
   }
   if (input.secret !== undefined) {
     checkSecretAllowed(existing.type, input.secret);
-    patch.secretEnc = input.secret ? encryptSecret(input.secret, opts.keys) : null;
+    const stored = secretToStore(existing.type, input.secret);
+    patch.secretEnc = stored ? encryptSecret(stored, opts.keys) : null;
   }
   if (input.syncIntervalMinutes !== undefined && input.syncIntervalMinutes !== existing.syncIntervalMinutes) {
     patch.syncIntervalMinutes = input.syncIntervalMinutes;

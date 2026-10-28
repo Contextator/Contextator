@@ -13,6 +13,7 @@ The name is the mount point, so it cannot change after creation; everything else
 | **Notion** | Every page shared with an internal integration (or the configured root pages/databases and their descendants), rendered to Markdown, nested by parent page. | The Notion API, re-rendering only pages whose `last_edited_time` changed |
 | **Confluence** | **Cloud, or Data Center 7.9 and later** (see below). Every page in the chosen spaces — or in every space the account can read — rendered from Confluence's storage format to Markdown, nested the way it is in the wiki: `<name>/<space>/<parent page>/<page>.md`. | The Confluence REST API, re-rendering only pages whose version number changed; a signed webhook on Data Center, or the sync interval below |
 | **Documentation site** | **Public pages only** (see below). A published site, found through its `sitemap.xml`, its `llms.txt` or a crawl from one start URL, written under the site's own paths: `<name>/guide/install.html`, converted to Markdown by the same transform `.html` files use. | Conditional GETs against the site (`ETag`/`Last-Modified`), inside the five crawl ceilings below |
+| **S3 bucket** | The objects under one prefix of an S3-compatible bucket (AWS S3, MinIO, Ceph, Cloudflare R2…) whose file type the source reads, written under the prefix-relative key: `<name>/guides/install.md`. A key pair is stored encrypted (see below). | `ListObjectsV2`, downloading only objects whose ETag or size changed; the sync interval below |
 
 Sources are synced at the start of every index run, one after another; a source that fails to sync is
 reported on its own row and the others still index. **Sync** on a row and **Re-index** in the header
@@ -61,6 +62,48 @@ bound a crawl and stop it by name rather than failing the run; only a `sitemap.x
 freshness check, `llms.txt` and crawl sources re-fetch in full on every scheduled run.
 
 Field-by-field setup, the five ceilings table, `robots.txt` handling and common problems: [Documentation Site Source](https://contextator.com/en/docs/documentation-site-source/).
+
+## S3 buckets: a prefix, a key pair, and a listing per check
+
+An **S3 bucket** source mirrors the objects under one **prefix** whose extension the source reads (the **File
+types** ticked in the dialog; `.md`, `.mdx` and `.txt` by default) to `DATA_DIR` and indexes them like any
+other directory. The prefix is removed from the names: with prefix `guides`, the object `guides/nested/a.md`
+in a source named `handbook` is `handbook/nested/a.md`. Folder markers (keys ending `/`), names starting with
+a dot and keys that could leave the source's directory (an empty, `.` or `..` segment) are skipped, and the
+run's note counts the ones that matter.
+
+- **Endpoint and addressing.** Leave **Endpoint** empty for AWS S3 (`https` only, region from **Region**). For
+  MinIO, Ceph, R2 or another S3-compatible server give its address; `http` and `https` are both allowed there.
+  Addressing is path-style (`host/bucket/key`) when an endpoint is given, and on AWS when the bucket name has a
+  dot; otherwise virtual-hosted (`bucket.host/key`). The **Addressing** field overrides it either way.
+- **The key pair** is one credential: an access key ID and a secret access key, stored encrypted with
+  `SECRET_KEY` as a single document and never returned by the API or shown again. Over the API the `secret` is the
+  JSON string `{"v":1,"accessKeyId":"…","secretAccessKey":"…"}`. **Temporary credentials (a session token) are not
+  accepted** — a stored credential that expires in hours would fail a scheduled source a day later — and neither
+  are instance-profile or IRSA credentials, which come from the metadata address the egress guard always refuses.
+  Grant the key `s3:ListBucket` on the bucket and `s3:GetObject` on the prefix, and nothing else.
+- **A private endpoint** (a MinIO inside the network) is refused unless its host name is listed in
+  `SOURCE_ALLOWED_HOSTS`; the refusal names the rule, the host and that setting. Loopback and link-local are
+  refused whatever is listed. With virtual-hosted addressing the host that resolves is `<bucket>.<endpoint host>`,
+  so list that name (or use path-style). An S3 interface VPC endpoint with private DNS resolves
+  `s3.<region>.amazonaws.com` to a private address; list that name.
+- **What a check costs.** Every scheduled check lists the whole prefix (`ListObjectsV2`, 1 000 keys a request) and
+  downloads nothing; the source runs only when the listing changed. On a prefix with many keys outside the
+  source's scope the check still lists them all, so give the source the narrowest prefix and file types that
+  hold its documents — the run's note shows how many keys were listed.
+- **Bounds.** One source indexes at most `S3_MAX_OBJECTS` objects (5 000 by default, see
+  [Configuration](configuration.md#object-ceiling-for-s3-sources)): the first ones in key order, and the run's note
+  says in capitals that the rest are not indexed. An object over `MAX_CONVERTED_FILE_BYTES` is refused by name and
+  not downloaded, and a run that would leave less than `DATA_DIR_MIN_FREE_BYTES` free fails with
+  `insufficient_disk` before it downloads anything.
+- **Failures.** A network error or a `5xx` answer (`503 SlowDown` included) is tried three times; a `4xx` answer
+  fails the run at once with S3's own error code (`AccessDenied`, `NoSuchBucket`, `SignatureDoesNotMatch`). Every
+  `503 SlowDown` is counted in `contextator_source_throttled_total{source_type="s3"}` (see
+  [Observability](observability.md#source-throttling)), retried or not. A failed run does not move the manifest or the
+  freshness check, so the next check runs it again; files the run had already replaced keep their new content, and
+  nothing is deleted until every download has succeeded. A listing page larger than 8 MiB is refused rather than read.
+- **Export and import.** A project export carries the source's settings and not its key pair; an imported S3
+  source arrives unscheduled and needs its credential entered again.
 
 ## Keeping a source fresh on its own
 

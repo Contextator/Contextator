@@ -4,6 +4,7 @@ import type { Logger } from '../context.js';
 import type { Db } from '../db/client.js';
 import { documentSources, type DocumentSourceRow } from '../db/schema.js';
 import type { Indexer } from './indexer.js';
+import type { SourceThrottleObserver } from './metrics.js';
 import { driverFor } from './sources/driver.js';
 import { storedProbeToken } from './sources.js';
 
@@ -40,6 +41,8 @@ export interface SchedulerDeps {
   db: Db;
   indexer: SchedulerIndexer;
   log: Logger;
+  /** Where a probe's throttling answers are counted (ADR-0126); optional, a test or the CLI counts nothing. */
+  metrics?: Partial<SourceThrottleObserver>;
   // `SYNC_MAX_SKIP_HOURS` is required, not optional: a caller that builds its own config must say "off"
   // (`0`) out loud rather than switch FR-320's bound off by leaving the key out.
   config: Pick<
@@ -56,6 +59,9 @@ export interface SchedulerDeps {
         | 'GIT_MAX_PACK_BYTES'
         | 'CONFLUENCE_MAX_PAGES'
         | 'NOTION_MAX_PAGES'
+        | 'S3_MAX_OBJECTS'
+        | 'MAX_CONVERTED_FILE_BYTES'
+        | 'DATA_DIR_MIN_FREE_BYTES'
       >
     > &
     WebLimits;
@@ -295,7 +301,7 @@ export async function runSyncTick(deps: SchedulerDeps): Promise<SyncTickResult> 
 
     let token: string | null = null;
     try {
-      const driver = driverFor(source, { db, log, config });
+      const driver = driverFor(source, { db, log, config, ...(deps.metrics ? { metrics: deps.metrics } : {}) });
       if (driver.probe) {
         result.probed++;
         token = await driver.probe();

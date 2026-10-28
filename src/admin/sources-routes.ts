@@ -155,7 +155,7 @@ export const sourceRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app,
     await requireProject(id);
     const source = await getSource(db, id, sid);
     if (!source) throw new NotFoundError('Source not found');
-    const driver = driverFor(source, { db, log, config });
+    const driver = driverFor(source, { db, log, config, metrics: ctx.metrics });
     if (!driver.test) return { ok: true, message: 'Nothing to test for this source type' };
     try {
       return { ok: true, message: await driver.test() };

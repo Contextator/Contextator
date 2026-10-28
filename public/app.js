@@ -63,7 +63,7 @@ const TOOLS = [
   },
 ];
 
-const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN', confluence: 'CNF', web: 'WEB' };
+const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN', confluence: 'CNF', web: 'WEB', s3: 'S3' };
 const SOURCE_TITLE = {
   local: 'Local directory',
   git: 'Git repository',
@@ -71,6 +71,7 @@ const SOURCE_TITLE = {
   notion: 'Notion workspace',
   confluence: 'Confluence site',
   web: 'Documentation site',
+  s3: 'S3 bucket',
 };
 
 /**
@@ -102,6 +103,11 @@ const SOURCE_KINDS = {
     title: 'Documentation site',
     subtitle: 'A published site, read from its sitemap.xml, its llms.txt or a crawl. Public pages only — there is no login.',
   },
+  s3: {
+    type: 's3',
+    title: 'S3 bucket',
+    subtitle: 'Objects under a bucket prefix on AWS S3 or an S3-compatible server. Only objects that changed are downloaded.',
+  },
 };
 
 /**
@@ -112,7 +118,7 @@ const SOURCE_KINDS = {
  * every page and then drop all of them at the indexer's extension filter — reporting a successful run
  * over an empty index.
  */
-const KIND_EXTENSIONS = { web: ['html', 'md', 'txt'] };
+const KIND_EXTENSIONS = { web: ['html', 'md', 'txt'], s3: ['md', 'mdx', 'txt'] };
 
 /**
  * The source types that hold a credential, and the form field each one's token is typed into.
@@ -121,7 +127,9 @@ const KIND_EXTENSIONS = { web: ['html', 'md', 'txt'] };
  * the patch below all mean the same thing by it, and a new type that was added to two of the three is
  * exactly the bug this shape removes.
  */
-const SECRET_FIELD = { git: 'secret', notion: 'notionSecret', confluence: 'confluenceSecret' };
+const SECRET_FIELD = { git: 'secret', notion: 'notionSecret', confluence: 'confluenceSecret', s3: 's3SecretAccessKey' };
+/** An S3 credential has two parts; `SECRET_FIELD.s3` is the half that is a secret, this is the other one. */
+const S3_KEY_ID_FIELD = 's3AccessKeyId';
 const CREDENTIALLED = new Set(Object.keys(SECRET_FIELD));
 
 /**
@@ -138,6 +146,7 @@ const CLEAR_SECRET_ROWS = () => ({
   git: $('#git-clear-secret-row'),
   notion: $('#notion-clear-secret-row'),
   confluence: $('#confluence-clear-secret-row'),
+  s3: $('#s3-clear-secret-row'),
 });
 const clearSecretRow = (type) => CLEAR_SECRET_ROWS()[type];
 
@@ -877,7 +886,7 @@ function renderSources(project, busy) {
       : el('p', {
           class: 'sources-empty',
           text: mayEdit
-            ? 'No sources yet. Add a local directory, a git repository, an upload, a Notion workspace or a Confluence site to give this project something to index.'
+            ? 'No sources yet. Add a local directory, a git repository, an upload, a Notion workspace, a Confluence site or an S3 bucket to give this project something to index.'
             : 'No sources yet. An editor on this project can add one.',
         }),
   ]);
@@ -891,6 +900,7 @@ function sourceOrigin(s) {
   if (s.type === 'notion') return (c.rootIds || []).length ? `${c.rootIds.length} root page(s)` : 'everything shared with the integration';
   if (s.type === 'confluence') return c.baseUrl || '—';
   if (s.type === 'web') return c.entryUrl || '—';
+  if (s.type === 's3') return `s3://${c.bucket || '—'}/${c.prefix ? `${c.prefix}/` : ''}`;
   return `${s.name}/`;
 }
 
@@ -1266,6 +1276,8 @@ function openSourceDialog(project, source) {
   srcForm.elements.secret.placeholder = 'leave empty for public repositories';
   srcForm.elements.notionSecret.placeholder = 'ntn_… / secret_…';
   srcForm.elements.confluenceSecret.placeholder = 'ATATT…';
+  srcForm.elements[S3_KEY_ID_FIELD].placeholder = 'AKIA…';
+  srcForm.elements[SECRET_FIELD.s3].placeholder = '';
   $('#secret-hint').innerHTML = SECRET_HINT_HTML; // static markup restored, never user data
   renderSrcRootPrefix();
 
@@ -1283,6 +1295,7 @@ function openSourceDialog(project, source) {
   if (srcUi.readOnly) {
     for (const field of srcForm.querySelectorAll('input, select, textarea')) field.disabled = true;
     for (const type of CREDENTIALLED) srcForm.elements[SECRET_FIELD[type]].value = '';
+    srcForm.elements[S3_KEY_ID_FIELD].value = '';
   }
 
   openDialog(srcDialog);
@@ -1339,6 +1352,18 @@ function fillSourceForm(s) {
     srcForm.elements.confluenceEmail.value = c.email || '';
     srcForm.elements.spaceKeys.value = (c.spaceKeys || []).join('\n');
     if (s.hasSecret) srcForm.elements.confluenceSecret.placeholder = 'unchanged — type to replace';
+  }
+  if (s.type === 's3') {
+    srcForm.elements.s3Bucket.value = c.bucket || '';
+    srcForm.elements.s3Prefix.value = c.prefix || '';
+    srcForm.elements.s3Endpoint.value = c.endpoint || '';
+    srcForm.elements.s3Region.value = c.region || '';
+    srcForm.elements.s3PathStyle.value = typeof c.pathStyle === 'boolean' ? String(c.pathStyle) : '';
+    if (s.hasSecret) {
+      // The key pair is one encrypted document the server never returns, so both halves read "unchanged".
+      srcForm.elements[S3_KEY_ID_FIELD].placeholder = 'unchanged — type to replace';
+      srcForm.elements[SECRET_FIELD.s3].placeholder = 'unchanged — type to replace';
+    }
   }
   updateProviderHint();
 }
@@ -1600,6 +1625,21 @@ function configForKind(kind) {
       ...common,
     };
   }
+  if (type === 's3') {
+    const bucket = srcForm.elements.s3Bucket.value.trim();
+    if (!bucket) throw new Error('A bucket name is required');
+    const pathStyle = srcForm.elements.s3PathStyle.value;
+    // Empty strings and `null` are sent on purpose: the PATCH merges over the stored config, so a cleared
+    // endpoint, region or addressing left out would keep its old value with nothing on screen to say so.
+    return {
+      bucket,
+      prefix: srcForm.elements.s3Prefix.value.trim(),
+      endpoint: srcForm.elements.s3Endpoint.value.trim(),
+      region: srcForm.elements.s3Region.value.trim(),
+      pathStyle: pathStyle === '' ? null : pathStyle === 'true',
+      ...common,
+    };
+  }
   return { ...common };
 }
 
@@ -1609,6 +1649,18 @@ function secretPatchForKind(kind) {
   if (!CREDENTIALLED.has(type)) return {};
   const row = clearSecretRow(type);
   if (!row.hidden && row.querySelector('input').checked) return { secret: null };
+  if (type === 's3') {
+    // Two fields, one credential: the server stores them as a single encrypted JSON document.
+    const accessKeyId = srcForm.elements[S3_KEY_ID_FIELD].value.trim();
+    const secretAccessKey = srcForm.elements[SECRET_FIELD.s3].value.trim();
+    if (!accessKeyId && !secretAccessKey) {
+      if (srcUi.editing?.hasSecret) return {};
+      throw new Error('An access key ID and a secret access key are required');
+    }
+    if (!accessKeyId || !secretAccessKey)
+      throw new Error('Enter both the access key ID and the secret access key, or leave both empty to keep the stored pair');
+    return { secret: JSON.stringify({ v: 1, accessKeyId, secretAccessKey }) };
+  }
   const value = srcForm.elements[SECRET_FIELD[type]].value.trim();
   return value ? { secret: value } : {};
 }

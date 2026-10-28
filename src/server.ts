@@ -13,6 +13,7 @@ import { webhookRoutes } from './admin/webhooks.js';
 import './services/sources/confluence.js';
 import './services/sources/git.js';
 import './services/sources/notion.js';
+import './services/sources/s3.js';
 import './services/sources/web.js';
 import { deprecatedSettingWarnings, loadConfig, OAUTH_CLIENT_STALE_MS, OAUTH_CLIENT_UNUSED_MS, OAUTH_CREDENTIAL_SWEEP_GRACE_MS } from './config.js';
 import type { AppContext } from './context.js';
@@ -354,7 +355,7 @@ async function main(): Promise<void> {
   // It is not conditional on a setting. On an upgraded installation every source carries
   // `sync_interval_minutes = NULL`, so the tick is one indexed query that matches nothing, once a
   // minute, and NFR-10 holds by the data rather than by a flag somebody has to find.
-  stopSyncScheduler = startSyncScheduler({ db, indexer, log, config });
+  stopSyncScheduler = startSyncScheduler({ db, indexer, log, config, metrics });
 
   // Said before the listener opens, from the same rows the dashboard shows. Never fatal: a failed read
   // costs a warning, not the start (ADR-0065).

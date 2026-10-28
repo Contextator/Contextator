@@ -62,17 +62,22 @@ export const WEB_LIMIT_DEFAULTS = {
 } as const;
 
 /**
- * How many pages one Confluence or Notion sync may index before it stops and says so.
+ * How many pages one Confluence or Notion sync, or objects one S3 sync, may index before it stops and says so.
  *
- * 5000 is the ceiling both drivers have always had ([ADR-0015](../../.ssot/ADR.md#adr-0015)); these are
- * now the defaults of `CONFLUENCE_MAX_PAGES` and `NOTION_MAX_PAGES` rather than constants nobody could
+ * 5000 is the ceiling the first two drivers have always had ([ADR-0015](../../.ssot/ADR.md#adr-0015)) and the one
+ * `S3_MAX_OBJECTS` takes ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 6); these are
+ * the defaults of `CONFLUENCE_MAX_PAGES`, `NOTION_MAX_PAGES` and `S3_MAX_OBJECTS` rather than constants nobody could
  * move. Kept here, beside the schema that uses them, so the drivers fall back to the same number a
  * context built without them (a test, an older caller) would otherwise have to repeat.
  */
 export const SOURCE_PAGE_LIMIT_DEFAULTS = {
   CONFLUENCE_MAX_PAGES: 5000,
   NOTION_MAX_PAGES: 5000,
+  S3_MAX_OBJECTS: 5000,
 } as const;
+
+/** The default of `MAX_CONVERTED_FILE_BYTES` (32 MiB); a driver built from a context without the setting falls back to it. */
+export const MAX_CONVERTED_FILE_BYTES_DEFAULT = 32 * 1024 * 1024;
 
 /**
  * The default of `GIT_MAX_PACK_BYTES`: 256 MiB. isomorphic-git gathers a packfile in memory — and copies it
@@ -665,6 +670,13 @@ export const EnvSchema = z
     CONFLUENCE_MAX_PAGES: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.CONFLUENCE_MAX_PAGES),
     /** The same ceiling for one Notion sync, announced the same way. */
     NOTION_MAX_PAGES: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.NOTION_MAX_PAGES),
+    /**
+     * Objects one S3 sync indexes at most ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 6): the first N in
+     * key order, among the objects under the source's prefix whose extension the source reads. Past it the run
+     * indexes up to the ceiling and its note says in capitals that the rest was not indexed, as
+     * `CONFLUENCE_MAX_PAGES` does. The probe still lists the whole prefix, so a narrow prefix is cheaper.
+     */
+    S3_MAX_OBJECTS: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.S3_MAX_OBJECTS),
     /** Writable directory for materialised sources (git checkouts, uploads, Notion pulls). */
     DATA_DIR: z
       .string()
@@ -754,7 +766,7 @@ export const EnvSchema = z
       .number()
       .int()
       .min(64 * 1024)
-      .default(32 * 1024 * 1024),
+      .default(MAX_CONVERTED_FILE_BYTES_DEFAULT),
 
     /**
      * What one API specification may weigh before the indexer will parse it

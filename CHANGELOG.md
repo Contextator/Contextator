@@ -19,7 +19,15 @@ ships, that stops.
   command and the S3 source share one implementation. The backup command's behaviour is unchanged.
 - Internal building blocks for the remote-store sources of 0.6.0: a one-JSON-document credential helper
   (ADR-0126 decision 8) and a shared list / version / download-what-changed / remove-what-is-gone routine with a
-  per-type object ceiling. No new source type is available yet.
+  per-type object ceiling.
+- **S3 bucket source** (`s3`; ADR-0126): the objects under one prefix of an S3-compatible bucket (AWS S3, MinIO,
+  Ceph, R2…), signed with SigV4 and read without an SDK. Incremental on the ETag: a scheduled check lists the
+  prefix and downloads nothing, and a run fetches only objects that changed or appeared and drops those that are
+  gone. The key pair is one encrypted `secret_enc` document (`{"v":1,"accessKeyId":…,"secretAccessKey":…}`;
+  session tokens are refused); an endpoint on a private address needs `SOURCE_ALLOWED_HOSTS`. New setting
+  `S3_MAX_OBJECTS` (default 5 000). Panel: an **S3 bucket** tab. The `s3` type joins the credential-bearing types
+  of the backup's key check and the project export's manifest.
+- `/metrics`: `contextator_source_throttled_total{source_type}`, the throttling answers a source's remote gave (S3 `503 SlowDown`), counted per answer whether or not a retry then succeeded. The label set is closed (`s3`, `gdrive`) and every value is exported from start at `0` (ADR-0126 decision 9).
 
 ### Deprecated
 
