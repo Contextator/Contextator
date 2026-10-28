@@ -29,6 +29,14 @@ import { captureAuditFocus, loadAudit, renderAuditView } from './audit.js';
 import { canCreateProject, canDeleteProject, canEdit, initAuthUi, loadMe, renderUserMenu } from './auth.js';
 import { authHeaderFor, authModeBadge, initMcpUi, loadMcpTokens, renderMcpAccess, showMcpSecret } from './mcp.js';
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
+import {
+  announceNotionOAuthOutcome,
+  loadNotionOAuth,
+  notionOAuthEnabled,
+  renderNotionConnect,
+  showNotionWebhook,
+  startNotionOAuth,
+} from './notion-oauth.js';
 import { loadQuerySummary, renderQueries } from './queries.js';
 import { renderSourceFreshness } from './freshness.js';
 import { loadEval, renderEval } from './eval.js';
@@ -1241,7 +1249,8 @@ function setKind(kind) {
   $('#webhook-box').hidden = !(editing && meta.type === 'git') || srcUi.readOnly;
   // The Notion box is the same affordance with the secret coming the other way: Notion generates the
   // token, the product captures it inside a window, and the operator carries it back into Notion.
-  $('#notion-webhook-box').hidden = !(editing && meta.type === 'notion') || srcUi.readOnly;
+  // An OAuth source has none: the webhook of a public connection belongs to the connection (ADR-0129).
+  $('#notion-webhook-box').hidden = !(editing && meta.type === 'notion') || srcUi.readOnly || !showNotionWebhook(editing);
   // Confluence's secret goes git's way (generated here, pasted into Confluence), but it only exists once
   // an editor turns the webhook on — until then the delivery route refuses everything.
   $('#confluence-webhook-box').hidden = !(editing && meta.type === 'confluence') || srcUi.readOnly;
@@ -1289,9 +1298,41 @@ function openSourceDialog(project, source) {
   (source ? srcForm.elements.label : srcForm.elements.name).focus();
 
   if (source?.type === 'git' && !srcUi.readOnly) renderWebhook(project, source);
-  if (source?.type === 'notion' && !srcUi.readOnly) renderNotionWebhook(project, source);
+  if (source?.type === 'notion' && !srcUi.readOnly && showNotionWebhook(source)) renderNotionWebhook(project, source);
+  renderNotionOAuthBox();
+  // Asked once per page load; the box is drawn again when the answer is in.
+  if (!state.notionOAuth) void loadNotionOAuth().then(renderNotionOAuthBox);
   if (source?.type === 'confluence' && !srcUi.readOnly) renderConfluenceWebhook(project, source);
   if (source?.type === 'upload' && !srcUi.readOnly) void loadSourceFiles(project, source);
+}
+
+/** "Connect with Notion" for a new source, the workspace and "Reconnect" for a connected one (notion-oauth.js). */
+function renderNotionOAuthBox() {
+  const box = $('#notion-oauth-box');
+  const node = renderNotionConnect({
+    source: srcUi.editing,
+    enabled: notionOAuthEnabled(),
+    readOnly: srcUi.readOnly,
+    onStart: (sourceId) => void beginNotionOAuth(sourceId),
+  });
+  box.replaceChildren(...(node ? [node] : []));
+  box.hidden = !node;
+}
+
+/**
+ * Sends the browser to Notion. A new source takes what the form already holds (its name and root pages)
+ * to the server, which keeps them across the round trip; nothing is created until Notion sends the person back.
+ */
+async function beginNotionOAuth(sourceId) {
+  const errorNode = $('#source-error');
+  errorNode.hidden = true;
+  try {
+    const body = sourceId ? { sourceId } : { name: srcForm.elements.name.value.trim(), rootIds: parseNotionIds(srcForm.elements.rootIds.value) };
+    location.assign(await startNotionOAuth(srcUi.project.id, body));
+  } catch (err) {
+    errorNode.textContent = describeApiError(err);
+    errorNode.hidden = false;
+  }
 }
 
 function closeSourceDialog() {
@@ -1968,6 +2009,7 @@ async function boot() {
   initGoldenUi();
   initTokensUi();
   await loadMe();
+  announceNotionOAuthOutcome();
   applyHash();
   document.body.classList.remove('booting');
   await refresh();

@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { PROJECT_NAME_RE, SYNC_MAX_INTERVAL_MINUTES, SYNC_MIN_INTERVAL_MINUTES } from '../config.js';
 import type { Db } from '../db/client.js';
@@ -26,8 +26,19 @@ export type SourceType = (typeof SOURCE_TYPES)[number];
  */
 function checkSecretAllowed(type: string, secret: string | null | undefined): void {
   if (!secret) return;
-  if (isCredentialSourceType(type)) return;
-  throw new ValidationError(`A ${type} source takes no secret; only git, notion and confluence sources use one.`);
+  if (!isCredentialSourceType(type)) {
+    throw new ValidationError(`A ${type} source takes no secret; only git, notion and confluence sources use one.`);
+  }
+  // **The OAuth blob cannot be written through the API** ([ADR-0129](../../.ssot/ADR.md#adr-0129) §4).
+  // A Notion source's driver tells the two stored formats apart by the first character of the decrypted
+  // value, and an internal integration token never starts with `{`. A caller who could send one that
+  // does would be choosing which format the driver parses; only the OAuth callback and the driver's
+  // own refresh write that format, through `replaceSourceSecretIfUnchanged`, which does not come here.
+  if (type === 'notion' && secret.trim().startsWith('{')) {
+    throw new ValidationError(
+      'A Notion integration token never starts with "{". A Notion connection made with OAuth is created only through "Connect with Notion" in the dashboard.',
+    );
+  }
 }
 
 /**
@@ -181,9 +192,22 @@ export const UploadConfig = z.object({
   version: Version,
   syncProbeToken: ProbeToken,
 });
+/**
+ * What the dashboard may show about a Notion connection made with OAuth ([ADR-0129](../../.ssot/ADR.md#adr-0129)
+ * §4). Names and ids only — the tokens are in `secret_enc` and nowhere else.
+ */
+export const NotionOAuthInfo = z.object({
+  workspaceId: z.string().max(200),
+  workspaceName: z.string().max(500),
+  botId: z.string().max(200),
+});
+export type NotionOAuthInfo = z.infer<typeof NotionOAuthInfo>;
+
 export const NotionConfig = z.object({
   /** Page or database ids to start from; empty = everything shared with the integration. */
   rootIds: z.array(z.string().min(1).max(64)).max(50).default([]),
+  /** Present when the source was connected with OAuth instead of a pasted integration token. */
+  oauth: NotionOAuthInfo.optional(),
   extensions: Extensions.default(['md']),
   language: Language,
   version: Version,
@@ -498,6 +522,13 @@ export interface CreateSourceInput {
   label?: string;
   flavor?: Flavor;
   config?: unknown;
+  /**
+   * The workspace a Notion source was connected to with OAuth ([ADR-0129](../../.ssot/ADR.md#adr-0129)).
+   * **Written only through here**, by the OAuth callback: the same key inside `config` is dropped, so a
+   * client cannot make a source look connected (or not) by sending it. The admin API's bodies do not
+   * name this field, which is what keeps it out of their reach.
+   */
+  oauth?: NotionOAuthInfo;
   /** Plain token; encrypted before it is stored. */
   secret?: string | null;
   /**
@@ -536,6 +567,16 @@ async function validateConfig(type: SourceType, config: unknown, opts: SourceSer
   return parsed;
 }
 
+/**
+ * A client's `config` for a Notion source with `oauth` taken out, and the trusted one (the callback's) put
+ * in. Every other type has no such key and is returned as it came.
+ */
+function withoutClientOauth(type: SourceType, config: unknown, oauth: NotionOAuthInfo | undefined): unknown {
+  if (type !== 'notion') return config;
+  const { oauth: _fromClient, ...rest } = (config ?? {}) as Record<string, unknown>;
+  return oauth ? { ...rest, oauth } : rest;
+}
+
 export async function createSource(db: Db, projectId: string, input: CreateSourceInput, opts: SourceServiceOptions): Promise<DocumentSourceRow> {
   if (!SOURCE_TYPES.includes(input.type)) throw new ValidationError(`Unknown source type "${String(input.type)}"`);
   const name = input.name.trim();
@@ -544,7 +585,7 @@ export async function createSource(db: Db, projectId: string, input: CreateSourc
   }
   const flavor = input.flavor ?? 'plain';
   if (!FLAVORS.includes(flavor)) throw new ValidationError(`Unknown flavor "${String(flavor)}"`);
-  const config = await validateConfig(input.type, input.config, opts);
+  const config = await validateConfig(input.type, withoutClientOauth(input.type, input.config, input.oauth), opts);
   checkExtensions(flavor, config);
   checkSecretAllowed(input.type, input.secret);
   const secretEnc = input.secret ? encryptSecret(input.secret, opts.keys) : null;
@@ -581,6 +622,8 @@ export interface UpdateSourceInput {
   label?: string;
   flavor?: Flavor;
   config?: unknown;
+  /** As {@link CreateSourceInput.oauth}: set by the OAuth callback and by nothing a client can send. */
+  oauth?: NotionOAuthInfo;
   /** New plain token; `null` removes the stored one. */
   secret?: string | null;
   /** Minutes between scheduled syncs; `null` switches scheduling off. Omitted leaves it alone. */
@@ -619,6 +662,10 @@ export async function updateSource(
     // nothing changed into a re-sync of the source, and the route below reads exactly this comparison
     // to decide whether to queue a run at all.
     delete merged[PROBE_TOKEN_KEY];
+    // The workspace of an OAuth connection is not the client's to state either way: what is stored stays,
+    // whatever the body says (the callback sets it through `input.oauth`, below).
+    delete merged.oauth;
+    if (existing.config.oauth !== undefined) merged.oauth = existing.config.oauth;
     const nextConfig = await validateConfig(existing.type as SourceType, merged, opts);
     const previous = { ...existing.config };
     const token = previous[PROBE_TOKEN_KEY];
@@ -657,6 +704,20 @@ export async function updateSource(
     checkSecretAllowed(existing.type, input.secret);
     patch.secretEnc = input.secret ? encryptSecret(input.secret, opts.keys) : null;
   }
+  // The OAuth workspace follows the credential ([ADR-0129](../../.ssot/ADR.md#adr-0129) §4): the callback
+  // sets it, and a secret that arrives any other way is never an OAuth connection (`checkSecretAllowed`),
+  // so the name of the workspace the source used to talk to goes with the token it replaces.
+  if (existing.type === 'notion' && (input.oauth !== undefined || input.secret !== undefined)) {
+    const next = { ...((patch.config ?? existing.config) as Record<string, unknown>) };
+    if (input.oauth !== undefined) {
+      next.oauth = NotionOAuthInfo.parse(input.oauth);
+      // A different workspace is a different question for the revision probe to have answered.
+      delete next[PROBE_TOKEN_KEY];
+    } else {
+      delete next.oauth;
+    }
+    patch.config = next;
+  }
   if (input.syncIntervalMinutes !== undefined && input.syncIntervalMinutes !== existing.syncIntervalMinutes) {
     patch.syncIntervalMinutes = input.syncIntervalMinutes;
     // Re-jittered rather than carried over: a source moved from daily to hourly would otherwise keep
@@ -672,6 +733,36 @@ export async function updateSource(
   if (Object.keys(patch).length === 0) return existing;
   const [row] = await db.update(documentSources).set(patch).where(eq(documentSources.id, sourceId)).returning();
   return row;
+}
+
+/**
+ * Replaces a source's stored secret **only if it is still the ciphertext the caller read**
+ * ([ADR-0129](../../.ssot/ADR.md#adr-0129) §5). `true` means this call wrote it; `false` means the row
+ * moved first (another run refreshed the same tokens, a reconnect landed, a rotation re-sealed it) and
+ * nothing was written.
+ *
+ * Compare-and-swap in the `WHERE` rather than a read followed by a write, because the value being
+ * protected is a rotating refresh token: a second writer that overwrote a newer pair with an older one
+ * would leave the source holding a token Notion has already retired. `expectedEnc` is `null` for a row
+ * that holds no secret yet (the OAuth callback creates the source and then seals its first pair).
+ *
+ * This is the only writer of the OAuth blob and does not go through `checkSecretAllowed` on purpose.
+ */
+export async function replaceSourceSecretIfUnchanged(
+  db: Db,
+  sourceId: string,
+  expectedEnc: string | null,
+  plain: string,
+  keys: SecretKeyring,
+): Promise<boolean> {
+  const rows = await db
+    .update(documentSources)
+    .set({ secretEnc: encryptSecret(plain, keys) })
+    .where(
+      and(eq(documentSources.id, sourceId), expectedEnc === null ? isNull(documentSources.secretEnc) : eq(documentSources.secretEnc, expectedEnc)),
+    )
+    .returning({ id: documentSources.id });
+  return rows.length === 1;
 }
 
 export async function regenerateWebhookSecret(db: Db, projectId: string, sourceId: string, opts: SourceServiceOptions): Promise<DocumentSourceRow> {

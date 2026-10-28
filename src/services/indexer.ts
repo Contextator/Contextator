@@ -131,6 +131,8 @@ export interface IndexerDeps {
         | 'GIT_MAX_PACK_BYTES'
         | 'CONFLUENCE_MAX_PAGES'
         | 'NOTION_MAX_PAGES'
+        | 'NOTION_OAUTH_CLIENT_ID'
+        | 'NOTION_OAUTH_CLIENT_SECRET'
         | 'DATA_DIR_MIN_FREE_BYTES'
         | 'CONTEXTATOR_EMBEDDED_PGDATA'
         | 'CONVERSION_WORKER_MAX_HEAP_MB'

@@ -10,7 +10,7 @@ The name is the mount point, so it cannot change after creation; everything else
 | **Local directory** | A folder mounted on the server, scanned in place. Must live inside `ALLOWED_DOC_ROOTS`; nothing is copied. | Reading it at index time |
 | **Git repository** | A shallow, single-branch checkout under `DATA_DIR`. Any HTTPS git server: GitHub, GitLab, Bitbucket, Gitea/Forgejo/Codeberg. Optionally only a **subdirectory** of the repository (`docs/`). | `git fetch` of the branch tip at the start of every index run, a push webhook, or the sync interval below |
 | **Upload** | Files, whole folders (structure preserved) and archives — `.zip`, `.tar`, `.tar.gz`/`.tgz`, `.rar` — unpacked on the server. Add to the existing files or replace them all. | Nothing to sync; the files live under `DATA_DIR` |
-| **Notion** | Every page shared with an internal integration (or the configured root pages/databases and their descendants), rendered to Markdown, nested by parent page. | The Notion API, re-rendering only pages whose `last_edited_time` changed |
+| **Notion** | Every page shared with an internal integration or an OAuth connection (or the configured root pages/databases and their descendants), rendered to Markdown, nested by parent page. | The Notion API, re-rendering only pages whose `last_edited_time` changed |
 | **Confluence** | **Cloud, or Data Center 7.9 and later** (see below). Every page in the chosen spaces — or in every space the account can read — rendered from Confluence's storage format to Markdown, nested the way it is in the wiki: `<name>/<space>/<parent page>/<page>.md`. | The Confluence REST API, re-rendering only pages whose version number changed; a signed webhook on Data Center, or the sync interval below |
 | **Documentation site** | **Public pages only** (see below). A published site, found through its `sitemap.xml`, its `llms.txt` or a crawl from one start URL, written under the site's own paths: `<name>/guide/install.html`, converted to Markdown by the same transform `.html` files use. | Conditional GETs against the site (`ETag`/`Last-Modified`), inside the five crawl ceilings below |
 
@@ -145,6 +145,38 @@ message rather than reporting an empty workspace — which would otherwise delet
 imported.
 
 Full setup steps, the rendered-block list and rate limiting: [Notion](https://contextator.com/en/docs/notion/).
+
+### Two ways to authorise a Notion source
+
+| | Internal integration token | Connect with Notion (OAuth) |
+| --- | --- | --- |
+| You do | Create an internal integration, share the pages with it, paste its token | Pick the pages in Notion's own page picker |
+| Needs on the instance | `SECRET_KEY` | `SECRET_KEY` and a **public connection you registered yourself**, with `NOTION_OAUTH_CLIENT_ID`, `NOTION_OAUTH_CLIENT_SECRET` and a redirect URI |
+| Stored | The token, encrypted with `SECRET_KEY` | The access and refresh token, encrypted with `SECRET_KEY`, and the workspace name beside them |
+| Webhook | Yes, [push webhooks](#push-webhooks) work as before | **No.** A public connection's webhook belongs to the connection, not to one source, so an OAuth source has no webhook section; it is kept fresh by the schedule and its revision check |
+| When Notion refuses the token | The source fails with that message; paste a new token | The tokens are refreshed once and the request repeated; if Notion no longer accepts the refresh token, the run fails and asks for **Reconnect** |
+
+Both are always available: with no Notion OAuth variables set, the dashboard shows only the token field and
+nothing else changes. There is no Contextator-owned connection, so every instance registers its own.
+
+**Register the public connection** at `notion.so/profile/integrations` (a *public* connection, not an internal
+one). Its **redirect URI** must be the address Notion sends the browser back to, and it must name this instance:
+
+- `https://<your-domain>/api/sources/notion/oauth/callback` for a deployed instance. Set `PUBLIC_BASE_URL` and the
+  server derives the same address; or set `NOTION_OAUTH_REDIRECT_URI` to pin it.
+- `http://localhost:<port>/api/sources/notion/oauth/callback` for an instance on your own machine.
+- **Open the dashboard on that same host.** Sign-in cookies belong to a host name: if the redirect URI says
+  `localhost` and you opened the dashboard at `127.0.0.1`, Notion sends the browser back to a host where you
+  are not signed in, and the callback answers `401`.
+- **Not an IP address.** `http://127.0.0.1:...` is reported to be refused by Notion's form, and the server never
+  guesses a redirect URI from a request: with neither `NOTION_OAUTH_REDIRECT_URI` nor `PUBLIC_BASE_URL` set,
+  startup is refused.
+
+Then **Connect with Notion** appears in the Notion tab of *Add source*. Only a signed-in editor of the project
+can use it (an API token or `ADMIN_TOKEN` cannot start it, because it is a browser round trip). The source is
+created when Notion sends the person back, and **Reconnect** on an existing OAuth source authorises it again
+without changing its name or its settings. A project export drops the tokens like every other secret, so an
+imported OAuth source needs Reconnect. The tokens are never shown, returned by the API, or written to a log.
 
 ## Private repositories and tokens
 

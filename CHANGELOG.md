@@ -10,6 +10,25 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Added
+
+- Notion sources can be connected with OAuth ("Connect with Notion") instead of a pasted integration token
+  (ADR-0129). Each operator registers their own Notion public connection and sets `NOTION_OAUTH_CLIENT_ID` and
+  `NOTION_OAUTH_CLIENT_SECRET` (and `NOTION_OAUTH_REDIRECT_URI`, or `PUBLIC_BASE_URL`); with none set nothing
+  changes. An editor starts it from the dashboard with a session; an API token or `ADMIN_TOKEN` cannot. The
+  access and refresh token are stored encrypted in the source's existing secret, the source refreshes them when
+  Notion refuses the access token, and a revoked connection ends the run asking for **Reconnect**. OAuth sources
+  have no webhook; the schedule keeps them fresh. Startup is refused when only one of the id and the secret is set,
+  when neither a redirect URI nor `PUBLIC_BASE_URL` is set, or when `SECRET_KEY` is missing.
+- New routes `GET /api/sources/notion/oauth` (whether the flow is configured), `POST
+  /api/projects/:id/sources/notion/oauth` and `GET /api/sources/notion/oauth/callback`.
+
+### Changed
+
+- A Notion `secret` sent through `POST`/`PATCH /api/projects/:id/sources` that starts with `{` is refused with
+  `400 invalid_request`: that is the shape of an OAuth connection, which only the dashboard flow creates. No real
+  integration token starts with `{`.
+
 ## [0.5.0] - 2026-10-26
 
 ### Breaking

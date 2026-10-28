@@ -651,6 +651,21 @@ export const EnvSchema = z
     CONFLUENCE_MAX_PAGES: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.CONFLUENCE_MAX_PAGES),
     /** The same ceiling for one Notion sync, announced the same way. */
     NOTION_MAX_PAGES: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.NOTION_MAX_PAGES),
+    /**
+     * The client id of the Notion **public connection** this operator registered, which turns "Connect
+     * with Notion" on ([ADR-0129](../.ssot/ADR.md#adr-0129)). There is no central Contextator connection
+     * (PRD P1): every instance brings its own. Required together with `NOTION_OAUTH_CLIENT_SECRET`.
+     */
+    NOTION_OAUTH_CLIENT_ID: z.string().min(1).optional(),
+    /** The secret paired with `NOTION_OAUTH_CLIENT_ID`. A process secret, like `OIDC_CLIENT_SECRET`: never stored, never returned, never logged. */
+    NOTION_OAUTH_CLIENT_SECRET: z.string().min(1).optional(),
+    /**
+     * The redirect URI registered on that connection. Left unset it is `<PUBLIC_BASE_URL>/api/sources/notion/oauth/callback`;
+     * with neither set, startup is refused rather than a redirect URI guessed from a request, because a
+     * guess can send the authorization code to the wrong host. Notion's registration form refuses an IP
+     * address: use `localhost` for a local instance and an `https` domain name otherwise.
+     */
+    NOTION_OAUTH_REDIRECT_URI: z.url().optional(),
     /** Writable directory for materialised sources (git checkouts, uploads, Notion pulls). */
     DATA_DIR: z
       .string()
@@ -1472,6 +1487,31 @@ export const EnvSchema = z
       }
       if (!c.OIDC_CLIENT_SECRET) {
         ctx.addIssue({ code: 'custom', path: ['OIDC_CLIENT_SECRET'], message: 'required when OIDC_ISSUER_URL is set' });
+      }
+    }
+    // Notion OAuth ([ADR-0129](../.ssot/ADR.md#adr-0129)): the id and the secret are one credential, so
+    // one without the other is a half-finished edit that must fail now rather than at the first click.
+    if (c.NOTION_OAUTH_CLIENT_ID !== undefined && c.NOTION_OAUTH_CLIENT_SECRET === undefined) {
+      ctx.addIssue({ code: 'custom', path: ['NOTION_OAUTH_CLIENT_SECRET'], message: 'required when NOTION_OAUTH_CLIENT_ID is set' });
+    }
+    if (c.NOTION_OAUTH_CLIENT_SECRET !== undefined && c.NOTION_OAUTH_CLIENT_ID === undefined) {
+      ctx.addIssue({ code: 'custom', path: ['NOTION_OAUTH_CLIENT_ID'], message: 'required when NOTION_OAUTH_CLIENT_SECRET is set' });
+    }
+    if (c.NOTION_OAUTH_CLIENT_ID !== undefined && c.NOTION_OAUTH_CLIENT_SECRET !== undefined) {
+      if (c.NOTION_OAUTH_REDIRECT_URI === undefined && c.PUBLIC_BASE_URL === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['NOTION_OAUTH_REDIRECT_URI'],
+          message: 'required when Notion OAuth is on and PUBLIC_BASE_URL is not set: the redirect URI is never guessed from a request',
+        });
+      }
+      // The tokens it brings are stored in `document_sources.secret_enc`, which needs the key.
+      if (c.SECRET_KEY === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['SECRET_KEY'],
+          message: 'required when Notion OAuth is on: the tokens it obtains are stored encrypted with it',
+        });
       }
     }
   });
