@@ -32,6 +32,7 @@ import { initMembersUi, loadMembers, renderMembers } from './members.js';
 import { loadQuerySummary, renderQueries } from './queries.js';
 import { renderSourceFreshness } from './freshness.js';
 import { loadEval, renderEval } from './eval.js';
+import { loadFindings, renderFindings } from './findings.js';
 import { initGoldenUi, loadGolden, renderGolden } from './golden.js';
 import { describeApiError, initQuotasUi, loadQuotas, renderQuotas } from './quotas.js';
 import { captureSearchFocus, renderSearch } from './search.js';
@@ -286,6 +287,7 @@ function select(id) {
   void loadQuotas();
   void loadGolden();
   void loadEval();
+  void loadFindings();
 }
 
 /** Fetches the selected project's run history when the selection or the newest job changes. */
@@ -691,6 +693,9 @@ function renderDetail() {
   main.append(renderGolden(p));
   // Beside the questions it asks: the server's own runs of them and what they found.
   main.append(renderEval(p));
+  // An editor's: null for a viewer (ADR-0130 decision 6).
+  const findingsPanel = renderFindings(p);
+  if (findingsPanel) main.append(findingsPanel);
   main.append(renderMembers(p));
   main.append(renderMcpAccess(p));
 
@@ -974,6 +979,8 @@ async function refresh() {
     void loadGolden();
     // Quiet unless the selection or the project's index moved, or a run asked for by hand has not shown up yet.
     void loadEval();
+    // Quiet unless the selection, the project's index or the chosen rule moved; the panel carries Refresh.
+    void loadFindings();
   }
   // The account list is not part of a project poll; refresh it only while it is on screen.
   if (state.view === 'users') void loadUsers();

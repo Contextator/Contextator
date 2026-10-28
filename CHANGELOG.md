@@ -20,6 +20,10 @@ ships, that stops.
   `document_findings` and `document_scans`; `/metrics` gains `contextator_document_findings_total{rule}` and
   `contextator_document_scans_total{outcome}`; a project export counts the findings it leaves out
   (`excluded.documentFindings`).
+- A "Secrets and personal data" section on the project page for an `editor` and above (ADR-0130): the PII scan's
+  findings by document path, with the rule, the position and the masked preview, narrowed by rule. It never shows a
+  value, and says separately that scanning is off (`PII_SCAN=0`), that findings are not grouped (no `SECRET_KEY`), that
+  documents hit the per-document ceiling and that documents were cut when indexed. A viewer does not see it.
 
 ### Fixed
 
