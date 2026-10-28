@@ -62,12 +62,12 @@ export const WEB_LIMIT_DEFAULTS = {
 } as const;
 
 /**
- * How many pages one Confluence or Notion sync, objects one S3 sync, or files one Google Drive sync, may index before it stops and says so.
+ * How many pages one Confluence or Notion sync, objects one S3 sync, files one Google Drive sync, or issues or discussions one GitHub sync, may index before it stops and says so.
  *
  * 5000 is the ceiling the first two drivers have always had ([ADR-0015](../../.ssot/ADR.md#adr-0015)) and the one
- * `S3_MAX_OBJECTS` and `GDRIVE_MAX_FILES` take ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 6,
+ * `S3_MAX_OBJECTS`, `GDRIVE_MAX_FILES` and the two GitHub ceilings take ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 6,
  * [ADR-0127](../../.ssot/ADR.md#adr-0127) decision 7); these are
- * the defaults of `CONFLUENCE_MAX_PAGES`, `NOTION_MAX_PAGES`, `S3_MAX_OBJECTS` and `GDRIVE_MAX_FILES` rather than constants nobody could
+ * the defaults of `CONFLUENCE_MAX_PAGES`, `NOTION_MAX_PAGES`, `S3_MAX_OBJECTS`, `GDRIVE_MAX_FILES`, `GITHUB_MAX_ISSUES` and `GITHUB_MAX_DISCUSSIONS` rather than constants nobody could
  * move. Kept here, beside the schema that uses them, so the drivers fall back to the same number a
  * context built without them (a test, an older caller) would otherwise have to repeat.
  */
@@ -76,6 +76,8 @@ export const SOURCE_PAGE_LIMIT_DEFAULTS = {
   NOTION_MAX_PAGES: 5000,
   S3_MAX_OBJECTS: 5000,
   GDRIVE_MAX_FILES: 5000,
+  GITHUB_MAX_ISSUES: 5000,
+  GITHUB_MAX_DISCUSSIONS: 5000,
 } as const;
 
 /** The default of `MAX_CONVERTED_FILE_BYTES` (32 MiB); a driver built from a context without the setting falls back to it. */
@@ -687,6 +689,15 @@ export const EnvSchema = z
      * it, so a folder shared by mistake would otherwise start embedding a whole Drive.
      */
     GDRIVE_MAX_FILES: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.GDRIVE_MAX_FILES),
+    /**
+     * Issues one GitHub source indexes at most ([ADR-0128](../../.ssot/ADR.md#adr-0128) decision 8): the most
+     * recently created first, pull requests not counted. Past it a full run indexes up to the ceiling and its note
+     * says in capitals that the rest was not indexed, as `CONFLUENCE_MAX_PAGES` does. The default is a placeholder
+     * taken from the other sources until Faz 06's smoke run measures what a source of this size costs.
+     */
+    GITHUB_MAX_ISSUES: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.GITHUB_MAX_ISSUES),
+    /** The same ceiling for the Discussions of one GitHub source, announced the same way. */
+    GITHUB_MAX_DISCUSSIONS: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.GITHUB_MAX_DISCUSSIONS),
     /** Writable directory for materialised sources (git checkouts, uploads, Notion pulls). */
     DATA_DIR: z
       .string()

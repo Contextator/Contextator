@@ -63,7 +63,7 @@ const TOOLS = [
   },
 ];
 
-const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN', confluence: 'CNF', web: 'WEB', s3: 'S3', gdrive: 'GDR' };
+const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN', confluence: 'CNF', web: 'WEB', s3: 'S3', gdrive: 'GDR', github: 'GH' };
 const SOURCE_TITLE = {
   local: 'Local directory',
   git: 'Git repository',
@@ -73,6 +73,7 @@ const SOURCE_TITLE = {
   web: 'Documentation site',
   s3: 'S3 bucket',
   gdrive: 'Google Drive',
+  github: 'GitHub issues',
 };
 
 /**
@@ -114,6 +115,11 @@ const SOURCE_KINDS = {
     title: 'Google Drive',
     subtitle: 'Folders shared with a Google service account. Docs, Sheets and Slides are exported; only files that changed are downloaded.',
   },
+  github: {
+    type: 'github',
+    title: 'GitHub issues',
+    subtitle: 'The issues of one repository, with their comments, and optionally its Discussions. Only what changed since the last run is read.',
+  },
 };
 
 /**
@@ -129,6 +135,8 @@ const KIND_EXTENSIONS = {
   s3: ['md', 'mdx', 'txt'],
   // A Doc is exported as .md, a Sheet as .xlsx and a Slides deck as .pptx, so each is read only while ticked.
   gdrive: ['md', 'txt', 'pdf', 'docx', 'xlsx', 'pptx'],
+  // Every issue and Discussion is written as Markdown.
+  github: ['md'],
 };
 
 /**
@@ -138,7 +146,14 @@ const KIND_EXTENSIONS = {
  * the patch below all mean the same thing by it, and a new type that was added to two of the three is
  * exactly the bug this shape removes.
  */
-const SECRET_FIELD = { git: 'secret', notion: 'notionSecret', confluence: 'confluenceSecret', s3: 's3SecretAccessKey', gdrive: 'gdriveKey' };
+const SECRET_FIELD = {
+  git: 'secret',
+  notion: 'notionSecret',
+  confluence: 'confluenceSecret',
+  s3: 's3SecretAccessKey',
+  gdrive: 'gdriveKey',
+  github: 'githubToken',
+};
 /** An S3 credential has two parts; `SECRET_FIELD.s3` is the half that is a secret, this is the other one. */
 const S3_KEY_ID_FIELD = 's3AccessKeyId';
 const CREDENTIALLED = new Set(Object.keys(SECRET_FIELD));
@@ -159,6 +174,7 @@ const CLEAR_SECRET_ROWS = () => ({
   confluence: $('#confluence-clear-secret-row'),
   s3: $('#s3-clear-secret-row'),
   gdrive: $('#gdrive-clear-secret-row'),
+  github: $('#github-clear-secret-row'),
 });
 const clearSecretRow = (type) => CLEAR_SECRET_ROWS()[type];
 
@@ -898,7 +914,7 @@ function renderSources(project, busy) {
       : el('p', {
           class: 'sources-empty',
           text: mayEdit
-            ? 'No sources yet. Add a local directory, a git repository, an upload, a Notion workspace, a Confluence site, an S3 bucket or a Google Drive folder to give this project something to index.'
+            ? 'No sources yet. Add a local directory, a git repository, an upload, a Notion workspace, a Confluence site, an S3 bucket, a Google Drive folder or the issues of a GitHub repository to give this project something to index.'
             : 'No sources yet. An editor on this project can add one.',
         }),
   ]);
@@ -914,6 +930,7 @@ function sourceOrigin(s) {
   if (s.type === 'web') return c.entryUrl || '—';
   if (s.type === 's3') return `s3://${c.bucket || '—'}/${c.prefix ? `${c.prefix}/` : ''}`;
   if (s.type === 'gdrive') return `${(c.folderIds || []).length} Drive folder(s)`;
+  if (s.type === 'github') return `${c.owner || '—'}/${c.repo || '—'}`;
   return `${s.name}/`;
 }
 
@@ -1292,6 +1309,7 @@ function openSourceDialog(project, source) {
   srcForm.elements[S3_KEY_ID_FIELD].placeholder = 'AKIA…';
   srcForm.elements[SECRET_FIELD.s3].placeholder = '';
   srcForm.elements[SECRET_FIELD.gdrive].placeholder = '…or paste the JSON key file';
+  srcForm.elements[SECRET_FIELD.github].placeholder = 'ghp_… / github_pat_…';
   showGdriveEmail(''); // a reset form names no account until a key is pasted or a source is opened
   $('#secret-hint').innerHTML = SECRET_HINT_HTML; // static markup restored, never user data
   renderSrcRootPrefix();
@@ -1386,6 +1404,14 @@ function fillSourceForm(s) {
     if (s.hasSecret) srcForm.elements[SECRET_FIELD.gdrive].placeholder = 'unchanged — paste a key file to replace';
     showGdriveEmail(s.hasSecret ? c.serviceAccountEmail : '');
   }
+  if (s.type === 'github') {
+    srcForm.elements.githubRepo.value = c.owner && c.repo ? `${c.owner}/${c.repo}` : '';
+    srcForm.elements.githubApiUrl.value = c.apiBaseUrl && c.apiBaseUrl !== 'https://api.github.com' ? c.apiBaseUrl : '';
+    srcForm.elements.githubIncludeClosed.checked = c.includeClosed === true;
+    srcForm.elements.githubIncludeDiscussions.checked = c.includeDiscussions === true;
+    srcForm.elements.githubIncludeBots.checked = c.includeBots !== false;
+    if (s.hasSecret) srcForm.elements[SECRET_FIELD.github].placeholder = 'unchanged — type to replace';
+  }
   updateProviderHint();
 }
 
@@ -1403,6 +1429,16 @@ function gdriveEmailOf(text) {
   } catch {
     return '';
   }
+}
+
+/** `owner/repo` from what was typed: the pair itself, or a github.com (or Enterprise Server) repository address. */
+function parseGithubRepo(text) {
+  const value = String(text || '')
+    .trim()
+    .replace(/\.git$/, '')
+    .replace(/\/+$/, '');
+  const match = value.match(/(?:^|\/)([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9._-]{1,100})(?:\/(?:issues|discussions|pulls?)\b.*)?$/);
+  return match ? { owner: match[1], repo: match[2] } : null;
 }
 
 /** Accepts folder links or ids, one per line. */
@@ -1692,6 +1728,20 @@ function configForKind(kind) {
     if (folderIds.length === 0) throw new Error('Name at least one Drive folder');
     return { folderIds, ...common };
   }
+  if (type === 'github') {
+    const target = parseGithubRepo(srcForm.elements.githubRepo.value);
+    if (!target) throw new Error('Name the repository as owner/repository');
+    // The blank API address is sent on purpose, as the S3 endpoint is: the PATCH merges over the stored config, so a cleared
+    // field left out would keep its old value with nothing on screen to say so.
+    return {
+      ...target,
+      apiBaseUrl: srcForm.elements.githubApiUrl.value.trim(),
+      includeClosed: srcForm.elements.githubIncludeClosed.checked,
+      includeDiscussions: srcForm.elements.githubIncludeDiscussions.checked,
+      includeBots: srcForm.elements.githubIncludeBots.checked,
+      ...common,
+    };
+  }
   return { ...common };
 }
 
@@ -1700,6 +1750,12 @@ function secretPatchForKind(kind) {
   const { type } = SOURCE_KINDS[kind];
   if (!CREDENTIALLED.has(type)) return {};
   const row = clearSecretRow(type);
+  if (type === 'github' && srcForm.elements.githubIncludeDiscussions.checked) {
+    // GraphQL answers no anonymous request, so Discussions need a token that will still be there after this save.
+    const clearing = !row.hidden && row.querySelector('input').checked;
+    if (!srcForm.elements[SECRET_FIELD.github].value.trim() && (clearing || !srcUi.editing?.hasSecret))
+      throw new Error('Discussions need an access token');
+  }
   if (!row.hidden && row.querySelector('input').checked) return { secret: null };
   if (type === 's3') {
     // Two fields, one credential: the server stores them as a single encrypted JSON document.

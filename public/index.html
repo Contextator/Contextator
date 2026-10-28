@@ -119,6 +119,7 @@
           <button type="button" class="tab" role="tab" data-kind="web">Documentation site</button>
           <button type="button" class="tab" role="tab" data-kind="s3">S3 bucket</button>
           <button type="button" class="tab" role="tab" data-kind="gdrive">Google Drive</button>
+          <button type="button" class="tab" role="tab" data-kind="github">GitHub issues</button>
         </div>
         <div class="dialog-body">
           <div class="field-row">
@@ -359,6 +360,35 @@
             <label class="check-inline" id="gdrive-clear-secret-row" hidden>
               <input type="checkbox" id="gdrive-clear-secret" />
               <span>Remove the stored key</span>
+            </label>
+          </div>
+
+          <div class="kind-only" data-kind="github">
+            <label class="field">
+              <span class="field-label">Repository</span>
+              <input name="githubRepo" placeholder="owner/repository, or its GitHub address" maxlength="200" autocomplete="off" spellcheck="false" />
+              <span class="field-hint">Each issue becomes one document with its comments, <code>issues/&lt;number&gt;.md</code>; pull requests are not indexed. The repository's files and wiki are not read here: add them as a <strong>Git repository</strong> source.</span>
+            </label>
+            <div class="field">
+              <span class="field-label">What to index</span>
+              <label class="check-inline"><input type="checkbox" name="githubIncludeClosed" /> <span>Closed issues too <span class="muted">— open ones only by default</span></span></label>
+              <label class="check-inline"><input type="checkbox" name="githubIncludeDiscussions" /> <span>Discussions, with their replies <span class="muted">— needs a token</span></span></label>
+              <label class="check-inline"><input type="checkbox" name="githubIncludeBots" checked /> <span>Comments and issues written by bots</span></label>
+              <span class="field-hint">Issue and Discussion text can carry names, addresses and pasted credentials; it is indexed as written. Deleted or transferred issues leave the index on the next full run, at the latest after <code>SYNC_MAX_SKIP_HOURS</code> (24 hours by default).</span>
+            </div>
+            <label class="field">
+              <span class="field-label">Access token <span class="muted">— optional for public repositories</span></span>
+              <input name="githubToken" type="password" placeholder="ghp_… / github_pat_…" autocomplete="off" />
+              <span class="field-hint">A fine-grained personal access token with read access to <em>Issues</em> (and <em>Discussions</em>) on this repository; a classic one works. Without a token only a public repository's issues can be read, under GitHub's small anonymous limit shared by every tokenless source on this server. Stored encrypted with <code>SECRET_KEY</code> and never shown again.</span>
+            </label>
+            <label class="check-inline" id="github-clear-secret-row" hidden>
+              <input type="checkbox" id="github-clear-secret" />
+              <span>Remove the stored token</span>
+            </label>
+            <label class="field">
+              <span class="field-label">API address <span class="muted">— GitHub Enterprise Server only</span></span>
+              <input name="githubApiUrl" type="url" placeholder="https://github.example.com/api/v3" autocomplete="off" spellcheck="false" />
+              <span class="field-hint">Empty is github.com. A server on a private address must be named in <code>SOURCE_ALLOWED_HOSTS</code> in <code>.env</code>.</span>
             </label>
           </div>
 

@@ -37,6 +37,17 @@ ships, that stops.
   (e-mail, key id, private key). New setting `GDRIVE_MAX_FILES` (default 5 000). Panel: a **Google Drive** tab. The
   `gdrive` type joins the credential-bearing types of the backup's key check and the project export's manifest.
   Shared drives are not verified.
+- **GitHub issues and Discussions source** (`github`; ADR-0128): the issues of one repository, and optionally its
+  Discussions, one document each with its comments (`issues/<number>.md`, `discussions/<number>.md`); closed issues are
+  opt-in and pull requests are never indexed. A token is optional: without one the source reads a public repository's
+  issues under GitHub's anonymous limit, and `includeDiscussions` without a token is `400 invalid_request`. The token is
+  the bare `secret` string, stored encrypted and counted by the backup's key check; the `github` type joins the credential-bearing
+  types and the project export's manifest. A scheduled check is one conditional request (`ETag`, a free `304` with a token);
+  a run reads only what changed since the last one, and deletions and transfers are found on the first run and on a run
+  after `SYNC_MAX_SKIP_HOURS` (24 hours when that is off). A rate limit ends the run as `error` with the reset time and
+  moves no cursor. GitHub Enterprise Server works through `apiBaseUrl` and `SOURCE_ALLOWED_HOSTS`. New settings
+  `GITHUB_MAX_ISSUES` and `GITHUB_MAX_DISCUSSIONS` (default 5 000 each, placeholders until measured). Panel: a
+  **GitHub issues** tab. The wiki and files stay with the `git` source.
 - `/metrics`: `contextator_source_throttled_total{source_type}`, the throttling answers a source's remote gave (S3 `503 SlowDown`, Drive `429` and rate-limit `403`), counted per answer whether or not a retry then succeeded. The label set is closed (`s3`, `gdrive`) and every value is exported from start at `0` (ADR-0126 decision 9).
 
 ### Deprecated
@@ -45,8 +56,22 @@ ships, that stops.
   sources only, and the server logs one warning at startup while it is set. Move its hosts to
   `SOURCE_ALLOWED_HOSTS`. It is removed no earlier than `1.0.0`.
 
+### Security
+
+- **A stored credential can no longer be redirected by editing a source's address.** An editor may write a source's
+  settings but cannot read its token, yet `PATCH /api/projects/:id/sources/:sid` kept the stored credential when it changed
+  the address the source calls, so pointing a Confluence `baseUrl`, a git `url`, an S3 `endpoint` or a GitHub `apiBaseUrl`
+  at a host of one's own sent the token there on the next Test or sync (for git, any server that answers `401` is
+  offered it). The request is now refused with `400 invalid_request` unless it also supplies the credential again.
+  `gdrive` has no such setting: its hosts are pinned to Google's.
+
 ### Changed
 
+- **Behaviour change for API clients:** changing the host (scheme, name or port) of a source's `baseUrl` (Confluence),
+  `url` (git), `endpoint` (S3) or `apiBaseUrl` (GitHub) while a credential is stored now needs the credential in the
+  same request, either the new value or `secret: null` to remove it. A change of path on the same host, an edit that
+  leaves the address alone, and any edit of a source that stores no credential (a public git repository) are
+  unchanged. In the dashboard the save is refused with a message naming the setting; type the token again and save.
 - A Confluence source refused for resolving to a private address now names `SOURCE_ALLOWED_HOSTS`, not
   `CONFLUENCE_ALLOWED_HOSTS`, in its error message.
 

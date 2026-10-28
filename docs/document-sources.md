@@ -14,11 +14,20 @@ The name is the mount point, so it cannot change after creation; everything else
 | **Confluence** | **Cloud, or Data Center 7.9 and later** (see below). Every page in the chosen spaces — or in every space the account can read — rendered from Confluence's storage format to Markdown, nested the way it is in the wiki: `<name>/<space>/<parent page>/<page>.md`. | The Confluence REST API, re-rendering only pages whose version number changed; a signed webhook on Data Center, or the sync interval below |
 | **Documentation site** | **Public pages only** (see below). A published site, found through its `sitemap.xml`, its `llms.txt` or a crawl from one start URL, written under the site's own paths: `<name>/guide/install.html`, converted to Markdown by the same transform `.html` files use. | Conditional GETs against the site (`ETag`/`Last-Modified`), inside the five crawl ceilings below |
 | **Google Drive** | The files under the folders you share with a Google **service account** (see below), written under each folder's own name: `<name>/Handbook/Guide.md`. Google Docs become Markdown, Sheets `.xlsx` and Slides `.pptx`; other files are downloaded as they are. The account's key is stored encrypted. | One `changes.list` request for the freshness check; a run walks the folders and downloads only files whose Google version or checksum changed; the sync interval below |
+| **GitHub issues** | The issues of one repository, and optionally its Discussions, one document each with its comments: `<name>/issues/12.md`, `<name>/discussions/4.md`. Closed issues are opt-in; pull requests are never indexed. A token is optional for a public repository (see below). | One conditional request for the most recently updated issue; a run reads only what changed since the last one |
 | **S3 bucket** | The objects under one prefix of an S3-compatible bucket (AWS S3, MinIO, Ceph, Cloudflare R2…) whose file type the source reads, written under the prefix-relative key: `<name>/guides/install.md`. A key pair is stored encrypted (see below). | `ListObjectsV2`, downloading only objects whose ETag or size changed; the sync interval below |
 
 Sources are synced at the start of every index run, one after another; a source that fails to sync is
 reported on its own row and the others still index. **Sync** on a row and **Re-index** in the header
 both queue the same run.
+
+**Moving a source's address needs its credential again.** A Confluence source's *Site URL*, a git source's *URL*, an S3
+source's *Endpoint* and a GitHub source's *API address* are where the stored credential is sent. An editor can change
+them but cannot read the credential, so an edit that moved the host and kept the credential would let any editor send it
+to a server of their choice. Such an edit is refused (`400 invalid_request`, naming the setting) unless the same request
+also supplies the credential again or removes it (`secret: null` over the API; type the token again, or tick
+*Remove the stored token*, in the dialog). Changing only the path on the same host, editing anything else, and editing a
+source that stores no credential (a public repository) are not affected.
 
 ## Versions: two releases of one product in one project
 
@@ -173,6 +182,68 @@ affected. This product has no other way in: workload identity federation and use
 - **Export and import.** A project export carries the source's folders and settings, not its key or its position in
   Google's change feed; an imported Drive source arrives unscheduled and needs its key entered again.
 
+## GitHub issues and Discussions
+
+A **GitHub issues** source indexes the issues of one repository — and, when you turn it on, its Discussions — as one
+document each, with the comments (and, for a Discussion, the replies) in the same document. It is a different source
+from the **Git repository** one: the repository's files and its wiki come through `git`, and this source never reads
+either. Add both when you want both; the dialog says so.
+
+- **Documents.** `<name>/issues/<number>.md` and `<name>/discussions/<number>.md`. The front matter carries the title,
+  the page URL (which search results and `read_document` return as the source link), the state, the labels, the author
+  and the update time; the body is the issue or Discussion followed by its comments in order, each under a heading
+  naming the author and the date. A Discussion's accepted answer is marked, and its replies sit one heading level down.
+  Pull requests, which GitHub's issues API returns beside issues, are skipped. A thread longer than a million
+  characters is cut at a comment boundary and says so.
+- **What is in scope.** *Closed issues* are left out unless you tick **Closed issues too**; an issue that is closed
+  later leaves the index at the next run, and returns if it is reopened. Every Discussion is a document, open or
+  closed. *Bots* — comments and issues written by bot accounts — are kept unless you untick them. Issue and Discussion
+  text routinely carries names, addresses and pasted credentials; it is indexed as written, and the findings view
+  (when scanning is on) reports where such text sits.
+- **The token is optional.** Without one, the source reads a **public** repository's issues, under GitHub's anonymous
+  limit of 60 requests an hour per address — a limit every tokenless GitHub source on this server shares. With a token
+  it also reads private repositories and may turn on **Discussions**, which GitHub serves through its GraphQL API and
+  answers only for a signed-in caller: ticking Discussions with no token is refused with `400 invalid_request`. Use a
+  **fine-grained personal access token** with read access to *Issues* (and *Discussions*) on that repository; a classic
+  token works too. GitHub Apps are not supported. The token is stored encrypted with `SECRET_KEY` as the plain string
+  you pasted, never returned or shown again, and counts as a credential for the backup's key check (a source with no
+  token stores nothing and is not counted). A project export carries the settings and not the token.
+- **GitHub Enterprise Server.** Set the **API address** to the server's REST base (`https://ghe.example.com/api/v3`);
+  GraphQL is read from the matching `…/api/graphql`. Only `https` is accepted, because the token travels to it. A
+  server that resolves to a private address must be named in `SOURCE_ALLOWED_HOSTS`
+  ([Configuration](configuration.md#egress-allowlists-which-private-hosts-a-source-may-reach)).
+- **What a check costs.** One request: `GET /issues?sort=updated&direction=desc&per_page=1` with the `ETag` of the last
+  answer. GitHub answers `304`, which does not count against the primary rate limit when the request carries a token,
+  and the run is skipped. With Discussions on there is one more request, a GraphQL query for the most recently updated
+  Discussion. A comment, an edit, a close or a new issue all move the newest-updated issue and wake the source.
+- **What a run costs.** The **first** run lists every issue (100 to a request), then every comment of the repository
+  (100 to a request), so a repository costs about `issues/100 + comments/100` requests and no request per issue. An
+  **incremental** run asks for the issues and the repository's comments updated since the last successful run began
+  (moved back five minutes for clock skew), reads the comments of each issue that moved, and re-renders those documents
+  only; an issue whose rendering did not change is not rewritten. If more than 100 issues moved, it lists everything
+  instead.
+- **Deletions are found on full runs.** GitHub's lists never show an issue that was deleted or transferred, and an
+  edited or deleted comment does not always move its issue. So the **first** run, a run after the source's settings
+  changed, and a run whose last full run is older than `SYNC_MAX_SKIP_HOURS` (24 hours when that is off) list every
+  number and remove the documents whose number is gone and re-read every comment. Between full runs a deleted or
+  transferred issue **stays searchable**, for up to that long. Pressing **Sync** does not force a full run. Changing the repository, the
+  API address, or the closed / Discussions / bots settings starts over, and replacing the token forgets what the old one
+  read.
+- **Bounds.** One source indexes at most `GITHUB_MAX_ISSUES` issues (the most recently created first) and
+  `GITHUB_MAX_DISCUSSIONS` Discussions, see [Configuration](configuration.md#ceilings-for-github-sources); past a ceiling the note says in
+  capitals that the rest is not indexed.
+- **Rate limits end the run.** A `429`, or a `403` that says the limit is spent (`x-ratelimit-remaining: 0`, a
+  `retry-after`, or a rate-limit message), makes the run an `error` whose message gives the time the limit resets. The
+  run is not retried and stores no cursor, so the next run starts from the same place and finds the same changes. A
+  `5xx` answer or a network error is retried a few times. A rejected token, a repository that is missing or that the
+  token cannot read, and Issues switched off in the repository are each named in the run's message.
+- **Network.** Requests go only to the one API host of the source, through the same egress guard as the other
+  sources; a redirect or a pagination link to any other host is refused, so the token cannot be led elsewhere. For the
+  same reason, **changing the API address to another host while a token is stored is refused** unless the same request
+  gives the token again (or removes it); see the note under the table at the top of this page.
+- **Export and import.** A project export carries the repository, the settings and no token or cursor; an imported
+  GitHub source arrives unscheduled, and a tokenless one runs as a public source.
+
 ## Keeping a source fresh on its own
 
 A source can carry a **sync interval** — the *Sync every* field in its dialog — and the server checks it
@@ -187,6 +258,7 @@ index run only happens when the answer moved since the last successful sync:
 | Notion | One `search`, newest edit first, one result | A page read per page, 350 ms apart |
 | Confluence | One CQL search over the same spaces the run indexes: how many pages there are, and when the newest was touched | A listing plus a body read per page |
 | Google Drive | One `changes.list` request (page size 1) from the position the last run took | A walk of every folder |
+| GitHub issues | One conditional request for the most recently updated issue (a `304` is free of the primary limit with a token), plus one GraphQL query with Discussions on | A listing of the issues and comments updated since the last run |
 | Documentation site | Two requests — `robots.txt`, then the `sitemap.xml`: how many URLs it lists, and the newest `<lastmod>` among them | A conditional GET per page |
 | Local, Upload | The file count and the newest modification time | Reading and hashing every file |
 

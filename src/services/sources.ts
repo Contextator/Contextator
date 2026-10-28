@@ -11,11 +11,12 @@ import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './
 import { ConflictError, NotFoundError, ValidationError } from './projects.js';
 import { S3_SECRET } from './s3/client.js';
 import { GDRIVE_SECRET } from './sources/gdrive-client.js';
+import { canonicalGithubToken, GITHUB_API_DEFAULT } from './sources/github-client.js';
 import { sanitizeGitUrl } from './sources/git-auth.js';
 import type { SecretBlob } from './sources/secret-blob.js';
 import { TEXT_SEARCH_CONFIGS } from './text-search.js';
 
-export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion', 'confluence', 'web', 's3', 'gdrive'] as const;
+export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion', 'confluence', 'web', 's3', 'gdrive', 'github'] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
 
 /**
@@ -50,6 +51,8 @@ function checkSecretAllowed(type: string, secret: string | null | undefined): vo
  */
 function secretToStore(type: string, secret: string | null | undefined): string | null {
   if (!secret) return null;
+  // A GitHub token is one word that travels in a header ([ADR-0128](../../.ssot/ADR.md#adr-0128) decision 2); it is stored as given, trimmed.
+  if (type === 'github') return canonicalGithubToken(secret);
   const blob = SECRET_BLOBS[type];
   return blob ? blob.canonicalize(secret) : secret;
 }
@@ -394,6 +397,133 @@ export const GdriveConfig = z.object({
 /** The `gdrive` config keys only the server writes. */
 export const GDRIVE_SERVER_KEYS = ['serviceAccountEmail', 'changesCursor'] as const;
 
+/**
+ * GitHub Issues and Discussions ([ADR-0128](../../.ssot/ADR.md#adr-0128)): one repository, as documents
+ * `issues/<number>.md` and, with `includeDiscussions`, `discussions/<number>.md`. The token is not here: it is the
+ * source's one `secret_enc` string, and optional (an anonymous source reads a public repository's issues only).
+ *
+ * **Five keys are the server's.** `syncedSince` (when the last successful run started, the cursor of an
+ * incremental one), `lastFullRunAt` (when the last run that listed every number finished, which is when deletions were last found),
+ * `scope` (the settings those two were taken under, so that a changed one starts over), `issuesEtag` and
+ * `discussionsMark` (what the freshness check compares). None can be set by a client: `createSource` and
+ * `updateSource` overwrite them ({@link GITHUB_SERVER_KEYS}), replacing the token forgets them, and an export leaves them out.
+ */
+export const GithubConfig = z.object({
+  /** A user or organisation login: letters, digits and single hyphens, at most 39. */
+  owner: z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, 'must be a GitHub user or organisation name'),
+  /** A repository name: letters, digits, `.`, `_` and `-`; `.` and `..` are not names. */
+  repo: z
+    .string()
+    .regex(/^[A-Za-z0-9._-]{1,100}$/, 'must be a repository name (letters, digits, ".", "_" and "-")')
+    .refine((value) => value !== '.' && value !== '..', 'must be a repository name'),
+  /**
+   * `https://api.github.com`, or a GitHub Enterprise Server API base such as `https://ghe.example.com/api/v3`. `https`
+   * only — the token travels in a header — with no user, password, query or fragment. A server on a private address
+   * must be named in `SOURCE_ALLOWED_HOSTS`. The empty string clears the setting (the form's blank field).
+   */
+  apiBaseUrl: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z
+      .url()
+      .max(2048)
+      .refine((value) => /^https:\/\//i.test(value), 'must be an https:// URL; the token is sent to it')
+      .refine((value) => {
+        const url = new URL(value);
+        return url.username === '' && url.password === '';
+      }, 'must not carry a user or password; the token goes in the credential')
+      .refine((value) => {
+        const url = new URL(value);
+        return url.search === '' && url.hash === '';
+      }, 'must not carry a query string or fragment')
+      .transform((value) => {
+        const url = new URL(value);
+        return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+      })
+      .default(GITHUB_API_DEFAULT),
+  ),
+  /** Closed issues are left out unless this is on ([ADR-0128](../../.ssot/ADR.md#adr-0128) decision 4). */
+  includeClosed: z.boolean().default(false),
+  /** Needs a token: Discussions are served by GraphQL, which answers no anonymous request. */
+  includeDiscussions: z.boolean().default(false),
+  /** Comments, issues and discussions written by bot accounts are kept unless this is off. */
+  includeBots: z.boolean().default(true),
+  syncedSince: z.string().max(40).optional(),
+  lastFullRunAt: z.string().max(40).optional(),
+  scope: z.string().max(2400).optional(),
+  issuesEtag: z.string().max(300).optional(),
+  discussionsMark: z.string().max(100).optional(),
+  /** The driver writes Markdown, so `['md']` is the default; see the note on {@link ConfluenceConfig}. */
+  extensions: Extensions.default(['md']),
+  language: Language,
+  version: Version,
+  syncProbeToken: ProbeToken,
+});
+
+/** The `github` config keys only the server writes. */
+export const GITHUB_SERVER_KEYS = ['syncedSince', 'lastFullRunAt', 'scope', 'issuesEtag', 'discussionsMark'] as const;
+
+/**
+ * The sources whose stored credential is sent to a host that an editor types into the settings, and the origin it goes
+ * to. Editing that origin without giving the credential again would send the stored one to a host the editor chose
+ * (a token read by anyone who may only write settings), so {@link checkSecretHostUnchanged} refuses it.
+ *
+ * `github` (`apiBaseUrl`), `s3` (`endpoint`; unset is AWS), `confluence` (`baseUrl`) and `git` (`url`) are here. A `gdrive`
+ * source is not: its hosts are pinned to Google's in the driver, so no setting can name another. A source with no
+ * stored credential is not asked for one (a public git repository has no token to redirect), which is the
+ * `hasStoredSecret` test in {@link checkSecretHostUnchanged}. A git server that answers `401` is enough to make
+ * isomorphic-git offer the token, so the git rule is as much a rule as the others, though no redirect is involved.
+ */
+const SECRET_HOST: Readonly<Partial<Record<string, { setting: string; originOf: (config: Record<string, unknown>) => string }>>> = {
+  github: { setting: 'apiBaseUrl', originOf: (config) => originOf(config.apiBaseUrl, GITHUB_API_DEFAULT) },
+  s3: { setting: 'endpoint', originOf: (config) => originOf(config.endpoint, 'aws') },
+  confluence: { setting: 'baseUrl', originOf: (config) => originOf(config.baseUrl, '') },
+  git: { setting: 'url', originOf: (config) => originOf(config.url, '') },
+};
+
+function originOf(value: unknown, fallback: string): string {
+  if (typeof value !== 'string' || value.trim() === '') return fallback;
+  try {
+    const url = new URL(value);
+    // A scheme the URL parser does not know (`ssh:`) has the opaque origin "null", which would make every host equal.
+    return url.origin === 'null' ? `${url.protocol}//${url.host}` : url.origin;
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Refuses an edit that moves the address a stored credential is sent to unless the same request supplies the
+ * credential again (or removes it). A change of path on the same origin, which Enterprise Server's `/api/v3` is, passes.
+ */
+function checkSecretHostUnchanged(
+  type: string,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  hasStoredSecret: boolean,
+  secretInput: string | null | undefined,
+): void {
+  const rule = SECRET_HOST[type];
+  if (!rule || !hasStoredSecret) return;
+  // A new credential, or none at all, leaves nothing stored to be sent anywhere.
+  if (secretInput !== undefined) return;
+  if (rule.originOf(before) === rule.originOf(after)) return;
+  throw new ValidationError(
+    `Changing ${rule.setting} would send the stored ${type} credential to a different host; enter the credential again in the same request (or remove it first)`,
+  );
+}
+
+/**
+ * Discussions are served by GraphQL, which answers only with a token ([ADR-0128](../../.ssot/ADR.md#adr-0128)
+ * decision 2), so asking for them with no token is refused up front, naming the reason, rather than failing every run.
+ */
+function checkGithubDiscussions(config: Record<string, unknown>, hasToken: boolean): void {
+  if (config.includeDiscussions === true && !hasToken) {
+    throw new ValidationError(
+      'includeDiscussions needs a token: GitHub serves Discussions through its GraphQL API, which does not answer anonymous requests',
+    );
+  }
+}
+
 export const SourceConfigByType = {
   local: LocalConfig,
   git: GitConfig,
@@ -403,6 +533,7 @@ export const SourceConfigByType = {
   web: WebConfig,
   s3: S3Config,
   gdrive: GdriveConfig,
+  github: GithubConfig,
 } as const;
 export type LocalConfig = z.infer<typeof LocalConfig>;
 export type GitConfig = z.infer<typeof GitConfig>;
@@ -412,6 +543,7 @@ export type ConfluenceConfig = z.infer<typeof ConfluenceConfig>;
 export type WebConfig = z.infer<typeof WebConfig>;
 export type S3Config = z.infer<typeof S3Config>;
 export type GdriveConfig = z.infer<typeof GdriveConfig>;
+export type GithubConfig = z.infer<typeof GithubConfig>;
 
 export interface SourceView {
   id: string;
@@ -687,6 +819,11 @@ export async function createSource(db: Db, projectId: string, input: CreateSourc
     for (const key of GDRIVE_SERVER_KEYS) delete config[key];
     if (stored) config.serviceAccountEmail = GDRIVE_SECRET.parse(stored).clientEmail;
   }
+  if (input.type === 'github') {
+    // The cursor and validators are the driver's: whatever the client sent for them is dropped.
+    for (const key of GITHUB_SERVER_KEYS) delete config[key];
+    checkGithubDiscussions(config, stored !== null);
+  }
   // Encrypted when the instance has a key and stored in the clear when it has none — a git source on a
   // public repository must not be the thing that forces SECRET_KEY on an operator (ADR-0017), and
   // `npm run rotate-secret` seals such a value the day a key appears.
@@ -765,6 +902,13 @@ export async function updateSource(
         else merged[key] = existing.config[key];
       }
     }
+    // Likewise a GitHub source's cursor and validators ([ADR-0128](../../.ssot/ADR.md#adr-0128)): the driver compares them with the settings they were taken under.
+    if (existing.type === 'github') {
+      for (const key of GITHUB_SERVER_KEYS) {
+        if (existing.config[key] === undefined) delete merged[key];
+        else merged[key] = existing.config[key];
+      }
+    }
     const nextConfig = await validateConfig(existing.type as SourceType, merged, opts);
     const previous = { ...existing.config };
     const token = previous[PROBE_TOKEN_KEY];
@@ -779,6 +923,7 @@ export async function updateSource(
     // the patch lands — the dashboard sends both in one save, and checking the stored one would refuse
     // the very edit that makes the extensions legal.
     checkExtensions(nextFlavor, patch.config as Record<string, unknown>);
+    checkSecretHostUnchanged(existing.type, existing.config, patch.config as Record<string, unknown>, existing.secretEnc !== null, input.secret);
   } else if (patch.flavor !== undefined) {
     // **A patch that moves only the content type may not be refused by a setting it did not send.**
     // Turning an `openapi` source back into a plain one would otherwise be impossible without also
@@ -813,6 +958,18 @@ export async function updateSource(
       else delete config.serviceAccountEmail;
       patch.config = config;
     }
+    if (existing.type === 'github') {
+      // A different token may see different issues (a private repository, another account's access), so what the
+      // cursor and the validators were taken with no longer describes the source: the next run lists everything.
+      const config = { ...((patch.config as Record<string, unknown> | undefined) ?? existing.config) };
+      for (const key of GITHUB_SERVER_KEYS) delete config[key];
+      delete config[PROBE_TOKEN_KEY];
+      patch.config = config;
+    }
+  }
+  if (existing.type === 'github' && (input.config !== undefined || input.secret !== undefined)) {
+    const hasToken = input.secret !== undefined ? patch.secretEnc !== null && patch.secretEnc !== undefined : existing.secretEnc !== null;
+    checkGithubDiscussions((patch.config as Record<string, unknown> | undefined) ?? existing.config, hasToken);
   }
   if (input.syncIntervalMinutes !== undefined && input.syncIntervalMinutes !== existing.syncIntervalMinutes) {
     patch.syncIntervalMinutes = input.syncIntervalMinutes;

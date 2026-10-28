@@ -17,6 +17,12 @@ export interface DriverContext {
    */
   metrics?: Partial<SourceThrottleObserver>;
   /**
+   * `true` when the run is a forced one (`POST …/index?force=1`, a rebuild): the user asked for everything to be read
+   * again. Optional, and a driver that has no cheaper way of reading less ignores it; `github` lists every issue number
+   * on such a run, which is when a deleted or transferred issue leaves the index ([ADR-0128](../../../.ssot/ADR.md#adr-0128) decision 6).
+   */
+  force?: boolean;
+  /**
    * `SOURCE_ALLOWED_HOSTS` and the deprecated `CONFLUENCE_ALLOWED_HOSTS` are optional here only so that a
    * context built for another driver need not carry them; absent reads as the empty list, which is the
    * strictest the egress can be ([ADR-0126](../../../.ssot/ADR.md#adr-0126)). Confluence reads both
@@ -25,8 +31,9 @@ export interface DriverContext {
    * sources' egress.
    * `GIT_MAX_PACK_BYTES` is optional for the same reason; absent reads as `GIT_MAX_PACK_BYTES_DEFAULT`.
    * `CONFLUENCE_MAX_PAGES` and `NOTION_MAX_PAGES` are optional for the same reason; absent reads as
-   * `SOURCE_PAGE_LIMIT_DEFAULTS`. `S3_MAX_OBJECTS`, `GDRIVE_MAX_FILES`, `MAX_CONVERTED_FILE_BYTES` and `DATA_DIR_MIN_FREE_BYTES`
-   * are optional likewise: an `s3` or `gdrive` sync reads them, and a context built for a probe or another driver need not
+   * `SOURCE_PAGE_LIMIT_DEFAULTS`. `S3_MAX_OBJECTS`, `GDRIVE_MAX_FILES`, `GITHUB_MAX_ISSUES`, `GITHUB_MAX_DISCUSSIONS`, `SYNC_MAX_SKIP_HOURS`,
+   * `MAX_CONVERTED_FILE_BYTES` and `DATA_DIR_MIN_FREE_BYTES`
+   * are optional likewise: an `s3`, `gdrive` or `github` sync reads them (a `github` source starts a full run when its last one is older than `SYNC_MAX_SKIP_HOURS`), and a context built for a probe or another driver need not
    * carry them (the ceiling and size limit then read as their defaults, the disk check as off).
    */
   config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS'> &
@@ -42,6 +49,9 @@ export interface DriverContext {
         | 'NOTION_MAX_PAGES'
         | 'S3_MAX_OBJECTS'
         | 'GDRIVE_MAX_FILES'
+        | 'GITHUB_MAX_ISSUES'
+        | 'GITHUB_MAX_DISCUSSIONS'
+        | 'SYNC_MAX_SKIP_HOURS'
         | 'MAX_CONVERTED_FILE_BYTES'
         | 'DATA_DIR_MIN_FREE_BYTES'
       >

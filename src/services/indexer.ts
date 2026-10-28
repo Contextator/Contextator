@@ -134,6 +134,9 @@ export interface IndexerDeps {
         | 'NOTION_MAX_PAGES'
         | 'S3_MAX_OBJECTS'
         | 'GDRIVE_MAX_FILES'
+        | 'GITHUB_MAX_ISSUES'
+        | 'GITHUB_MAX_DISCUSSIONS'
+        | 'SYNC_MAX_SKIP_HOURS'
         | 'DATA_DIR_MIN_FREE_BYTES'
         | 'CONTEXTATOR_EMBEDDED_PGDATA'
         | 'CONVERSION_WORKER_MAX_HEAP_MB'
@@ -443,13 +446,19 @@ export class Indexer {
    * (e.g. the previous git checkout); only when nothing can be scanned are the source's documents
    * protected from deletion, so a transient error never wipes a source.
    */
-  private async collectSource(source: DocumentSourceRow, state: JobSourceState, files: SourceFile[], log: Logger): Promise<{ scanned: boolean }> {
+  private async collectSource(
+    source: DocumentSourceRow,
+    state: JobSourceState,
+    files: SourceFile[],
+    log: Logger,
+    force: boolean,
+  ): Promise<{ scanned: boolean }> {
     const { db, config } = this.deps;
     const flavor = source.flavor as Flavor;
     const extensions = (source.config as { extensions?: string[] }).extensions;
     const textSearchConfig = textSearchConfigFor((source.config as { language?: unknown }).language);
     const version = sourceVersion(source.config);
-    const driver = driverFor(source, { db, log, config, ...(this.deps.metrics ? { metrics: this.deps.metrics } : {}) });
+    const driver = driverFor(source, { db, log, config, force, ...(this.deps.metrics ? { metrics: this.deps.metrics } : {}) });
 
     let syncError: string | undefined;
     let configPatch: Record<string, unknown> | undefined;
@@ -609,7 +618,7 @@ export class Indexer {
         const protectedSources = new Set<string>();
         for (const source of sources) {
           const state = job.sources.find((s) => s.id === source.id)!;
-          const { scanned } = await this.collectSource(source, state, files, log);
+          const { scanned } = await this.collectSource(source, state, files, log, job.force);
           if (!scanned) protectedSources.add(source.id);
         }
         const failures = job.sources.filter((s) => s.status === 'error').map((s) => `${s.name}: ${s.error}`);

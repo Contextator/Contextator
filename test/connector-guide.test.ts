@@ -171,7 +171,7 @@ describe('the guide, followed for a dummy type', () => {
 
   it('step 8: a type that holds no secret stays off the credential list (ADR-0091)', () => {
     expect(isCredentialSourceType(DUMMY)).toBe(false);
-    expect([...CREDENTIAL_SOURCE_TYPES]).toEqual(['git', 'notion', 'confluence', 's3', 'gdrive']);
+    expect([...CREDENTIAL_SOURCE_TYPES]).toEqual(['git', 'notion', 'confluence', 's3', 'gdrive', 'github']);
     for (const type of CREDENTIAL_SOURCE_TYPES) expect(SOURCE_TYPES).toContain(type);
   });
 });

@@ -13,6 +13,7 @@ import { webhookRoutes } from './admin/webhooks.js';
 import './services/sources/confluence.js';
 import './services/sources/gdrive.js';
 import './services/sources/git.js';
+import './services/sources/github.js';
 import './services/sources/notion.js';
 import './services/sources/s3.js';
 import './services/sources/web.js';

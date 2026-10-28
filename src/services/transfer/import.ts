@@ -16,7 +16,7 @@ import { GoldenRowSchema } from '../golden-row.js';
 import { allowedExtensionsFor, FLAVORS, type Flavor } from '../flavors.js';
 import { createProject } from '../projects.js';
 import { normalizeSourceUrl, parseSourceDate } from '../source-url.js';
-import { GDRIVE_SERVER_KEYS, SOURCE_TYPES, type SourceType, parseSourceConfig, sourceVersion } from '../sources.js';
+import { GDRIVE_SERVER_KEYS, GITHUB_SERVER_KEYS, SOURCE_TYPES, type SourceType, parseSourceConfig, sourceVersion } from '../sources.js';
 import { textSearchConfigFor } from '../text-search.js';
 import { recountProject, replaceDocument } from '../vector-store.js';
 import {
@@ -387,6 +387,7 @@ export function importedSourceConfig(source: Pick<z.infer<typeof ImportedSource>
     throw new ImportRefusedError('bad_source', `${SOURCES_ENTRY}: ${err instanceof Error ? err.message : String(err)}`);
   }
   if (source.type === 'gdrive') for (const key of GDRIVE_SERVER_KEYS) delete config[key];
+  if (source.type === 'github') for (const key of GITHUB_SERVER_KEYS) delete config[key];
   return config;
 }
 

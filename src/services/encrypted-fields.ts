@@ -62,7 +62,7 @@ export type SecretRecovery = 'irrecoverable' | 'regenerable';
  * The source types that authenticate with a credential, and so the only ones that may hold a
  * `secret_enc` ([ADR-0091](../../.ssot/ADR.md#adr-0091)): a git token, a Notion integration secret, a
  * Confluence API token or personal access token, and — as one JSON document
- * ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 8) — an S3 key pair or a Google service account key ([ADR-0127](../../.ssot/ADR.md#adr-0127)). A `local`, `upload` or `web` source
+ * ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 8) — an S3 key pair or a Google service account key ([ADR-0127](../../.ssot/ADR.md#adr-0127)) — or, as the bare token and optional, a GitHub token ([ADR-0128](../../.ssot/ADR.md#adr-0128)). A `local`, `upload` or `web` source
  * reads nothing with one.
  *
  * Stated here, beside the list of encrypted columns, because three places have to agree on it: the
@@ -70,7 +70,7 @@ export type SecretRecovery = 'irrecoverable' | 'regenerable';
  * credentials as what a wrong key would destroy, and `scripts/restore.ts` refuses only for those and
  * drops a `secret_enc` it finds on any other type.
  */
-export const CREDENTIAL_SOURCE_TYPES = ['git', 'notion', 'confluence', 's3', 'gdrive'] as const;
+export const CREDENTIAL_SOURCE_TYPES = ['git', 'notion', 'confluence', 's3', 'gdrive', 'github'] as const;
 
 /** Whether a `document_sources.type` value is one of {@link CREDENTIAL_SOURCE_TYPES}. */
 export function isCredentialSourceType(type: string): boolean {

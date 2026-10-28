@@ -61,6 +61,8 @@ export interface SchedulerDeps {
         | 'NOTION_MAX_PAGES'
         | 'S3_MAX_OBJECTS'
         | 'GDRIVE_MAX_FILES'
+        | 'GITHUB_MAX_ISSUES'
+        | 'GITHUB_MAX_DISCUSSIONS'
         | 'MAX_CONVERTED_FILE_BYTES'
         | 'DATA_DIR_MIN_FREE_BYTES'
       >

@@ -198,6 +198,20 @@ freshness check is one request whatever the ceiling. A Google file over the 10 M
 over `MAX_CONVERTED_FILE_BYTES` are refused by name whatever the ceiling, and `DATA_DIR_MIN_FREE_BYTES` is checked
 before a sync downloads anything. See [Document sources](document-sources.md#google-drive-folders-shared-with-a-service-account).
 
+## Ceilings for GitHub sources
+
+| Setting | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `GITHUB_MAX_ISSUES` | `5000` | 1 – 100 000 | Issues one GitHub source indexes at most: the most recently created first, counted among the issues the source reads (pull requests, and closed issues while they are left out, do not use it up) |
+| `GITHUB_MAX_DISCUSSIONS` | `5000` | 1 – 100 000 | Discussions one GitHub source indexes at most: the most recently created first |
+
+Past a ceiling a full run indexes up to it, logs a warning, and its note says in capitals that the older ones are **not**
+indexed: raise the setting (or, with closed issues on, leave them out). The defaults are placeholders taken from the other sources until a
+measured run of a large repository sets them. A GitHub Enterprise Server host on a private address is named in
+`SOURCE_ALLOWED_HOSTS`. A GitHub source's last full run is also bounded by `SYNC_MAX_SKIP_HOURS`: a source whose last full
+run is older than it lists every issue again on its next run, which is when a deleted issue leaves the index. See
+[Document sources](document-sources.md#github-issues-and-discussions).
+
 ## Source links and the "unchanged for a long time" mark
 
 Search and `read_document` answers carry the link to the original document (`sourceUrl`) and the date it last
