@@ -10,6 +10,13 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Added
+
+- `test/agent-skill.test.ts` holds `skills/contextator/SKILL.md` to the Agent Skills specification (frontmatter fields and limits,
+  `name` equal to its directory, under 500 lines) and to the code: every tool name the skill mentions must be in
+  `MCP_TOOL_NAMES`, and every tool in `MCP_TOOL_NAMES` must be mentioned, so a tool added without updating the skill breaks
+  the unit tests.
+
 ## [0.5.0] - 2026-10-26
 
 ### Breaking
