@@ -738,11 +738,15 @@ durations with their units in descending order (`y`, `w`, `d`, `h`, `m`, `s`, `m
 the format the Prometheus Operator CRD itself accepts. `env` accepts any variable name with a string value; `envSecret` accepts any name,
 but each entry must be exactly `{secretName, secretKey}`.
 
-Five application settings have typed keys under `config` rather than going through `env`, so the schema
+These application settings have typed keys under `config` rather than going through `env`, so the schema
 checks them:
 
-- `config.confluenceAllowedHosts` — a list of host names (not URLs), joined into
-  `CONFLUENCE_ALLOWED_HOSTS`. Empty leaves the variable unset.
+- `config.sourceAllowedHosts` — a list of host names (not URLs), joined into `SOURCE_ALLOWED_HOSTS`: the hosts
+  a Confluence, S3 or GitHub Enterprise Server source may reach on a private address (ADR-0126). It does not
+  admit a host for a web or git source. Empty leaves the variable unset.
+- `config.confluenceAllowedHosts` — **deprecated**, use `config.sourceAllowedHosts`. A list of host names (not
+  URLs), joined into `CONFLUENCE_ALLOWED_HOSTS`, which still admits its hosts for Confluence only; the
+  application logs one deprecation warning at startup while it is set. Empty leaves the variable unset.
 - `config.webAllowedHosts` — the same for a web source, joined into `WEB_ALLOWED_HOSTS`. Empty leaves the
   variable unset.
 - `config.gitAllowedHosts` — the same for a git source, joined into `GIT_ALLOWED_HOSTS`. Empty leaves the

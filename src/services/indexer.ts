@@ -125,6 +125,7 @@ export interface IndexerDeps {
     Partial<
       Pick<
         Config,
+        | 'SOURCE_ALLOWED_HOSTS'
         | 'CONFLUENCE_ALLOWED_HOSTS'
         | 'WEB_ALLOWED_HOSTS'
         | 'GIT_ALLOWED_HOSTS'

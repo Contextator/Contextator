@@ -145,6 +145,9 @@ jobs:
           check 'confluenceAllowedHosts' --set 'config.confluenceAllowedHosts={wiki.corp.example:8443}'
           check 'confluenceAllowedHosts' --set 'config.confluenceAllowedHosts={10.0.4.12:8443}'
           check 'confluenceAllowedHosts' --set 'config.confluenceAllowedHosts={https://wiki.corp.example}'
+          check 'sourceAllowedHosts' --set 'config.sourceAllowedHosts={minio.corp.example:9000}'
+          check 'sourceAllowedHosts' --set 'config.sourceAllowedHosts={10.0.4.12:9000}'
+          check 'sourceAllowedHosts' --set 'config.sourceAllowedHosts={https://minio.corp.example}'
 
       # TRUST_PROXY must never be inferred from ingress.enabled (ADR-0060, ADR-0078) — it is only ever
       # rendered when config.trustProxy is set explicitly. This regression-tests the tur 2 fix against

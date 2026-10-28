@@ -49,7 +49,13 @@ export interface SchedulerDeps {
     Partial<
       Pick<
         Config,
-        'CONFLUENCE_ALLOWED_HOSTS' | 'WEB_ALLOWED_HOSTS' | 'GIT_ALLOWED_HOSTS' | 'GIT_MAX_PACK_BYTES' | 'CONFLUENCE_MAX_PAGES' | 'NOTION_MAX_PAGES'
+        | 'SOURCE_ALLOWED_HOSTS'
+        | 'CONFLUENCE_ALLOWED_HOSTS'
+        | 'WEB_ALLOWED_HOSTS'
+        | 'GIT_ALLOWED_HOSTS'
+        | 'GIT_MAX_PACK_BYTES'
+        | 'CONFLUENCE_MAX_PAGES'
+        | 'NOTION_MAX_PAGES'
       >
     > &
     WebLimits;

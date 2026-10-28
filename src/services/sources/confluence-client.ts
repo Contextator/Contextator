@@ -263,7 +263,7 @@ export class HttpConfluenceClient implements ConfluenceClient {
     /**
      * Every request this client makes goes through it. The default is the ADR-0088 egress with an empty
      * allowlist — the strictest it can be — so a client built without one cannot reach an internal
-     * address; the driver passes one that carries `CONFLUENCE_ALLOWED_HOSTS`.
+     * address; the driver passes one that carries `SOURCE_ALLOWED_HOSTS` and the deprecated `CONFLUENCE_ALLOWED_HOSTS`.
      */
     private readonly fetchImpl: FetchLike = confluenceEgress({ allowedHosts: [] }),
     private readonly log?: Logger,

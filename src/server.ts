@@ -14,7 +14,7 @@ import './services/sources/confluence.js';
 import './services/sources/git.js';
 import './services/sources/notion.js';
 import './services/sources/web.js';
-import { loadConfig, OAUTH_CLIENT_STALE_MS, OAUTH_CLIENT_UNUSED_MS, OAUTH_CREDENTIAL_SWEEP_GRACE_MS } from './config.js';
+import { deprecatedSettingWarnings, loadConfig, OAUTH_CLIENT_STALE_MS, OAUTH_CLIENT_UNUSED_MS, OAUTH_CREDENTIAL_SWEEP_GRACE_MS } from './config.js';
 import type { AppContext } from './context.js';
 import { createDb, waitForDb } from './db/client.js';
 import { exposureWarning, httpServerOptions, warnAboutProxyConfiguration } from './http.js';
@@ -59,6 +59,7 @@ async function main(): Promise<void> {
     ...httpServerOptions(config),
   });
   const log = app.log;
+  for (const warning of deprecatedSettingWarnings(config)) log.warn(warning);
 
   // Both directions of a wrong `TRUST_PROXY` are silent ([ADR-0060](../.ssot/ADR.md#adr-0060)), and the
   // one that actually happens is diagnosed from traffic rather than from settings. Installed before the

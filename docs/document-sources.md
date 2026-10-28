@@ -46,7 +46,7 @@ both. Changing a source's version re-indexes it, the way changing its content ty
 
 Cloud (API token) and Data Center (personal access token) authenticate differently, so **Deployment** is
 picked by hand, not detected. Data Center connections to a private address are refused unless the host is
-listed in `CONFLUENCE_ALLOWED_HOSTS`, one source indexes at most 5 000 pages, and a named
+listed in `SOURCE_ALLOWED_HOSTS` (the older `CONFLUENCE_ALLOWED_HOSTS` still works, with a startup warning; see [Configuration](configuration.md#egress-allowlists-which-private-hosts-a-source-may-reach)), one source indexes at most 5 000 pages, and a named
 space that stops answering fails the sync rather than deleting its documents. On Data Center a signed
 webhook can start a sync as soon as a page changes.
 

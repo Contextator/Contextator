@@ -152,6 +152,27 @@ silently record nothing. The list, checked against the pinned versions, is in
 [Observability](observability.md#variables-the-opentelemetry-sdk-reads-itself), which also describes the
 spans, the trace-context propagation and the dashboard that goes with `/metrics`.
 
+## Egress allowlists: which private hosts a source may reach
+
+Every request a source makes to a host an editor types goes through one egress guard. It refuses loopback,
+link-local (including the cloud metadata address `169.254.169.254`), unspecified and multicast addresses
+whatever is configured, and refuses an address on a private network (RFC 1918, `fc00::/7`) unless the host's
+**name** is listed. Names, not URLs: a scheme, port or path in an entry is rejected at startup. A refusal names
+the rule and the host, and the list that would admit it.
+
+| Setting | Admits a private host for | Notes |
+| --- | --- | --- |
+| `SOURCE_ALLOWED_HOSTS` | Confluence, S3 and the GitHub Enterprise Server host of a GitHub source | The list for sources whose host an operator names and which call an API |
+| `WEB_ALLOWED_HOSTS` | web sources | A host trusted for an API call is not, by that fact, a host an editor may crawl |
+| `GIT_ALLOWED_HOSTS` | git sources | Independent of the other lists; a GitHub Enterprise Server host that is both cloned and read through the API is listed in both |
+| `CONFLUENCE_ALLOWED_HOSTS` | Confluence only | **Deprecated**: see below |
+
+`CONFLUENCE_ALLOWED_HOSTS` keeps working: a Confluence source may reach every host in it and every host in
+`SOURCE_ALLOWED_HOSTS`. While it is non-empty the server logs one deprecation warning at startup. Move its hosts
+to `SOURCE_ALLOWED_HOSTS`; the old setting is removed no earlier than `1.0.0`, and from then a non-empty value
+stops the server from starting, with a message naming `SOURCE_ALLOWED_HOSTS`. With the Helm chart the settings
+are `config.sourceAllowedHosts` and `config.confluenceAllowedHosts`.
+
 ## Source links and the "unchanged for a long time" mark
 
 Search and `read_document` answers carry the link to the original document (`sourceUrl`) and the date it last

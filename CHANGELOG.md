@@ -10,6 +10,28 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Added
+
+- `SOURCE_ALLOWED_HOSTS`: one allowlist of host names that Confluence sources (and the S3 and GitHub Enterprise
+  Server sources of this release) may reach on a private address (ADR-0126, amending ADR-0088). Same format as
+  the other allowlists; it does not admit a host for a web or git source. Helm chart: `config.sourceAllowedHosts`.
+- The AWS Signature V4 signer moved from `scripts/backup-s3.ts` to `src/services/s3/sigv4.ts`, so the backup
+  command and the S3 source share one implementation. The backup command's behaviour is unchanged.
+- Internal building blocks for the remote-store sources of 0.6.0: a one-JSON-document credential helper
+  (ADR-0126 decision 8) and a shared list / version / download-what-changed / remove-what-is-gone routine with a
+  per-type object ceiling. No new source type is available yet.
+
+### Deprecated
+
+- `CONFLUENCE_ALLOWED_HOSTS` (Helm: `config.confluenceAllowedHosts`). It still admits its hosts for Confluence
+  sources only, and the server logs one warning at startup while it is set. Move its hosts to
+  `SOURCE_ALLOWED_HOSTS`. It is removed no earlier than `1.0.0`.
+
+### Changed
+
+- A Confluence source refused for resolving to a private address now names `SOURCE_ALLOWED_HOSTS`, not
+  `CONFLUENCE_ALLOWED_HOSTS`, in its error message.
+
 ## [0.5.0] - 2026-10-26
 
 ### Breaking

@@ -13,8 +13,8 @@ const csv = (value: string): string[] =>
     .filter(Boolean);
 
 /**
- * A comma-separated list of host names for an egress allowlist (`CONFLUENCE_ALLOWED_HOSTS`,
- * `WEB_ALLOWED_HOSTS`, `GIT_ALLOWED_HOSTS`): lower-cased, brackets and a trailing dot dropped, and refused at startup when
+ * A comma-separated list of host names for an egress allowlist (`SOURCE_ALLOWED_HOSTS`,
+ * `CONFLUENCE_ALLOWED_HOSTS`, `WEB_ALLOWED_HOSTS`, `GIT_ALLOWED_HOSTS`): lower-cased, brackets and a trailing dot dropped, and refused at startup when
  * an entry is not a name or an address (a scheme, port or path would never match the host a request is
  * made to, so it would silently allow nothing).
  */
@@ -634,13 +634,27 @@ export const EnvSchema = z
     ALLOWED_DOC_ROOTS: z.string().default('/docs').transform(csv),
     IGNORE_GLOBS: z.string().default('').transform(csv),
     /**
-     * Host names a Confluence base URL may reach **on a private address** (RFC 1918, `fc00::/7`)
-     * ([ADR-0088](../../.ssot/ADR.md#adr-0088)). A Data Center inside the network is listed here; nothing
-     * else is. Loopback, link-local, unspecified and multicast stay refused whatever the list says, and
-     * there is no switch that turns the check off.
+     * Host names an operator-named API host may reach **on a private address** (RFC 1918, `fc00::/7`)
+     * ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 7, amending [ADR-0088](../../.ssot/ADR.md#adr-0088)).
+     * It serves the source types whose host an operator names and which call an API: Confluence, S3 and
+     * the GitHub Enterprise Server host of a GitHub source. A Data Center or an S3 gateway inside the
+     * network is listed here; nothing else is. Loopback, link-local, unspecified and multicast stay
+     * refused whatever the list says, and there is no switch that turns the check off.
+     *
+     * It does **not** admit a host for a web or git source: those keep `WEB_ALLOWED_HOSTS` and
+     * `GIT_ALLOWED_HOSTS` ([ADR-0107](../../.ssot/ADR.md#adr-0107)). A host trusted for an API call is
+     * not, by that fact, a host an editor may crawl or clone from.
      *
      * Names, not URLs: a scheme, port or path here would never match the host a request is made to, so
      * it is rejected at startup instead of silently allowing nothing.
+     */
+    SOURCE_ALLOWED_HOSTS: allowedHostsSetting(),
+    /**
+     * **Deprecated** ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 7): use `SOURCE_ALLOWED_HOSTS`.
+     * It still admits its hosts on a private address, for Confluence only; Confluence's list is the
+     * union of the two. A non-empty value logs one deprecation warning at startup
+     * ({@link deprecatedSettingWarnings}). Removed no earlier than `1.0.0`; from then a non-empty value
+     * refuses startup with a message that names `SOURCE_ALLOWED_HOSTS`.
      */
     CONFLUENCE_ALLOWED_HOSTS: allowedHostsSetting(),
     /**
@@ -1494,6 +1508,22 @@ export type Config = z.infer<typeof EnvSchema>;
  * that a sixth, if it ever exists, is one edit.
  */
 export type WebLimits = Pick<Config, 'WEB_MAX_PAGES' | 'WEB_MAX_DEPTH' | 'WEB_REQUEST_DELAY_MS' | 'WEB_CRAWL_BUDGET_MS' | 'WEB_RESPECT_ROBOTS'>;
+
+/**
+ * The deprecation warnings a configuration earns at startup, one string each, logged once by the caller
+ * ([ADR-0126](../.ssot/ADR.md#adr-0126) decision 7). Kept here, next to the settings it names, so that
+ * the wording and the condition cannot drift apart and a test can pin both.
+ */
+export function deprecatedSettingWarnings(config: Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS'>): string[] {
+  const warnings: string[] = [];
+  if (config.CONFLUENCE_ALLOWED_HOSTS.length > 0) {
+    warnings.push(
+      'CONFLUENCE_ALLOWED_HOSTS is deprecated and will be removed no earlier than 1.0.0; move its hosts to SOURCE_ALLOWED_HOSTS. ' +
+        'Until then it still admits its hosts for Confluence sources only.',
+    );
+  }
+  return warnings;
+}
 
 /**
  * Parses and validates process.env. Empty-string values are treated as unset so that
