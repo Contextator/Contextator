@@ -22,10 +22,29 @@
 # Started without DATABASE_URL it exits immediately with a message naming what it wanted, rather than
 # looking for a postmaster that was never installed or waiting for one that is never coming.
 #
+# A third way to start the image: `contextator <command> …` as the container's arguments (ADR-0131).
+# It is a one-shot client of the admin API (and, for `backup`, of a database), so none of the above
+# applies to it — it is routed before the root check, the ownership fix, the database choice and
+# PostgreSQL, and starts nothing that stays running.
+#
 # Stopping the container (SIGTERM) shuts the app down first, then PostgreSQL if there is one (fast
 # shutdown). If either process dies on its own the other one is stopped and the container exits, so
 # `restart: unless-stopped` brings the pair back.
 set -uo pipefail
+
+# ---- the `contextator` command (ADR-0131) ------------------------------------------------------------
+# Only when the first argument is exactly `contextator`. Every other start, with or without arguments,
+# is the server it always was; `contextator-x` or a later `contextator` is not this. Started as root it
+# drops to `node`, so that whatever the command writes (a backup on a bind mount) is not left owned by
+# root; started as anyone else it runs as that user, which is how `docker run --user` keeps working.
+# `exec` leaves tini as PID 1 with the command as its child, so signals reach it.
+if [ "${1:-}" = 'contextator' ]; then
+  shift
+  if [ "$(id -u)" = '0' ]; then
+    exec gosu node node /app/dist/cli.js "$@"
+  fi
+  exec node /app/dist/cli.js "$@"
+fi
 
 : "${POSTGRES_USER:=contextator}"
 : "${POSTGRES_DB:=contextator}"

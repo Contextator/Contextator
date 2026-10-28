@@ -1,0 +1,73 @@
+# Creates a Contextator project for this repository, waits until its first index run ends, and mints
+# an MCP token for an agent. It uses the `contextator` command that ships in the image (docs/cli.md),
+# from the slim image: no database in the job, only an HTTP client of your running instance.
+#
+# Secrets to set on the repository:
+#   CONTEXTATOR_URL    https://docs.example.com            the address of your instance
+#   CONTEXTATOR_TOKEN  an admin account's API token (account menu > API tokens) scoped to
+#                      POST /api/projects, GET /api/projects, POST /api/projects/:id/sources,
+#                      GET /api/projects/:id/sources, GET /api/projects/:id/status,
+#                      GET /api/projects/:id/runs and POST /api/projects/:id/mcp-tokens, with no
+#                      project restriction
+#   CONTEXTATOR_GIT_TOKEN  optional, for a private repository only: a long-lived, read-only token
+#                      (a fine-grained personal access token with Contents: read). Do not use
+#                      secrets.GITHUB_TOKEN here: it is stored on the git source and used by every later
+#                      sync, and it stops working when this job ends, so each sync after the first would
+#                      fail with 401. Leave the secret unset for a public repository.
+#
+# This creates the project and its first index. It does not re-index on a later run: a project that
+# exists is only reported (its newest run is waited for), so keep the index current with the source's
+# sync schedule (SYNC_DEFAULT_INTERVAL_MINUTES) or a push webhook (docs/document-sources.md), not with
+# this job.
+#
+# Pin the image to the version your server runs: the admin API is not versioned, and the command
+# warns when the two differ.
+name: Index docs in Contextator
+
+on:
+  workflow_dispatch:
+
+env:
+  CONTEXTATOR_IMAGE: contextator/contextator:0.6.0-slim
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Create the project and wait for its index
+        env:
+          CONTEXTATOR_URL: ${{ secrets.CONTEXTATOR_URL }}
+          CONTEXTATOR_TOKEN: ${{ secrets.CONTEXTATOR_TOKEN }}
+          # Empty for a public repository. The command reads it by variable name; it is never an argument.
+          GIT_TOKEN: ${{ secrets.CONTEXTATOR_GIT_TOKEN }}
+        run: |
+          # Progress is on stderr and shows in the log; the result is one JSON object on stdout.
+          # Exit codes: 3 not authorised, 4 not found, 5 the index run failed, 6 timed out, 7 unreachable.
+          git_token_args=()
+          if [ -n "$GIT_TOKEN" ]; then git_token_args=(--git-token-env GIT_TOKEN); fi
+          result=$(docker run --rm \
+            -e CONTEXTATOR_URL -e CONTEXTATOR_TOKEN -e GIT_TOKEN \
+            "$CONTEXTATOR_IMAGE" \
+            contextator project create docs \
+              --git "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+              --branch "$GITHUB_REF_NAME" \
+              "${git_token_args[@]}" \
+              --exists-ok --wait --timeout 20m --json)
+          echo "MCP endpoint: $(jq -r '.project.mcpUrl' <<<"$result")"
+
+      - name: Mint an MCP token for the agent
+        id: mint
+        env:
+          CONTEXTATOR_URL: ${{ secrets.CONTEXTATOR_URL }}
+          CONTEXTATOR_TOKEN: ${{ secrets.CONTEXTATOR_TOKEN }}
+        run: |
+          result=$(docker run --rm -e CONTEXTATOR_URL -e CONTEXTATOR_TOKEN \
+            "$CONTEXTATOR_IMAGE" \
+            contextator token create --project docs --name "ci-$GITHUB_RUN_ID" --expires-in-days 30 --json)
+          secret=$(jq -r '.secret' <<<"$result")
+          # Mask it before anything else can print it, then hand it to later steps through the job
+          # environment. It is shown once; this is the only place it exists.
+          echo "::add-mask::$secret"
+          echo "CONTEXTATOR_MCP_TOKEN=$secret" >> "$GITHUB_ENV"
