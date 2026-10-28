@@ -5,8 +5,8 @@ Point Claude Code, Cursor, Claude Desktop or any other MCP client at `http://loc
 requires one. Four read-only tools are exposed: `search_docs` (hybrid search, ranked excerpts),
 `list_topics` (the indexed document list), `read_document` (one file's Markdown, by path or heading
 range) and `whats_new` (what was added, changed or removed since a point in time). A fifth, `report_gap`, lets an
-agent tell the maintainers what the documentation did not answer; it writes to the query log, never to documentation,
-and is absent while the query log is off. See [MCP access](mcp-access.md) for the auth modes and the tools' arguments.
+agent tell the maintainers what the documentation did not answer; it writes to its own table (`reported_gaps`) under the query log's
+retention and purge, never to documentation, and is absent while the query log is off. See [MCP access](mcp-access.md) for the auth modes and the tools' arguments.
 
 Beside the tools, each project publishes its documents as MCP resources and two read-only **prompts**,
 `answer_from_docs` (argument `question`) and `explore_topic` (argument `topic`). A prompt reads nothing and

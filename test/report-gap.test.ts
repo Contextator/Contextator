@@ -165,15 +165,32 @@ describe('contextator_mcp_gap_reports_total', () => {
   });
 });
 
+/** The body of the reaper's tick in `server.ts`, comments dropped: the code that runs on the timer. */
+function reaperTick(): string {
+  const source = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('startSessionReaper(db');
+  const end = source.indexOf('\n  });\n', start);
+  expect(start, 'the session reaper is started from server.ts').toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  return source
+    .slice(start, end)
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('//'))
+    .join('\n');
+}
+
 describe('the reaper', () => {
   // The reaper's tick is a closure inside `server.ts`, so the order is held at the source (as ADR-0123's is).
   // ADR-0125, decision 3: switching the query log off must not stop the forgetting of what it collected.
-  it('sweeps reported gaps before the query log returns early, and so also while the log is off', () => {
-    const source = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
-    const sweep = source.indexOf('sweepReportedGaps(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)');
-    const earlyReturn = source.indexOf('if (!config.SEARCH_QUERY_LOG) return;');
-    expect(sweep, 'the sweep is called from the reaper').toBeGreaterThan(-1);
-    expect(earlyReturn).toBeGreaterThan(-1);
-    expect(sweep).toBeLessThan(earlyReturn);
+  it('sweeps reported gaps and the query log itself with nothing in the tick consulting the switch, so also while the log is off', () => {
+    const tick = reaperTick();
+    expect(tick, 'the gaps sweep is called from the reaper').toContain('sweepReportedGaps(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)');
+    expect(tick, 'the query log sweep is called from the reaper, unconditionally').toMatch(
+      /^\s*void sweepQueryLogRetention\(db, config\.SEARCH_QUERY_LOG_RETENTION_DAYS, log\);$/m,
+    );
+    // Whatever the shape of the guard (`if (!x) return`, braces, `=== false`, a wrapping `if (x) {`), it has to
+    // name the switch or return; the tick has neither. `SEARCH_QUERY_LOG_RETENTION_DAYS` is not the switch.
+    expect(tick).not.toMatch(/\bSEARCH_QUERY_LOG\b(?!_)/);
+    expect(tick).not.toMatch(/\breturn\b/);
   });
 });

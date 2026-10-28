@@ -59,7 +59,7 @@ const TOOLS = [
   },
   {
     name: 'report_gap',
-    text: 'Tells the maintainers a question the documentation does not answer. The only tool that writes — to the query log, never to documentation; present while the query log is on.',
+    text: 'Tells the maintainers a question the documentation does not answer. The only tool that writes — to its own table, under the same retention and purge as the query log, never to documentation; present while the query log is on.',
   },
 ];
 

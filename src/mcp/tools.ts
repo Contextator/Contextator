@@ -250,7 +250,7 @@ export function decodeCursor(cursor: string): string | null {
 }
 
 /**
- * What the three tools actually reach for, named rather than taken as the whole `AppContext`. The
+ * What the tools actually reach for, named rather than taken as the whole `AppContext`. The
  * server hands them the composition root; a test hands them four fields and a stub provider, which is
  * the difference between a tool contract that can be exercised and one that can only be deployed.
  */

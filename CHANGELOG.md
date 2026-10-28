@@ -10,6 +10,25 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Fixed
+
+- With `SEARCH_QUERY_LOG=0`, `search_queries` rows older than `SEARCH_QUERY_LOG_RETENTION_DAYS` are now swept too. The
+  sweep sat behind the switch, so an instance that turned the log off kept what it had logged until somebody turned
+  it back on. `reported_gaps`, the audit log and `document_changes` were already swept regardless.
+- The CI `eval` job now also starts for a change to `package.json`, `package-lock.json` or `drizzle/`, so every
+  dependabot pull request runs it.
+- The Helm CI job checks that the values schema rejects `config.trustProxy` set to `1` and to `true`.
+- An import that refuses an over-long line in an NDJSON file names the line (`documents.ndjson:12: ...`).
+- The "three tools" wording in the dashboard's About page and in the demo docs now lists all five MCP tools, and
+  `report_gap` is described as writing to its own table under the query log's policies rather than "to the query
+  log".
+
+### Changed
+
+- A project export's manifest states, beside the other exclusions, how many `report_gap` reports stayed behind
+  (`excluded.reportedGaps`), and so does the README in the archive. A manifest from an earlier version, without the
+  field, is still read.
+
 ## [0.5.0] - 2026-10-26
 
 ### Breaking

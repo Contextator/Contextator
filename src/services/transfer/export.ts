@@ -13,6 +13,7 @@ import {
   indexRuns,
   mcpTokens,
   projectMembers,
+  reportedGaps,
   searchQueries,
   searchQueryHits,
   type DocumentSourceRow,
@@ -154,7 +155,7 @@ export function needsFor(row: DocumentSourceRow): SourceNeed[] {
 /** Counts of everything that stays behind, so that the manifest states the absence as a number. */
 async function excludedCounts(db: Db, projectId: string): Promise<Manifest['excluded']> {
   const one = async (value: Promise<Array<{ n: number }>>): Promise<number> => (await value)[0]?.n ?? 0;
-  const [queries, hits, tokens, runs, members] = await Promise.all([
+  const [queries, hits, gaps, tokens, runs, members] = await Promise.all([
     one(db.select({ n: count() }).from(searchQueries).where(eq(searchQueries.projectId, projectId))),
     one(
       db
@@ -163,6 +164,7 @@ async function excludedCounts(db: Db, projectId: string): Promise<Manifest['excl
         .innerJoin(searchQueries, eq(searchQueryHits.queryId, searchQueries.id))
         .where(eq(searchQueries.projectId, projectId)),
     ),
+    one(db.select({ n: count() }).from(reportedGaps).where(eq(reportedGaps.projectId, projectId))),
     one(db.select({ n: count() }).from(mcpTokens).where(eq(mcpTokens.projectId, projectId))),
     one(db.select({ n: count() }).from(indexRuns).where(eq(indexRuns.projectId, projectId))),
     db
@@ -174,6 +176,7 @@ async function excludedCounts(db: Db, projectId: string): Promise<Manifest['excl
   return {
     searchQueries: queries,
     searchQueryHits: hits,
+    reportedGaps: gaps,
     mcpTokens: tokens,
     indexRuns: runs,
     projectMembers: {

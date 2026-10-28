@@ -32,7 +32,7 @@ import { MetricsRegistry } from './services/metrics.js';
 import { listProjects } from './services/projects.js';
 import { AuditWriter, sweepAuditLog } from './services/audit.js';
 import { DOCUMENT_CHANGES_RETENTION_DAYS, sweepDocumentChanges } from './services/document-changes.js';
-import { QueryLog, sweepQueryLog } from './services/query-log.js';
+import { QueryLog, sweepQueryLogRetention } from './services/query-log.js';
 import { sweepReportedGaps } from './services/report-gap.js';
 import { startSyncScheduler } from './services/scheduler.js';
 import { scanFrom, selectionFrom } from './services/vector-store.js';
@@ -251,9 +251,9 @@ async function main(): Promise<void> {
         .catch((err: unknown) => log.warn({ err }, 'oauth client sweep failed'));
     }
     // The audit log's retention ([ADR-0055](../.ssot/ADR.md#adr-0055)), on this timer for the reason
-    // every sweep above is on it. **Before the query log's `return` below and not after it**: the two
-    // are separate records under separate windows, and an instance that switched the query log off
-    // must not thereby stop forgetting audit events.
+    // every sweep above is on it. **Not behind the query log's switch**: the two are separate records
+    // under separate windows, and an instance that switched the query log off must not thereby stop
+    // forgetting audit events.
     void sweepAuditLog(db, config.AUDIT_LOG_RETENTION_DAYS)
       .then((deleted) => {
         if (deleted > 0) log.info({ deleted, retentionDays: config.AUDIT_LOG_RETENTION_DAYS }, 'swept expired audit events');
@@ -261,14 +261,14 @@ async function main(): Promise<void> {
       .catch((err: unknown) => log.warn({ err }, 'audit log sweep failed'));
     // Upload sessions idle for 24 hours, so that what the upload quota counts and what is on disk agree
     // ([ADR-0117](../.ssot/ADR.md#adr-0117)). A directory walk of the staging roots, on the timer every other
-    // forgetting here uses. Also before the query log's `return`.
+    // forgetting here uses. Also not behind the query log's switch.
     void sweepExpiredUploadSessions(config.DATA_DIR, Date.now(), locks)
       .then((deleted) => {
         if (deleted > 0) log.info({ deleted }, 'swept idle upload sessions');
       })
       .catch((err: unknown) => log.warn({ err }, 'upload session sweep failed'));
     // The record of document changes behind `whats_new` ([ADR-0123](../.ssot/ADR.md#adr-0123)), ninety days.
-    // **Before the query log's `return` and not after it**: that table is not the query log and does not
+    // **Not behind the query log's switch**: that table is not the query log and does not
     // switch off with it, so an instance with `SEARCH_QUERY_LOG=0` must still forget what it recorded.
     void sweepDocumentChanges(db)
       .then((deleted) => {
@@ -276,21 +276,17 @@ async function main(): Promise<void> {
       })
       .catch((err: unknown) => log.warn({ err }, 'document changes sweep failed'));
     // What agents reported through `report_gap` ([ADR-0125](../.ssot/ADR.md#adr-0125)), under the query log's
-    // retention. **Before the `return` below and not after it**, and that is the point of it: these rows are
+    // retention. **Not behind the query log's switch**, and that is the point of it: these rows are
     // user content under a promise on the privacy page, and an instance that switched the query log off must
     // not thereby keep what the log collected until somebody switches it back on. (`search_queries` itself
-    // is still swept after the `return`; moving it is a separate change.)
+    // is swept below, and also while the log is off, for the same reason.)
     void sweepReportedGaps(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)
       .then((deleted) => {
         if (deleted > 0) log.info({ deleted, retentionDays: config.SEARCH_QUERY_LOG_RETENTION_DAYS }, 'swept expired reported gaps');
       })
       .catch((err: unknown) => log.warn({ err }, 'reported gaps sweep failed'));
-    if (!config.SEARCH_QUERY_LOG) return;
-    void sweepQueryLog(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS)
-      .then((deleted) => {
-        if (deleted > 0) log.info({ deleted, retentionDays: config.SEARCH_QUERY_LOG_RETENTION_DAYS }, 'swept expired query log rows');
-      })
-      .catch((err: unknown) => log.warn({ err }, 'query log sweep failed'));
+    // The query log itself: no switch is consulted, so `SEARCH_QUERY_LOG=0` still forgets what was logged.
+    void sweepQueryLogRetention(db, config.SEARCH_QUERY_LOG_RETENTION_DAYS, log);
   });
 
   // Data directory for materialised sources.

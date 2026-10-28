@@ -19,6 +19,7 @@ import {
   mcpTokens,
   projectMembers,
   projects,
+  reportedGaps,
   searchQueries,
   searchQueryHits,
   users,
@@ -330,6 +331,15 @@ async function seedOrigin(db: Db): Promise<void> {
     .insert(searchQueryHits)
     .values({ queryId: query.id, rank: 1, relativePath: 'wiki/credentials.md', headingPath: 'Credentials > Rotation', chunkIndex: 0, score: 0.42 });
 
+  // What an agent reported through `report_gap` lives in its own table and stays behind too, counted apart.
+  await db.insert(reportedGaps).values({
+    projectId,
+    rateKey: 'anon',
+    query: 'a question the handbook never answered',
+    queryNorm: 'a question the handbook never answered',
+    liveGeneration: ORIGIN_LIVE,
+  });
+
   await db.insert(indexRuns).values({
     projectId,
     mode: 'force',
@@ -393,6 +403,7 @@ describe('exporting a project', () => {
     expect(manifest.excluded).toEqual({
       searchQueries: 1,
       searchQueryHits: 1,
+      reportedGaps: 1,
       mcpTokens: 1,
       indexRuns: 1,
       projectMembers: { viewer: 1, editor: 0 },
