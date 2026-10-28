@@ -20,6 +20,7 @@ import {
   type ProjectRow,
 } from '../../db/schema.js';
 import { sourceCurrentDir } from '../data-dir.js';
+import { countFindings } from '../document-findings.js';
 import { formatGoldenJsonl, listGoldenQuestions } from '../golden-questions.js';
 import { PROBE_TOKEN_KEY, type SourceType, withoutUrlCredentials } from '../sources.js';
 import {
@@ -155,7 +156,7 @@ export function needsFor(row: DocumentSourceRow): SourceNeed[] {
 /** Counts of everything that stays behind, so that the manifest states the absence as a number. */
 async function excludedCounts(db: Db, projectId: string): Promise<Manifest['excluded']> {
   const one = async (value: Promise<Array<{ n: number }>>): Promise<number> => (await value)[0]?.n ?? 0;
-  const [queries, hits, gaps, tokens, runs, members] = await Promise.all([
+  const [queries, hits, gaps, findings, tokens, runs, members] = await Promise.all([
     one(db.select({ n: count() }).from(searchQueries).where(eq(searchQueries.projectId, projectId))),
     one(
       db
@@ -165,6 +166,7 @@ async function excludedCounts(db: Db, projectId: string): Promise<Manifest['excl
         .where(eq(searchQueries.projectId, projectId)),
     ),
     one(db.select({ n: count() }).from(reportedGaps).where(eq(reportedGaps.projectId, projectId))),
+    countFindings(db, projectId),
     one(db.select({ n: count() }).from(mcpTokens).where(eq(mcpTokens.projectId, projectId))),
     one(db.select({ n: count() }).from(indexRuns).where(eq(indexRuns.projectId, projectId))),
     db
@@ -177,6 +179,7 @@ async function excludedCounts(db: Db, projectId: string): Promise<Manifest['excl
     searchQueries: queries,
     searchQueryHits: hits,
     reportedGaps: gaps,
+    documentFindings: findings,
     mcpTokens: tokens,
     indexRuns: runs,
     projectMembers: {

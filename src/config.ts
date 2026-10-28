@@ -1236,6 +1236,17 @@ export const EnvSchema = z
      */
     SEARCH_QUERY_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
 
+    /**
+     * The PII scan ([ADR-0130](../.ssot/ADR.md#adr-0130)): whether stored documents are looked through for secrets
+     * and personal numbers, and the findings recorded beside them. **Report only** — a document is never masked or
+     * skipped, and search is not touched (ADR-0043, FR-523).
+     *
+     * On by default, because a report nobody switches on is never read, and because it changes no behaviour a
+     * user can see. `0` stops new scanning and **leaves the findings that exist in place**; there is no switch
+     * that deletes them, and a deleted document, a generation swap and a deleted project already take theirs.
+     */
+    PII_SCAN: z.string().default('1').transform(flag),
+
     // The audit log and /metrics (ADR-0055). Both are about the instance rather than about any one
     // project, which is why neither has a per-project column beside it the way the query log does.
     /**

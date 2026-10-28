@@ -156,6 +156,12 @@ export const Manifest = z.object({
      */
     reportedGaps: z.number().int().min(0).optional(),
     /**
+     * The PII scan's findings ([ADR-0130](../../../.ssot/ADR.md#adr-0130) decision 8). Derived data, and made under the
+     * source instance's key: the target scans for itself. Optional, and `manifestVersion` did not move, for the reason
+     * given on `reportedGaps`.
+     */
+    documentFindings: z.number().int().min(0).optional(),
+    /**
      * Memberships, **by role and by count only**. A username list is an inventory of accounts on an
      * instance that did not move, in a file that travels by e-mail; the count is what the destination
      * operator needs — "this project had four people who could see it and now has none" — and the
@@ -293,6 +299,12 @@ export function readmeFor(manifest: Manifest): string {
       : [
           `  - ${manifest.excluded.reportedGaps} reported gap(s). They are questions agents said the documentation did not answer, ` +
             'in their own words, held under the same retention window as the logged searches.',
+        ]),
+    ...(manifest.excluded.documentFindings === undefined
+      ? []
+      : [
+          `  - ${manifest.excluded.documentFindings} PII scan finding(s). They are derived from the documents and keyed to the source ` +
+            "instance's SECRET_KEY, so this instance scans the documents itself once they are imported.",
         ]),
     `  - ${manifest.excluded.mcpTokens} MCP token(s). They are bearer credentials for the other instance's endpoints. Mint new ones here.`,
     `  - ${manifest.excluded.indexRuns} index run record(s). They describe runs on another machine, numbered in its generations.`,

@@ -29,6 +29,7 @@ import { generateFloorSuggestion } from './services/floor-calibration.js';
 import { Indexer } from './services/indexer.js';
 import { KeyedMutex } from './services/locks.js';
 import { MetricsRegistry } from './services/metrics.js';
+import { PiiScanner } from './services/pii-scan.js';
 import { listProjects } from './services/projects.js';
 import { AuditWriter, sweepAuditLog } from './services/audit.js';
 import { DOCUMENT_CHANGES_RETENTION_DAYS, sweepDocumentChanges } from './services/document-changes.js';
@@ -105,6 +106,9 @@ async function main(): Promise<void> {
   // The golden set asked of the live index after the index changes (ADR-0124). Built before the indexer, which
   // calls it from its hook; it takes no part of the indexer's own locking, so a run never holds indexing up.
   const evalRuns = new EvalRunner({ db, embeddings, scan: scanFrom(config), selection: selectionFrom(config), log, metrics });
+  // The PII scan (ADR-0130): reads the stored text after the index changed and writes its findings beside it. It
+  // is asked from the same hook and takes no part of the indexer's own locking, so a run never waits for it.
+  const piiScanner = new PiiScanner({ db, config, log, metrics });
   const indexer = new Indexer({
     db,
     embeddings,
@@ -113,7 +117,15 @@ async function main(): Promise<void> {
     locks,
     metrics,
     onModelChangeRebuilt,
-    onIndexChanged: (projectId, trigger) => evalRuns.request(projectId, trigger),
+    onIndexChanged: (projectId, trigger) => {
+      // Independent of each other: one that throws must not keep the other from being asked.
+      try {
+        evalRuns.request(projectId, trigger);
+      } catch (err) {
+        log.warn({ err, projectId, trigger }, 'eval run request failed');
+      }
+      piiScanner.request(projectId);
+    },
   });
   const uploads = new UploadService(config);
   const setup = new SetupGate();
@@ -178,6 +190,8 @@ async function main(): Promise<void> {
     await sessions.closeAll();
     // Before the pool: a run that is asking stops at its next question and writes no row (ADR-0124).
     await evalRuns.stop();
+    // Likewise: a scan in hand stops at the end of its document, and what is left is found at the next start.
+    await piiScanner.stop();
     // The conversion thread is the one piece of the indexer that outlives a run (ADR-0071); an
     // in-flight file is refused rather than left holding the process open.
     await indexer.stop();
@@ -300,6 +314,11 @@ async function main(): Promise<void> {
     log,
     reindexOnModelChange: config.REINDEX_ON_MODEL_CHANGE ? { embeddingModelId: embeddings.id } : undefined,
   });
+
+  // Everything that is due for the PII scan (ADR-0130): on the first start after the upgrade that is the whole
+  // corpus, scanned from the stored text with no re-embedding. In the background, one project at a time, and never
+  // fatal: a failed read costs a warning and the next index change asks again.
+  void piiScanner.sweep().catch((err: unknown) => log.warn({ err }, 'pii scan sweep failed'));
 
   // Model download/load can take a while on first start; don't block the dashboard on it.
   void embeddings

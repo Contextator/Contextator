@@ -138,6 +138,13 @@ describe('every /api route is covered by the policy', () => {
    */
   const MANAGER_READS = new Set(['/api/projects/:id/export']);
 
+  /**
+   * The same discipline one rung down ([ADR-0130](../.ssot/ADR.md#adr-0130)): the PII findings are the one read that
+   * asks for an `editor`. A list of where the secrets are is not handed to the widest audience, and the invariant above
+   * is not loosened to "viewer or editor" to say so.
+   */
+  const EDITOR_READS = new Set(['/api/projects/:id/findings']);
+
   it('requires an editor for every write under a project, and a viewer for every read', async () => {
     const app = await buildApi();
     const table = routeTable(app.printRoutes({ commonPrefix: false }));
@@ -145,17 +152,18 @@ describe('every /api route is covered by the policy', () => {
 
     for (const [method, url] of table.filter(([m, u]) => isProjectScoped(u) && m !== 'HEAD' && m !== 'OPTIONS')) {
       const need = requiredProjectAccess(method, url);
-      if (method === 'GET') expect(need).toBe(MANAGER_READS.has(url) ? 'manager' : 'viewer');
+      if (method === 'GET') expect(need).toBe(MANAGER_READS.has(url) ? 'manager' : EDITOR_READS.has(url) ? 'editor' : 'viewer');
       else expect(['editor', 'manager']).toContain(need);
     }
   });
 
-  it('registers every route named in the manager-read exception list', async () => {
+  it('registers every route named in the manager-read and editor-read exception lists', async () => {
     const app = await buildApi();
     const urls = new Set(routeTable(app.printRoutes({ commonPrefix: false })).map(([, url]) => url));
     await app.close();
     // An exception for a route that does not exist is an exception that would silently outlive it.
     for (const url of MANAGER_READS) expect(urls.has(url)).toBe(true);
+    for (const url of EDITOR_READS) expect(urls.has(url)).toBe(true);
   });
 
   /**

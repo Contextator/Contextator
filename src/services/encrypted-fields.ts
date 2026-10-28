@@ -121,6 +121,10 @@ export const UNENCRYPTED_SECRET_COLUMNS: Readonly<Record<string, string>> = {
     'Names of golden questions ("pricing-tiers") that a run lost — the `golden_questions.key` values, not key material. Here only because the guard test matches column names.',
   'eval_runs.skipped_keys':
     'Names of golden questions a run could not ask, like eval_runs.lost_keys: not key material. Here only because the guard test matches column names.',
+  'document_findings.hmac_key_id':
+    "The id of the key a finding's HMAC was made under (secretKeyId, 8 hex characters of an HMAC over a constant), not key material. Here only because the guard test matches column names.",
+  'document_scans.hmac_key_id':
+    "The id of the key a scan's findings were keyed under, like document_findings.hmac_key_id: not key material. Here only because the guard test matches column names.",
   'eval_runs.newly_skipped_keys':
     'Names of golden questions a run could no longer ask, like eval_runs.lost_keys: not key material. Here only because the guard test matches column names.',
 };

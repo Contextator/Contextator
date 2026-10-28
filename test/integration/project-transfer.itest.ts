@@ -404,6 +404,7 @@ describe('exporting a project', () => {
       searchQueries: 1,
       searchQueryHits: 1,
       reportedGaps: 1,
+      documentFindings: 0,
       mcpTokens: 1,
       indexRuns: 1,
       projectMembers: { viewer: 1, editor: 0 },

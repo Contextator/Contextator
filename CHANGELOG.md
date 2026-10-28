@@ -10,6 +10,17 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Added
+
+- The PII scan (ADR-0130): after an index run, and once at startup for the whole corpus, stored documents are looked
+  through for AWS access keys, GitHub tokens, PEM private key headers, JWTs, Turkish citizen numbers (valid check digits)
+  and IBANs (valid mod-97). It only reports: nothing is masked or skipped and search is unchanged. Findings are listed
+  by `GET /api/projects/:id/findings` for a project `editor` and above, as a masked preview and a short group id;
+  without `SECRET_KEY` they are written without an HMAC. `PII_SCAN=0` stops new scanning. Migration `0029` adds
+  `document_findings` and `document_scans`; `/metrics` gains `contextator_document_findings_total{rule}` and
+  `contextator_document_scans_total{outcome}`; a project export counts the findings it leaves out
+  (`excluded.documentFindings`).
+
 ### Fixed
 
 - With `SEARCH_QUERY_LOG=0`, `search_queries` rows older than `SEARCH_QUERY_LOG_RETENTION_DAYS` are now swept too. The
