@@ -103,6 +103,10 @@ ships, that stops.
   timeout; output is `--json` or lines, with distinct exit codes (`docs/cli.md`). `docker run … contextator <command>`
   runs it without starting a server or a database; `backup` is the existing backup under that name and needs the
   default image. A GitHub Actions example is in `docs/examples/`. No new dependency, and nothing is published to npm.
+- `test/agent-skill.test.ts` holds `skills/contextator/SKILL.md` to the Agent Skills specification (frontmatter fields and limits,
+  `name` equal to its directory, under 500 lines) and to the code: every tool name the skill mentions must be in
+  `MCP_TOOL_NAMES`, and every tool in `MCP_TOOL_NAMES` must be mentioned, so a tool added without updating the skill breaks
+  the unit tests.
 
 ### Deprecated
 
