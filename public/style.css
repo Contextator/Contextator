@@ -3267,3 +3267,145 @@ a.btn.ghost.small {
     transition: r 0.15s;
   }
 }
+
+/* ---------- secrets and personal data (findings.js, ADR-0130) ---------- */
+
+/* The head's button and the "read" stamp beside the text do not fit on a phone: let them wrap. */
+#findings-panel > .sources-head {
+  flex-wrap: wrap;
+}
+
+#findings-panel > .sources-head .source-actions {
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+#findings-panel > .hint,
+#findings-panel > .form-error {
+  padding: 12px 20px;
+}
+
+.findings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px 20px;
+  min-width: 0;
+}
+
+.findings-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.findings-rule-select {
+  max-width: 100%;
+}
+
+.findings-rule-select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.findings-note {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--neutral-tint);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.findings-note.warn {
+  border-color: var(--border-strong);
+  background: var(--warn-tint);
+  color: var(--warn-text);
+}
+
+.findings-empty {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.findings-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.finding {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--neutral-tint);
+  border-radius: 7px;
+}
+
+.finding-head,
+.finding-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.finding-body {
+  margin-top: 6px;
+}
+
+.finding-rule {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--neutral-tint);
+  color: var(--text-2);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.finding-path {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+a.finding-path {
+  color: var(--accent);
+}
+
+a.finding-path:hover {
+  color: var(--accent-hover);
+}
+
+a.finding-path:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.finding-preview {
+  min-width: 0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--neutral-tint);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.finding-group {
+  padding: 1px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
