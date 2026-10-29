@@ -455,6 +455,30 @@
           "type": ["integer", "null"],
           "minimum": 0
         },
+        "s3MaxObjects": {
+          "description": "S3_MAX_OBJECTS: the most objects an S3 source lists under its prefix in one run; the rest is not indexed. An integer from 1 to 100000. Null or unset leaves the application default, 5000.",
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "gdriveMaxFiles": {
+          "description": "GDRIVE_MAX_FILES: the most files a Google Drive source walks in one run; the rest is not indexed. An integer from 1 to 100000. Null or unset leaves the application default, 5000.",
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "githubMaxIssues": {
+          "description": "GITHUB_MAX_ISSUES: the most issues a GitHub source reads in one run; the rest is not indexed. An integer from 1 to 100000. Null or unset leaves the application default, 5000.",
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "githubMaxDiscussions": {
+          "description": "GITHUB_MAX_DISCUSSIONS: the most Discussions a GitHub source reads in one run; the rest is not indexed. An integer from 1 to 100000. Null or unset leaves the application default, 5000.",
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 100000
+        },
         "mcpStructuredOutput": {
           "description": "MCP_STRUCTURED_OUTPUT: true adds structuredContent beside every MCP tool's text answer. Off by default; false leaves the variable unset.",
           "type": "boolean"

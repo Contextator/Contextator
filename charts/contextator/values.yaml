@@ -161,6 +161,14 @@ config:
   projectMaxDocuments: null
   projectMaxChunks: null
   projectMaxUploadBytes: null
+  # S3_MAX_OBJECTS / GDRIVE_MAX_FILES / GITHUB_MAX_ISSUES / GITHUB_MAX_DISCUSSIONS (ADR-0126, ADR-0127,
+  # ADR-0128): the most objects, files, issues and Discussions one source of that type reads in a run;
+  # the rest is not indexed. Integers from 1 to 100000. Null leaves a variable
+  # unset, so the application default of 5000 applies.
+  s3MaxObjects: null
+  gdriveMaxFiles: null
+  githubMaxIssues: null
+  githubMaxDiscussions: null
   # MCP_STRUCTURED_OUTPUT: true makes every MCP tool also return its answer as structured JSON
   # (`structuredContent`) beside the unchanged text answer. Off by default: Claude Code hands its
   # model the structured part alone when both are present, so the guidance each answer carries

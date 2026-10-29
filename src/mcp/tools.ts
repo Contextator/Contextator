@@ -18,6 +18,7 @@ import {
   listDocumentChanges,
   parseSince,
   readTrackingSince,
+  whatsNewTruncationNote,
 } from '../services/document-changes.js';
 import { chunksWithinBudget, joinChunks, truncateToTokens } from '../services/document-read.js';
 import { normalizeRelativePath } from '../services/fs-scan.js';
@@ -941,9 +942,7 @@ export function registerTools(
           );
         }
         if (truncated) {
-          guidance.push(
-            `[…truncated: the ${changes.length} newest changes are shown. Ask again with a later since, or with a larger limit (at most ${WHATS_NEW_MAX_LIMIT}), to see the rest.]`,
-          );
+          guidance.push(whatsNewTruncationNote(changes.length));
         }
         if (note) guidance.push(note);
 

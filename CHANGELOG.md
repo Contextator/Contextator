@@ -10,6 +10,8 @@ ships, that stops.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-29
+
 ### Added
 
 - **OIDC groups grant project memberships** (ADR-0134, amending ADR-0077; migration `0031_oidc_group_mappings`): set
@@ -41,6 +43,9 @@ ships, that stops.
 - `SOURCE_ALLOWED_HOSTS`: one allowlist of host names that Confluence sources (and the S3 and GitHub Enterprise
   Server sources of this release) may reach on a private address (ADR-0126, amending ADR-0088). Same format as
   the other allowlists; it does not admit a host for a web or git source. Helm chart: `config.sourceAllowedHosts`.
+- Helm chart 2.1.0: `config.s3MaxObjects`, `config.gdriveMaxFiles`, `config.githubMaxIssues` and
+  `config.githubMaxDiscussions` set `S3_MAX_OBJECTS`, `GDRIVE_MAX_FILES`, `GITHUB_MAX_ISSUES` and
+  `GITHUB_MAX_DISCUSSIONS` (integers 1 to 100 000; `null`, the default, leaves the application default of 5 000).
 - The AWS Signature V4 signer moved from `scripts/backup-s3.ts` to `src/services/s3/sigv4.ts`, so the backup
   command and the S3 source share one implementation. The backup command's behaviour is unchanged.
 - Internal building blocks for the remote-store sources of 0.6.0: a one-JSON-document credential helper
@@ -103,6 +108,10 @@ ships, that stops.
   timeout; output is `--json` or lines, with distinct exit codes (`docs/cli.md`). `docker run … contextator <command>`
   runs it without starting a server or a database; `backup` is the existing backup under that name and needs the
   default image. A GitHub Actions example is in `docs/examples/`. No new dependency, and nothing is published to npm.
+- An Agent Skill, `skills/contextator/SKILL.md`, for assistants that read the Agent Skills format: it says in what order to use
+  `search_docs`, `list_topics`, `read_document`, `whats_new` and `report_gap` against a Contextator MCP endpoint, to cite the file
+  path of every passage relied on, and to say so when the documentation does not cover a question. It adds no tool and changes
+  no server behaviour.
 - `test/agent-skill.test.ts` holds `skills/contextator/SKILL.md` to the Agent Skills specification (frontmatter fields and limits,
   `name` equal to its directory, under 500 lines) and to the code: every tool name the skill mentions must be in
   `MCP_TOOL_NAMES`, and every tool in `MCP_TOOL_NAMES` must be mentioned, so a tool added without updating the skill breaks
@@ -141,6 +150,9 @@ ships, that stops.
 
 ### Fixed
 
+- The note `whats_new` appends when it cuts a list at `limit` told the client to ask again with a later `since`, which
+  hides the older changes it was cut from; it now says to ask with a larger `limit` (at most 200), and, when the list
+  was already cut at 200, to narrow the question with `source` or `version`.
 - With `SEARCH_QUERY_LOG=0`, `search_queries` rows older than `SEARCH_QUERY_LOG_RETENTION_DAYS` are now swept too. The
   sweep sat behind the switch, so an instance that turned the log off kept what it had logged until somebody turned
   it back on. `reported_gaps`, the audit log and `document_changes` were already swept regardless.
@@ -1065,7 +1077,8 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Contextator/Contextator/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Contextator/Contextator/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/Contextator/Contextator/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/Contextator/Contextator/compare/v0.4.0...v0.4.1

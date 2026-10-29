@@ -6,8 +6,8 @@ import { sourceCurrentDir, sourceDir } from '../data-dir.js';
 import { PROBE_TOKEN_KEY } from '../sources.js';
 
 /**
- * The pattern every source that mirrors a remote file store follows — an S3 bucket, a Drive folder, a
- * SharePoint library ([ADR-0126](../../../.ssot/ADR.md#adr-0126) decisions 4–6): **list, give each object
+ * The pattern every source that mirrors a remote file store follows — an S3 bucket, a Drive folder
+ * ([ADR-0126](../../../.ssot/ADR.md#adr-0126) decisions 4–6): **list, give each object
  * a version token, download only what changed, materialise under `DATA_DIR`, remove what the listing no
  * longer holds, and derive the probe token from the listing**.
  *

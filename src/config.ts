@@ -715,7 +715,7 @@ export const EnvSchema = z
     GITHUB_MAX_DISCUSSIONS: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.GITHUB_MAX_DISCUSSIONS),
     /**
      * The client id of the Notion **public connection** this operator registered, which turns "Connect
-     * with Notion" on ([ADR-0129](../.ssot/ADR.md#adr-0129)). There is no central Contextator connection
+     * with Notion" on ([ADR-0129](../../.ssot/ADR.md#adr-0129)). There is no central Contextator connection
      * (PRD P1): every instance brings its own. Required together with `NOTION_OAUTH_CLIENT_SECRET`.
      */
     NOTION_OAUTH_CLIENT_ID: z.string().min(1).optional(),

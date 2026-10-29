@@ -9,6 +9,7 @@ import {
   isModified,
   parseSince,
   textProvesEqual,
+  whatsNewTruncationNote,
 } from '../src/services/document-changes.js';
 
 /**
@@ -173,5 +174,20 @@ describe('the reaper', () => {
     expect(tick).toContain('sweepDocumentChanges(db)');
     expect(tick).not.toMatch(/\bSEARCH_QUERY_LOG\b(?!_)/);
     expect(tick).not.toMatch(/\breturn\b/);
+  });
+});
+
+describe('whatsNewTruncationNote', () => {
+  it('asks for a larger limit while one exists', () => {
+    expect(whatsNewTruncationNote(2)).toBe(
+      '[…truncated: the 2 newest changes are shown. Ask again with a larger limit (at most 200), to see the rest.]',
+    );
+    expect(whatsNewTruncationNote(199)).toContain('larger limit');
+  });
+
+  it('says to narrow the question at the ceiling, where no larger limit exists', () => {
+    const note = whatsNewTruncationNote(200);
+    expect(note).toContain('Narrow the question with source or version');
+    expect(note).not.toContain('larger limit');
   });
 });

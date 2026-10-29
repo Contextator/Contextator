@@ -106,6 +106,22 @@ spec:
             - name: PROJECT_MAX_UPLOAD_BYTES
               value: {{ . | int64 | quote }}
             {{- end }}
+            {{- with .Values.config.s3MaxObjects }}
+            - name: S3_MAX_OBJECTS
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.gdriveMaxFiles }}
+            - name: GDRIVE_MAX_FILES
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.githubMaxIssues }}
+            - name: GITHUB_MAX_ISSUES
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.githubMaxDiscussions }}
+            - name: GITHUB_MAX_DISCUSSIONS
+              value: {{ . | int64 | quote }}
+            {{- end }}
             {{- if .Values.config.mcpStructuredOutput }}
             - name: MCP_STRUCTURED_OUTPUT
               value: "1"

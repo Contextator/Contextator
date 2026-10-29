@@ -23,6 +23,19 @@ export const TRACKING_SINCE_KEY = 'document_changes_tracking_since';
 export const WHATS_NEW_DEFAULT_LIMIT = 50;
 export const WHATS_NEW_MAX_LIMIT = 200;
 
+/**
+ * The note a cut list ends with. The list is newest first, so what was cut is the older part: a later `since`
+ * would hide it, and only a larger `limit` shows it. At the ceiling there is no larger limit, and the one way
+ * left to reach the older changes is to ask about fewer of them.
+ */
+export function whatsNewTruncationNote(shown: number): string {
+  const how =
+    shown >= WHATS_NEW_MAX_LIMIT
+      ? `${WHATS_NEW_MAX_LIMIT} is the most one call returns. Narrow the question with source or version to see the older changes.`
+      : `Ask again with a larger limit (at most ${WHATS_NEW_MAX_LIMIT}), to see the rest.`;
+  return `[…truncated: the ${shown} newest changes are shown. ${how}]`;
+}
+
 export type DocumentChangeKind = 'added' | 'modified' | 'removed';
 
 /** A `Db` or the transaction handle `db.transaction` gives its callback; both run the same statements. */

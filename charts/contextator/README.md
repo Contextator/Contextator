@@ -767,6 +767,11 @@ checks them:
   least `0`, set as `PROJECT_MAX_DOCUMENTS`, `PROJECT_MAX_CHUNKS` and `PROJECT_MAX_UPLOAD_BYTES`: the
   instance-wide default caps on what one project may hold. A project the instance admin gave its own
   value uses that instead. `null` (the default) and `0` leave a cap off.
+- `config.s3MaxObjects`, `config.gdriveMaxFiles`, `config.githubMaxIssues`, `config.githubMaxDiscussions` —
+  integers from `1` to `100000`, set as `S3_MAX_OBJECTS`, `GDRIVE_MAX_FILES`, `GITHUB_MAX_ISSUES` and
+  `GITHUB_MAX_DISCUSSIONS`: the most objects, files, issues and Discussions one source of that type reads in a
+  run; the rest is not indexed. `null` (the default) leaves the variable unset, so the
+  application default of `5000` applies.
 - `config.mcpStructuredOutput` — `true` sets `MCP_STRUCTURED_OUTPUT=1`. `false` (the default) leaves it
   unset.
 - `config.mcpRateLimitPerMinute`, `config.mcpRateLimitAnonPerMinute` — integers, at least `0`, set as
