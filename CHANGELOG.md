@@ -151,6 +151,10 @@ ships, that stops.
 - The "three tools" wording in the dashboard's About page and in the demo docs now lists all five MCP tools, and
   `report_gap` is described as writing to its own table under the query log's policies rather than "to the query
   log".
+- The dashboard no longer scrolls sideways on a phone-width screen. At 390 px the health strip in the top bar
+  (database and model pills, the model id, open sessions, the version) ran past the viewport and widened the
+  whole page to 573 px; below 720 px it now sits on its own row, wraps, and ellipsises the model id inside it.
+  Wider screens are unchanged.
 
 ## [0.5.0] - 2026-10-26
 

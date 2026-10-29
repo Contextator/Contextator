@@ -2110,6 +2110,26 @@ a.btn:focus-visible {
   white-space: nowrap;
 }
 
+/* Narrow screens: the health strip is five items wide (two pills, two chips, the version) and cannot
+   shrink below its content, so on one line it ran past the viewport and took the whole page's
+   scrollWidth with it. That happens below roughly 640px; 720px is the breakpoint the rest of this file
+   already uses for "tablet and down", so the strip drops to its own row under the brand there and
+   wraps. The model id, the one chip that can be longer than a phone, ellipsises inside its own line
+   instead of pushing the rest out. */
+@media (max-width: 720px) {
+  .topbar-right {
+    flex-basis: 100%;
+  }
+  .topbar-right .health {
+    flex: 1 1 0;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  .topbar-right .health .chip.mono {
+    max-width: 100%;
+  }
+}
+
 /* Until app.js knows who is signed in, the chrome stays out of the way rather than flashing empty. */
 body.booting .layout,
 body.booting .topbar-right {
