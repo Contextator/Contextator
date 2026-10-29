@@ -97,6 +97,12 @@ ships, that stops.
   findings by document path, with the rule, the position and the masked preview, narrowed by rule. It never shows a
   value, and says separately that scanning is off (`PII_SCAN=0`), that findings are not grouped (no `SECRET_KEY`), that
   documents hit the per-document ceiling and that documents were cut when indexed. A viewer does not see it.
+- A `contextator` command in both images (ADR-0131): `project create <name> --git <url> [--wait]`,
+  `project status`, `token create` and `backup`, for CI and shells. The first three call the admin API with
+  `CONTEXTATOR_URL` and `CONTEXTATOR_TOKEN` (a token is never an argument); `--wait` follows the index run, with a
+  timeout; output is `--json` or lines, with distinct exit codes (`docs/cli.md`). `docker run … contextator <command>`
+  runs it without starting a server or a database; `backup` is the existing backup under that name and needs the
+  default image. A GitHub Actions example is in `docs/examples/`. No new dependency, and nothing is published to npm.
 
 ### Deprecated
 

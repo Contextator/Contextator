@@ -19,6 +19,9 @@ query parameters) and the audit log's guarantees and limits — what it records,
 does not (refused requests, actions that fail after committing), its performance at 200,004 rows,
 and that it is not tamper-evident: [Admin API](https://contextator.com/en/docs/admin-api/).
 
+From a shell or a CI job, the `contextator` command in the image calls the project, status and MCP token routes
+for you: [Command line](cli.md).
+
 ## Golden-set eval runs
 
 A project's golden questions (`/api/projects/:id/golden-questions`) are asked of its live index by the server
