@@ -10,7 +10,7 @@ ships, that stops.
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-10-29
+## [0.6.0] - 2026-10-30
 
 ### Added
 
