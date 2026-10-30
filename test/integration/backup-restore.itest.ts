@@ -24,6 +24,7 @@ import { createProjectVectorIndex, PROJECT_VECTOR_INDEX_PREFIX, projectVectorInd
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
 import { chunkMarkdown, embeddingText, estimateTokens } from '../../src/services/chunker.js';
 import { decryptSecret, encryptSecret, encryptWebhookSecret } from '../../src/services/crypto.js';
+import { CREDENTIAL_SOURCE_TYPES } from '../../src/services/encrypted-fields.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
 import { type NewChunk, replaceDocument, searchChunks, type SearchHit } from '../../src/services/vector-store.js';
 import {
@@ -1313,7 +1314,7 @@ describe('the backup command, and the instance it is asked to bring back', () =>
 
     it('is written with the local secret left out of the count, and says which types it counted', () => {
       expect(localBackup.secretKey.encryptedSources).toBe(0);
-      expect(localBackup.secretKey.encryptedSourceTypes).toEqual(['git', 'notion', 'confluence']);
+      expect(localBackup.secretKey.encryptedSourceTypes).toEqual([...CREDENTIAL_SOURCE_TYPES]);
     });
 
     it('restores an old archive under the wrong key, reading the dump rather than refusing, and drops the secret', async () => {

@@ -12,6 +12,11 @@
 # `full` is the last stage on purpose: `docker build .` with no --target has to keep building the
 # default installation, because that is what every existing command and every document assumes.
 #
+# Both carry the `contextator` command on PATH (ADR-0131): `docker run … contextator project create …`
+# is routed to it by docker/entrypoint.sh without starting a server or a database. The PATH wrapper is
+# for `docker exec` and `--entrypoint contextator`, which skip the entrypoint; like it, the wrapper drops
+# root to `node` so that nothing the command writes is left owned by root.
+#
 # Persistent paths (mount volumes here):
 #   /var/lib/postgresql/data   PostgreSQL cluster — `full` only; `slim` has no cluster to keep
 #   /app/.cache/models         downloaded embedding models
@@ -71,6 +76,10 @@ COPY docker/entrypoint.sh /usr/local/bin/contextator-entrypoint
 RUN set -eux; \
     sed -i 's/\r$//' /usr/local/bin/contextator-entrypoint; \
     chmod 0755 /usr/local/bin/contextator-entrypoint; \
+    printf '%s\n' '#!/bin/sh' \
+      'if [ "$(id -u)" = 0 ]; then exec gosu node node /app/dist/cli.js "$@"; fi' \
+      'exec node /app/dist/cli.js "$@"' > /usr/local/bin/contextator; \
+    chmod 0755 /usr/local/bin/contextator; \
     mkdir -p /app/.cache/models /data /docs; \
     chown -R node:node /app/.cache /data
 
@@ -117,6 +126,10 @@ COPY docker/entrypoint.sh /usr/local/bin/contextator-entrypoint
 RUN set -eux; \
     sed -i 's/\r$//' /usr/local/bin/contextator-entrypoint; \
     chmod 0755 /usr/local/bin/contextator-entrypoint; \
+    printf '%s\n' '#!/bin/sh' \
+      'if [ "$(id -u)" = 0 ]; then exec gosu node node /app/dist/cli.js "$@"; fi' \
+      'exec node /app/dist/cli.js "$@"' > /usr/local/bin/contextator; \
+    chmod 0755 /usr/local/bin/contextator; \
     mkdir -p /app/.cache/models /data /docs; \
     chown -R node:node /app/.cache /data
 

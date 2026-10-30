@@ -1,4 +1,5 @@
 import type { QueryActor } from '../db/schema.js';
+import { PII_RULES, type PiiRule } from './pii-rules.js';
 
 /**
  * The Prometheus exposition ([ADR-0055](../../.ssot/ADR.md#adr-0055)).
@@ -253,6 +254,38 @@ export interface GapReportObserver {
   countGapReport(outcome: GapReportOutcome): void;
 }
 
+/**
+ * The source types that report a throttling answer from their remote
+ * ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 9): the closed set of the `source_type` label of
+ * `contextator_source_throttled_total` ([ADR-0105](../../.ssot/ADR.md#adr-0105)). `s3` counts `503 SlowDown`,
+ * `gdrive` counts `429` and `403` with `rateLimitExceeded`/`userRateLimitExceeded`
+ * ([ADR-0127](../../.ssot/ADR.md#adr-0127) decision 9). Another source type joins the set only through its own entry.
+ */
+export const SOURCE_THROTTLE_TYPES = ['s3', 'gdrive'] as const;
+export type SourceThrottleType = (typeof SOURCE_THROTTLE_TYPES)[number];
+
+/** Counts one throttling answer a source's remote gave, retried or not. Optional wherever it is taken, like the other observers. */
+export interface SourceThrottleObserver {
+  countSourceThrottled(type: SourceThrottleType): void;
+}
+
+/**
+ * What happened to one document the PII scan looked at ([ADR-0130](../../.ssot/ADR.md#adr-0130)): the closed set of
+ * `contextator_document_scans_total{outcome}` ([ADR-0105](../../.ssot/ADR.md#adr-0105)). `no_content` is a document
+ * whose text is not stored, `failed` one the scanner could not scan or could not write.
+ */
+export const DOCUMENT_SCAN_OUTCOMES = ['scanned', 'no_content', 'failed'] as const;
+export type DocumentScanOutcome = (typeof DOCUMENT_SCAN_OUTCOMES)[number];
+
+/**
+ * What the PII scanner reports. The labels are the two closed sets (`rule` from `PII_RULES`, `outcome` above) and
+ * no project, document or value goes with a count (ADR-0105). Optional wherever it is taken, like the other observers.
+ */
+export interface PiiScanObserver {
+  countDocumentScan(outcome: DocumentScanOutcome): void;
+  countDocumentFindings(rule: PiiRule, count: number): void;
+}
+
 /** Times one tool call, handler start to answer. */
 export interface McpToolObserver {
   observeToolDuration(tool: string, seconds: number): void;
@@ -303,6 +336,12 @@ export interface SourceFreshnessSample {
   neverSynced: number;
 }
 
+/** The `contextator_document_scans_total` and `contextator_document_findings_total` values. */
+export interface PiiScanSample {
+  scans: Record<DocumentScanOutcome, number>;
+  findings: Record<PiiRule, number>;
+}
+
 /** Everything one scrape reports, gathered by the route and rendered by the function below. */
 export interface MetricsSnapshot {
   version: string;
@@ -326,6 +365,10 @@ export interface MetricsSnapshot {
   evalRuns?: EvalRunSample;
   /** `report_gap` calls since start by outcome (ADR-0125). Optional like `mcpGuard`. */
   gapReports?: Record<GapReportOutcome, number>;
+  /** Throttling answers from a source's remote since start, by source type (ADR-0126). Optional like `mcpGuard`. */
+  sourceThrottled?: Record<SourceThrottleType, number>;
+  /** PII scan results since start (ADR-0130): documents by outcome and findings by rule. Optional like `mcpGuard`. */
+  piiScan?: PiiScanSample;
   /** Rendered after the gauges and counters, in the order given. Optional so a snapshot without any is still one. */
   histograms?: HistogramSnapshot[];
 }
@@ -338,7 +381,17 @@ export interface MetricsSnapshot {
  * reached for them would be a second place that knows how this application is wired.
  */
 export class MetricsRegistry
-  implements SearchCounter, SearchObserver, IndexerObserver, McpRequestCounter, McpToolObserver, McpGuardCounter, EvalRunObserver, GapReportObserver
+  implements
+    SearchCounter,
+    SearchObserver,
+    IndexerObserver,
+    McpRequestCounter,
+    McpToolObserver,
+    McpGuardCounter,
+    EvalRunObserver,
+    GapReportObserver,
+    SourceThrottleObserver,
+    PiiScanObserver
 {
   private readonly searches: Record<QueryActor, number> = { mcp: 0, dashboard: 0 };
   private readonly mcpRequestCounts = new Map<string, McpRequestSample>();
@@ -351,6 +404,9 @@ export class MetricsRegistry
   private evalRunErrors = 0;
   private evalRegressions = 0;
   private readonly gapReportCounts: Record<GapReportOutcome, number> = { accepted: 0, limited: 0, disabled: 0, failed: 0 };
+  private readonly sourceThrottledCounts: Record<SourceThrottleType, number> = { s3: 0, gdrive: 0 };
+  private readonly documentScanCounts: Record<DocumentScanOutcome, number> = { scanned: 0, no_content: 0, failed: 0 };
+  private readonly documentFindingCounts: Record<PiiRule, number> = { aws_access_key: 0, github_token: 0, private_key: 0, jwt: 0, tckn: 0, iban: 0 };
   private readonly histogramFamilies = new Map<string, Histogram>();
   /** Read once per search, at the moment it is observed; see `watchIndexing`. */
   private indexingNow: () => boolean = () => false;
@@ -500,6 +556,28 @@ export class MetricsRegistry
     this.gapReportCounts[outcome]++;
   }
 
+  countSourceThrottled(type: SourceThrottleType): void {
+    this.sourceThrottledCounts[type]++;
+  }
+
+  /** The throttling counters as they stand; copied, so a caller cannot move them. */
+  sourceThrottled(): Record<SourceThrottleType, number> {
+    return { ...this.sourceThrottledCounts };
+  }
+
+  countDocumentScan(outcome: DocumentScanOutcome): void {
+    this.documentScanCounts[outcome]++;
+  }
+
+  countDocumentFindings(rule: PiiRule, count: number): void {
+    this.documentFindingCounts[rule] += count;
+  }
+
+  /** The PII scan counters as they stand; copied, so a caller cannot move them. */
+  piiScan(): PiiScanSample {
+    return { scans: { ...this.documentScanCounts }, findings: { ...this.documentFindingCounts } };
+  }
+
   /** The `report_gap` counters as they stand; copied, so a caller cannot move them. */
   gapReports(): Record<GapReportOutcome, number> {
     return { ...this.gapReportCounts };
@@ -639,6 +717,37 @@ export function renderPrometheus(snapshot: MetricsSnapshot): string {
       'report_gap calls by outcome: accepted, limited (over MCP_REPORT_GAP_PER_HOUR), disabled (query log off for the project) or failed.',
       'counter',
       GAP_REPORT_OUTCOMES.map((outcome): [string, number] => [`{outcome="${outcome}"}`, snapshot.gapReports?.[outcome] ?? 0]),
+    );
+  }
+
+  // Throttling answers a source's remote gave (ADR-0126 decision 9), counted per answer whether or not a retry
+  // then succeeded. The label is the closed set of source types that report one and every value is stated from
+  // the start at 0, so a rate that has not happened yet is a flat line and not a missing series (ADR-0105).
+  if (snapshot.sourceThrottled) {
+    family(
+      'contextator_source_throttled_total',
+      'Throttling answers a source remote gave (S3 503 SlowDown, Drive 429 and rate-limit 403), by source type, retried or not.',
+      'counter',
+      SOURCE_THROTTLE_TYPES.map((type): [string, number] => [`{source_type="${type}"}`, snapshot.sourceThrottled?.[type] ?? 0]),
+    );
+  }
+
+  // The PII scan (ADR-0130). Two closed sets and no project, document or value: ADR-0105 allows none of those as a
+  // label, and where a finding is lives in the table the dashboard reads. `failed` is documents the scanner
+  // could not scan or write, which is the number worth looking at when the dashboard's pending count does not move.
+  if (snapshot.piiScan) {
+    const pii = snapshot.piiScan;
+    family(
+      'contextator_document_scans_total',
+      'Documents the PII scan has looked at since start, by outcome: scanned, no_content (text not stored) or failed.',
+      'counter',
+      DOCUMENT_SCAN_OUTCOMES.map((outcome): [string, number] => [`{outcome="${outcome}"}`, pii.scans[outcome]]),
+    );
+    family(
+      'contextator_document_findings_total',
+      'Findings the PII scan has recorded since start, by rule. A document that is rescanned counts again.',
+      'counter',
+      PII_RULES.map((rule): [string, number] => [`{rule="${rule}"}`, pii.findings[rule]]),
     );
   }
 

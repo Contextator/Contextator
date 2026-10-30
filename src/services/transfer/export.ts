@@ -13,14 +13,16 @@ import {
   indexRuns,
   mcpTokens,
   projectMembers,
+  reportedGaps,
   searchQueries,
   searchQueryHits,
   type DocumentSourceRow,
   type ProjectRow,
 } from '../../db/schema.js';
 import { sourceCurrentDir } from '../data-dir.js';
+import { countFindings } from '../document-findings.js';
 import { formatGoldenJsonl, listGoldenQuestions } from '../golden-questions.js';
-import { PROBE_TOKEN_KEY, type SourceType, withoutUrlCredentials } from '../sources.js';
+import { GDRIVE_SERVER_KEYS, GITHUB_SERVER_KEYS, PROBE_TOKEN_KEY, type SourceType, withoutUrlCredentials } from '../sources.js';
 import {
   DATA_PREFIX,
   DOCUMENTS_ENTRY,
@@ -128,6 +130,11 @@ export function exportedSource(row: DocumentSourceRow): Record<string, unknown> 
   const config = { ...row.config };
   delete config[PROBE_TOKEN_KEY];
   delete config.lastCommit;
+  // A Drive source's change-feed position belongs to the service account that took it, and the e-mail was read
+  // from a key that does not travel; the destination writes both when it has a key of its own (ADR-0127).
+  if (row.type === 'gdrive') for (const key of GDRIVE_SERVER_KEYS) delete config[key];
+  // A GitHub source's cursor says which issues this instance has already read; the destination has read none of them (ADR-0128).
+  if (row.type === 'github') for (const key of GITHUB_SERVER_KEYS) delete config[key];
   if (row.type === 'git' && typeof config.url === 'string') config.url = withoutUrlCredentials(config.url);
   return {
     type: row.type,
@@ -154,7 +161,7 @@ export function needsFor(row: DocumentSourceRow): SourceNeed[] {
 /** Counts of everything that stays behind, so that the manifest states the absence as a number. */
 async function excludedCounts(db: Db, projectId: string): Promise<Manifest['excluded']> {
   const one = async (value: Promise<Array<{ n: number }>>): Promise<number> => (await value)[0]?.n ?? 0;
-  const [queries, hits, tokens, runs, members] = await Promise.all([
+  const [queries, hits, gaps, findings, tokens, runs, members] = await Promise.all([
     one(db.select({ n: count() }).from(searchQueries).where(eq(searchQueries.projectId, projectId))),
     one(
       db
@@ -163,6 +170,8 @@ async function excludedCounts(db: Db, projectId: string): Promise<Manifest['excl
         .innerJoin(searchQueries, eq(searchQueryHits.queryId, searchQueries.id))
         .where(eq(searchQueries.projectId, projectId)),
     ),
+    one(db.select({ n: count() }).from(reportedGaps).where(eq(reportedGaps.projectId, projectId))),
+    countFindings(db, projectId),
     one(db.select({ n: count() }).from(mcpTokens).where(eq(mcpTokens.projectId, projectId))),
     one(db.select({ n: count() }).from(indexRuns).where(eq(indexRuns.projectId, projectId))),
     db
@@ -174,6 +183,8 @@ async function excludedCounts(db: Db, projectId: string): Promise<Manifest['excl
   return {
     searchQueries: queries,
     searchQueryHits: hits,
+    reportedGaps: gaps,
+    documentFindings: findings,
     mcpTokens: tokens,
     indexRuns: runs,
     projectMembers: {

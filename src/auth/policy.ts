@@ -50,6 +50,9 @@ export const satisfies = (have: ProjectAccess, need: ProjectAccess): boolean => 
 /** Routes that are not about one project: the instance role they need, or null for any account. */
 export function requiredRole(method: string, url: string): UserRole | null {
   if (url.startsWith('/api/users')) return 'admin';
+  // Which provider group grants which project ([ADR-0134](../../.ssot/ADR.md#adr-0134)). A mapping is an
+  // access decision about every person in a group, so it asks for the standing user management does.
+  if (url.startsWith('/api/oidc/')) return 'admin';
   // Reading the audit log ([ADR-0055](../../.ssot/ADR.md#adr-0055)). It is **not** a project route and
   // must not become one: the log records deleting a project, so its rows outlive the membership that
   // would otherwise decide, and there is nothing for a `member` to be a member of. What it holds is
@@ -63,6 +66,15 @@ export function requiredRole(method: string, url: string): UserRole | null {
   // ([ADR-0051](../../.ssot/ADR.md#adr-0051)). It also writes into DATA_DIR from a file somebody
   // uploaded, which is a second reason and not the deciding one.
   if (url === '/api/projects/import' && method === 'POST') return 'admin';
+  // Notion OAuth's two instance-level routes ([ADR-0129](../../.ssot/ADR.md#adr-0129)): whether the
+  // flow is offered, and the page Notion sends the browser back to. Neither is about a project the
+  // route names — the callback reads its project from the flow cookie and checks the `editor` role
+  // live — so the only rule the table can state is "an account", which `member` is the floor of. The
+  // handlers go further and require a **session** (`requireSession`): an API token or `ADMIN_TOKEN`
+  // is machine access, and this is a browser round trip. The project route that starts the flow,
+  // `POST /api/projects/:id/sources/notion/oauth`, needs no row: a `POST` under a project already asks
+  // for an `editor`.
+  if (url.startsWith('/api/sources/notion/oauth')) return 'member';
   return null;
 }
 
@@ -72,6 +84,11 @@ const PROJECT_ROUTE_OVERRIDES: ReadonlyArray<{ method: string; url: string; need
   // Whether this project's documents are readable by anything that can reach the URL is the same
   // class of decision as creating the project in the first place, which is already admin-only.
   { method: 'PATCH', url: '/api/projects/:id/mcp-auth', need: 'manager' },
+  // Which sources a static MCP token may read ([ADR-0133](../../.ssot/ADR.md#adr-0133)). **An `editor`'s, as minting is**,
+  // and stated here although the default below would say the same: widening a token's scope is the same act as
+  // minting one with that scope, so the two must not be able to drift apart, and the row is where a later
+  // change of one has to argue with the other.
+  { method: 'PATCH', url: '/api/projects/:id/mcp-tokens/:tokenId/sources', need: 'editor' },
   { method: 'GET', url: '/api/projects/:id/members', need: 'viewer' },
   { method: 'PUT', url: '/api/projects/:id/members/:userId', need: 'manager' },
   { method: 'DELETE', url: '/api/projects/:id/members/:userId', need: 'manager' },
@@ -112,6 +129,12 @@ const PROJECT_ROUTE_OVERRIDES: ReadonlyArray<{ method: string; url: string; need
   // see is that the entire corpus in one downloadable file is a different act from reading a page of
   // it. It is the `mcp-auth` class of decision: who may have this project's content, and where.
   { method: 'GET', url: '/api/projects/:id/export', need: 'manager' },
+  // Where the PII scan found secrets and personal numbers ([ADR-0130](../../.ssot/ADR.md#adr-0130) decision 6).
+  // **A `GET`, and deliberately an `editor`'s.** A viewer can read every document already, which is the argument the
+  // `GET` default makes — and what the default cannot see is that a list of where the credentials are is a different
+  // thing to hand to the widest audience, while the role that can act on it (correct or remove the source) is an
+  // editor. It is named in the coverage test's `EDITOR_READS` beside `MANAGER_READS`, so the next such read arrives argued.
+  { method: 'GET', url: '/api/projects/:id/findings', need: 'editor' },
 ];
 
 /**
@@ -235,6 +258,8 @@ const AUDIT_DETAIL: ReadonlyArray<{ url: string; field: string; values: readonly
   // A role granted or changed on a project, and an instance role granted to an account. Both are the
   // substance of the event rather than a detail of it.
   { url: '/api/projects/:id/members/:userId', field: 'role', values: ['viewer', 'editor'] },
+  // The role a provider group is mapped to; the group's own name is typed text and is not recorded.
+  { url: '/api/oidc/group-mappings', field: 'role', values: ['viewer', 'editor'] },
   { url: '/api/users', field: 'role', values: ['root', 'admin', 'member'] },
   { url: '/api/users/:id', field: 'role', values: ['root', 'admin', 'member'] },
   // Whether the person approved the connector or refused it. The whole substance of the event, and
@@ -264,6 +289,7 @@ const AUDIT_CREATED: ReadonlyArray<{ method: string; url: string; type: string; 
   { method: 'POST', url: '/api/projects/:id/mcp-tokens', type: 'tokenId', path: ['token', 'id'] },
   { method: 'POST', url: '/api/tokens', type: 'tokenId', path: ['token', 'id'] },
   { method: 'POST', url: '/api/users', type: 'userId', path: ['user', 'id'] },
+  { method: 'POST', url: '/api/oidc/group-mappings', type: 'mappingId', path: ['id'] },
   // The first account. `POST /api/setup` is the one request in this product that creates its own
   // actor, and the account it creates is both the target and the person the row names.
   { method: 'POST', url: '/api/setup', type: 'userId', path: ['user', 'id'] },
@@ -296,8 +322,11 @@ export const auditReadsResponse = (method: string, url: string): boolean => AUDI
  * `AUDIT_DETAIL` and its closed set of values; a value the handler computed itself (`req.auditDetail`) — a
  * count, the acting token's id; and a number read back from a row a CHECK constraint bounds
  * (`floorFrom` / `floorTo`). A number is never a value a caller sent.
+ *
+ * A list of strings is one more shape a handler may compute ([ADR-0133](../../.ssot/ADR.md#adr-0133)): the
+ * names of the sources a token was bound to, read back from `document_sources` and never from the request.
  */
-export type AuditDetail = Record<string, string | number | boolean>;
+export type AuditDetail = Record<string, string | number | boolean | readonly string[]>;
 
 /** What the policy layer decided to record about one request; `null` when the request is not an event. */
 export interface AuditSubject {

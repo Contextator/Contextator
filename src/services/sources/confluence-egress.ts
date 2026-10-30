@@ -14,8 +14,10 @@ import type { FetchLike } from './confluence-client.js';
  * A Confluence base URL or a web source's entry URL is typed by an editor and the server connects to
  * it, so without a bound it is a way to read the instance's loopback services, the cloud metadata
  * address or the internal network through a source's status and Test message. {@link egressFetch} is
- * the rule itself; {@link confluenceEgress} is it with Confluence's wording and `webEgress` with the
- * web source's, and each names its own allowlist (`CONFLUENCE_ALLOWED_HOSTS`, `WEB_ALLOWED_HOSTS`).
+ * the rule itself; {@link sourceEgress} is it for a host an operator names and an API answers on
+ * (`SOURCE_ALLOWED_HOSTS`, [ADR-0126](../../../.ssot/ADR.md#adr-0126)), {@link confluenceEgress} is that with
+ * Confluence's wording, and `webEgress` and `gitEgress` have their own allowlists (`WEB_ALLOWED_HOSTS`,
+ * `GIT_ALLOWED_HOSTS`).
  *
  * **The check runs on the address the socket is opened to.** Node's `lookup` option is the hook: the
  * connection asks it for the address, it resolves, judges every address it got, and hands back only
@@ -34,7 +36,8 @@ export type Resolver = (hostname: string) => Promise<Array<{ address: string; fa
 
 export interface EgressOptions {
   /**
-   * `CONFLUENCE_ALLOWED_HOSTS`, `WEB_ALLOWED_HOSTS` or `GIT_ALLOWED_HOSTS`: host names allowed to resolve to a **private**
+   * `SOURCE_ALLOWED_HOSTS` (with `CONFLUENCE_ALLOWED_HOSTS` for Confluence), `WEB_ALLOWED_HOSTS` or
+   * `GIT_ALLOWED_HOSTS`: host names allowed to resolve to a **private**
    * address. It never lifts loopback, link-local, unspecified, multicast or reserved.
    */
   allowedHosts: readonly string[];
@@ -58,7 +61,7 @@ export interface EgressOptions {
   label?: string;
   /**
    * The setting a private-address refusal points at, or `null` when there is none to point at.
-   * `CONFLUENCE_ALLOWED_HOSTS` through {@link confluenceEgress}.
+   * `SOURCE_ALLOWED_HOSTS` through {@link sourceEgress} and {@link confluenceEgress}.
    */
   allowListName?: string | null;
   /**
@@ -75,6 +78,14 @@ export interface EgressOptions {
    * ([ADR-0107](../../../.ssot/ADR.md#adr-0107)).
    */
   methods?: readonly ('GET' | 'POST')[];
+  /**
+   * The only host names this egress connects to, on the first request and on every redirect hop; anything
+   * else is refused before a socket is opened ([ADR-0127](../../../.ssot/ADR.md#adr-0127) decision 4).
+   * Unset is no pin. For a source whose host is fixed by the product, not typed by an editor (Google Drive):
+   * a key file or a redirect cannot lead a credential anywhere but the listed hosts. The address checks
+   * still apply to a pinned host.
+   */
+  pinnedHosts?: readonly string[];
 }
 
 /**
@@ -97,7 +108,7 @@ export type EgressFetch = (
 export class EgressRefusedError extends Error {
   constructor(
     message: string,
-    readonly rule: RefusedRule | 'scheme',
+    readonly rule: RefusedRule | 'scheme' | 'pinned',
   ) {
     super(message);
     this.name = 'EgressRefusedError';
@@ -222,11 +233,39 @@ function refusal(host: string, rule: RefusedRule, literal: boolean, redirected: 
 const systemResolver: Resolver = (hostname) => dns.promises.lookup(hostname, { all: true, verbatim: true });
 
 /**
- * A `fetch` for Confluence that connects only to addresses ADR-0088 allows: {@link egressFetch} with
- * Confluence's name, its allowlist (`CONFLUENCE_ALLOWED_HOSTS`) and its "base URL" wording.
+ * The hosts a Confluence source may reach on a private address: `SOURCE_ALLOWED_HOSTS` and the deprecated
+ * `CONFLUENCE_ALLOWED_HOSTS`, joined ([ADR-0126](../../../.ssot/ADR.md#adr-0126) decision 7). The old list
+ * admits its hosts for Confluence only, which is why this union is taken here and not in the config:
+ * an `s3` or `github` source reads {@link SourceHostsConfig.SOURCE_ALLOWED_HOSTS} alone.
+ */
+export function confluenceAllowedHosts(config: SourceHostsConfig): string[] {
+  return [...(config.SOURCE_ALLOWED_HOSTS ?? []), ...(config.CONFLUENCE_ALLOWED_HOSTS ?? [])];
+}
+
+/** The slice of `Config` that names egress hosts; every key is optional so a context built for another driver need not carry it. */
+export interface SourceHostsConfig {
+  SOURCE_ALLOWED_HOSTS?: readonly string[];
+  CONFLUENCE_ALLOWED_HOSTS?: readonly string[];
+}
+
+/**
+ * A `fetch` for a source whose host an operator names and which calls an API (`s3`, the GitHub
+ * Enterprise Server host of `github`): {@link egressFetch} with the shared allowlist,
+ * `SOURCE_ALLOWED_HOSTS` ([ADR-0126](../../../.ssot/ADR.md#adr-0126) decision 7). A refusal names it.
+ * `label` and `subject` default to wording that fits any such source; a driver passes its own
+ * (`label: 'The S3 endpoint'`, `subject: 'the endpoint'`) so that an editor reads what was refused.
+ */
+export function sourceEgress(options: EgressOptions): EgressFetch {
+  return egressFetch({ label: 'the host', allowListName: 'SOURCE_ALLOWED_HOSTS', subject: 'the URL', ...options });
+}
+
+/**
+ * A `fetch` for Confluence that connects only to addresses ADR-0088 allows: {@link sourceEgress} with
+ * Confluence's name and its "base URL" wording. A refusal names `SOURCE_ALLOWED_HOSTS`; pass
+ * {@link confluenceAllowedHosts} as `allowedHosts` so the deprecated list keeps working.
  */
 export function confluenceEgress(options: EgressOptions): EgressFetch {
-  return egressFetch({ label: 'Confluence', allowListName: 'CONFLUENCE_ALLOWED_HOSTS', subject: 'the base URL', ...options });
+  return sourceEgress({ label: 'Confluence', subject: 'the base URL', ...options });
 }
 
 /**
@@ -270,7 +309,7 @@ export function egressFetch(options: EgressOptions): EgressFetch {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const label = options.label ?? 'Confluence';
   const subject = options.subject ?? 'the base URL';
-  const allowListName = options.allowListName === undefined ? 'CONFLUENCE_ALLOWED_HOSTS' : options.allowListName;
+  const allowListName = options.allowListName === undefined ? 'SOURCE_ALLOWED_HOSTS' : options.allowListName;
   // The agent's `timeout` is what a socket gets while it waits in the pool; a request in flight
   // runs on its own `timeout` below, which Node sets on the socket when it hands it to the request.
   const pool = { keepAlive: true, timeout: options.idleMs ?? DEFAULT_IDLE_MS };
@@ -282,6 +321,7 @@ export function egressFetch(options: EgressOptions): EgressFetch {
   };
 
   const methods = new Set<string>(options.methods ?? ['GET']);
+  const pinned = options.pinnedHosts ? new Set(options.pinnedHosts.map(normalizeHost)) : null;
 
   const send = (
     url: URL,
@@ -300,6 +340,15 @@ export function egressFetch(options: EgressOptions): EgressFetch {
       return Promise.reject(new EgressRefusedError(`refused: ${where} a \`${url.protocol}\` address; only https is allowed`, 'scheme'));
     }
     const host = normalizeHost(url.hostname);
+    if (pinned && !pinned.has(host)) {
+      const where = redirected ? 'the server redirected to' : 'the request goes to';
+      return Promise.reject(
+        new EgressRefusedError(
+          `refused: ${where} \`${host}\`, which is not one of the hosts ${label} is limited to (${[...pinned].join(', ')})`,
+          'pinned',
+        ),
+      );
+    }
     if (net.isIP(host)) {
       const rule = judge(host, host);
       if (rule) return Promise.reject(new EgressRefusedError(refusal(host, rule, true, redirected, allowListName), rule));

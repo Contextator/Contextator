@@ -16,7 +16,7 @@ import { GoldenRowSchema } from '../golden-row.js';
 import { allowedExtensionsFor, FLAVORS, type Flavor } from '../flavors.js';
 import { createProject } from '../projects.js';
 import { normalizeSourceUrl, parseSourceDate } from '../source-url.js';
-import { SOURCE_TYPES, type SourceType, parseSourceConfig, sourceVersion } from '../sources.js';
+import { GDRIVE_SERVER_KEYS, GITHUB_SERVER_KEYS, SOURCE_TYPES, type SourceType, parseSourceConfig, sourceVersion } from '../sources.js';
 import { textSearchConfigFor } from '../text-search.js';
 import { recountProject, replaceDocument } from '../vector-store.js';
 import {
@@ -373,6 +373,24 @@ async function readManifest(file: string): Promise<Manifest> {
   return result.data;
 }
 
+/**
+ * The settings an imported source is created with: parsed like any client's, minus the keys the server owns.
+ * The server's own keys are never an archive's to set (ADR-0127 decision 2): a Drive source's e-mail names whom
+ * to share folders with, and its cursor is a position in a feed this instance has not read.
+ * Exported for `test/gdrive-driver.test.ts`.
+ */
+export function importedSourceConfig(source: Pick<z.infer<typeof ImportedSource>, 'type' | 'config'>): Record<string, unknown> {
+  let config: Record<string, unknown>;
+  try {
+    config = parseSourceConfig(source.type, source.config) as Record<string, unknown>;
+  } catch (err) {
+    throw new ImportRefusedError('bad_source', `${SOURCES_ENTRY}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (source.type === 'gdrive') for (const key of GDRIVE_SERVER_KEYS) delete config[key];
+  if (source.type === 'github') for (const key of GITHUB_SERVER_KEYS) delete config[key];
+  return config;
+}
+
 /** Exported for `test/project-transfer.test.ts`; the import itself is the only caller. */
 export async function readSources(file: string): Promise<Array<z.infer<typeof ImportedSource>>> {
   const out: Array<z.infer<typeof ImportedSource>> = [];
@@ -451,12 +469,7 @@ async function insertImportedSource(
 ): Promise<{ id: string; type: string; config: Record<string, unknown> }> {
   const flavor = source.flavor as Flavor;
   if (!FLAVORS.includes(flavor)) throw new ImportRefusedError('bad_source', `${SOURCES_ENTRY}: unknown flavor "${source.flavor}".`);
-  let config: Record<string, unknown>;
-  try {
-    config = parseSourceConfig(source.type, source.config) as Record<string, unknown>;
-  } catch (err) {
-    throw new ImportRefusedError('bad_source', `${SOURCES_ENTRY}: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  const config = importedSourceConfig(source);
   const [row] = await db
     .insert(documentSources)
     .values({
@@ -626,7 +639,7 @@ export async function writeDocuments(
  * A missing file is an empty iteration — an export with no sources has an empty `sources.ndjson`, and
  * an export of a project that has never been indexed an empty `documents.ndjson`.
  */
-export async function* lines(file: string): AsyncGenerator<{ text: string; lineNumber: number }> {
+export async function* lines(file: string, maxLineBytes: number = MAX_LINE_BYTES): AsyncGenerator<{ text: string; lineNumber: number }> {
   if (!(await fs.stat(file).catch(() => null))) return;
 
   let pending = '';
@@ -643,8 +656,10 @@ export async function* lines(file: string): AsyncGenerator<{ text: string; lineN
         if (line.trim() !== '') yield { text: line, lineNumber };
         newline = pending.indexOf('\n');
       }
-      if (pending.length > MAX_LINE_BYTES) {
-        throw new ImportRefusedError('line_too_long', `${path.basename(file)} has a line longer than ${MAX_LINE_BYTES} bytes.`);
+      if (pending.length > maxLineBytes) {
+        // `pending` is the line being assembled, which is the one after the last newline seen, so the
+        // physical number an editor would show for it is `lineNumber + 1` (as for the unterminated last line below).
+        throw new ImportRefusedError('line_too_long', `${path.basename(file)}:${lineNumber + 1}: has a line longer than ${maxLineBytes} bytes.`);
       }
     }
   } finally {

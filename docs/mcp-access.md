@@ -165,6 +165,49 @@ The address checked is the one the server believes the client has, which depends
 A request from an address that the list does not name, or from a peer the server does not trust that
 writes `X-Forwarded-For` anyway, is answered `403` as above: the header of an untrusted peer is never read.
 
+## Binding a static token to some of a project's sources
+
+A project can mount several sources: a handbook, a Confluence space, a bucket, a repository's issues. A static `ctxm_…`
+token can be bound to a list of them, so a CI job or an agent that needs one source is not handed all of them. Pick
+**Only these sources** when you create the token, or send `sources` (source **names**) to
+`POST /api/projects/:id/mcp-tokens`; change it later with
+`PATCH /api/projects/:id/mcp-tokens/:tokenId/sources` and `{ "sources": ["handbook"] }`, or remove it with
+`{ "sources": null }`. The change applies to the token's next request, because a token is resolved on every request.
+Minting and changing it is an `editor`'s, as minting a token is, and both are audited with the source names in the
+event's `detail`.
+
+**A source outside the scope does not exist for the token.** Nothing of it is found: not a path, a title or a passage
+in `search_docs`; not a file in `read_document` (by its path or by a path suffix, and a match outside the scope does not
+make a suffix ambiguous); not a document, a source, a version or a total in `list_topics`; not an added, changed or
+**removed** row in `whats_new`; not an entry in `resources/list` or a body in `resources/read`. The filter is in the
+SQL, ahead of ranking, paging and counting, so a page, a cursor and a total are the scope's own. A source name outside
+the scope is answered as an unknown source, and the answer lists only the names inside it. A path or a resource outside
+it is the answer for one that does not exist. The 404 and 401 rules of the endpoint are unchanged.
+
+| Surface | Scope applied |
+|---------|:-------------:|
+| `search_docs`, `read_document`, `list_topics`, `whats_new`, `resources/list`, `resources/read` | yes |
+| `resources/templates/list`, prompts, `report_gap`, `initialize`, `tools/list` | no: none reads a document, a path or a source name |
+| Dashboard search, the project export, the query-log panel | not reachable with a `ctxm_` token (`401`) |
+
+What to know before relying on it:
+
+- **Only a static token carries a scope.** An OAuth access credential is the account's membership (ADR-0054), an API token
+  never reaches `/mcp/*`, and a project in `account` mode refuses static tokens. Narrowing a person to a source is a later
+  feature, not this one.
+- **A scope that holds nothing reads nothing, never everything.** If every source a token was bound to is deleted, the
+  token is not widened to the project: its calls answer that it is limited to sources that no longer exist, and the
+  token list marks it **Scope empty**. A source deleted and re-created under the same name has a new identity and is in
+  no scope, and a token scoped to the new one does not see the deleted one's `removed` rows in `whats_new`.
+- **The network allowlist reads empty as "no restriction"; the scope does not.** `[]` is refused (`400 empty_scope`) when
+  you create or change a scope, and `null` or an absent `sources` is the way to say "the whole project".
+- **On an `open` project a scope is not a boundary.** The token's answers are filtered and are cached `private`, but a
+  request with no token at all reads the whole project.
+- **Going back to a release before 0.6.0 widens every scoped token to its project**, because the older code does not read
+  the scope. Revoke the scoped tokens first.
+- A scoped search always runs the filtered statement. A narrow scope inside a very large project can lose recall there, as
+  the `source` parameter already can.
+
 ## Account required, and connecting a browser-based client
 
 **account required** is the mode where this dashboard's memberships reach `/mcp/*`. A client has to act as somebody,

@@ -18,6 +18,7 @@ import {
   listDocumentChanges,
   parseSince,
   readTrackingSince,
+  whatsNewTruncationNote,
 } from '../services/document-changes.js';
 import { chunksWithinBudget, joinChunks, truncateToTokens } from '../services/document-read.js';
 import { normalizeRelativePath } from '../services/fs-scan.js';
@@ -36,6 +37,7 @@ import { formatSourceDate, normalizeSourceUrl, sourceFieldsOf, sourceLine } from
 import { SOURCE_VERSION_MAX_LENGTH, listSources } from '../services/sources.js';
 import { namedLanguageOf } from '../services/text-search.js';
 import {
+  countDocumentsInScope,
   getDocument,
   getDocumentBySuffix,
   getDocumentChunks,
@@ -250,7 +252,7 @@ export function decodeCursor(cursor: string): string | null {
 }
 
 /**
- * What the three tools actually reach for, named rather than taken as the whole `AppContext`. The
+ * What the tools actually reach for, named rather than taken as the whole `AppContext`. The
  * server hands them the composition root; a test hands them four fields and a stub provider, which is
  * the difference between a tool contract that can be exercised and one that can only be deployed.
  */
@@ -425,6 +427,28 @@ export function tokenIdOf(auth: AuthInfo | undefined): string | null {
 }
 
 /**
+ * The source scope the router put in `AuthInfo.extra` ([ADR-0133](../../.ssot/ADR.md#adr-0133)): the ids a
+ * scoped static token may read, or `null` for a request that is not scoped.
+ *
+ * **It fails closed.** No `authInfo`, or one with no `sourceScope` key, is `null` — the in-process transport
+ * and an `open` project's anonymous request, which the router never marks. A key that is present and is not
+ * a list of strings is a scope this code cannot read, and is answered as a scope that holds nothing rather
+ * than as no scope. `[]` stays `[]`: an emptied scope reads nothing, and nothing here turns it into `null`.
+ */
+export function sourceScopeOf(auth: AuthInfo | undefined): string[] | null {
+  const extra = auth?.extra;
+  if (!extra || !('sourceScope' in extra) || extra.sourceScope === null || extra.sourceScope === undefined) return null;
+  const scope = extra.sourceScope;
+  return Array.isArray(scope) && scope.every((id) => typeof id === 'string') ? (scope as string[]) : [];
+}
+
+/**
+ * What a token whose scope holds nothing is told, and all it is told: its own state, not what exists beyond
+ * it ([ADR-0133](../../.ssot/ADR.md#adr-0133) decision 5).
+ */
+export const EMPTY_SCOPE_MESSAGE = "This token is limited to sources that no longer exist; ask the project's operator for a new token.";
+
+/**
  * The text an unknown tool's `isError` result carries in the legacy era: what SDK 1.x put there, an
  * `McpError`'s message, which prefixes the JSON-RPC code.
  */
@@ -494,6 +518,7 @@ export function registerTools(
   project: ProjectRow,
   mcpTokenId: string | null = null,
   era: McpEra = 'legacy',
+  fallbackScope: string[] | null = null,
 ): void {
   const { db, embeddings, config, log } = ctx;
   const structuredOutput = structuredOutputFor(era, config);
@@ -504,6 +529,20 @@ export function registerTools(
   const queryLogFor = (call: ServerContext) => {
     const auth = call.http?.authInfo;
     return ctx.queryLog?.for('mcp', auth ? tokenIdOf(auth) : mcpTokenId);
+  };
+  // The source scope of **this call's** credential, read as the token id is (ADR-0099, ADR-0133): a legacy
+  // session can change tokens, and the scope that applies is the one the request in hand presented.
+  // `fallbackScope` is for a call with no HTTP request behind it, as `mcpTokenId` is.
+  const scopeFor = (call: ServerContext): string[] | null => {
+    const auth = call.http?.authInfo;
+    return auth ? sourceScopeOf(auth) : fallbackScope;
+  };
+  // An emptied scope is answered once, before anything is read, and leaves a line for the operator who is
+  // looking for a token that has stopped working.
+  const emptyScope = (call: ServerContext, tool: string): ToolResult => {
+    const auth = call.http?.authInfo;
+    log.warn({ tool, project: project.name, tokenId: auth ? tokenIdOf(auth) : mcpTokenId }, 'mcp token with an empty source scope was used');
+    return fail(EMPTY_SCOPE_MESSAGE);
   };
   const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
   // Every name passes through here on its way to `registerTool`, so the legacy wrapper's notion of a
@@ -545,6 +584,7 @@ export function registerTools(
       annotations: readOnly,
     },
     timed('search_docs', async ({ query, limit, source, path_prefix, version }, call) => {
+      const scope = scopeFor(call);
       // Every structured answer starts from this: no excerpts, nothing dropped, nothing cut.
       // `guidance` is the text answer's own sentence for every status but `results`, whose guidance is
       // the header and the truncation note `formatHits` wrote.
@@ -565,6 +605,7 @@ export function registerTools(
         // Counted before the search rather than after it, so a search that threw is still a search
         // somebody asked for ([ADR-0055](../../.ssot/ADR.md#adr-0055)).
         ctx.metrics?.countSearch('mcp');
+        if (scope !== null && scope.length === 0) return emptyScope(call, 'search_docs');
         // The guards, the query embedding and the top-k query are services/search.ts; what is left
         // here is the wording, which is prompt-visible and belongs to the tool.
         const outcome = await searchProject(
@@ -577,7 +618,7 @@ export function registerTools(
             queryLog: queryLogFor(call),
             metrics: ctx.metrics,
           },
-          { projectId: project.id, query, limit, source, pathPrefix: path_prefix, version },
+          { projectId: project.id, query, limit, source, pathPrefix: path_prefix, version, sourceScope: scope },
         );
         if (outcome.status === 'project_gone') return fail(`Project "${project.name}" no longer exists.`);
         if (outcome.status === 'unknown_source') {
@@ -671,8 +712,10 @@ export function registerTools(
       ...(structuredOutput ? { outputSchema: listTopicsOutput } : {}),
       annotations: readOnly,
     },
-    timed('list_topics', async ({ cursor, limit }) => {
+    timed('list_topics', async ({ cursor, limit }, call) => {
+      const scope = scopeFor(call);
       try {
+        if (scope !== null && scope.length === 0) return emptyScope(call, 'list_topics');
         // Re-read for the live generation, for `searchProject`'s reason: a session outlives a
         // re-index, and the row bound to it at connect time can name a generation that has since been
         // superseded — which would list the documents of an index nobody is being served (ADR-0039).
@@ -686,13 +729,18 @@ export function registerTools(
 
         // One more than the page, so "is there a next page" is answered by the same query rather than
         // by a second `count(*)` over a table the first query has already walked.
-        const rows = await listDocumentsForProject(db, project.id, live.liveGeneration, { limit: limit + 1, after });
+        const rows = await listDocumentsForProject(db, project.id, live.liveGeneration, { limit: limit + 1, after, sourceIds: scope });
+        // The header's totals are the scope's own when there is one: the project's would say how much lies outside it (ADR-0133).
+        const totals =
+          scope === null
+            ? { documentCount: live.documentCount, chunkCount: live.chunkCount }
+            : await countDocumentsInScope(db, project.id, live.liveGeneration, scope);
         const hasMore = rows.length > limit;
         const docs = rows.slice(0, limit);
         const structured: ListTopicsOutput = {
           project: project.name,
-          documentCount: live.documentCount,
-          chunkCount: live.chunkCount,
+          documentCount: totals.documentCount,
+          chunkCount: totals.chunkCount,
           after: after ?? null,
           documents: docs.map((doc) => ({ path: doc.relativePath, title: doc.title, chunkCount: doc.chunkCount })),
           nextCursor: hasMore ? encodeCursor(docs[docs.length - 1].relativePath) : null,
@@ -716,11 +764,11 @@ export function registerTools(
           groups.set(dir, list);
         }
 
-        const lines: string[] = [`Project "${project.name}": ${live.documentCount} documents, ${live.chunkCount} chunks`];
+        const lines: string[] = [`Project "${project.name}": ${totals.documentCount} documents, ${totals.chunkCount} chunks`];
         if (after === undefined) {
           // Only on the first page. The source list describes the project and not the page, and
           // repeating it on every continuation is context spent to say the same thing again.
-          const sources = await listSources(db, project.id);
+          const sources = await listSources(db, project.id, scope);
           structured.sources = sources.map((s) => ({
             name: s.name,
             type: s.type,
@@ -746,7 +794,7 @@ export function registerTools(
           // a call spent on discovery — and this is the answer to "which is the latest" that the
           // product is willing to give: the list, alphabetical and in no chronological order at all,
           // for the agent to choose from.
-          const versions = await listDocumentVersions(db, project.id, live.liveGeneration);
+          const versions = await listDocumentVersions(db, project.id, live.liveGeneration, scope);
           structured.versions = versions;
           if (versions.length > 0) {
             const line = `Versions (pass one to search_docs as version): ${versions.join(', ')}. Omit it to search all of them.`;
@@ -793,8 +841,10 @@ export function registerTools(
       ...(structuredOutput ? { outputSchema: readDocumentOutput } : {}),
       annotations: readOnly,
     },
-    timed('read_document', async ({ path: requested, heading, from, to, max_tokens }) => {
+    timed('read_document', async ({ path: requested, heading, from, to, max_tokens }, call) => {
+      const scope = scopeFor(call);
       try {
+        if (scope !== null && scope.length === 0) return emptyScope(call, 'read_document');
         const relativePath = normalizeRelativePath(requested);
         if (!relativePath) return fail(`Invalid path "${requested}".`);
         if (from !== undefined && to !== undefined && to < from) return fail(`"to" (${to}) is before "from" (${from}).`);
@@ -808,7 +858,8 @@ export function registerTools(
         // document nor makes the suffix fallback ambiguous against its own copy of it (ADR-0039).
         const generation = live.liveGeneration;
         const doc =
-          (await getDocument(db, project.id, generation, relativePath)) ?? (await getDocumentBySuffix(db, project.id, generation, relativePath));
+          (await getDocument(db, project.id, generation, relativePath, scope)) ??
+          (await getDocumentBySuffix(db, project.id, generation, relativePath, scope));
         if (!doc) return fail(`Unknown document "${relativePath}". Use list_topics or the file paths returned by search_docs.`);
 
         const count = (text: string): number => embeddings.countTokens(text);
@@ -840,8 +891,10 @@ export function registerTools(
       ...(structuredOutput ? { outputSchema: whatsNewOutput } : {}),
       annotations: readOnly,
     },
-    timed('whats_new', async ({ since, source, version, limit }) => {
+    timed('whats_new', async ({ since, source, version, limit }, call) => {
+      const scope = scopeFor(call);
       try {
+        if (scope !== null && scope.length === 0) return emptyScope(call, 'whats_new');
         const sinceAt = parseSince(since);
         if (sinceAt === null) {
           return fail(`"${since}" is not an ISO 8601 date or date-time. Use a form such as "2026-10-01" or "2026-10-01T09:30:00Z".`);
@@ -864,7 +917,7 @@ export function registerTools(
         // exactly what is being asked about; it is a note, so that a misspelt name does not read as "nothing changed".
         let note: string | undefined;
         if (source !== undefined) {
-          const names = (await listSources(db, project.id)).map((s) => s.name);
+          const names = (await listSources(db, project.id, scope)).map((s) => s.name);
           if (!names.includes(source)) {
             note =
               `Project "${project.name}" has no source named "${source}" now${names.length > 0 ? ` (its sources are: ${names.join(', ')})` : ''}; ` +
@@ -878,6 +931,7 @@ export function registerTools(
           since: sinceAt,
           source,
           version,
+          sourceScope: scope,
           limit,
         });
 
@@ -888,9 +942,7 @@ export function registerTools(
           );
         }
         if (truncated) {
-          guidance.push(
-            `[…truncated: the ${changes.length} newest changes are shown. Ask again with a later since, or with a larger limit (at most ${WHATS_NEW_MAX_LIMIT}), to see the rest.]`,
-          );
+          guidance.push(whatsNewTruncationNote(changes.length));
         }
         if (note) guidance.push(note);
 

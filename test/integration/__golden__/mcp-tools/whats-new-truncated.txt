@@ -3,7 +3,7 @@
     "content": [
       {
         "type": "text",
-        "text": "Project \"changes-project\": 2 changes since 2026-10-01T00:00:00.000Z, newest first.\nhistory_starts_at: 2026-09-01T00:00:00.000Z (complete)\n\n• modified — docs/changelog.md — Changelog (2026-10-24T07:30:00.000Z) [version v2]\n• removed — docs/retired.md — Retired runbook (2026-10-23T09:00:00.000Z)\n\n[…truncated: the 2 newest changes are shown. Ask again with a later since, or with a larger limit (at most 200), to see the rest.]"
+        "text": "Project \"changes-project\": 2 changes since 2026-10-01T00:00:00.000Z, newest first.\nhistory_starts_at: 2026-09-01T00:00:00.000Z (complete)\n\n• modified — docs/changelog.md — Changelog (2026-10-24T07:30:00.000Z) [version v2]\n• removed — docs/retired.md — Retired runbook (2026-10-23T09:00:00.000Z)\n\n[…truncated: the 2 newest changes are shown. Ask again with a larger limit (at most 200), to see the rest.]"
       }
     ]
   },

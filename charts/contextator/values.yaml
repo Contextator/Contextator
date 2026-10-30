@@ -117,19 +117,31 @@ config:
   # "1"/"true" (trust every hop's X-Forwarded-For) is refused by the app from 0.5.0 and by this chart's
   # values schema from chart 2.0.0 (ADR-0122): `helm install`/`upgrade` fails on it before anything is rendered.
   trustProxy: ""
-  # CONFLUENCE_ALLOWED_HOSTS (ADR-0088): host names — not URLs — a Confluence source may reach on a
-  # private address (10/8, 172.16/12, 192.168/16, fc00::/7). Set it when Confluence Data Center is
-  # on the internal network. Loopback, link-local (169.254.169.254), unspecified and multicast
-  # addresses stay refused whatever is listed. Empty leaves the variable unset.
-  confluenceAllowedHosts: []
+  # OIDC_GROUPS_CLAIM (ADR-0134): the top-level ID-token claim that lists a person's groups; setting it turns
+  # on mapping provider groups to project memberships (`/api/oidc/group-mappings`). It needs OIDC_ISSUER_URL,
+  # which still goes through `env` below, and a provider that needs a scope to emit the claim gets it
+  # through OIDC_SCOPES. Empty leaves the variable unset and sign-in unchanged.
+  oidcGroupsClaim: ""
+  # SOURCE_ALLOWED_HOSTS (ADR-0126, amending ADR-0088): host names — not URLs — that sources whose host an
+  # operator names and which call an API (Confluence, S3, the GitHub Enterprise Server host of a GitHub
+  # source) may reach on a private address (10/8, 172.16/12, 192.168/16, fc00::/7). Set it when Confluence
+  # Data Center or an S3 gateway is on the internal network. Loopback, link-local (169.254.169.254),
+  # unspecified and multicast addresses stay refused whatever is listed. It does not admit a host for a
+  # web or git source (ADR-0107): those keep their own lists below. Empty leaves the variable unset.
+  sourceAllowedHosts: []
   #   - wiki.corp.example
+  #   - minio.corp.example
+  # DEPRECATED (ADR-0126): CONFLUENCE_ALLOWED_HOSTS. Still admits its hosts for Confluence sources only, and the
+  # application logs one deprecation warning at startup while it is non-empty. Move its hosts to
+  # `sourceAllowedHosts`. Removed no earlier than application 1.0.0. Empty leaves the variable unset.
+  confluenceAllowedHosts: []
   # WEB_ALLOWED_HOSTS (ADR-0107): the same for a web source (pages, robots.txt, sitemap, redirects).
-  # Independent of the Confluence list. Loopback, link-local and the reserved 240.0.0.0/4 range stay
+  # Independent of the lists above. Loopback, link-local and the reserved 240.0.0.0/4 range stay
   # refused whatever is listed. Empty leaves the variable unset.
   webAllowedHosts: []
   #   - docs.corp.example
   # GIT_ALLOWED_HOSTS (ADR-0107): the same for a git source (ref advertisement, pack requests,
-  # redirects). Independent of the other two lists. Loopback, link-local and the reserved 240.0.0.0/4
+  # redirects). Independent of the other lists. Loopback, link-local and the reserved 240.0.0.0/4
   # range stay refused whatever is listed. Empty leaves the variable unset.
   gitAllowedHosts: []
   #   - git.corp.example
@@ -149,6 +161,14 @@ config:
   projectMaxDocuments: null
   projectMaxChunks: null
   projectMaxUploadBytes: null
+  # S3_MAX_OBJECTS / GDRIVE_MAX_FILES / GITHUB_MAX_ISSUES / GITHUB_MAX_DISCUSSIONS (ADR-0126, ADR-0127,
+  # ADR-0128): the most objects, files, issues and Discussions one source of that type reads in a run;
+  # the rest is not indexed. Integers from 1 to 100000. Null leaves a variable
+  # unset, so the application default of 5000 applies.
+  s3MaxObjects: null
+  gdriveMaxFiles: null
+  githubMaxIssues: null
+  githubMaxDiscussions: null
   # MCP_STRUCTURED_OUTPUT: true makes every MCP tool also return its answer as structured JSON
   # (`structuredContent`) beside the unchanged text answer. Off by default: Claude Code hands its
   # model the structured part alone when both are present, so the guidance each answer carries

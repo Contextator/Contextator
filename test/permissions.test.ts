@@ -185,6 +185,13 @@ const CASES: Array<{ method: string; url: string; actor: Principal; membership: 
   { method: 'GET', url: '/api/projects/:id/export', actor: as('admin'), membership: null, allowed: true },
   { method: 'GET', url: '/api/projects/:id/export', actor: as('root'), membership: null, allowed: true },
   { method: 'GET', url: '/api/projects/:id/export', actor: token, membership: null, allowed: true },
+  // The PII findings ([ADR-0130](../.ssot/ADR.md#adr-0130)): a `GET` that is an `editor`'s. The viewer row is the one that
+  // matters, for the reason the export's are: the default would have said `viewer`.
+  { method: 'GET', url: '/api/projects/:id/findings', actor: as('member'), membership: 'viewer', allowed: false },
+  { method: 'GET', url: '/api/projects/:id/findings', actor: as('member'), membership: 'editor', allowed: true },
+  { method: 'GET', url: '/api/projects/:id/findings', actor: as('member'), membership: null, allowed: false },
+  { method: 'GET', url: '/api/projects/:id/findings', actor: as('admin'), membership: null, allowed: true },
+  { method: 'GET', url: '/api/projects/:id/findings', actor: token, membership: null, allowed: true },
   // The import has no project to be a member of, so it is an *instance* rule: the same `admin` that
   // creating a project has needed since ADR-0028, because that is what an import does.
   { method: 'POST', url: '/api/projects/import', actor: as('member'), membership: null, allowed: false },

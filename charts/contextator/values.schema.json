@@ -339,6 +339,8 @@
       "required": [
         "publicBaseUrl",
         "trustProxy",
+        "oidcGroupsClaim",
+        "sourceAllowedHosts",
         "confluenceAllowedHosts",
         "webAllowedHosts",
         "gitAllowedHosts",
@@ -356,8 +358,31 @@
             "pattern": "^[\\s\\x0b]*([1]|[Tt][Rr][Uu][Ee])[\\s\\x0b]*$"
           }
         },
+        "oidcGroupsClaim": {
+          "description": "OIDC_GROUPS_CLAIM (ADR-0134): the top-level ID-token claim that lists a person's groups; setting it turns on mapping provider groups to project memberships. Mirrors the application's startup check (src/config.ts): 1-128 characters of letters, digits and _ : . - /. The application also needs OIDC_ISSUER_URL (set through `env`). Empty leaves it unset.",
+          "type": "string",
+          "pattern": "^([A-Za-z0-9_:.\\-/]{1,128})?$"
+        },
+        "sourceAllowedHosts": {
+          "description": "SOURCE_ALLOWED_HOSTS: host names or IP addresses (not URLs: no scheme, port or path) that a Confluence, S3 or GitHub Enterprise Server source may reach on a private address (ADR-0126, amending ADR-0088). It does not admit a host for a web or git source (ADR-0107). Mirrors the application's startup check (src/config.ts): a DNS-style name (letters, digits, '_' and inner '-', optional trailing dot) or an IP address, IPv6 optionally in brackets. Empty leaves it unset.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "anyOf": [
+              {
+                "description": "A host name or an IPv4 address, e.g. wiki.corp.example or 10.0.4.12.",
+                "pattern": "^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?(\\.[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?)*\\.?$"
+              },
+              {
+                "description": "An IPv6 address (at least two colons), bare or in brackets, e.g. fd00::12 or [fd00::12]. A port after the brackets, or an IPv4 address with a port, is rejected.",
+                "pattern": "^(\\[[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*\\]|[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*)$"
+              }
+            ]
+          }
+        },
         "confluenceAllowedHosts": {
-          "description": "CONFLUENCE_ALLOWED_HOSTS: host names or IP addresses (not URLs: no scheme, port or path) a Confluence source may reach on a private address (ADR-0088). Mirrors the application's startup check (src/config.ts): a DNS-style name (letters, digits, '_' and inner '-', optional trailing dot) or an IP address, IPv6 optionally in brackets. Empty leaves it unset.",
+          "description": "DEPRECATED, use sourceAllowedHosts (ADR-0126). CONFLUENCE_ALLOWED_HOSTS: host names or IP addresses (not URLs: no scheme, port or path) a Confluence source may reach on a private address (ADR-0088); it admits its hosts for Confluence only and the application logs a deprecation warning at startup while it is set; removed no earlier than application 1.0.0. Mirrors the application's startup check (src/config.ts): a DNS-style name (letters, digits, '_' and inner '-', optional trailing dot) or an IP address, IPv6 optionally in brackets. Empty leaves it unset.",
           "type": "array",
           "uniqueItems": true,
           "items": {
@@ -429,6 +454,30 @@
           "description": "PROJECT_MAX_UPLOAD_BYTES: the instance-wide default for the bytes stored for one project's upload sources. A project's own cap overrides it; 0 on a project means unlimited. Null, unset or 0 leaves it off.",
           "type": ["integer", "null"],
           "minimum": 0
+        },
+        "s3MaxObjects": {
+          "description": "S3_MAX_OBJECTS: the most objects an S3 source lists under its prefix in one run; the rest is not indexed. An integer from 1 to 100000. Null or unset leaves the application default, 5000.",
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "gdriveMaxFiles": {
+          "description": "GDRIVE_MAX_FILES: the most files a Google Drive source walks in one run; the rest is not indexed. An integer from 1 to 100000. Null or unset leaves the application default, 5000.",
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "githubMaxIssues": {
+          "description": "GITHUB_MAX_ISSUES: the most issues a GitHub source reads in one run; the rest is not indexed. An integer from 1 to 100000. Null or unset leaves the application default, 5000.",
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "githubMaxDiscussions": {
+          "description": "GITHUB_MAX_DISCUSSIONS: the most Discussions a GitHub source reads in one run; the rest is not indexed. An integer from 1 to 100000. Null or unset leaves the application default, 5000.",
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 100000
         },
         "mcpStructuredOutput": {
           "description": "MCP_STRUCTURED_OUTPUT: true adds structuredContent beside every MCP tool's text answer. Off by default; false leaves the variable unset.",

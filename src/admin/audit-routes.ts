@@ -192,6 +192,9 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
   'POST /api/projects/:id/reindex': { verb: 'queued a re-index', prep: 'of' },
   // Sources
   'POST /api/projects/:id/sources': { verb: 'added a source', prep: 'to', target: 'source' },
+  // Notion OAuth ([ADR-0129](../../.ssot/ADR.md#adr-0129)): this row is the click that sends the browser to Notion. The
+  // connection itself is recorded by the callback as the two rows above and below (`connection: notion-oauth`).
+  'POST /api/projects/:id/sources/notion/oauth': { verb: 'started connecting a Notion workspace', prep: 'for' },
   'PATCH /api/projects/:id/sources/:sid': { verb: 'changed a source', prep: 'of', target: 'source' },
   'DELETE /api/projects/:id/sources/:sid': { verb: 'deleted a source', prep: 'from', target: 'source' },
   'POST /api/projects/:id/sources/:sid/sync': { verb: 'queued a sync of a source', prep: 'of', target: 'source' },
@@ -212,9 +215,21 @@ const PHRASES: Readonly<Record<string, Phrase>> = {
     prep: 'of',
     target: 'credential',
   },
+  // Which sources a token may read ([ADR-0133](../../.ssot/ADR.md#adr-0133)). The names are in `detail.sources`, which the
+  // verb leaves to the aside: they are what an investigation asks for, so they are shown rather than summarised.
+  'PATCH /api/projects/:id/mcp-tokens/:tokenId/sources': {
+    verb: (detail) => (detail.scoped === false ? 'removed the source scope of an MCP credential' : 'changed the sources an MCP credential may read'),
+    prep: 'of',
+    target: 'credential',
+    consumes: ['scoped'],
+  },
   'DELETE /api/projects/:id/mcp-tokens/:tokenId': { verb: 'revoked an MCP credential', prep: 'of', target: 'credential' },
   'PUT /api/projects/:id/members/:userId': { verb: 'granted access', prep: 'to', target: 'account' },
   'DELETE /api/projects/:id/members/:userId': { verb: 'revoked access', prep: 'to', target: 'account' },
+  // Provider group → project mappings ([ADR-0134](../../.ssot/ADR.md#adr-0134)). The delete's counts say what it did to the
+  // memberships that rested on the group; the memberships a sign-in changes are their own events.
+  'POST /api/oidc/group-mappings': { verb: 'mapped a single sign-on group to a project', target: 'mapping' },
+  'DELETE /api/oidc/group-mappings/:id': { verb: 'deleted a single sign-on group mapping', target: 'mapping' },
   // A self-service API token ([ADR-0076](../../.ssot/ADR.md#adr-0076)) — never project-scoped as an
   // *action*, even when the token itself is scoped to one: minting and revoking are things an
   // account does to its own credentials, not to a project.

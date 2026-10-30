@@ -589,6 +589,8 @@ describe('document and chunk quotas in an indexing run', () => {
   let projectId: string;
   let indexer: Indexer;
   let baseline: string[];
+  // One mutex for every indexer of this describe, so `run` can wait on it (see below).
+  const locks = new KeyedMutex();
 
   const makeIndexer = (overrides: Partial<typeof indexerConfig> = {}): Indexer =>
     new Indexer({
@@ -596,11 +598,16 @@ describe('document and chunk quotas in an indexing run', () => {
       embeddings,
       config: { ...indexerConfig, ...overrides, ALLOWED_DOC_ROOTS: [path.dirname(root)], DATA_DIR: path.join(root, '.data') },
       log: silentLogger,
-      locks: new KeyedMutex(),
+      locks,
     });
 
   const run = async (opts?: { force?: boolean }, using: Indexer = indexer): Promise<JobState> => {
     const job = await settle(database.db, using.enqueue(projectId, opts));
+    // `settle` returns once the job says `error` and the project row stops saying `indexing`, but a failed run
+    // still sweeps its half-built generation and records its `index_runs` row after that. The run holds the
+    // project's lock to the very end, so taking it here waits for that cleanup; without it the assertions on
+    // `generationsOf` right after a failed rebuild raced the sweep and failed about one full-suite run in three.
+    await locks.runExclusive(projectId, async () => undefined);
     using.forget(projectId);
     return job;
   };

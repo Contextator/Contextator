@@ -70,6 +70,14 @@ spec:
             - name: TRUST_PROXY
               value: {{ .Values.config.trustProxy | quote }}
             {{- end }}
+            {{- with .Values.config.oidcGroupsClaim }}
+            - name: OIDC_GROUPS_CLAIM
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.sourceAllowedHosts }}
+            - name: SOURCE_ALLOWED_HOSTS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- with .Values.config.confluenceAllowedHosts }}
             - name: CONFLUENCE_ALLOWED_HOSTS
               value: {{ join "," . | quote }}
@@ -96,6 +104,22 @@ spec:
             {{- end }}
             {{- with .Values.config.projectMaxUploadBytes }}
             - name: PROJECT_MAX_UPLOAD_BYTES
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.s3MaxObjects }}
+            - name: S3_MAX_OBJECTS
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.gdriveMaxFiles }}
+            - name: GDRIVE_MAX_FILES
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.githubMaxIssues }}
+            - name: GITHUB_MAX_ISSUES
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.githubMaxDiscussions }}
+            - name: GITHUB_MAX_DISCUSSIONS
               value: {{ . | int64 | quote }}
             {{- end }}
             {{- if .Values.config.mcpStructuredOutput }}

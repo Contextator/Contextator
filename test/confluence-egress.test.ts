@@ -233,7 +233,7 @@ describe('confluenceEgress', () => {
     it('tells the operator which setting allows a private host', async () => {
       const fetch = guarded({ resolve: fakeResolver({ 'wiki.corp': '10.20.30.40' }), route: routeToLoopback('10.20.30.40') });
       const err = await refusal(fetch(`http://wiki.corp:${fixture.port}/`, GET));
-      expect(err.message).toBe('refused: `wiki.corp` resolves to a private address; list `wiki.corp` in CONFLUENCE_ALLOWED_HOSTS to allow it');
+      expect(err.message).toBe('refused: `wiki.corp` resolves to a private address; list `wiki.corp` in SOURCE_ALLOWED_HOSTS to allow it');
     });
   });
 
@@ -270,7 +270,7 @@ describe('confluenceEgress', () => {
       const unlisted = guarded({ resolve, route: () => '127.0.0.1' });
       const err = await refusal(unlisted(`http://wiki.corp:${fixture.port}/`, GET));
       expect(err.rule).toBe('private');
-      expect(err.message).toContain('CONFLUENCE_ALLOWED_HOSTS');
+      expect(err.message).toContain('SOURCE_ALLOWED_HOSTS');
       expect(fixture.hits).toEqual([]);
 
       const listed = guarded({ allowedHosts: ['wiki.corp'], resolve, route: () => '127.0.0.1' });
@@ -512,7 +512,7 @@ describe('the Confluence driver behind the guard', () => {
   let dataDir: string;
   let server: DataCenterServer;
 
-  const driver = (baseUrl: string, allowed: string[] | undefined, egress?: Pick<EgressOptions, 'resolve' | 'route'>) =>
+  const driver = (baseUrl: string, allowed: string[] | undefined, egress?: Pick<EgressOptions, 'resolve' | 'route'>, sourceAllowed?: string[]) =>
     new ConfluenceDriver(
       {
         id: '00000000-0000-4000-8000-000000000031',
@@ -532,6 +532,7 @@ describe('the Confluence driver behind the guard', () => {
           ALLOWED_DOC_ROOTS: [],
           IGNORE_GLOBS: [],
           ...(allowed ? { CONFLUENCE_ALLOWED_HOSTS: allowed } : {}),
+          ...(sourceAllowed ? { SOURCE_ALLOWED_HOSTS: sourceAllowed } : {}),
         },
       },
       undefined,
@@ -565,13 +566,31 @@ describe('the Confluence driver behind the guard', () => {
     const baseUrl = renamed(server.baseUrl, 'wiki.corp');
 
     await expect(driver(baseUrl, undefined, seams).test()).rejects.toThrow(
-      'refused: `wiki.corp` resolves to a private address; list `wiki.corp` in CONFLUENCE_ALLOWED_HOSTS to allow it',
+      'refused: `wiki.corp` resolves to a private address; list `wiki.corp` in SOURCE_ALLOWED_HOSTS to allow it',
     );
     await expect(driver(baseUrl, ['other.corp'], seams).sync()).rejects.toThrow(/resolves to a private address/);
     expect(server.requests).toEqual([]);
 
     expect(await driver(baseUrl, ['wiki.corp'], seams).test()).toMatch(/^Connected to Confluence Data Center/);
     expect(server.requests.length).toBeGreaterThan(0);
+  });
+
+  // ADR-0126 decision 7: the deprecated list keeps its effect for Confluence, and the shared one does too.
+  it('still reaches a private host named only in the deprecated CONFLUENCE_ALLOWED_HOSTS', async () => {
+    const seams = { resolve: fakeResolver({ 'wiki.corp': '10.20.30.40' }), route: routeToLoopback('10.20.30.40') };
+    const baseUrl = renamed(server.baseUrl, 'wiki.corp');
+
+    expect(await driver(baseUrl, ['wiki.corp'], seams, []).test()).toMatch(/^Connected to Confluence Data Center/);
+    expect(server.requests.length).toBeGreaterThan(0);
+  });
+
+  it('reaches a private host named only in SOURCE_ALLOWED_HOSTS, and the two lists are joined', async () => {
+    const seams = { resolve: fakeResolver({ 'wiki.corp': '10.20.30.40' }), route: routeToLoopback('10.20.30.40') };
+    const baseUrl = renamed(server.baseUrl, 'wiki.corp');
+
+    expect(await driver(baseUrl, undefined, seams, ['wiki.corp']).test()).toMatch(/^Connected to Confluence Data Center/);
+    expect(await driver(baseUrl, ['other.corp'], seams, ['wiki.corp']).test()).toMatch(/^Connected to Confluence Data Center/);
+    expect(await driver(baseUrl, ['wiki.corp'], seams, ['other.corp']).test()).toMatch(/^Connected to Confluence Data Center/);
   });
 
   it('guards a client built without an explicit fetch', async () => {

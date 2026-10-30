@@ -9,6 +9,7 @@ import {
   isModified,
   parseSince,
   textProvesEqual,
+  whatsNewTruncationNote,
 } from '../src/services/document-changes.js';
 
 /**
@@ -159,12 +160,34 @@ describe('the reaper', () => {
   // The sweep has to run on an instance that has switched the query log off: this table is not the query
   // log (ADR-0123 decision 5). The reaper's tick is a closure inside `server.ts`, so the order is held at
   // its source, the one place a refactor could silently reverse it.
-  it('sweeps document changes before the query log returns early', () => {
+  // Since 0.6.0 the query log's own sweep is not behind that switch either, so the reaper's tick neither
+  // returns nor names the switch; the test holds that it stays that way.
+  it('sweeps document changes with nothing in the tick consulting the query log switch', () => {
     const source = readFileSync(new URL('../src/server.ts', import.meta.url), 'utf8');
-    const sweep = source.indexOf('sweepDocumentChanges(db)');
-    const earlyReturn = source.indexOf('if (!config.SEARCH_QUERY_LOG) return;');
-    expect(sweep).toBeGreaterThan(-1);
-    expect(earlyReturn).toBeGreaterThan(-1);
-    expect(sweep).toBeLessThan(earlyReturn);
+    const start = source.indexOf('startSessionReaper(db');
+    const tick = source
+      .slice(start, source.indexOf('\n  });\n', start))
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n');
+    expect(start).toBeGreaterThan(-1);
+    expect(tick).toContain('sweepDocumentChanges(db)');
+    expect(tick).not.toMatch(/\bSEARCH_QUERY_LOG\b(?!_)/);
+    expect(tick).not.toMatch(/\breturn\b/);
+  });
+});
+
+describe('whatsNewTruncationNote', () => {
+  it('asks for a larger limit while one exists', () => {
+    expect(whatsNewTruncationNote(2)).toBe(
+      '[…truncated: the 2 newest changes are shown. Ask again with a larger limit (at most 200), to see the rest.]',
+    );
+    expect(whatsNewTruncationNote(199)).toContain('larger limit');
+  });
+
+  it('says to narrow the question at the ceiling, where no larger limit exists', () => {
+    const note = whatsNewTruncationNote(200);
+    expect(note).toContain('Narrow the question with source or version');
+    expect(note).not.toContain('larger limit');
   });
 });

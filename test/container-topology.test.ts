@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 /**
  * The packaging half of [ADR-0069](../.ssot/ADR.md#adr-0069): one `DATABASE_URL` decides between the
@@ -214,5 +215,138 @@ describe('docker/entrypoint.sh', () => {
     ])('stays quiet on %s', (url) => {
       expect(matches(url)).toBe(false);
     });
+  });
+});
+
+/**
+ * The `contextator` command's packaging ([ADR-0131](../.ssot/ADR.md#adr-0131)): a third way to start the
+ * image, decided by the first argument alone. Like the loopback patterns above, it is **run**: the real
+ * entrypoint under bash, with `id`, `gosu`, `node`, `chown` and the upstream PostgreSQL entrypoint
+ * replaced by stubs that write down how they were called. What a stub's log does not contain is as much
+ * of the assertion as what it does: the command must start no database and fix no ownership.
+ */
+describe('docker/entrypoint.sh: the contextator command', () => {
+  let work: string;
+  let stubs: string;
+  let log: string;
+
+  const stub = (name: string, body: string) => {
+    const file = path.join(stubs, name);
+    writeFileSync(file, `#!/bin/sh\n${body}\n`);
+    chmodSync(file, 0o755);
+  };
+
+  beforeAll(() => {
+    work = mkdtempSync(path.join(tmpdir(), 'ctx-entrypoint-'));
+    stubs = path.join(work, 'bin');
+    log = path.join(work, 'calls.log');
+    mkdirSync(stubs);
+    // Each stub records its own name and arguments, one call per line.
+    for (const name of ['gosu', 'node', 'chown', 'docker-entrypoint.sh', 'pg_isready']) {
+      // gosu execs its command, so its exit status is the command's.
+      stub(name, `echo "${name} $*" >> "$STUB_LOG"; exit "\${STUB_EXIT_${name === 'node' || name === 'gosu' ? 'NODE' : 'OTHER'}:-0}"`);
+    }
+    stub('id', 'echo "$STUB_UID"');
+  });
+
+  afterAll(() => {
+    rmSync(work, { recursive: true, force: true });
+  });
+
+  /** The entrypoint as a slim image would run it: no database, none to embed, directories somewhere writable. */
+  const start = (args: string[], env: Record<string, string> = {}) => {
+    writeFileSync(log, '');
+    const result = spawnSync('bash', [path.join(root, 'docker', 'entrypoint.sh'), ...args], {
+      encoding: 'utf8',
+      env: {
+        PATH: `${stubs}:/usr/bin:/bin`,
+        STUB_LOG: log,
+        STUB_UID: '0',
+        CONTEXTATOR_EMBEDDED_POSTGRES: '0',
+        MODEL_CACHE_DIR: path.join(work, 'models'),
+        DATA_DIR: path.join(work, 'data'),
+        ...env,
+      },
+    });
+    const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean);
+    return { ...result, calls };
+  };
+
+  it('runs the command as node through gosu when started as root, and starts nothing else', () => {
+    const run = start(['contextator', 'project', 'create', 'docs', '--git', 'https://example.com/r', '--wait']);
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.calls).toEqual(['gosu node node /app/dist/cli.js project create docs --git https://example.com/r --wait']);
+    // No ownership fix: the directories were not even created, let alone chowned.
+    expect(existsSync(path.join(work, 'models'))).toBe(false);
+    expect(existsSync(path.join(work, 'data'))).toBe(false);
+  });
+
+  it('works with no database configured at all, which is the slim image’s state in CI', () => {
+    const run = start(['contextator', '--help']);
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stderr).not.toContain('no database configured');
+  });
+
+  it('runs as whoever started it when that is not root, with no gosu and no root check', () => {
+    const run = start(['contextator', 'backup', '/data/out.tar.gz'], { STUB_UID: '1000' });
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stderr).not.toContain('must start as root');
+    expect(run.calls).toEqual(['node /app/dist/cli.js backup /data/out.tar.gz']);
+  });
+
+  it('passes the command’s exit code through', () => {
+    const run = start(['contextator', 'project', 'status', 'docs'], { STUB_EXIT_NODE: '6' });
+    expect(run.status).toBe(6);
+  });
+
+  it('dispatches on a first argument that is exactly `contextator`, and on nothing else', () => {
+    // These are the server starts of before: with no database to use, the slim refusal; never the command.
+    for (const args of [[], ['server'], ['contextator-x'], ['--', 'contextator'], ['run', 'contextator'], ['CONTEXTATOR'], ['contextator ']]) {
+      const run = start(args);
+      expect(run.status, `args ${JSON.stringify(args)}`).toBe(1);
+      expect(run.stderr, `args ${JSON.stringify(args)}`).toContain('no database configured');
+      expect(run.calls.filter((call) => call.startsWith('node ') || call.includes('cli.js'))).toEqual([]);
+    }
+  });
+
+  it('keeps the root requirement for the server start', () => {
+    const run = start([], { STUB_UID: '1000' });
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain('must start as root');
+  });
+});
+
+describe('the contextator command in the image', () => {
+  const pkg = JSON.parse(read('package.json')) as { bin?: Record<string, string> };
+
+  it('is named by package.json `bin`, at the file the build writes from src/cli.ts (ADR-0131 decision 1)', () => {
+    // tsc keeps src/'s layout under dist/ (rootDir is src), so the entry point is derived, not chosen.
+    expect(pkg.bin).toEqual({ contextator: 'dist/cli.js' });
+    expect(read('src', 'cli.ts').startsWith('#!/usr/bin/env node\n')).toBe(true);
+    // The entry point starts the process and nothing else; the command's code is importable without running.
+    expect(read('src', 'cli', 'main.ts')).not.toContain('process.argv');
+  });
+
+  it('is on PATH in both image targets, running the same file the entrypoint runs', () => {
+    const slim = dockerfile.slice(dockerfile.indexOf('FROM node:22-bookworm-slim AS slim'), dockerfile.indexOf('# ---- full runtime'));
+    const full = dockerfile.slice(dockerfile.indexOf('FROM pgvector/pgvector:pg16 AS full'));
+    for (const stage of [slim, full]) {
+      expect(stage).toContain('exec node /app/dist/cli.js "$@"');
+      // `docker exec` and `--entrypoint contextator` skip the entrypoint, so the wrapper drops root itself.
+      expect(stage).toContain('exec gosu node node /app/dist/cli.js "$@"');
+      expect(stage).toContain('> /usr/local/bin/contextator;');
+      expect(stage).toContain('chmod 0755 /usr/local/bin/contextator;');
+    }
+    expect(entrypoint).toContain('/app/dist/cli.js');
+  });
+
+  it('routes before anything that needs root, a database or PostgreSQL', () => {
+    const dispatch = entrypoint.indexOf(`if [ "\${1:-}" = 'contextator' ]`);
+    expect(dispatch).toBeGreaterThan(-1);
+    for (const later of ["id -u)\" != '0'", 'chown -R node:node', 'DATABASE_URL:-', 'docker-entrypoint.sh postgres']) {
+      expect(entrypoint.indexOf(later, dispatch + 1), later).toBeGreaterThan(dispatch);
+    }
+    // The only `id -u` before the dispatch's own is none: nothing above it decides anything.
+    expect(entrypoint.slice(0, dispatch)).not.toContain('exit 1');
   });
 });

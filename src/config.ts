@@ -13,8 +13,8 @@ const csv = (value: string): string[] =>
     .filter(Boolean);
 
 /**
- * A comma-separated list of host names for an egress allowlist (`CONFLUENCE_ALLOWED_HOSTS`,
- * `WEB_ALLOWED_HOSTS`, `GIT_ALLOWED_HOSTS`): lower-cased, brackets and a trailing dot dropped, and refused at startup when
+ * A comma-separated list of host names for an egress allowlist (`SOURCE_ALLOWED_HOSTS`,
+ * `CONFLUENCE_ALLOWED_HOSTS`, `WEB_ALLOWED_HOSTS`, `GIT_ALLOWED_HOSTS`): lower-cased, brackets and a trailing dot dropped, and refused at startup when
  * an entry is not a name or an address (a scheme, port or path would never match the host a request is
  * made to, so it would silently allow nothing).
  */
@@ -62,17 +62,26 @@ export const WEB_LIMIT_DEFAULTS = {
 } as const;
 
 /**
- * How many pages one Confluence or Notion sync may index before it stops and says so.
+ * How many pages one Confluence or Notion sync, objects one S3 sync, files one Google Drive sync, or issues or discussions one GitHub sync, may index before it stops and says so.
  *
- * 5000 is the ceiling both drivers have always had ([ADR-0015](../../.ssot/ADR.md#adr-0015)); these are
- * now the defaults of `CONFLUENCE_MAX_PAGES` and `NOTION_MAX_PAGES` rather than constants nobody could
+ * 5000 is the ceiling the first two drivers have always had ([ADR-0015](../../.ssot/ADR.md#adr-0015)) and the one
+ * `S3_MAX_OBJECTS`, `GDRIVE_MAX_FILES` and the two GitHub ceilings take ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 6,
+ * [ADR-0127](../../.ssot/ADR.md#adr-0127) decision 7); these are
+ * the defaults of `CONFLUENCE_MAX_PAGES`, `NOTION_MAX_PAGES`, `S3_MAX_OBJECTS`, `GDRIVE_MAX_FILES`, `GITHUB_MAX_ISSUES` and `GITHUB_MAX_DISCUSSIONS` rather than constants nobody could
  * move. Kept here, beside the schema that uses them, so the drivers fall back to the same number a
  * context built without them (a test, an older caller) would otherwise have to repeat.
  */
 export const SOURCE_PAGE_LIMIT_DEFAULTS = {
   CONFLUENCE_MAX_PAGES: 5000,
   NOTION_MAX_PAGES: 5000,
+  S3_MAX_OBJECTS: 5000,
+  GDRIVE_MAX_FILES: 5000,
+  GITHUB_MAX_ISSUES: 5000,
+  GITHUB_MAX_DISCUSSIONS: 5000,
 } as const;
+
+/** The default of `MAX_CONVERTED_FILE_BYTES` (32 MiB); a driver built from a context without the setting falls back to it. */
+export const MAX_CONVERTED_FILE_BYTES_DEFAULT = 32 * 1024 * 1024;
 
 /**
  * The default of `GIT_MAX_PACK_BYTES`: 256 MiB. isomorphic-git gathers a packfile in memory — and copies it
@@ -499,6 +508,21 @@ export const EnvSchema = z
      * identity is refused an SSO sign-in from then on, the same as one that was never anything but root.
      */
     OIDC_DEFAULT_ROLE: z.enum(['admin', 'member']).default('member'),
+    /**
+     * The top-level ID-token claim that lists a person's groups ([ADR-0134](../../.ssot/ADR.md#adr-0134)) —
+     * its presence is the switch for mapping provider groups to project memberships.
+     *
+     * Unset (the default), nothing of this runs and a sign-in is what ADR-0077 describes. Set, every SSO
+     * sign-in of a `member` account makes that account's group-granted memberships exactly the projects
+     * its groups map to (`oidc_group_mappings`). The claim is read from the ID token only — there is no
+     * userinfo request — so a provider that needs a scope to emit it gets it through `OIDC_SCOPES`.
+     * Requires `OIDC_ISSUER_URL`; a name outside the character set below is refused here rather than
+     * silently never matching a claim.
+     */
+    OIDC_GROUPS_CLAIM: z
+      .string()
+      .regex(/^[A-Za-z0-9_:.\-/]{1,128}$/, 'must be 1-128 characters of letters, digits and _ : . - /')
+      .optional(),
 
     // MCP OAuth 2.1 (ADR-0054). What these switch on is a *second* way to present a credential at
     // /mcp/*, never a second set of rights: what an OAuth session reaches is the membership of the
@@ -634,13 +658,27 @@ export const EnvSchema = z
     ALLOWED_DOC_ROOTS: z.string().default('/docs').transform(csv),
     IGNORE_GLOBS: z.string().default('').transform(csv),
     /**
-     * Host names a Confluence base URL may reach **on a private address** (RFC 1918, `fc00::/7`)
-     * ([ADR-0088](../../.ssot/ADR.md#adr-0088)). A Data Center inside the network is listed here; nothing
-     * else is. Loopback, link-local, unspecified and multicast stay refused whatever the list says, and
-     * there is no switch that turns the check off.
+     * Host names an operator-named API host may reach **on a private address** (RFC 1918, `fc00::/7`)
+     * ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 7, amending [ADR-0088](../../.ssot/ADR.md#adr-0088)).
+     * It serves the source types whose host an operator names and which call an API: Confluence, S3 and
+     * the GitHub Enterprise Server host of a GitHub source. A Data Center or an S3 gateway inside the
+     * network is listed here; nothing else is. Loopback, link-local, unspecified and multicast stay
+     * refused whatever the list says, and there is no switch that turns the check off.
+     *
+     * It does **not** admit a host for a web or git source: those keep `WEB_ALLOWED_HOSTS` and
+     * `GIT_ALLOWED_HOSTS` ([ADR-0107](../../.ssot/ADR.md#adr-0107)). A host trusted for an API call is
+     * not, by that fact, a host an editor may crawl or clone from.
      *
      * Names, not URLs: a scheme, port or path here would never match the host a request is made to, so
      * it is rejected at startup instead of silently allowing nothing.
+     */
+    SOURCE_ALLOWED_HOSTS: allowedHostsSetting(),
+    /**
+     * **Deprecated** ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 7): use `SOURCE_ALLOWED_HOSTS`.
+     * It still admits its hosts on a private address, for Confluence only; Confluence's list is the
+     * union of the two. A non-empty value logs one deprecation warning at startup
+     * ({@link deprecatedSettingWarnings}). Removed no earlier than `1.0.0`; from then a non-empty value
+     * refuses startup with a message that names `SOURCE_ALLOWED_HOSTS`.
      */
     CONFLUENCE_ALLOWED_HOSTS: allowedHostsSetting(),
     /**
@@ -651,6 +689,45 @@ export const EnvSchema = z
     CONFLUENCE_MAX_PAGES: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.CONFLUENCE_MAX_PAGES),
     /** The same ceiling for one Notion sync, announced the same way. */
     NOTION_MAX_PAGES: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.NOTION_MAX_PAGES),
+    /**
+     * Objects one S3 sync indexes at most ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 6): the first N in
+     * key order, among the objects under the source's prefix whose extension the source reads. Past it the run
+     * indexes up to the ceiling and its note says in capitals that the rest was not indexed, as
+     * `CONFLUENCE_MAX_PAGES` does. The probe still lists the whole prefix, so a narrow prefix is cheaper.
+     */
+    S3_MAX_OBJECTS: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.S3_MAX_OBJECTS),
+    /**
+     * Files one Google Drive sync indexes at most ([ADR-0127](../../.ssot/ADR.md#adr-0127) decision 7): the
+     * first N in the walk order (the folders in the order they are listed on the source, depth first, each
+     * folder's children by name). Past it the run indexes up to the ceiling and its note says in capitals that
+     * the rest was not indexed, as `S3_MAX_OBJECTS` does. A service account can read everything shared with
+     * it, so a folder shared by mistake would otherwise start embedding a whole Drive.
+     */
+    GDRIVE_MAX_FILES: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.GDRIVE_MAX_FILES),
+    /**
+     * Issues one GitHub source indexes at most ([ADR-0128](../../.ssot/ADR.md#adr-0128) decision 8): the most
+     * recently created first, pull requests not counted. Past it a full run indexes up to the ceiling and its note
+     * says in capitals that the rest was not indexed, as `CONFLUENCE_MAX_PAGES` does. The default is a placeholder
+     * taken from the other sources until Faz 06's smoke run measures what a source of this size costs.
+     */
+    GITHUB_MAX_ISSUES: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.GITHUB_MAX_ISSUES),
+    /** The same ceiling for the Discussions of one GitHub source, announced the same way. */
+    GITHUB_MAX_DISCUSSIONS: z.coerce.number().int().min(1).max(100_000).default(SOURCE_PAGE_LIMIT_DEFAULTS.GITHUB_MAX_DISCUSSIONS),
+    /**
+     * The client id of the Notion **public connection** this operator registered, which turns "Connect
+     * with Notion" on ([ADR-0129](../../.ssot/ADR.md#adr-0129)). There is no central Contextator connection
+     * (PRD P1): every instance brings its own. Required together with `NOTION_OAUTH_CLIENT_SECRET`.
+     */
+    NOTION_OAUTH_CLIENT_ID: z.string().min(1).optional(),
+    /** The secret paired with `NOTION_OAUTH_CLIENT_ID`. A process secret, like `OIDC_CLIENT_SECRET`: never stored, never returned, never logged. */
+    NOTION_OAUTH_CLIENT_SECRET: z.string().min(1).optional(),
+    /**
+     * The redirect URI registered on that connection. Left unset it is `<PUBLIC_BASE_URL>/api/sources/notion/oauth/callback`;
+     * with neither set, startup is refused rather than a redirect URI guessed from a request, because a
+     * guess can send the authorization code to the wrong host. Notion's registration form refuses an IP
+     * address: use `localhost` for a local instance and an `https` domain name otherwise.
+     */
+    NOTION_OAUTH_REDIRECT_URI: z.url().optional(),
     /** Writable directory for materialised sources (git checkouts, uploads, Notion pulls). */
     DATA_DIR: z
       .string()
@@ -740,7 +817,7 @@ export const EnvSchema = z
       .number()
       .int()
       .min(64 * 1024)
-      .default(32 * 1024 * 1024),
+      .default(MAX_CONVERTED_FILE_BYTES_DEFAULT),
 
     /**
      * What one API specification may weigh before the indexer will parse it
@@ -1236,6 +1313,17 @@ export const EnvSchema = z
      */
     SEARCH_QUERY_LOG_RETENTION_DAYS: z.coerce.number().int().min(1).max(3650).default(30),
 
+    /**
+     * The PII scan ([ADR-0130](../.ssot/ADR.md#adr-0130)): whether stored documents are looked through for secrets
+     * and personal numbers, and the findings recorded beside them. **Report only** — a document is never masked or
+     * skipped, and search is not touched (ADR-0043, FR-523).
+     *
+     * On by default, because a report nobody switches on is never read, and because it changes no behaviour a
+     * user can see. `0` stops new scanning and **leaves the findings that exist in place**; there is no switch
+     * that deletes them, and a deleted document, a generation swap and a deleted project already take theirs.
+     */
+    PII_SCAN: z.string().default('1').transform(flag),
+
     // The audit log and /metrics (ADR-0055). Both are about the instance rather than about any one
     // project, which is why neither has a per-project column beside it the way the query log does.
     /**
@@ -1474,6 +1562,39 @@ export const EnvSchema = z
         ctx.addIssue({ code: 'custom', path: ['OIDC_CLIENT_SECRET'], message: 'required when OIDC_ISSUER_URL is set' });
       }
     }
+    // Group mapping ([ADR-0134](../.ssot/ADR.md#adr-0134)) reads the ID token of a sign-in, which needs the provider.
+    if (c.OIDC_GROUPS_CLAIM !== undefined && c.OIDC_ISSUER_URL === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['OIDC_GROUPS_CLAIM'],
+        message: 'requires OIDC_ISSUER_URL: the groups come from the provider’s ID token',
+      });
+    }
+    // Notion OAuth ([ADR-0129](../.ssot/ADR.md#adr-0129)): the id and the secret are one credential, so
+    // one without the other is a half-finished edit that must fail now rather than at the first click.
+    if (c.NOTION_OAUTH_CLIENT_ID !== undefined && c.NOTION_OAUTH_CLIENT_SECRET === undefined) {
+      ctx.addIssue({ code: 'custom', path: ['NOTION_OAUTH_CLIENT_SECRET'], message: 'required when NOTION_OAUTH_CLIENT_ID is set' });
+    }
+    if (c.NOTION_OAUTH_CLIENT_SECRET !== undefined && c.NOTION_OAUTH_CLIENT_ID === undefined) {
+      ctx.addIssue({ code: 'custom', path: ['NOTION_OAUTH_CLIENT_ID'], message: 'required when NOTION_OAUTH_CLIENT_SECRET is set' });
+    }
+    if (c.NOTION_OAUTH_CLIENT_ID !== undefined && c.NOTION_OAUTH_CLIENT_SECRET !== undefined) {
+      if (c.NOTION_OAUTH_REDIRECT_URI === undefined && c.PUBLIC_BASE_URL === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['NOTION_OAUTH_REDIRECT_URI'],
+          message: 'required when Notion OAuth is on and PUBLIC_BASE_URL is not set: the redirect URI is never guessed from a request',
+        });
+      }
+      // The tokens it brings are stored in `document_sources.secret_enc`, which needs the key.
+      if (c.SECRET_KEY === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['SECRET_KEY'],
+          message: 'required when Notion OAuth is on: the tokens it obtains are stored encrypted with it',
+        });
+      }
+    }
   });
 
 export type Config = z.infer<typeof EnvSchema>;
@@ -1494,6 +1615,22 @@ export type Config = z.infer<typeof EnvSchema>;
  * that a sixth, if it ever exists, is one edit.
  */
 export type WebLimits = Pick<Config, 'WEB_MAX_PAGES' | 'WEB_MAX_DEPTH' | 'WEB_REQUEST_DELAY_MS' | 'WEB_CRAWL_BUDGET_MS' | 'WEB_RESPECT_ROBOTS'>;
+
+/**
+ * The deprecation warnings a configuration earns at startup, one string each, logged once by the caller
+ * ([ADR-0126](../.ssot/ADR.md#adr-0126) decision 7). Kept here, next to the settings it names, so that
+ * the wording and the condition cannot drift apart and a test can pin both.
+ */
+export function deprecatedSettingWarnings(config: Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS'>): string[] {
+  const warnings: string[] = [];
+  if (config.CONFLUENCE_ALLOWED_HOSTS.length > 0) {
+    warnings.push(
+      'CONFLUENCE_ALLOWED_HOSTS is deprecated and will be removed no earlier than 1.0.0; move its hosts to SOURCE_ALLOWED_HOSTS. ' +
+        'Until then it still admits its hosts for Confluence sources only.',
+    );
+  }
+  return warnings;
+}
 
 /**
  * Parses and validates process.env. Empty-string values are treated as unset so that

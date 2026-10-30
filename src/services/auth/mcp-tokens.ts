@@ -1,7 +1,16 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { and, asc, eq, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../../db/client.js';
-import { mcpTokens, projects, users, type McpAuthMode, type McpTokenKind, type McpTokenRow } from '../../db/schema.js';
+import {
+  documentSources,
+  mcpTokenSources,
+  mcpTokens,
+  projects,
+  users,
+  type McpAuthMode,
+  type McpTokenKind,
+  type McpTokenRow,
+} from '../../db/schema.js';
 import { NotFoundError } from '../projects.js';
 import { withUserRowLock } from './users.js';
 
@@ -49,9 +58,22 @@ export interface McpTokenView {
    * `null` for unrestricted ([ADR-0118](../../../.ssot/ADR.md#adr-0118)).
    */
   allowedCidrs: string[] | null;
+  /**
+   * The names of the sources this token is bound to ([ADR-0133](../../../.ssot/ADR.md#adr-0133)), or `null`
+   * for a token that reads the whole project. Names and not ids, because they are what an operator typed
+   * and what every path is prefixed with.
+   */
+  sources: string[] | null;
+  /** A scoped token whose sources are all gone: it reads nothing, and the panel says so. */
+  scopeEmpty: boolean;
 }
 
-export const toMcpTokenView = (row: McpTokenRow): McpTokenView => ({
+/**
+ * `sourceNames` are the names behind this row's scope; they are read separately (`scopeNamesOf`) and a
+ * row that is not scoped needs none. A scoped row with no names is an **empty** scope and stays one:
+ * `sources: []`, `scopeEmpty: true`, never `null`.
+ */
+export const toMcpTokenView = (row: McpTokenRow, sourceNames: readonly string[] = []): McpTokenView => ({
   id: row.id,
   name: row.name,
   prefix: row.prefix,
@@ -59,7 +81,69 @@ export const toMcpTokenView = (row: McpTokenRow): McpTokenView => ({
   lastUsedAt: row.lastUsedAt,
   expiresAt: row.expiresAt,
   allowedCidrs: row.allowedCidrs && row.allowedCidrs.length > 0 ? row.allowedCidrs : null,
+  sources: row.sourceScoped ? [...sourceNames] : null,
+  scopeEmpty: row.sourceScoped && sourceNames.length === 0,
 });
+
+/** What went wrong with a source scope; the route turns each into its own status and error code. */
+export type McpScopeErrorCode = 'empty_scope' | 'unknown_source' | 'not_static';
+
+export class McpScopeError extends Error {
+  constructor(
+    readonly code: McpScopeErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'McpScopeError';
+  }
+}
+
+/** The source names behind each scoped token in `rows`, sorted; a token with no entry has an empty scope. */
+async function scopeNamesOf(db: Db, rows: readonly McpTokenRow[]): Promise<Map<string, string[]>> {
+  const scoped = rows.filter((r) => r.sourceScoped).map((r) => r.id);
+  const names = new Map<string, string[]>();
+  if (scoped.length === 0) return names;
+  const found = await db
+    .select({ tokenId: mcpTokenSources.tokenId, name: documentSources.name })
+    .from(mcpTokenSources)
+    .innerJoin(documentSources, eq(documentSources.id, mcpTokenSources.sourceId))
+    .where(inArray(mcpTokenSources.tokenId, scoped))
+    .orderBy(asc(documentSources.name));
+  for (const row of found) names.set(row.tokenId, [...(names.get(row.tokenId) ?? []), row.name]);
+  return names;
+}
+
+/**
+ * Source names to ids, inside the token's own project. A name this project does not have is
+ * `unknown_source` and an empty list is `empty_scope`: a token that reads nothing is never minted on
+ * purpose ([ADR-0133](../../../.ssot/ADR.md#adr-0133) decision 6). The editor making the call sees every
+ * source of the project, so the refusal may name the ones it did not find.
+ */
+async function resolveScopeSources(db: Db, projectId: string, names: readonly string[]): Promise<string[]> {
+  const wanted = [...new Set(names)];
+  if (wanted.length === 0)
+    throw new McpScopeError('empty_scope', 'A source scope needs at least one source; leave it out for a token that reads the whole project.');
+  const rows = await db
+    .select({ id: documentSources.id, name: documentSources.name })
+    .from(documentSources)
+    .where(and(eq(documentSources.projectId, projectId), inArray(documentSources.name, wanted)));
+  const missing = wanted.filter((n) => !rows.some((r) => r.name === n));
+  if (missing.length > 0) throw new McpScopeError('unknown_source', `This project has no source named: ${missing.join(', ')}.`);
+  return rows.map((r) => r.id);
+}
+
+/**
+ * A source deleted between the name lookup and the insert fails `mcp_token_sources_source_id_fkey`, and only that
+ * one is `unknown_source`. The same code on `mcp_tokens_project_id_fkey` or `mcp_tokens_created_by_fkey` is a project
+ * or an account deleted mid-request, and must stay the error it is rather than be reported as a missing source.
+ */
+export const isSourceForeignKeyViolation = (err: unknown): boolean => {
+  for (let e: unknown = err; typeof e === 'object' && e !== null; e = (e as { cause?: unknown }).cause) {
+    const { code, constraint } = e as { code?: unknown; constraint?: unknown };
+    if (code === '23503' && constraint === 'mcp_token_sources_source_id_fkey') return true;
+  }
+  return false;
+};
 
 /**
  * The project's **static** tokens — what the dashboard's MCP access panel lists and what an operator
@@ -73,7 +157,8 @@ export async function listMcpTokens(db: Db, projectId: string): Promise<McpToken
     .from(mcpTokens)
     .where(and(eq(mcpTokens.projectId, projectId), eq(mcpTokens.kind, 'static'), isNull(mcpTokens.revokedAt)))
     .orderBy(asc(mcpTokens.createdAt));
-  return rows.map(toMcpTokenView);
+  const names = await scopeNamesOf(db, rows);
+  return rows.map((row) => toMcpTokenView(row, names.get(row.id)));
 }
 
 export async function createMcpToken(
@@ -83,22 +168,76 @@ export async function createMcpToken(
   createdBy: string | null,
   expiresAt: Date | null = null,
   allowedCidrs: string[] | null = null,
+  sources: readonly string[] | null = null,
 ): Promise<{ token: string; view: McpTokenView }> {
   const token = newMcpToken('static');
-  const [row] = await db
-    .insert(mcpTokens)
-    .values({
-      projectId,
-      name: name.trim(),
-      tokenHash: hashMcpToken(token),
-      prefix: displayPrefix(token),
-      createdBy,
-      kind: 'static',
-      expiresAt,
-      allowedCidrs,
-    })
-    .returning();
-  return { token, view: toMcpTokenView(row) };
+  // `null` is a token that reads the whole project; **`[]` is not that** and is refused by
+  // `resolveScopeSources` as `empty_scope` (ADR-0133). The two are told apart here by `null` and nothing else.
+  const sourceIds = sources === null ? null : await resolveScopeSources(db, projectId, sources);
+  try {
+    const row = await db.transaction(async (tx) => {
+      const [inserted] = await tx
+        .insert(mcpTokens)
+        .values({
+          projectId,
+          name: name.trim(),
+          tokenHash: hashMcpToken(token),
+          prefix: displayPrefix(token),
+          createdBy,
+          kind: 'static',
+          expiresAt,
+          allowedCidrs,
+          sourceScoped: sourceIds !== null,
+        })
+        .returning();
+      if (sourceIds !== null) await tx.insert(mcpTokenSources).values(sourceIds.map((sourceId) => ({ tokenId: inserted.id, sourceId })));
+      return inserted;
+    });
+    const names = sourceIds === null ? undefined : await scopeNamesOf(db, [row]);
+    return { token, view: toMcpTokenView(row, names?.get(row.id)) };
+  } catch (err) {
+    if (sourceIds !== null && isSourceForeignKeyViolation(err))
+      throw new McpScopeError('unknown_source', 'A source of the scope was deleted while the token was being created.');
+    throw err;
+  }
+}
+
+/**
+ * Replaces the source scope of one live **static** token, or removes it with `null`
+ * ([ADR-0133](../../../.ssot/ADR.md#adr-0133)). It takes effect on the token's next request: the token is
+ * resolved on every request (ADR-0099), so nothing is cached that this would have to invalidate.
+ *
+ * An OAuth credential is `not_static` (`409`), and the check reads the row it is about to change: a token
+ * that is not in this project, or has been revoked, is `NotFoundError`. The row is locked `FOR UPDATE` so
+ * two concurrent edits cannot interleave their delete and insert and leave a union of both lists.
+ */
+export async function setMcpTokenSources(db: Db, projectId: string, tokenId: string, sources: readonly string[] | null): Promise<McpTokenView> {
+  try {
+    return await db.transaction(async (tx) => {
+      const [current] = await tx
+        .select()
+        .from(mcpTokens)
+        .where(and(eq(mcpTokens.id, tokenId), eq(mcpTokens.projectId, projectId), isNull(mcpTokens.revokedAt)))
+        .for('update')
+        .limit(1);
+      if (!current) throw new NotFoundError('Token not found');
+      if (current.kind !== 'static') throw new McpScopeError('not_static', 'Only a static token carries a source scope.');
+      const sourceIds = sources === null ? null : await resolveScopeSources(tx as unknown as Db, projectId, sources);
+      await tx.delete(mcpTokenSources).where(eq(mcpTokenSources.tokenId, tokenId));
+      if (sourceIds !== null) await tx.insert(mcpTokenSources).values(sourceIds.map((sourceId) => ({ tokenId, sourceId })));
+      const [row] = await tx
+        .update(mcpTokens)
+        .set({ sourceScoped: sourceIds !== null })
+        .where(eq(mcpTokens.id, tokenId))
+        .returning();
+      const names = await scopeNamesOf(tx as unknown as Db, [row]);
+      return toMcpTokenView(row, names.get(row.id));
+    });
+  } catch (err) {
+    if (sources !== null && isSourceForeignKeyViolation(err))
+      throw new McpScopeError('unknown_source', 'A source of the scope was deleted while the scope was being set.');
+    throw err;
+  }
 }
 
 /**
@@ -113,7 +252,7 @@ export async function updateMcpTokenNetworks(db: Db, projectId: string, tokenId:
     .where(and(eq(mcpTokens.id, tokenId), eq(mcpTokens.projectId, projectId), eq(mcpTokens.kind, 'static'), isNull(mcpTokens.revokedAt)))
     .returning();
   if (!row) throw new NotFoundError('Token not found');
-  return toMcpTokenView(row);
+  return toMcpTokenView(row, (await scopeNamesOf(db, [row])).get(row.id));
 }
 
 /**
@@ -313,6 +452,16 @@ export interface McpTokenIdentity {
   userId: string | null;
   /** The network allowlist of a static token (`null`: unrestricted); always `null` for an OAuth credential. */
   allowedCidrs: string[] | null;
+  /**
+   * The ids of the sources a scoped static token may read ([ADR-0133](../../../.ssot/ADR.md#adr-0133)), or
+   * `null` for a token that reads the whole project. **`[]` is a scope that holds nothing and reads nothing**
+   * (every source of it was deleted): it is not `null`, and it is not normalised into `null`.
+   *
+   * `allowedCidrs` above reads an empty list as "unrestricted", and that normalisation is **not** copied here:
+   * for a network list "none" can only mean "no list", while for a scope it means the opposite, and
+   * widening a token to its whole project because its last source was deleted is the failure this field exists to prevent.
+   */
+  sourceScope: string[] | null;
 }
 
 /**
@@ -332,7 +481,18 @@ export interface McpTokenIdentity {
 export async function verifyMcpToken(db: Db, projectId: string, raw: string): Promise<McpTokenIdentity | null> {
   if (!looksLikeOneOfOurs(raw)) return null;
   const rows = await db
-    .select({ id: mcpTokens.id, kind: mcpTokens.kind, userId: mcpTokens.userId, allowedCidrs: mcpTokens.allowedCidrs })
+    .select({
+      id: mcpTokens.id,
+      kind: mcpTokens.kind,
+      userId: mcpTokens.userId,
+      allowedCidrs: mcpTokens.allowedCidrs,
+      sourceScoped: mcpTokens.sourceScoped,
+      // The scope in the same statement as the credential: a second read could be answered after the
+      // scope changed, and a read that failed must not become "no scope" (it throws, and the request is a 500).
+      // Spelled out rather than interpolated: drizzle does not qualify a column in a single-table select,
+      // and `mcp_token_sources` has no `id` of its own to make an unqualified one safe by luck.
+      scopeSourceIds: sql<string[]>`array(select s.source_id::text from mcp_token_sources s where s.token_id = mcp_tokens.id)`,
+    })
     .from(mcpTokens)
     .where(
       and(
@@ -360,6 +520,9 @@ export async function verifyMcpToken(db: Db, projectId: string, raw: string): Pr
     kind: row.kind,
     userId: row.userId,
     allowedCidrs: row.kind === 'static' && row.allowedCidrs?.length ? row.allowedCidrs : null,
+    // `sourceScoped` alone decides, whatever the kind: a CHECK keeps it false on an OAuth credential, and
+    // if it were ever true on one this would narrow it and not ignore the flag. Never `length ? x : null`.
+    sourceScope: row.sourceScoped ? row.scopeSourceIds : null,
   };
 }
 

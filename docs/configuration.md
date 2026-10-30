@@ -152,6 +152,66 @@ silently record nothing. The list, checked against the pinned versions, is in
 [Observability](observability.md#variables-the-opentelemetry-sdk-reads-itself), which also describes the
 spans, the trace-context propagation and the dashboard that goes with `/metrics`.
 
+## Egress allowlists: which private hosts a source may reach
+
+Every request a source makes to a host an editor types goes through one egress guard. It refuses loopback,
+link-local (including the cloud metadata address `169.254.169.254`), unspecified and multicast addresses
+whatever is configured, and refuses an address on a private network (RFC 1918, `fc00::/7`) unless the host's
+**name** is listed. Names, not URLs: a scheme, port or path in an entry is rejected at startup. A refusal names
+the rule and the host, and the list that would admit it.
+
+| Setting | Admits a private host for | Notes |
+| --- | --- | --- |
+| `SOURCE_ALLOWED_HOSTS` | Confluence, S3 and the GitHub Enterprise Server host of a GitHub source | The list for sources whose host an operator names and which call an API |
+| `WEB_ALLOWED_HOSTS` | web sources | A host trusted for an API call is not, by that fact, a host an editor may crawl |
+| `GIT_ALLOWED_HOSTS` | git sources | Independent of the other lists; a GitHub Enterprise Server host that is both cloned and read through the API is listed in both |
+| `CONFLUENCE_ALLOWED_HOSTS` | Confluence only | **Deprecated**: see below |
+
+`CONFLUENCE_ALLOWED_HOSTS` keeps working: a Confluence source may reach every host in it and every host in
+`SOURCE_ALLOWED_HOSTS`. While it is non-empty the server logs one deprecation warning at startup. Move its hosts
+to `SOURCE_ALLOWED_HOSTS`; the old setting is removed no earlier than `1.0.0`, and from then a non-empty value
+stops the server from starting, with a message naming `SOURCE_ALLOWED_HOSTS`. With the Helm chart the settings
+are `config.sourceAllowedHosts` and `config.confluenceAllowedHosts`.
+
+## Object ceiling for S3 sources
+
+| Setting | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `S3_MAX_OBJECTS` | `5000` | 1 – 100 000 | Objects one S3 source indexes at most: the first ones in key order among those under its prefix whose file type it reads |
+
+Past the ceiling the run indexes up to it, logs a warning, and its note says in capitals that the rest are **not**
+indexed — a partial index that looks complete is the failure this prevents. Narrow the source's prefix, split it
+across several sources, or raise the setting. The freshness check still lists every key under the prefix. An object
+over `MAX_CONVERTED_FILE_BYTES` is refused by name whatever the ceiling, and `DATA_DIR_MIN_FREE_BYTES` is checked
+before a sync downloads anything. See [Document sources](document-sources.md#s3-buckets-a-prefix-a-key-pair-and-a-listing-per-check).
+
+## File ceiling for Google Drive sources
+
+| Setting | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `GDRIVE_MAX_FILES` | `5000` | 1 – 100 000 | Files one Google Drive source indexes at most: the first ones in walk order (the folders in the order listed on the source, depth first, each folder's children by name and then by id) among those whose type the source reads |
+
+Past the ceiling the walk stops, the run indexes what it has, logs a warning, and its note says in capitals that the
+rest are **not** indexed. A service account can read everything shared with it, so a folder shared by mistake is
+the usual cause: narrow the source's folders, split it across several sources, or raise the setting. The
+freshness check is one request whatever the ceiling. A Google file over the 10 MB export limit and a stored file
+over `MAX_CONVERTED_FILE_BYTES` are refused by name whatever the ceiling, and `DATA_DIR_MIN_FREE_BYTES` is checked
+before a sync downloads anything. See [Document sources](document-sources.md#google-drive-folders-shared-with-a-service-account).
+
+## Ceilings for GitHub sources
+
+| Setting | Default | Range | Meaning |
+| --- | --- | --- | --- |
+| `GITHUB_MAX_ISSUES` | `5000` | 1 – 100 000 | Issues one GitHub source indexes at most: the most recently created first, counted among the issues the source reads (pull requests, and closed issues while they are left out, do not use it up) |
+| `GITHUB_MAX_DISCUSSIONS` | `5000` | 1 – 100 000 | Discussions one GitHub source indexes at most: the most recently created first |
+
+Past a ceiling a full run indexes up to it, logs a warning, and its note says in capitals that the older ones are **not**
+indexed: raise the setting (or, with closed issues on, leave them out). The defaults are placeholders taken from the other sources until a
+measured run of a large repository sets them. A GitHub Enterprise Server host on a private address is named in
+`SOURCE_ALLOWED_HOSTS`. A GitHub source's last full run is also bounded by `SYNC_MAX_SKIP_HOURS`: a source whose last full
+run is older than it lists every issue again on its next run, which is when a deleted issue leaves the index. See
+[Document sources](document-sources.md#github-issues-and-discussions).
+
 ## Source links and the "unchanged for a long time" mark
 
 Search and `read_document` answers carry the link to the original document (`sourceUrl`) and the date it last
@@ -170,6 +230,32 @@ answer marks the passage as unchanged for a long time (`stale: true`). It is a h
 
 Documents indexed before this feature have neither value until their source runs again.
 
+## Scanning documents for secrets and personal numbers
+
+`PII_SCAN` (default `1`, `0` turns it off) looks through the stored text of every document for six kinds of
+value: an AWS access key id, a GitHub token, the header of a PEM private key, a JWT, a Turkish citizen number (only
+with valid check digits) and an IBAN (only with its country's length and a valid mod-97). It **reports and does
+nothing else**: a document is indexed, searched and read exactly as written, never masked and never skipped, and
+search results are the same with the scan on and off.
+
+A finding is where the value is (document, line, column), a masked preview that shows at most four characters of it
+beyond a fixed prefix, and, when `SECRET_KEY` is set, an HMAC of the value under a key derived from `SECRET_KEY` for
+this purpose alone. The HMAC only lets the dashboard say "the same value appears in N documents"; it is never
+returned whole. **Without `SECRET_KEY` the findings are written without it** and nothing is grouped; when a key is
+set later, or changed, the documents are scanned again and the HMACs are filled. Neither the value nor a plain hash
+of it is stored anywhere.
+
+The scan runs in the background after an index run changes a project, and once at startup for everything that has not
+been scanned yet, so documents indexed before an upgrade are scanned without being indexed again. A document is
+scanned again when its text, the rule set or the key changes. Findings are listed by
+`GET /api/projects/:id/findings` for a project `editor` and above (a `viewer` gets `403`); there is no route that takes a
+value and says whether it was found, and nothing is on the MCP surface.
+
+`PII_SCAN=0` stops new scanning and **leaves the findings that exist in place**. They go away with the document that
+holds them, with the generation a rebuild replaces and with the project. A project export leaves them out (its
+manifest counts them under `excluded.documentFindings`); a backup is a full database dump and contains them, as the
+masked preview and the keyed HMAC, never the value. `/metrics` counts documents scanned by outcome and findings by rule.
+
 ## MCP rate limits and token networks
 
 `MCP_RATE_LIMIT_PER_MINUTE` (default `0`, off), `MCP_RATE_LIMIT_ANON_PER_MINUTE` (default `60`),
@@ -186,6 +272,52 @@ sharing one bucket of the same size. It is counted from the `reported_gaps` tabl
 answered as a success and dropped. What `report_gap` writes, and which switches stop it, are in
 [MCP access](mcp-access.md#reporting-what-the-documentation-does-not-answer); its rows are swept by
 `SEARCH_QUERY_LOG_RETENTION_DAYS`.
+
+## Connect with Notion (OAuth)
+
+Three variables turn on **Connect with Notion** in the source dialog, as an alternative to pasting an
+internal integration token. Each operator registers a public connection of their own in Notion; there is no
+Contextator-owned one.
+
+| Variable | Notes |
+| --- | --- |
+| `NOTION_OAUTH_CLIENT_ID` | The public connection's client id. Set together with the secret. |
+| `NOTION_OAUTH_CLIENT_SECRET` | Its client secret. A process secret like `OIDC_CLIENT_SECRET`: never stored in the database, returned or logged. |
+| `NOTION_OAUTH_REDIRECT_URI` | The redirect URI registered on the connection. Defaults to `<PUBLIC_BASE_URL>/api/sources/notion/oauth/callback`. Use a domain name, or `localhost` for a local instance; not an IP address. |
+
+Startup is refused, with a message that names the variable, when only one of the id and the secret is set, when
+both are set with neither `NOTION_OAUTH_REDIRECT_URI` nor `PUBLIC_BASE_URL` (the redirect URI is never guessed
+from a request), or when both are set without `SECRET_KEY` (the tokens are stored encrypted with it). With none
+of them set nothing changes and the dashboard shows no button.
+
+On Helm, put the id in `env` and the secret in `envSecret` (`NOTION_OAUTH_CLIENT_SECRET`), like the other
+secrets the chart does not model one by one. What the connection does, how it differs from a token and how to
+register it: [Two ways to authorise a Notion source](document-sources.md#two-ways-to-authorise-a-notion-source).
+
+## Single sign-on groups
+
+Single sign-on itself is `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` and their companions
+(`OIDC_SCOPES`, `OIDC_AUTO_PROVISION`, `OIDC_DEFAULT_ROLE`); see
+[Accounts and permissions](accounts-and-permissions.md). One more variable maps provider groups to project
+memberships:
+
+| Variable | Notes |
+| --- | --- |
+| `OIDC_GROUPS_CLAIM` | The top-level claim of the **ID token** that lists a person's groups, for example `groups`. 1–128 characters of letters, digits and `_ : . - /`. Unset (the default), nothing here runs and sign-in is unchanged. |
+
+Startup is refused when it is set without `OIDC_ISSUER_URL`. The claim is read from the ID token only: there
+is no request to the userinfo endpoint, and a nested claim path is not supported, so a provider that nests the
+groups (Keycloak's `realm_access.roles`) must map them to a flat claim. A provider that needs a scope to emit
+the claim gets it through `OIDC_SCOPES` (`openid profile email groups`). Which group grants which project is
+set under **Users → SSO group mappings**; what each sign-in then does, and what it does when the claim is
+missing or cannot be read, is in
+[Single sign-on groups](accounts-and-permissions.md#single-sign-on-groups).
+
+Turning `OIDC_GROUPS_CLAIM` off again removes no membership: the rows a group granted stay, marked as such,
+until an administrator removes them or edits them into manual ones.
+
+On Helm it is `config.oidcGroupsClaim`; the rest of the single sign-on variables go through `env` and
+`envSecret`.
 
 ## Project quotas
 

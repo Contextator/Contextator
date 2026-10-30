@@ -1,7 +1,7 @@
 // The account list at #/~users — who exists, what they may do, and how to reset them.
 // Only root and admin reach it; the server refuses /api/users to anyone else.
 
-import { $, api, closeDialog, copyText, el, emit, fmt, icon, initials, openDialog, relativeTime, state, toast } from './core.js';
+import { $, api, ApiError, closeDialog, copyText, el, emit, fmt, icon, initials, openDialog, relativeTime, state, toast } from './core.js';
 import { isRoot } from './auth.js';
 
 const ROLE_HINT = {
@@ -48,7 +48,178 @@ export function renderUsersView() {
       ),
     ]),
   );
+  const groups = renderGroupMappings();
+  if (groups) wrap.append(groups);
   return wrap;
+}
+
+// ---------- SSO group mappings (ADR-0134) ----------
+
+// Kept here rather than in `state`: only this view reads it, and it is reloaded after every change. A failed
+// load is not retried until the next window, or the render that follows it would ask again at once.
+const mappingsState = { list: [], loading: false, failed: false, at: 0, confirming: null, timer: null };
+const MAPPINGS_STALE_MS = 15_000;
+
+function loadMappings() {
+  if (mappingsState.loading) return;
+  mappingsState.loading = true;
+  api('/api/oidc/group-mappings')
+    .then((body) => {
+      mappingsState.list = body.mappings;
+      mappingsState.failed = false;
+    })
+    .catch((err) => {
+      mappingsState.failed = true;
+      if (!(err instanceof ApiError && err.status === 401)) toast(err.message);
+    })
+    .finally(() => {
+      mappingsState.loading = false;
+      mappingsState.at = Date.now();
+      if (state.view === 'users') emit('render');
+    });
+}
+
+function renderGroupMappings() {
+  const oidc = state.me?.oidc;
+  // Mappings can be prepared before the claim is switched on; with no SSO at all and none stored there is nothing to show.
+  if (!oidc?.enabled && mappingsState.list.length === 0 && !mappingsState.loading && mappingsState.at !== 0) return null;
+  if (!mappingsState.loading && Date.now() - mappingsState.at > MAPPINGS_STALE_MS) loadMappings();
+
+  const rows = mappingsState.list.map((m) =>
+    el('div', { class: 'user-row member-row' }, [
+      el('span', { class: 'user-glyph member', 'aria-hidden': 'true', text: initials(m.group) }),
+      el('span', { class: 'source-cell' }, [el('code', { text: m.group }), el('span', { class: 'sub', text: `→ ${m.projectName}` })]),
+      el('span', { class: `pill small ${m.role}`, text: m.role }),
+      el('span', { class: 'sub', text: relativeTime(m.createdAt), title: m.createdAt ? new Date(m.createdAt).toLocaleString() : '' }),
+      el('span', { class: 'source-actions' }, [
+        el('button', {
+          type: 'button',
+          class: `danger small${mappingsState.confirming === m.id ? ' confirm' : ''}`,
+          text: mappingsState.confirming === m.id ? 'Confirm' : 'Delete',
+          title: 'Updates or removes, now, the memberships this mapping granted to people already signed in',
+          onclick: () => (mappingsState.confirming === m.id ? deleteMapping(m) : askDeleteMapping(m)),
+        }),
+      ]),
+    ]),
+  );
+
+  return el('section', { class: 'panel' }, [
+    el('div', { class: 'sources-head' }, [
+      el('div', {}, [
+        el('h3', { text: 'SSO group mappings' }),
+        el('p', {
+          text: 'A person who signs in through single sign-on gets a membership in each project their provider groups map to, and loses it at the next sign-in once they leave the group. Memberships added by hand are never changed by a group; where two groups map the same project, the higher role applies.',
+        }),
+      ]),
+      el('button', { type: 'button', class: 'ghost small', text: 'Add mapping', onclick: openMappingDialog }),
+    ]),
+    oidc?.groups
+      ? null
+      : el('p', {
+          class: 'members-note',
+          text: 'Group mapping is off: mappings are stored but no sign-in applies them until OIDC_GROUPS_CLAIM names the claim that carries the groups.',
+        }),
+    rows.length
+      ? el('div', {}, rows)
+      : el('p', { class: 'sources-empty', text: mappingsState.failed ? 'The mappings could not be loaded.' : 'No mappings yet.' }),
+  ]);
+}
+
+function askDeleteMapping(m) {
+  mappingsState.confirming = m.id;
+  emit('render');
+  clearTimeout(mappingsState.timer);
+  mappingsState.timer = setTimeout(() => {
+    if (mappingsState.confirming === m.id) {
+      mappingsState.confirming = null;
+      emit('render');
+    }
+  }, 6000);
+}
+
+async function deleteMapping(m) {
+  mappingsState.confirming = null;
+  try {
+    await api(`/api/oidc/group-mappings/${m.id}`, { method: 'DELETE' });
+    toast('Mapping deleted');
+  } catch (err) {
+    toast(err.message);
+  }
+  loadMappings();
+  emit('refresh');
+}
+
+// The dialog is built once and kept in <body>, outside #detail: the poll rebuilds #detail wholesale, which
+// would throw away a group name that is half typed.
+let mappingDialog = null;
+
+function mappingDialogNode() {
+  if (mappingDialog) return mappingDialog;
+  const error = el('p', { class: 'form-error', role: 'alert', hidden: true });
+  const group = el('input', { name: 'group', type: 'text', maxlength: '256', required: true, autocomplete: 'off', spellcheck: 'false' });
+  const project = el('select', { name: 'projectId' });
+  const submit = el('button', { type: 'submit', class: 'primary', text: 'Add mapping' });
+  const cancel = el('button', { type: 'button', class: 'ghost', text: 'Cancel' });
+  const form = el('form', { method: 'dialog', novalidate: true }, [
+    el('div', { class: 'dialog-head' }, [
+      el('h2', { text: 'Add group mapping' }),
+      el('p', {
+        class: 'muted',
+        text: 'Give everyone in a provider group access to a project. The group name is matched exactly, capitals included.',
+      }),
+    ]),
+    el('div', { class: 'dialog-body' }, [
+      el('label', { class: 'field' }, [el('span', { class: 'field-label', text: 'Group name' }), group]),
+      el('label', { class: 'field' }, [el('span', { class: 'field-label', text: 'Project' }), project]),
+      el('div', { class: 'radio-row' }, [
+        el('label', {}, [el('input', { type: 'radio', name: 'role', value: 'viewer', checked: true }), ' Viewer — reads the project']),
+        el('label', {}, [el('input', { type: 'radio', name: 'role', value: 'editor' }), ' Editor — adds sources, uploads, re-indexes']),
+      ]),
+      error,
+    ]),
+    el('div', { class: 'dialog-foot' }, [cancel, submit]),
+  ]);
+  mappingDialog = el('dialog', { class: 'dialog' }, [form]);
+  document.body.append(mappingDialog);
+
+  cancel.addEventListener('click', () => closeDialog(mappingDialog));
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    error.hidden = true;
+    const data = new FormData(form);
+    const name = String(data.get('group'));
+    if (name.trim() === '' || !data.get('projectId')) {
+      error.textContent = 'Name a group and pick a project.';
+      error.hidden = false;
+      return;
+    }
+    submit.disabled = true;
+    try {
+      await api('/api/oidc/group-mappings', {
+        method: 'POST',
+        body: { group: name, projectId: String(data.get('projectId')), role: String(data.get('role')) },
+      });
+      closeDialog(mappingDialog);
+      toast('Mapping added');
+      loadMappings();
+    } catch (err) {
+      error.textContent = err.message;
+      error.hidden = false;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  return mappingDialog;
+}
+
+function openMappingDialog() {
+  const dialog = mappingDialogNode();
+  const form = dialog.querySelector('form');
+  form.reset();
+  dialog.querySelector('.form-error').hidden = true;
+  dialog.querySelector('select[name="projectId"]').replaceChildren(...state.projects.map((p) => el('option', { value: p.id, text: p.name })));
+  openDialog(dialog);
+  form.elements.group.focus();
 }
 
 function userRow(u, activeRoots) {

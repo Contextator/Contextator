@@ -117,6 +117,9 @@
           <button type="button" class="tab" role="tab" data-kind="notion">Notion</button>
           <button type="button" class="tab" role="tab" data-kind="confluence">Confluence</button>
           <button type="button" class="tab" role="tab" data-kind="web">Documentation site</button>
+          <button type="button" class="tab" role="tab" data-kind="s3">S3 bucket</button>
+          <button type="button" class="tab" role="tab" data-kind="gdrive">Google Drive</button>
+          <button type="button" class="tab" role="tab" data-kind="github">GitHub issues</button>
         </div>
         <div class="dialog-body">
           <div class="field-row">
@@ -191,6 +194,7 @@
           </div>
 
           <div class="kind-only" data-kind="notion">
+            <div id="notion-oauth-box" class="field" hidden></div>
             <label class="field">
               <span class="field-label">Integration token</span>
               <input name="notionSecret" type="password" placeholder="ntn_… / secret_…" autocomplete="off" />
@@ -287,6 +291,106 @@
               <span class="field-hint">Detection reads the document rather than the URL. When it cannot tell — a sitemap that redirects to a landing page, an <code>llms.txt</code> served as HTML — the source refuses instead of guessing, and names this field. Only <code>sitemap.xml</code> can be checked for freshness in one request; the other two re-fetch on every scheduled run.</span>
             </label>
             <p class="field-hint">Every run is held to the instance's crawl ceilings — pages, depth, the gap between requests, a total time budget and <code>robots.txt</code> (<code>WEB_*</code> in <code>.env</code>). Reaching one stops the run and says so on the source.</p>
+          </div>
+
+          <div class="kind-only" data-kind="s3">
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Bucket</span>
+                <input name="s3Bucket" placeholder="my-docs" maxlength="63" autocomplete="off" spellcheck="false" />
+                <span class="field-hint">Only the objects with the file types ticked below are read.</span>
+              </label>
+              <label class="field">
+                <span class="field-label">Prefix <span class="muted">— optional</span></span>
+                <input name="s3Prefix" placeholder="guides/v2" maxlength="1024" autocomplete="off" spellcheck="false" />
+                <span class="field-hint">Objects under it are indexed with it removed from their names. Every key under the prefix is listed on each check, so keep it narrow.</span>
+              </label>
+            </div>
+            <label class="field">
+              <span class="field-label">Endpoint <span class="muted">— optional</span></span>
+              <input name="s3Endpoint" type="url" placeholder="https://minio.example.com:9000" autocomplete="off" spellcheck="false" />
+              <span class="field-hint">Empty is AWS S3 (<code>https</code> only). For MinIO, Ceph, Cloudflare R2 or another S3-compatible server, give its address; a server on a private address must be named in <code>SOURCE_ALLOWED_HOSTS</code> in <code>.env</code>.</span>
+            </label>
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Region</span>
+                <input name="s3Region" placeholder="us-east-1" maxlength="64" autocomplete="off" spellcheck="false" />
+                <span class="field-hint">Empty is <code>us-east-1</code>. AWS needs the bucket's own region; most other servers accept any.</span>
+              </label>
+              <label class="field">
+                <span class="field-label">Addressing</span>
+                <select name="s3PathStyle">
+                  <option value="">Default (path-style with an endpoint)</option>
+                  <option value="true">Path-style — host/bucket/key</option>
+                  <option value="false">Virtual-hosted — bucket.host/key</option>
+                </select>
+                <span class="field-hint">Leave the default unless the server asks for the other.</span>
+              </label>
+            </div>
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Access key ID</span>
+                <input name="s3AccessKeyId" placeholder="AKIA…" autocomplete="off" spellcheck="false" />
+                <span class="field-hint">A key pair with read access (<code>s3:ListBucket</code>, <code>s3:GetObject</code>). Temporary credentials (a session token) and instance roles are not supported.</span>
+              </label>
+              <label class="field">
+                <span class="field-label">Secret access key</span>
+                <input name="s3SecretAccessKey" type="password" autocomplete="off" />
+                <span class="field-hint">Stored encrypted with <code>SECRET_KEY</code> and never shown again.</span>
+              </label>
+            </div>
+            <label class="check-inline" id="s3-clear-secret-row" hidden>
+              <input type="checkbox" id="s3-clear-secret" />
+              <span>Remove the stored key pair</span>
+            </label>
+          </div>
+
+          <div class="kind-only" data-kind="gdrive">
+            <label class="field">
+              <span class="field-label">Folders</span>
+              <textarea name="gdriveFolders" rows="3" placeholder="Folder links or ids, one per line" spellcheck="false"></textarea>
+              <span class="field-hint">Paste the link of each Drive folder (or its id); up to 50. Everything inside is indexed, with the folder's name as the first part of the path. Google Docs become Markdown, Sheets <code>.xlsx</code> and Slides <code>.pptx</code>; a Google file over 10&nbsp;MB cannot be exported and is named on the source. Shortcuts are not followed.</span>
+            </label>
+            <div class="field">
+              <span class="field-label">Service account key</span>
+              <input type="file" id="gdrive-key-file" accept="application/json,.json" />
+              <textarea name="gdriveKey" rows="3" placeholder="…or paste the JSON key file" autocomplete="off" spellcheck="false"></textarea>
+              <span class="field-hint">The key file of a Google service account, created under IAM &amp; Admin → Service accounts → Keys. Only its e-mail address, key id and private key are kept, encrypted with <code>SECRET_KEY</code> and never shown again. The account can read everything shared with it, so use one account for this source alone.</span>
+            </div>
+            <p class="field-hint" id="gdrive-share-hint" hidden>Share the folders with <code id="gdrive-sa-email"></code> — Viewer is enough.</p>
+            <label class="check-inline" id="gdrive-clear-secret-row" hidden>
+              <input type="checkbox" id="gdrive-clear-secret" />
+              <span>Remove the stored key</span>
+            </label>
+          </div>
+
+          <div class="kind-only" data-kind="github">
+            <label class="field">
+              <span class="field-label">Repository</span>
+              <input name="githubRepo" placeholder="owner/repository, or its GitHub address" maxlength="200" autocomplete="off" spellcheck="false" />
+              <span class="field-hint">Each issue becomes one document with its comments, <code>issues/&lt;number&gt;.md</code>; pull requests are not indexed. The repository's files and wiki are not read here: add them as a <strong>Git repository</strong> source.</span>
+            </label>
+            <div class="field">
+              <span class="field-label">What to index</span>
+              <label class="check-inline"><input type="checkbox" name="githubIncludeClosed" /> <span>Closed issues too <span class="muted">— open ones only by default</span></span></label>
+              <label class="check-inline"><input type="checkbox" name="githubIncludeDiscussions" /> <span>Discussions, with their replies <span class="muted">— needs a token</span></span></label>
+              <label class="check-inline"><input type="checkbox" name="githubIncludeBots" checked /> <span>Comments and issues written by bots</span></label>
+              <span class="field-hint">Issue and Discussion text can carry names, addresses and pasted credentials; it is indexed as written. Deleted or transferred issues leave the index on the next full run, at the latest after <code>SYNC_MAX_SKIP_HOURS</code> (24 hours by default).</span>
+            </div>
+            <label class="field">
+              <span class="field-label">Access token <span class="muted">— optional for public repositories</span></span>
+              <input name="githubToken" type="password" placeholder="ghp_… / github_pat_…" autocomplete="off" />
+              <span class="field-hint">A fine-grained personal access token with read access to <em>Issues</em> (and <em>Discussions</em>) on this repository; a classic one works. Without a token only a public repository's issues can be read, under GitHub's small anonymous limit shared by every tokenless source on this server. Stored encrypted with <code>SECRET_KEY</code> and never shown again.</span>
+            </label>
+            <label class="check-inline" id="github-clear-secret-row" hidden>
+              <input type="checkbox" id="github-clear-secret" />
+              <span>Remove the stored token</span>
+            </label>
+            <label class="field">
+              <span class="field-label">API address <span class="muted">— GitHub Enterprise Server only</span></span>
+              <input name="githubApiUrl" type="url" placeholder="https://github.example.com/api/v3" autocomplete="off" spellcheck="false" />
+              <span class="field-hint">Empty is github.com. A server on a private address must be named in <code>SOURCE_ALLOWED_HOSTS</code> in <code>.env</code>.</span>
+            </label>
           </div>
 
           <div class="kind-only" data-kind="obsidian">
@@ -544,6 +648,14 @@
             <textarea name="allowedCidrs" rows="3" spellcheck="false" autocomplete="off" placeholder="10.0.0.0/8&#10;203.0.113.7/32"></textarea>
             <span class="field-hint">One address or range (CIDR) per line, up to 32. The token is refused from anywhere else. Leave empty for no restriction. The address checked is the client's: the one the server's socket sees or, when <code>TRUST_PROXY</code> names the proxy in front, the one that proxy forwards.</span>
           </label>
+          <fieldset class="field token-scope-field" id="token-scope-field">
+            <legend class="field-label">Sources</legend>
+            <label class="check"><input type="radio" name="scope" value="all" checked /><span>Every source of this project</span></label>
+            <label class="check"><input type="radio" name="scope" value="some" /><span>Only these sources</span></label>
+            <div id="token-sources-list" hidden></div>
+            <span class="field-hint">A token bound to sources reads nothing outside them: they do not appear in a search, a listing or a change feed, and their names are not offered. It cannot be bound to none.</span>
+            <span id="token-scope-open-note" class="field-hint warn" hidden>This project is open, so a source scope is not a boundary here: a request without a token still reads the whole project.</span>
+          </fieldset>
           <p id="token-error" class="form-error" role="alert" hidden></p>
         </div>
         <div class="dialog-foot">

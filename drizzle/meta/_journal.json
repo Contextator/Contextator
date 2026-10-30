@@ -204,6 +204,27 @@
       "when": 1792991392378,
       "tag": "0028_reported_gaps",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1793199093258,
+      "tag": "0029_document_findings",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1793209203864,
+      "tag": "0030_mcp_token_scope",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1793213815155,
+      "tag": "0031_oidc_group_mappings",
+      "breakpoints": true
     }
   ]
 }

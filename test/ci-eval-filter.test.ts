@@ -85,6 +85,16 @@ describe('the eval job path filter in ci.yml', () => {
     expect(filterPattern().test('src/config.ts')).toBe(true);
   });
 
+  it('starts the eval job for a dependency or migration change (D3)', () => {
+    const filter = filterPattern();
+    for (const file of ['drizzle/x.sql', 'drizzle/meta/_journal.json', 'package.json', 'package-lock.json']) {
+      expect(filter.test(file), file).toBe(true);
+    }
+    // Only the repository root's manifests: a nested one is somebody else's.
+    expect(filter.test('charts/contextator/package.json')).toBe(false);
+    expect(filter.test('docs/demo/package-lock.json')).toBe(false);
+  });
+
   it('still lets a change with nothing to do with retrieval skip the job', () => {
     const filter = filterPattern();
     for (const file of [

@@ -738,11 +738,19 @@ durations with their units in descending order (`y`, `w`, `d`, `h`, `m`, `s`, `m
 the format the Prometheus Operator CRD itself accepts. `env` accepts any variable name with a string value; `envSecret` accepts any name,
 but each entry must be exactly `{secretName, secretKey}`.
 
-Five application settings have typed keys under `config` rather than going through `env`, so the schema
+These application settings have typed keys under `config` rather than going through `env`, so the schema
 checks them:
 
-- `config.confluenceAllowedHosts` — a list of host names (not URLs), joined into
-  `CONFLUENCE_ALLOWED_HOSTS`. Empty leaves the variable unset.
+- `config.oidcGroupsClaim` — joined into `OIDC_GROUPS_CLAIM` (ADR-0134): the top-level ID-token claim that lists
+  a person's groups, which turns on mapping provider groups to project memberships. It needs `OIDC_ISSUER_URL`
+  (through `env`); a provider that needs a scope to emit the claim gets it through `OIDC_SCOPES`. Empty leaves
+  the variable unset.
+- `config.sourceAllowedHosts` — a list of host names (not URLs), joined into `SOURCE_ALLOWED_HOSTS`: the hosts
+  a Confluence, S3 or GitHub Enterprise Server source may reach on a private address (ADR-0126). It does not
+  admit a host for a web or git source. Empty leaves the variable unset.
+- `config.confluenceAllowedHosts` — **deprecated**, use `config.sourceAllowedHosts`. A list of host names (not
+  URLs), joined into `CONFLUENCE_ALLOWED_HOSTS`, which still admits its hosts for Confluence only; the
+  application logs one deprecation warning at startup while it is set. Empty leaves the variable unset.
 - `config.webAllowedHosts` — the same for a web source, joined into `WEB_ALLOWED_HOSTS`. Empty leaves the
   variable unset.
 - `config.gitAllowedHosts` — the same for a git source, joined into `GIT_ALLOWED_HOSTS`. Empty leaves the
@@ -759,6 +767,11 @@ checks them:
   least `0`, set as `PROJECT_MAX_DOCUMENTS`, `PROJECT_MAX_CHUNKS` and `PROJECT_MAX_UPLOAD_BYTES`: the
   instance-wide default caps on what one project may hold. A project the instance admin gave its own
   value uses that instead. `null` (the default) and `0` leave a cap off.
+- `config.s3MaxObjects`, `config.gdriveMaxFiles`, `config.githubMaxIssues`, `config.githubMaxDiscussions` —
+  integers from `1` to `100000`, set as `S3_MAX_OBJECTS`, `GDRIVE_MAX_FILES`, `GITHUB_MAX_ISSUES` and
+  `GITHUB_MAX_DISCUSSIONS`: the most objects, files, issues and Discussions one source of that type reads in a
+  run; the rest is not indexed. `null` (the default) leaves the variable unset, so the
+  application default of `5000` applies.
 - `config.mcpStructuredOutput` — `true` sets `MCP_STRUCTURED_OUTPUT=1`. `false` (the default) leaves it
   unset.
 - `config.mcpRateLimitPerMinute`, `config.mcpRateLimitAnonPerMinute` — integers, at least `0`, set as

@@ -13,6 +13,7 @@ import {
   pgEnum,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   unique,
@@ -277,6 +278,17 @@ export const mcpTokens = pgTable(
      * address is stored as `/32` or `/128`. Meaningless on the two OAuth kinds, which never carry one.
      */
     allowedCidrs: cidr('allowed_cidrs').array(),
+    /**
+     * Whether this **static** token is bound to a list of the project's sources
+     * ([ADR-0133](../../.ssot/ADR.md#adr-0133)); the list itself is `mcp_token_sources`.
+     *
+     * `false` is unrestricted and is every row that existed before the column did, so the migration
+     * changes what no token reads. `true` with rows is those sources only, and **`true` with no rows
+     * is no source at all, never every source**: the flag is what keeps a scope whose last source was
+     * deleted from widening to the project. The `allowedCidrs` rule beside it reads empty as
+     * "unrestricted" and must not be copied here.
+     */
+    sourceScoped: boolean('source_scoped').notNull().default(false),
   },
   (t) => [
     foreignKey({ name: 'mcp_tokens_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
@@ -284,6 +296,7 @@ export const mcpTokens = pgTable(
     foreignKey({ name: 'mcp_tokens_user_id_fkey', columns: [t.userId], foreignColumns: [users.id] }).onDelete('cascade'),
     foreignKey({ name: 'mcp_tokens_client_id_fkey', columns: [t.clientId], foreignColumns: [oauthClients.clientId] }).onDelete('cascade'),
     check('mcp_tokens_kind_check', sql`${t.kind} in ('static', 'access', 'refresh')`),
+    check('mcp_tokens_source_scope_static_check', sql`NOT ${t.sourceScoped} OR ${t.kind} = 'static'`),
     index('mcp_tokens_project_idx').on(t.projectId),
     // "This account's MCP credentials", which is what revoking a person's access has to be able to ask.
     index('mcp_tokens_user_idx').on(t.userId),
@@ -388,6 +401,27 @@ export const documentSources = pgTable(
     // claimed is due whether or not it is scheduled at all. Partial for the same reason — on an
     // installation with no Notion webhook it matches nothing and costs a catalogue row.
     index('document_sources_webhook_due_idx').on(t.webhookDueAt).where(sql`webhook_due_at is not null`),
+  ],
+);
+
+/**
+ * The sources a scoped static MCP token may read ([ADR-0133](../../.ssot/ADR.md#adr-0133)); meaningful
+ * only while `mcp_tokens.source_scoped` is true. Both keys cascade: deleting a source removes its row
+ * and the token keeps its flag, so a scope only ever narrows on its own. A source re-created under a
+ * deleted one's name has a new id and enters no scope.
+ */
+export const mcpTokenSources = pgTable(
+  'mcp_token_sources',
+  {
+    tokenId: uuid('token_id').notNull(),
+    sourceId: uuid('source_id').notNull(),
+  },
+  (t) => [
+    foreignKey({ name: 'mcp_token_sources_token_id_fkey', columns: [t.tokenId], foreignColumns: [mcpTokens.id] }).onDelete('cascade'),
+    foreignKey({ name: 'mcp_token_sources_source_id_fkey', columns: [t.sourceId], foreignColumns: [documentSources.id] }).onDelete('cascade'),
+    primaryKey({ name: 'mcp_token_sources_pkey', columns: [t.tokenId, t.sourceId] }),
+    // "Which tokens name this source", for the cascade on a source delete.
+    index('mcp_token_sources_source_idx').on(t.sourceId),
   ],
 );
 
@@ -562,6 +596,93 @@ export const chunks = pgTable(
     // index over a `tsvector` needs no fixed dimension and blocks no `ALTER COLUMN … TYPE`, so none of
     // the reasons that keep the HNSW index in the bootstrap apply to it.
     index('chunks_content_tsv_idx').using('gin', t.contentTsv),
+  ],
+);
+
+/**
+ * What the PII scan found in a stored document ([ADR-0130](../../.ssot/ADR.md#adr-0130)): one row per finding.
+ *
+ * **The value is nowhere in this table, and neither is a plain hash of it.** A finding is a place (`line`,
+ * `col`, `start_offset`, `length` in `documents.content`), a masked `preview` that shows at most four
+ * characters of the value beyond a fixed prefix, and `value_hmac` — the value keyed under a key derived from
+ * `SECRET_KEY` for this purpose alone, with that key's id. A citizen number has nine free digits, so a plain
+ * hash of one is reversed in minutes and a keyed hash whose key sat in this database would be no better; the
+ * key lives in the environment. **Without `SECRET_KEY` both are NULL**, and the report still says where.
+ *
+ * It follows its document: deleting a document, a generation swap and deleting a project take the findings
+ * with them through the cascades, and there is no other retention. Only the findings whose
+ * `document_scans.content_hash` equals the document's current `content_hash` are ever shown.
+ */
+export const documentFindings = pgTable(
+  'document_findings',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id').notNull(),
+    documentId: uuid('document_id').notNull(),
+    /** One of `PII_RULES` (`services/pii-rules.ts`); the CHECK below is the same closed set. */
+    rule: text('rule').notNull(),
+    /** 1-based. */
+    line: integer('line').notNull(),
+    /** 1-based, in code points and not in UTF-16 code units. */
+    col: integer('col').notNull(),
+    /** UTF-16 code unit offset into `documents.content`, so `content.slice(start_offset, start_offset + length)` is the match. */
+    startOffset: integer('start_offset').notNull(),
+    length: integer('length').notNull(),
+    /** Masked: a fixed prefix and at most four characters of the value. */
+    preview: text('preview').notNull(),
+    /** Hex HMAC-SHA-256 of the normalised value under the findings key; NULL when the instance has no `SECRET_KEY`. */
+    valueHmac: text('value_hmac'),
+    /** `secretKeyId(SECRET_KEY)` of the key `value_hmac` was made under; NULL with it. */
+    hmacKeyId: text('hmac_key_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({ name: 'document_findings_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    foreignKey({ name: 'document_findings_document_id_fkey', columns: [t.documentId], foreignColumns: [documents.id] }).onDelete('cascade'),
+    check('document_findings_rule_check', sql`${t.rule} in ('aws_access_key', 'github_token', 'private_key', 'jwt', 'tckn', 'iban')`),
+    index('document_findings_project_rule_idx').on(t.projectId, t.rule),
+    index('document_findings_document_idx').on(t.documentId),
+    // "The same value in N documents": the grouping the dashboard shows, which exists only where there is a key.
+    index('document_findings_project_hmac_idx').on(t.projectId, t.valueHmac).where(sql`value_hmac is not null`),
+  ],
+);
+
+/**
+ * Which documents the PII scan has looked at, and as what ([ADR-0130](../../.ssot/ADR.md#adr-0130)): one row per
+ * scanned document.
+ *
+ * It is the scanner's whole memory. A document is scanned when it has no row here, or when its `content_hash`,
+ * the rule-set version or the key id differs from the row's; a document whose text is not stored is marked
+ * `no_content` and not retried. `finding_count` is the real number even when `capped` says only the first
+ * findings were kept.
+ *
+ * **Not a column of `documents`**, on purpose ([ADR-0130](../../.ssot/ADR.md#adr-0130) decision 5): the indexer's
+ * write path does not change for a feature that does not affect search, and the scan state cascades away with the
+ * document it describes.
+ */
+export const documentScans = pgTable(
+  'document_scans',
+  {
+    documentId: uuid('document_id').primaryKey(),
+    projectId: uuid('project_id').notNull(),
+    /** `scanned` or `no_content` (the document's text is NULL: a row written before `documents.content` existed). */
+    status: text('status').notNull(),
+    /** `PII_RULESET_VERSION` at the time of the scan. */
+    ruleset: smallint('ruleset').notNull(),
+    /** The `documents.content_hash` the scan read; findings are shown only while it is still the document's. */
+    contentHash: text('content_hash').notNull(),
+    /** The key id the findings' HMACs were made under; NULL when there was no `SECRET_KEY`. */
+    hmacKeyId: text('hmac_key_id'),
+    findingCount: integer('finding_count').notNull(),
+    /** More findings than the per-document ceiling. Text cut at `MAX_STORED_DOCUMENT_BYTES` is `documents.content_truncated`, not this. */
+    capped: boolean('capped').notNull(),
+    scannedAt: timestamp('scanned_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({ name: 'document_scans_document_id_fkey', columns: [t.documentId], foreignColumns: [documents.id] }).onDelete('cascade'),
+    foreignKey({ name: 'document_scans_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    check('document_scans_status_check', sql`${t.status} in ('scanned', 'no_content')`),
+    index('document_scans_project_idx').on(t.projectId),
   ],
 );
 
@@ -1136,6 +1257,14 @@ export const projectMembers = pgTable(
     role: text('role').notNull().$type<ProjectMemberRole>(),
     createdBy: uuid('created_by'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * Where this membership came from ([ADR-0134](../../.ssot/ADR.md#adr-0134)): `manual` — every row
+     * that existed before 0.6 and every row the members API writes — or `oidc_group`, one an SSO
+     * sign-in reconciled from the provider's group claim. Reconciliation touches `oidc_group` rows only.
+     */
+    origin: text('origin').notNull().default('manual').$type<ProjectMemberOrigin>(),
+    /** The provider groups that produced an `oidc_group` row, so a deleted mapping can recompute it; `NULL` on a `manual` row. */
+    oidcGroups: text('oidc_groups').array(),
   },
   // PK order is (user_id, project_id): the hot queries are "this account's projects" and the point
   // lookup, both served by that index. The reverse direction gets its own.
@@ -1145,7 +1274,39 @@ export const projectMembers = pgTable(
     foreignKey({ name: 'project_members_created_by_fkey', columns: [t.createdBy], foreignColumns: [users.id] }).onDelete('set null'),
     primaryKey({ name: 'project_members_pkey', columns: [t.userId, t.projectId] }),
     check('project_members_role_check', sql`${t.role} in ('viewer', 'editor')`),
+    // ADR-0134: a `manual` row names no group, an `oidc_group` row names at least one.
+    check(
+      'project_members_origin_check',
+      sql`(${t.origin} = 'manual' and ${t.oidcGroups} is null) or (${t.origin} = 'oidc_group' and cardinality(${t.oidcGroups}) > 0)`,
+    ),
     index('project_members_project_idx').on(t.projectId),
+  ],
+);
+
+/**
+ * Which provider group grants which project, and how far ([ADR-0134](../../.ssot/ADR.md#adr-0134)).
+ * An administrator's rows; an SSO sign-in reads them and writes `project_members` from them. A
+ * mapping carries no instance role: no group makes anybody an `admin`.
+ */
+export const oidcGroupMappings = pgTable(
+  'oidc_group_mappings',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** Matched exactly and case-sensitively against the ID token's group claim. */
+    groupName: text('group_name').notNull(),
+    projectId: uuid('project_id').notNull(),
+    /** `viewer` | `editor`, enforced by `oidc_group_mappings_role_check` below. */
+    role: text('role').notNull().$type<ProjectMemberRole>(),
+    createdBy: uuid('created_by'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({ name: 'oidc_group_mappings_project_id_fkey', columns: [t.projectId], foreignColumns: [projects.id] }).onDelete('cascade'),
+    foreignKey({ name: 'oidc_group_mappings_created_by_fkey', columns: [t.createdBy], foreignColumns: [users.id] }).onDelete('set null'),
+    unique('oidc_group_mappings_group_project_key').on(t.groupName, t.projectId),
+    check('oidc_group_mappings_role_check', sql`${t.role} in ('viewer', 'editor')`),
+    check('oidc_group_mappings_group_name_check', sql`char_length(${t.groupName}) between 1 and 256`),
+    index('oidc_group_mappings_project_idx').on(t.projectId),
   ],
 );
 
@@ -1201,7 +1362,8 @@ export const auditEvents = pgTable(
     /**
      * The address the request appeared to come from — **a hint beside the actor, never the actor.**
      *
-     * What `req.ip` is worth here is `TRUST_PROXY`'s answer ([ADR-0060](../../.ssot/ADR.md#adr-0060)):
+     * What `req.ip` is worth here is `TRUST_PROXY`'s answer ([ADR-0060](../../.ssot/ADR.md#adr-0060),
+     * [ADR-0122](../../.ssot/ADR.md#adr-0122)):
      * the socket's own peer address by default, the left-most `X-Forwarded-For` — which the client
      * writes — on an instance set to `1`, and the forwarded address vouched for by a named proxy when
      * it is set to one. It is recorded because it is useful next to an identity that was established
@@ -1307,12 +1469,15 @@ export type McpTokenKind = 'static' | 'access' | 'refresh';
  */
 export type AuditActorKind = 'user' | 'token' | 'api_token';
 export type ProjectMemberRole = 'viewer' | 'editor';
+/** Where a `project_members` row came from ([ADR-0134](../../.ssot/ADR.md#adr-0134)). */
+export type ProjectMemberOrigin = 'manual' | 'oidc_group';
 /** How a `user_sessions` row was opened — a password sign-in, or an OIDC provider. */
 export type SessionAuthMethod = 'password' | 'sso';
 
 export type UserRow = typeof users.$inferSelect;
 export type UserSessionRow = typeof userSessions.$inferSelect;
 export type ProjectMemberRow = typeof projectMembers.$inferSelect;
+export type OidcGroupMappingRow = typeof oidcGroupMappings.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 export type FloorSuggestionRow = typeof floorSuggestions.$inferSelect;
 export type GoldenQuestionRow = typeof goldenQuestions.$inferSelect;

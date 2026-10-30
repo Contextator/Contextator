@@ -149,6 +149,19 @@ export const Manifest = z.object({
     mcpTokens: z.number().int().min(0),
     indexRuns: z.number().int().min(0),
     /**
+     * What agents reported through `report_gap` ([ADR-0125](../../../.ssot/ADR.md#adr-0125)), in their own
+     * table and not in `search_queries`, so `searchQueries` above does not count them. Optional, and
+     * `manifestVersion` did not move: an export taken before 0.6.0 carries no such key and is still read
+     * (the prose then says nothing about it), and an older importer strips the key it does not know.
+     */
+    reportedGaps: z.number().int().min(0).optional(),
+    /**
+     * The PII scan's findings ([ADR-0130](../../../.ssot/ADR.md#adr-0130) decision 8). Derived data, and made under the
+     * source instance's key: the target scans for itself. Optional, and `manifestVersion` did not move, for the reason
+     * given on `reportedGaps`.
+     */
+    documentFindings: z.number().int().min(0).optional(),
+    /**
      * Memberships, **by role and by count only**. A username list is an inventory of accounts on an
      * instance that did not move, in a file that travels by e-mail; the count is what the destination
      * operator needs — "this project had four people who could see it and now has none" — and the
@@ -161,8 +174,8 @@ export const Manifest = z.object({
       name: z.string().min(1).max(64),
       /**
        * `confluence` joined the set in [ADR-0059](../../../.ssot/ADR.md#adr-0059) and `web` in
-       * [ADR-0070](../../../.ssot/ADR.md#adr-0070), and `manifestVersion` deliberately did **not** move
-       * with either — the same decision, for the same reason, that `account` got above. This is a value added to a field, not a field that changed
+       * [ADR-0070](../../../.ssot/ADR.md#adr-0070), `s3` in [ADR-0126](../../../.ssot/ADR.md#adr-0126) and `gdrive` in [ADR-0127](../../../.ssot/ADR.md#adr-0127) and `github` in [ADR-0128](../../../.ssot/ADR.md#adr-0128);
+       * `manifestVersion` deliberately did **not** move with any of them — the same decision, for the same reason, that `account` got above. This is a value added to a field, not a field that changed
        * meaning, and bumping the format would make every new export unreadable by builds that could
        * have read all of it but one enum member.
        *
@@ -174,7 +187,7 @@ export const Manifest = z.object({
        * importing something it does not understand. Nothing is silently dropped and nothing lands
        * half-configured.
        */
-      type: z.enum(['local', 'git', 'upload', 'notion', 'confluence', 'web']),
+      type: z.enum(['local', 'git', 'upload', 'notion', 'confluence', 'web', 's3', 'gdrive', 'github']),
       needs: z.array(z.enum(SOURCE_NEEDS)),
     }),
   ),
@@ -281,6 +294,18 @@ export function readmeFor(manifest: Manifest): string {
       'of them authenticate deliveries to the instance that did not move; a copy would let whoever holds this file forge those.',
     `  - ${manifest.excluded.searchQueries} logged searches and ${manifest.excluded.searchQueryHits} of their results. They are what ` +
       'people typed, held under a retention window this file would escape.',
+    ...(manifest.excluded.reportedGaps === undefined
+      ? []
+      : [
+          `  - ${manifest.excluded.reportedGaps} reported gap(s). They are questions agents said the documentation did not answer, ` +
+            'in their own words, held under the same retention window as the logged searches.',
+        ]),
+    ...(manifest.excluded.documentFindings === undefined
+      ? []
+      : [
+          `  - ${manifest.excluded.documentFindings} PII scan finding(s). They are derived from the documents and keyed to the source ` +
+            "instance's SECRET_KEY, so this instance scans the documents itself once they are imported.",
+        ]),
     `  - ${manifest.excluded.mcpTokens} MCP token(s). They are bearer credentials for the other instance's endpoints. Mint new ones here.`,
     `  - ${manifest.excluded.indexRuns} index run record(s). They describe runs on another machine, numbered in its generations.`,
     `  - ${manifest.excluded.projectMembers.viewer} viewer and ${manifest.excluded.projectMembers.editor} editor membership(s). They name ` +

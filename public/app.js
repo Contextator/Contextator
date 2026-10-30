@@ -29,9 +29,18 @@ import { captureAuditFocus, loadAudit, renderAuditView } from './audit.js';
 import { canCreateProject, canDeleteProject, canEdit, initAuthUi, loadMe, renderUserMenu } from './auth.js';
 import { authHeaderFor, authModeBadge, initMcpUi, loadMcpTokens, renderMcpAccess, showMcpSecret } from './mcp.js';
 import { initMembersUi, loadMembers, renderMembers } from './members.js';
+import {
+  announceNotionOAuthOutcome,
+  loadNotionOAuth,
+  notionOAuthEnabled,
+  renderNotionConnect,
+  showNotionWebhook,
+  startNotionOAuth,
+} from './notion-oauth.js';
 import { loadQuerySummary, renderQueries } from './queries.js';
 import { renderSourceFreshness } from './freshness.js';
 import { loadEval, renderEval } from './eval.js';
+import { loadFindings, renderFindings } from './findings.js';
 import { initGoldenUi, loadGolden, renderGolden } from './golden.js';
 import { describeApiError, initQuotasUi, loadQuotas, renderQuotas } from './quotas.js';
 import { captureSearchFocus, renderSearch } from './search.js';
@@ -59,11 +68,11 @@ const TOOLS = [
   },
   {
     name: 'report_gap',
-    text: 'Tells the maintainers a question the documentation does not answer. The only tool that writes — to the query log, never to documentation; present while the query log is on.',
+    text: 'Tells the maintainers a question the documentation does not answer. The only tool that writes — to its own table, under the same retention and purge as the query log, never to documentation; present while the query log is on.',
   },
 ];
 
-const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN', confluence: 'CNF', web: 'WEB' };
+const SOURCE_GLYPH = { local: 'DIR', git: 'GIT', upload: 'UP', notion: 'NTN', confluence: 'CNF', web: 'WEB', s3: 'S3', gdrive: 'GDR', github: 'GH' };
 const SOURCE_TITLE = {
   local: 'Local directory',
   git: 'Git repository',
@@ -71,6 +80,9 @@ const SOURCE_TITLE = {
   notion: 'Notion workspace',
   confluence: 'Confluence site',
   web: 'Documentation site',
+  s3: 'S3 bucket',
+  gdrive: 'Google Drive',
+  github: 'GitHub issues',
 };
 
 /**
@@ -102,6 +114,21 @@ const SOURCE_KINDS = {
     title: 'Documentation site',
     subtitle: 'A published site, read from its sitemap.xml, its llms.txt or a crawl. Public pages only — there is no login.',
   },
+  s3: {
+    type: 's3',
+    title: 'S3 bucket',
+    subtitle: 'Objects under a bucket prefix on AWS S3 or an S3-compatible server. Only objects that changed are downloaded.',
+  },
+  gdrive: {
+    type: 'gdrive',
+    title: 'Google Drive',
+    subtitle: 'Folders shared with a Google service account. Docs, Sheets and Slides are exported; only files that changed are downloaded.',
+  },
+  github: {
+    type: 'github',
+    title: 'GitHub issues',
+    subtitle: 'The issues of one repository, with their comments, and optionally its Discussions. Only what changed since the last run is read.',
+  },
 };
 
 /**
@@ -112,7 +139,14 @@ const SOURCE_KINDS = {
  * every page and then drop all of them at the indexer's extension filter — reporting a successful run
  * over an empty index.
  */
-const KIND_EXTENSIONS = { web: ['html', 'md', 'txt'] };
+const KIND_EXTENSIONS = {
+  web: ['html', 'md', 'txt'],
+  s3: ['md', 'mdx', 'txt'],
+  // A Doc is exported as .md, a Sheet as .xlsx and a Slides deck as .pptx, so each is read only while ticked.
+  gdrive: ['md', 'txt', 'pdf', 'docx', 'xlsx', 'pptx'],
+  // Every issue and Discussion is written as Markdown.
+  github: ['md'],
+};
 
 /**
  * The source types that hold a credential, and the form field each one's token is typed into.
@@ -121,7 +155,16 @@ const KIND_EXTENSIONS = { web: ['html', 'md', 'txt'] };
  * the patch below all mean the same thing by it, and a new type that was added to two of the three is
  * exactly the bug this shape removes.
  */
-const SECRET_FIELD = { git: 'secret', notion: 'notionSecret', confluence: 'confluenceSecret' };
+const SECRET_FIELD = {
+  git: 'secret',
+  notion: 'notionSecret',
+  confluence: 'confluenceSecret',
+  s3: 's3SecretAccessKey',
+  gdrive: 'gdriveKey',
+  github: 'githubToken',
+};
+/** An S3 credential has two parts; `SECRET_FIELD.s3` is the half that is a secret, this is the other one. */
+const S3_KEY_ID_FIELD = 's3AccessKeyId';
 const CREDENTIALLED = new Set(Object.keys(SECRET_FIELD));
 
 /**
@@ -138,6 +181,9 @@ const CLEAR_SECRET_ROWS = () => ({
   git: $('#git-clear-secret-row'),
   notion: $('#notion-clear-secret-row'),
   confluence: $('#confluence-clear-secret-row'),
+  s3: $('#s3-clear-secret-row'),
+  gdrive: $('#gdrive-clear-secret-row'),
+  github: $('#github-clear-secret-row'),
 });
 const clearSecretRow = (type) => CLEAR_SECRET_ROWS()[type];
 
@@ -286,6 +332,7 @@ function select(id) {
   void loadQuotas();
   void loadGolden();
   void loadEval();
+  void loadFindings();
 }
 
 /** Fetches the selected project's run history when the selection or the newest job changes. */
@@ -691,6 +738,9 @@ function renderDetail() {
   main.append(renderGolden(p));
   // Beside the questions it asks: the server's own runs of them and what they found.
   main.append(renderEval(p));
+  // An editor's: null for a viewer (ADR-0130 decision 6).
+  const findingsPanel = renderFindings(p);
+  if (findingsPanel) main.append(findingsPanel);
   main.append(renderMembers(p));
   main.append(renderMcpAccess(p));
 
@@ -877,7 +927,7 @@ function renderSources(project, busy) {
       : el('p', {
           class: 'sources-empty',
           text: mayEdit
-            ? 'No sources yet. Add a local directory, a git repository, an upload, a Notion workspace or a Confluence site to give this project something to index.'
+            ? 'No sources yet. Add a local directory, a git repository, an upload, a Notion workspace, a Confluence site, an S3 bucket, a Google Drive folder or the issues of a GitHub repository to give this project something to index.'
             : 'No sources yet. An editor on this project can add one.',
         }),
   ]);
@@ -891,6 +941,9 @@ function sourceOrigin(s) {
   if (s.type === 'notion') return (c.rootIds || []).length ? `${c.rootIds.length} root page(s)` : 'everything shared with the integration';
   if (s.type === 'confluence') return c.baseUrl || '—';
   if (s.type === 'web') return c.entryUrl || '—';
+  if (s.type === 's3') return `s3://${c.bucket || '—'}/${c.prefix ? `${c.prefix}/` : ''}`;
+  if (s.type === 'gdrive') return `${(c.folderIds || []).length} Drive folder(s)`;
+  if (s.type === 'github') return `${c.owner || '—'}/${c.repo || '—'}`;
   return `${s.name}/`;
 }
 
@@ -974,6 +1027,8 @@ async function refresh() {
     void loadGolden();
     // Quiet unless the selection or the project's index moved, or a run asked for by hand has not shown up yet.
     void loadEval();
+    // Quiet unless the selection, the project's index or the chosen rule moved; the panel carries Refresh.
+    void loadFindings();
   }
   // The account list is not part of a project poll; refresh it only while it is on screen.
   if (state.view === 'users') void loadUsers();
@@ -1241,7 +1296,8 @@ function setKind(kind) {
   $('#webhook-box').hidden = !(editing && meta.type === 'git') || srcUi.readOnly;
   // The Notion box is the same affordance with the secret coming the other way: Notion generates the
   // token, the product captures it inside a window, and the operator carries it back into Notion.
-  $('#notion-webhook-box').hidden = !(editing && meta.type === 'notion') || srcUi.readOnly;
+  // An OAuth source has none: the webhook of a public connection belongs to the connection (ADR-0129).
+  $('#notion-webhook-box').hidden = !(editing && meta.type === 'notion') || srcUi.readOnly || !showNotionWebhook(editing);
   // Confluence's secret goes git's way (generated here, pasted into Confluence), but it only exists once
   // an editor turns the webhook on — until then the delivery route refuses everything.
   $('#confluence-webhook-box').hidden = !(editing && meta.type === 'confluence') || srcUi.readOnly;
@@ -1266,6 +1322,11 @@ function openSourceDialog(project, source) {
   srcForm.elements.secret.placeholder = 'leave empty for public repositories';
   srcForm.elements.notionSecret.placeholder = 'ntn_… / secret_…';
   srcForm.elements.confluenceSecret.placeholder = 'ATATT…';
+  srcForm.elements[S3_KEY_ID_FIELD].placeholder = 'AKIA…';
+  srcForm.elements[SECRET_FIELD.s3].placeholder = '';
+  srcForm.elements[SECRET_FIELD.gdrive].placeholder = '…or paste the JSON key file';
+  srcForm.elements[SECRET_FIELD.github].placeholder = 'ghp_… / github_pat_…';
+  showGdriveEmail(''); // a reset form names no account until a key is pasted or a source is opened
   $('#secret-hint').innerHTML = SECRET_HINT_HTML; // static markup restored, never user data
   renderSrcRootPrefix();
 
@@ -1283,15 +1344,48 @@ function openSourceDialog(project, source) {
   if (srcUi.readOnly) {
     for (const field of srcForm.querySelectorAll('input, select, textarea')) field.disabled = true;
     for (const type of CREDENTIALLED) srcForm.elements[SECRET_FIELD[type]].value = '';
+    srcForm.elements[S3_KEY_ID_FIELD].value = '';
   }
 
   openDialog(srcDialog);
   (source ? srcForm.elements.label : srcForm.elements.name).focus();
 
   if (source?.type === 'git' && !srcUi.readOnly) renderWebhook(project, source);
-  if (source?.type === 'notion' && !srcUi.readOnly) renderNotionWebhook(project, source);
+  if (source?.type === 'notion' && !srcUi.readOnly && showNotionWebhook(source)) renderNotionWebhook(project, source);
+  renderNotionOAuthBox();
+  // Asked once per page load; the box is drawn again when the answer is in.
+  if (!state.notionOAuth) void loadNotionOAuth().then(renderNotionOAuthBox);
   if (source?.type === 'confluence' && !srcUi.readOnly) renderConfluenceWebhook(project, source);
   if (source?.type === 'upload' && !srcUi.readOnly) void loadSourceFiles(project, source);
+}
+
+/** "Connect with Notion" for a new source, the workspace and "Reconnect" for a connected one (notion-oauth.js). */
+function renderNotionOAuthBox() {
+  const box = $('#notion-oauth-box');
+  const node = renderNotionConnect({
+    source: srcUi.editing,
+    enabled: notionOAuthEnabled(),
+    readOnly: srcUi.readOnly,
+    onStart: (sourceId) => void beginNotionOAuth(sourceId),
+  });
+  box.replaceChildren(...(node ? [node] : []));
+  box.hidden = !node;
+}
+
+/**
+ * Sends the browser to Notion. A new source takes what the form already holds (its name and root pages)
+ * to the server, which keeps them across the round trip; nothing is created until Notion sends the person back.
+ */
+async function beginNotionOAuth(sourceId) {
+  const errorNode = $('#source-error');
+  errorNode.hidden = true;
+  try {
+    const body = sourceId ? { sourceId } : { name: srcForm.elements.name.value.trim(), rootIds: parseNotionIds(srcForm.elements.rootIds.value) };
+    location.assign(await startNotionOAuth(srcUi.project.id, body));
+  } catch (err) {
+    errorNode.textContent = describeApiError(err);
+    errorNode.hidden = false;
+  }
 }
 
 function closeSourceDialog() {
@@ -1340,7 +1434,69 @@ function fillSourceForm(s) {
     srcForm.elements.spaceKeys.value = (c.spaceKeys || []).join('\n');
     if (s.hasSecret) srcForm.elements.confluenceSecret.placeholder = 'unchanged — type to replace';
   }
+  if (s.type === 's3') {
+    srcForm.elements.s3Bucket.value = c.bucket || '';
+    srcForm.elements.s3Prefix.value = c.prefix || '';
+    srcForm.elements.s3Endpoint.value = c.endpoint || '';
+    srcForm.elements.s3Region.value = c.region || '';
+    srcForm.elements.s3PathStyle.value = typeof c.pathStyle === 'boolean' ? String(c.pathStyle) : '';
+    if (s.hasSecret) {
+      // The key pair is one encrypted document the server never returns, so both halves read "unchanged".
+      srcForm.elements[S3_KEY_ID_FIELD].placeholder = 'unchanged — type to replace';
+      srcForm.elements[SECRET_FIELD.s3].placeholder = 'unchanged — type to replace';
+    }
+  }
+  if (s.type === 'gdrive') {
+    srcForm.elements.gdriveFolders.value = (c.folderIds || []).join('\n');
+    // The key file is one encrypted document the server never returns; what it does return is whom to share with.
+    if (s.hasSecret) srcForm.elements[SECRET_FIELD.gdrive].placeholder = 'unchanged — paste a key file to replace';
+    showGdriveEmail(s.hasSecret ? c.serviceAccountEmail : '');
+  }
+  if (s.type === 'github') {
+    srcForm.elements.githubRepo.value = c.owner && c.repo ? `${c.owner}/${c.repo}` : '';
+    srcForm.elements.githubApiUrl.value = c.apiBaseUrl && c.apiBaseUrl !== 'https://api.github.com' ? c.apiBaseUrl : '';
+    srcForm.elements.githubIncludeClosed.checked = c.includeClosed === true;
+    srcForm.elements.githubIncludeDiscussions.checked = c.includeDiscussions === true;
+    srcForm.elements.githubIncludeBots.checked = c.includeBots !== false;
+    if (s.hasSecret) srcForm.elements[SECRET_FIELD.github].placeholder = 'unchanged — type to replace';
+  }
   updateProviderHint();
+}
+
+/** Says whom the Drive folders are to be shared with, from the stored source or from the key being pasted. */
+function showGdriveEmail(email) {
+  $('#gdrive-share-hint').hidden = !email;
+  $('#gdrive-sa-email').textContent = email || '';
+}
+
+/** The e-mail in a pasted key file, or nothing. Only this one field is read; the key itself stays in the form. */
+function gdriveEmailOf(text) {
+  try {
+    const email = JSON.parse(text)?.client_email;
+    return typeof email === 'string' ? email : '';
+  } catch {
+    return '';
+  }
+}
+
+/** `owner/repo` from what was typed: the pair itself, or a github.com (or Enterprise Server) repository address. */
+function parseGithubRepo(text) {
+  const value = String(text || '')
+    .trim()
+    .replace(/\.git$/, '')
+    .replace(/\/+$/, '');
+  const match = value.match(/(?:^|\/)([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9._-]{1,100})(?:\/(?:issues|discussions|pulls?)\b.*)?$/);
+  return match ? { owner: match[1], repo: match[2] } : null;
+}
+
+/** Accepts folder links or ids, one per line. */
+function parseDriveFolderIds(text) {
+  return String(text || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.match(/\/folders\/([A-Za-z0-9_-]+)/)?.[1] ?? line.match(/[?&]id=([A-Za-z0-9_-]+)/)?.[1] ?? line)
+    .slice(0, 50);
 }
 
 /** A hint with one fragment in monospace, built as nodes so no string ever reaches `innerHTML`. */
@@ -1600,6 +1756,40 @@ function configForKind(kind) {
       ...common,
     };
   }
+  if (type === 's3') {
+    const bucket = srcForm.elements.s3Bucket.value.trim();
+    if (!bucket) throw new Error('A bucket name is required');
+    const pathStyle = srcForm.elements.s3PathStyle.value;
+    // Empty strings and `null` are sent on purpose: the PATCH merges over the stored config, so a cleared
+    // endpoint, region or addressing left out would keep its old value with nothing on screen to say so.
+    return {
+      bucket,
+      prefix: srcForm.elements.s3Prefix.value.trim(),
+      endpoint: srcForm.elements.s3Endpoint.value.trim(),
+      region: srcForm.elements.s3Region.value.trim(),
+      pathStyle: pathStyle === '' ? null : pathStyle === 'true',
+      ...common,
+    };
+  }
+  if (type === 'gdrive') {
+    const folderIds = parseDriveFolderIds(srcForm.elements.gdriveFolders.value);
+    if (folderIds.length === 0) throw new Error('Name at least one Drive folder');
+    return { folderIds, ...common };
+  }
+  if (type === 'github') {
+    const target = parseGithubRepo(srcForm.elements.githubRepo.value);
+    if (!target) throw new Error('Name the repository as owner/repository');
+    // The blank API address is sent on purpose, as the S3 endpoint is: the PATCH merges over the stored config, so a cleared
+    // field left out would keep its old value with nothing on screen to say so.
+    return {
+      ...target,
+      apiBaseUrl: srcForm.elements.githubApiUrl.value.trim(),
+      includeClosed: srcForm.elements.githubIncludeClosed.checked,
+      includeDiscussions: srcForm.elements.githubIncludeDiscussions.checked,
+      includeBots: srcForm.elements.githubIncludeBots.checked,
+      ...common,
+    };
+  }
   return { ...common };
 }
 
@@ -1608,8 +1798,27 @@ function secretPatchForKind(kind) {
   const { type } = SOURCE_KINDS[kind];
   if (!CREDENTIALLED.has(type)) return {};
   const row = clearSecretRow(type);
+  if (type === 'github' && srcForm.elements.githubIncludeDiscussions.checked) {
+    // GraphQL answers no anonymous request, so Discussions need a token that will still be there after this save.
+    const clearing = !row.hidden && row.querySelector('input').checked;
+    if (!srcForm.elements[SECRET_FIELD.github].value.trim() && (clearing || !srcUi.editing?.hasSecret))
+      throw new Error('Discussions need an access token');
+  }
   if (!row.hidden && row.querySelector('input').checked) return { secret: null };
+  if (type === 's3') {
+    // Two fields, one credential: the server stores them as a single encrypted JSON document.
+    const accessKeyId = srcForm.elements[S3_KEY_ID_FIELD].value.trim();
+    const secretAccessKey = srcForm.elements[SECRET_FIELD.s3].value.trim();
+    if (!accessKeyId && !secretAccessKey) {
+      if (srcUi.editing?.hasSecret) return {};
+      throw new Error('An access key ID and a secret access key are required');
+    }
+    if (!accessKeyId || !secretAccessKey)
+      throw new Error('Enter both the access key ID and the secret access key, or leave both empty to keep the stored pair');
+    return { secret: JSON.stringify({ v: 1, accessKeyId, secretAccessKey }) };
+  }
   const value = srcForm.elements[SECRET_FIELD[type]].value.trim();
+  if (type === 'gdrive' && !value && !srcUi.editing?.hasSecret) throw new Error('The service account key file is required');
   return value ? { secret: value } : {};
 }
 
@@ -1799,6 +2008,18 @@ for (const tab of srcTabs)
     if (wanted && !srcUi.editing) for (const box of srcForm.querySelectorAll('input[name="ext"]')) box.checked = wanted.includes(box.value);
   });
 srcForm.elements.url.addEventListener('input', updateProviderHint);
+// A key file is read into the field, in the browser: it is sent once, with the form, and nowhere else.
+$('#gdrive-key-file').addEventListener('change', async (event) => {
+  const [file] = event.target.files;
+  if (!file) return;
+  srcForm.elements[SECRET_FIELD.gdrive].value = await file.text();
+  event.target.value = '';
+  showGdriveEmail(gdriveEmailOf(srcForm.elements[SECRET_FIELD.gdrive].value));
+});
+srcForm.elements[SECRET_FIELD.gdrive].addEventListener('input', () => {
+  const email = gdriveEmailOf(srcForm.elements[SECRET_FIELD.gdrive].value);
+  if (email || !srcUi.editing?.config?.serviceAccountEmail) showGdriveEmail(email);
+});
 for (const box of srcForm.querySelectorAll('input[name="ext"]')) box.addEventListener('change', () => renderQueue());
 $('#source-cancel').addEventListener('click', closeSourceDialog);
 srcDialog.addEventListener('close', () => {
@@ -1968,6 +2189,7 @@ async function boot() {
   initGoldenUi();
   initTokensUi();
   await loadMe();
+  announceNotionOAuthOutcome();
   applyHash();
   document.body.classList.remove('booting');
   await refresh();

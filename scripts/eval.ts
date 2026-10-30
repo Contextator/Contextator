@@ -2,13 +2,13 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { and, count, eq } from 'drizzle-orm';
+import { and, count, eq, sql } from 'drizzle-orm';
 
 import { loadConfig, type Config } from '../src/config.js';
 import type { Logger } from '../src/context.js';
 import { createDb, type Db } from '../src/db/client.js';
 import { createProjectVectorIndex } from '../src/db/vector-indexes.js';
-import { projects, searchQueries, type ProjectRow } from '../src/db/schema.js';
+import { documentSources, projects, searchQueries, type ProjectRow } from '../src/db/schema.js';
 import { chunkReserveTokens } from '../src/services/chunk-budget.js';
 import { chunkMarkdown, embeddingText } from '../src/services/chunker.js';
 import { createEmbeddingProvider, type EmbeddingProvider } from '../src/services/embeddings/index.js';
@@ -254,6 +254,12 @@ const USAGE = `Usage: npm run eval [-- <options>]
   SEARCH_MAX_PER_DOCUMENT, SEARCH_NEIGHBOR_CONTEXT and SEARCH_SCORE_FLOOR are read from the
   environment like every other setting, so measuring what the cap or the floor costs is running this
   twice with one of them changed rather than a flag this file has to grow.
+  EVAL_SOURCE_SCOPE=1 measures the search a token bound to sources runs (ADR-0133): every corpus
+  language directory becomes a document source, and every question is asked with a scope naming all
+  of them, which is the filtered statement with the whole corpus inside it. The recall it reports
+  is the unscoped run's to compare against, and the filter itself must change none of it.
+  EVAL_SEARCH_LATENCY=1 prints the per-search p50 and p95 of the questions, so the two runs can be put
+  side by side. Neither changes what an unset run does or what its report says.
 
   Every run also asks eval/negative.jsonl — questions whose right answer is "nothing" — and reports
   three refusal rates at SEARCH_SCORE_FLOOR: over the golden set, over absent-feature questions and
@@ -453,6 +459,38 @@ export async function corpusFiles(corpusDir: string = DEFAULT_CORPUS_DIR): Promi
   return found.sort();
 }
 
+/**
+ * Makes each top-level directory of the corpus a document source and stamps its documents with it, so a scope can
+ * name them ([ADR-0133](../.ssot/ADR.md#adr-0133)). The harness indexes with no source rows at all, and that is
+ * right for every other measurement; this is only for `EVAL_SOURCE_SCOPE=1`. Returns the source ids: the scope
+ * that covers the whole corpus, which is the worst case for the filtered statement and the figure worth having.
+ *
+ * A file with no directory belongs to no source, and a scope over every source would then miss it: the run would
+ * measure a different corpus, so it is refused rather than reported.
+ */
+export async function bindCorpusSources(db: Db, projectId: string, files: readonly string[]): Promise<string[]> {
+  const loose = files.filter((file) => !file.includes('/'));
+  if (loose.length > 0) {
+    throw new Error(`EVAL_SOURCE_SCOPE=1 needs every corpus file in a directory (its source); these are not: ${loose.join(', ')}`);
+  }
+  const names = [...new Set(files.map((file) => file.slice(0, file.indexOf('/'))))].sort();
+  const rows = await db
+    .insert(documentSources)
+    .values(names.map((name) => ({ projectId, type: 'local', name, config: {} })))
+    .returning({ id: documentSources.id });
+  await db.execute(sql`
+    update documents d set source_id = s.id
+    from document_sources s
+    where d.project_id = ${projectId} and s.project_id = ${projectId} and starts_with(d.relative_path, s.name || '/')`);
+  return rows.map((row) => row.id);
+}
+
+/** Nearest-rank percentile of a sample: a value that was measured, never one interpolated. */
+function nearestRank(values: readonly number[], p: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)] ?? 0;
+}
+
 export interface IndexOutcome {
   documents: number;
   chunks: number;
@@ -567,6 +605,11 @@ export interface AskDeps {
   projectId: string;
   /** The floor `refused` is decided against: the instance's, or the project's own when it holds one (ADR-0083). */
   refusalFloor: number;
+  /**
+   * A token's source scope ([ADR-0133](../.ssot/ADR.md#adr-0133)), for measuring the filtered statement.
+   * Unset, and **unset is the call this function always made**, the search is unscoped.
+   */
+  sourceScope?: readonly string[];
 }
 
 /**
@@ -585,10 +628,10 @@ export interface AskDeps {
  * result selection as well, for the same reason: SEARCH_MAX_PER_DOCUMENT changes `recall@5` by a
  * question (ADR-0042).
  */
-export function makeAsk({ db, embeddings, config, reranker, projectId, refusalFloor }: AskDeps): Ask {
+export function makeAsk({ db, embeddings, config, reranker, projectId, refusalFloor, sourceScope }: AskDeps): Ask {
   const deps: SearchDeps = { db, embeddings, scan: scanFrom(config), selection: selectionFrom(config), scoreFloor: 0, rerank: reranker ?? undefined };
   return async (id, query) => {
-    const outcome = await searchProject(deps, { projectId, query, limit: SEARCH_LIMIT });
+    const outcome = await searchProject(deps, { projectId, query, limit: SEARCH_LIMIT, ...(sourceScope ? { sourceScope } : {}) });
     if (outcome.status !== 'ok') {
       throw new Error(`Question ${id} could not be scored: searchProject answered ${outcome.status}`);
     }
@@ -836,8 +879,30 @@ async function runCorpus(options: Options): Promise<GateVerdict> {
       })
       .where(eq(projects.id, project.id));
 
-    const ask = makeAsk({ db, embeddings, config, reranker, projectId: project.id, refusalFloor: config.SEARCH_SCORE_FLOOR });
+    // Opt-in measurement of the filtered statement (ADR-0133): unset, `sourceScope` is undefined and so is every
+    // difference from the run this was before.
+    const sourceScope = process.env.EVAL_SOURCE_SCOPE === '1' ? await bindCorpusSources(db, project.id, files) : undefined;
+    if (sourceScope) step(`eval: every question is asked with a source scope covering all ${sourceScope.length} corpus sources`);
+    const baseAsk = makeAsk({ db, embeddings, config, reranker, projectId: project.id, refusalFloor: config.SEARCH_SCORE_FLOOR, sourceScope });
+    const latenciesMs: number[] = [];
+    const ask: Ask =
+      process.env.EVAL_SEARCH_LATENCY === '1' || sourceScope
+        ? async (id, query) => {
+            const started = performance.now();
+            try {
+              return await baseAsk(id, query);
+            } finally {
+              latenciesMs.push(performance.now() - started);
+            }
+          }
+        : baseAsk;
     const { results, negativeResults, searchMs } = await askQuestions(ask, golden, negative);
+    if (latenciesMs.length > 0) {
+      step(
+        `eval: ${latenciesMs.length} searches, ${sourceScope ? 'scoped to every corpus source' : 'unscoped'}: ` +
+          `p50 ${nearestRank(latenciesMs, 0.5).toFixed(1)} ms, p95 ${nearestRank(latenciesMs, 0.95).toFixed(1)} ms`,
+      );
+    }
     await reportRerankLatency(reranker, options);
 
     /**

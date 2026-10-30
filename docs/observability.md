@@ -26,6 +26,16 @@ All three are single, unlabeled series for the whole instance: they describe the
 number an alert needs, and they cannot grow with the number of projects or sources. To find out which
 source is behind, open the project in the dashboard; each source shows its own last sync time there.
 
+### Source throttling
+
+| Metric | Type | Meaning |
+|--------|------|---------|
+| `contextator_source_throttled_total{source_type}` | counter | Throttling answers a source's remote gave, counted per answer whether or not a retry then succeeded. `s3` counts `503 SlowDown`; `gdrive` counts `429` and `403` with `rateLimitExceeded` or `userRateLimitExceeded`. |
+
+The `source_type` label is a closed set (`s3`, `gdrive`) and both values are exported from start at `0`, so a rate
+that has not happened yet is a flat line and not a missing series (ADR-0126). A rising `s3` rate means the bucket's
+request-rate limit is being hit: narrow the source's prefix, lengthen its sync interval, or spread its keys.
+
 Things worth knowing before you pick a threshold:
 
 - Only **scheduled** sources count (those with a sync interval). A manual-only source is never expected to

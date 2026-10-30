@@ -10,6 +10,164 @@ ships, that stops.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-30
+
+### Added
+
+- **OIDC groups grant project memberships** (ADR-0134, amending ADR-0077; migration `0031_oidc_group_mappings`): set
+  `OIDC_GROUPS_CLAIM` to the ID-token claim that lists a person's groups, and map groups to projects and a role
+  (`viewer` or `editor`) under **Users → SSO group mappings** or `GET`/`POST /api/oidc/group-mappings` and
+  `DELETE /api/oidc/group-mappings/:id` (`admin`; `409 mapping_exists`). Each SSO sign-in of a `member` account
+  makes its group-granted memberships exactly the projects its groups map to (the higher role where two groups
+  disagree); a person who has left a group loses the membership at their next sign-in. A membership added by hand
+  wins and is never touched. A missing claim (omitted, `null`, `[]`, `{}`) means no groups; a claim that cannot be
+  read (Entra's `_claim_names.groups` overage, not a list of strings, over 1 000 entries or a name over 256
+  characters) stops a `member`'s sign-in with `groups_unavailable` and changes nothing. `admin` and `root` are
+  skipped and no group changes an instance role. A group-granted membership is also removed when its mapping is
+  deleted (recomputed in the same request), when its account unlinks SSO, and when a linked account signs in with
+  its password. While the setting is on, the members API answers `409 membership_managed_by_group` for such a row;
+  `GET /api/projects/:id/members` returns `origin` and `groups`. Every membership a sign-in changes is one audit
+  event. Switching the setting off removes nothing. `GET /api/auth/me` carries `oidc.groups`. Helm chart 2.1.0:
+  `config.oidcGroupsClaim`.
+- **Token scope** (ADR-0133, amending ADR-0027; migration `0030_mcp_token_scope`): a static `ctxm_` token can be bound to
+  a list of its project's sources, and a source outside the list does not exist for it in `search_docs`,
+  `read_document` (by path and by suffix), `list_topics`, `whats_new` (added, modified and removed rows),
+  `resources/list` and `resources/read`; the filter is in SQL, ahead of ranking, paging and counting. A source name
+  outside the scope is answered as an unknown source. A scope whose sources were all deleted reads nothing, never the
+  project. `POST /api/projects/:id/mcp-tokens` takes `sources` (names); the new
+  `PATCH /api/projects/:id/mcp-tokens/:tokenId/sources` sets or (`null`) removes it, with `400 empty_scope`,
+  `400 unknown_source` and `409 not_static`; `GET` returns `sources` and `scopeEmpty`; both writes are audited with the
+  names. Panel: source choice when minting, a scope badge per token (red when empty) and a note on `open` projects,
+  where a scope is not a boundary. OAuth credentials, API tokens and `/api/*` are unaffected. **Going back to a release
+  before 0.6.0 widens every scoped token to its whole project: revoke scoped tokens before a downgrade.**
+- `SOURCE_ALLOWED_HOSTS`: one allowlist of host names that Confluence sources (and the S3 and GitHub Enterprise
+  Server sources of this release) may reach on a private address (ADR-0126, amending ADR-0088). Same format as
+  the other allowlists; it does not admit a host for a web or git source. Helm chart: `config.sourceAllowedHosts`.
+- Helm chart 2.1.0: `config.s3MaxObjects`, `config.gdriveMaxFiles`, `config.githubMaxIssues` and
+  `config.githubMaxDiscussions` set `S3_MAX_OBJECTS`, `GDRIVE_MAX_FILES`, `GITHUB_MAX_ISSUES` and
+  `GITHUB_MAX_DISCUSSIONS` (integers 1 to 100 000; `null`, the default, leaves the application default of 5 000).
+- The AWS Signature V4 signer moved from `scripts/backup-s3.ts` to `src/services/s3/sigv4.ts`, so the backup
+  command and the S3 source share one implementation. The backup command's behaviour is unchanged.
+- Internal building blocks for the remote-store sources of 0.6.0: a one-JSON-document credential helper
+  (ADR-0126 decision 8) and a shared list / version / download-what-changed / remove-what-is-gone routine with a
+  per-type object ceiling.
+- **S3 bucket source** (`s3`; ADR-0126): the objects under one prefix of an S3-compatible bucket (AWS S3, MinIO,
+  Ceph, R2…), signed with SigV4 and read without an SDK. Incremental on the ETag: a scheduled check lists the
+  prefix and downloads nothing, and a run fetches only objects that changed or appeared and drops those that are
+  gone. The key pair is one encrypted `secret_enc` document (`{"v":1,"accessKeyId":…,"secretAccessKey":…}`;
+  session tokens are refused); an endpoint on a private address needs `SOURCE_ALLOWED_HOSTS`. New setting
+  `S3_MAX_OBJECTS` (default 5 000). Panel: an **S3 bucket** tab. The `s3` type joins the credential-bearing types
+  of the backup's key check and the project export's manifest.
+- **Google Drive source** (`gdrive`; ADR-0127): the files under folders shared with a Google service account.
+  Docs are exported as Markdown, Sheets as `.xlsx` and Slides as `.pptx` (the last two converted like any upload);
+  other files are downloaded as they are, and a Google file over Google's 10 MB export limit is refused by name
+  while the run goes on. A scheduled check is one `changes.list` request; a run walks the folders and fetches only
+  files whose Google version or checksum changed. No Google client library: the sign-in (RS256 JWT) and the Drive
+  calls are the product's own, sent only to `oauth2.googleapis.com` and `www.googleapis.com` through the egress
+  guard, which gained a `pinnedHosts` option for it. The key file is stored as one encrypted `secret_enc` document
+  (e-mail, key id, private key). New setting `GDRIVE_MAX_FILES` (default 5 000). Panel: a **Google Drive** tab. The
+  `gdrive` type joins the credential-bearing types of the backup's key check and the project export's manifest.
+  Shared drives are not verified.
+- **GitHub issues and Discussions source** (`github`; ADR-0128): the issues of one repository, and optionally its
+  Discussions, one document each with its comments (`issues/<number>.md`, `discussions/<number>.md`); closed issues are
+  opt-in and pull requests are never indexed. A token is optional: without one the source reads a public repository's
+  issues under GitHub's anonymous limit, and `includeDiscussions` without a token is `400 invalid_request`. The token is
+  the bare `secret` string, stored encrypted and counted by the backup's key check; the `github` type joins the credential-bearing
+  types and the project export's manifest. A scheduled check is one conditional request (`ETag`, a free `304` with a token);
+  a run reads only what changed since the last one, and deletions and transfers are found on the first run and on a run
+  after `SYNC_MAX_SKIP_HOURS` (24 hours when that is off). A rate limit ends the run as `error` with the reset time and
+  moves no cursor. GitHub Enterprise Server works through `apiBaseUrl` and `SOURCE_ALLOWED_HOSTS`. New settings
+  `GITHUB_MAX_ISSUES` and `GITHUB_MAX_DISCUSSIONS` (default 5 000 each, placeholders until measured). Panel: a
+  **GitHub issues** tab. The wiki and files stay with the `git` source.
+- `/metrics`: `contextator_source_throttled_total{source_type}`, the throttling answers a source's remote gave (S3 `503 SlowDown`, Drive `429` and rate-limit `403`), counted per answer whether or not a retry then succeeded. The label set is closed (`s3`, `gdrive`) and every value is exported from start at `0` (ADR-0126 decision 9).
+- Notion sources can be connected with OAuth ("Connect with Notion") instead of a pasted integration token
+  (ADR-0129). Each operator registers their own Notion public connection and sets `NOTION_OAUTH_CLIENT_ID` and
+  `NOTION_OAUTH_CLIENT_SECRET` (and `NOTION_OAUTH_REDIRECT_URI`, or `PUBLIC_BASE_URL`); with none set nothing
+  changes. An editor starts it from the dashboard with a session; an API token or `ADMIN_TOKEN` cannot. The
+  access and refresh token are stored encrypted in the source's existing secret, the source refreshes them when
+  Notion refuses the access token, and a revoked connection ends the run asking for **Reconnect**. OAuth sources
+  have no webhook; the schedule keeps them fresh. Startup is refused when only one of the id and the secret is set,
+  when neither a redirect URI nor `PUBLIC_BASE_URL` is set, or when `SECRET_KEY` is missing.
+- New routes `GET /api/sources/notion/oauth` (whether the flow is configured), `POST
+  /api/projects/:id/sources/notion/oauth` and `GET /api/sources/notion/oauth/callback`.
+- The PII scan (ADR-0130): after an index run, and once at startup for the whole corpus, stored documents are looked
+  through for AWS access keys, GitHub tokens, PEM private key headers, JWTs, Turkish citizen numbers (valid check digits)
+  and IBANs (valid mod-97). It only reports: nothing is masked or skipped and search is unchanged. Findings are listed
+  by `GET /api/projects/:id/findings` for a project `editor` and above, as a masked preview and a short group id;
+  without `SECRET_KEY` they are written without an HMAC. `PII_SCAN=0` stops new scanning. Migration `0029` adds
+  `document_findings` and `document_scans`; `/metrics` gains `contextator_document_findings_total{rule}` and
+  `contextator_document_scans_total{outcome}`; a project export counts the findings it leaves out
+  (`excluded.documentFindings`).
+- A "Secrets and personal data" section on the project page for an `editor` and above (ADR-0130): the PII scan's
+  findings by document path, with the rule, the position and the masked preview, narrowed by rule. It never shows a
+  value, and says separately that scanning is off (`PII_SCAN=0`), that findings are not grouped (no `SECRET_KEY`), that
+  documents hit the per-document ceiling and that documents were cut when indexed. A viewer does not see it.
+- A `contextator` command in both images (ADR-0131): `project create <name> --git <url> [--wait]`,
+  `project status`, `token create` and `backup`, for CI and shells. The first three call the admin API with
+  `CONTEXTATOR_URL` and `CONTEXTATOR_TOKEN` (a token is never an argument); `--wait` follows the index run, with a
+  timeout; output is `--json` or lines, with distinct exit codes (`docs/cli.md`). `docker run … contextator <command>`
+  runs it without starting a server or a database; `backup` is the existing backup under that name and needs the
+  default image. A GitHub Actions example is in `docs/examples/`. No new dependency, and nothing is published to npm.
+- An Agent Skill, `skills/contextator/SKILL.md`, for assistants that read the Agent Skills format: it says in what order to use
+  `search_docs`, `list_topics`, `read_document`, `whats_new` and `report_gap` against a Contextator MCP endpoint, to cite the file
+  path of every passage relied on, and to say so when the documentation does not cover a question. It adds no tool and changes
+  no server behaviour.
+- `test/agent-skill.test.ts` holds `skills/contextator/SKILL.md` to the Agent Skills specification (frontmatter fields and limits,
+  `name` equal to its directory, under 500 lines) and to the code: every tool name the skill mentions must be in
+  `MCP_TOOL_NAMES`, and every tool in `MCP_TOOL_NAMES` must be mentioned, so a tool added without updating the skill breaks
+  the unit tests.
+
+### Deprecated
+
+- `CONFLUENCE_ALLOWED_HOSTS` (Helm: `config.confluenceAllowedHosts`). It still admits its hosts for Confluence
+  sources only, and the server logs one warning at startup while it is set. Move its hosts to
+  `SOURCE_ALLOWED_HOSTS`. It is removed no earlier than `1.0.0`.
+
+### Security
+
+- **A stored credential can no longer be redirected by editing a source's address.** An editor may write a source's
+  settings but cannot read its token, yet `PATCH /api/projects/:id/sources/:sid` kept the stored credential when it changed
+  the address the source calls, so pointing a Confluence `baseUrl`, a git `url`, an S3 `endpoint` or a GitHub `apiBaseUrl`
+  at a host of one's own sent the token there on the next Test or sync (for git, any server that answers `401` is
+  offered it). The request is now refused with `400 invalid_request` unless it also supplies the credential again.
+  `gdrive` has no such setting: its hosts are pinned to Google's.
+
+### Changed
+
+- **Behaviour change for API clients:** changing the host (scheme, name or port) of a source's `baseUrl` (Confluence),
+  `url` (git), `endpoint` (S3) or `apiBaseUrl` (GitHub) while a credential is stored now needs the credential in the
+  same request, either the new value or `secret: null` to remove it. A change of path on the same host, an edit that
+  leaves the address alone, and any edit of a source that stores no credential (a public git repository) are
+  unchanged. In the dashboard the save is refused with a message naming the setting; type the token again and save.
+- A Confluence source refused for resolving to a private address now names `SOURCE_ALLOWED_HOSTS`, not
+  `CONFLUENCE_ALLOWED_HOSTS`, in its error message.
+- A Notion `secret` sent through `POST`/`PATCH /api/projects/:id/sources` that starts with `{` is refused with
+  `400 invalid_request`: that is the shape of an OAuth connection, which only the dashboard flow creates. No real
+  integration token starts with `{`.
+- A project export's manifest states, beside the other exclusions, how many `report_gap` reports stayed behind
+  (`excluded.reportedGaps`), and so does the README in the archive. A manifest from an earlier version, without the
+  field, is still read.
+
+### Fixed
+
+- The note `whats_new` appends when it cuts a list at `limit` told the client to ask again with a later `since`, which
+  hides the older changes it was cut from; it now says to ask with a larger `limit` (at most 200), and, when the list
+  was already cut at 200, to narrow the question with `source` or `version`.
+- With `SEARCH_QUERY_LOG=0`, `search_queries` rows older than `SEARCH_QUERY_LOG_RETENTION_DAYS` are now swept too. The
+  sweep sat behind the switch, so an instance that turned the log off kept what it had logged until somebody turned
+  it back on. `reported_gaps`, the audit log and `document_changes` were already swept regardless.
+- The CI `eval` job now also starts for a change to `package.json`, `package-lock.json` or `drizzle/`, so every
+  dependabot pull request runs it.
+- The Helm CI job checks that the values schema rejects `config.trustProxy` set to `1` and to `true`.
+- An import that refuses an over-long line in an NDJSON file names the line (`documents.ndjson:12: ...`).
+- The "three tools" wording in the dashboard's About page and in the demo docs now lists all five MCP tools, and
+  `report_gap` is described as writing to its own table under the query log's policies rather than "to the query
+  log".
+- The dashboard no longer scrolls sideways on a phone-width screen. At 390 px the health strip in the top bar
+  (database and model pills, the model id, open sessions, the version) ran past the viewport and widened the
+  whole page to 573 px; below 720 px it now sits on its own row, wraps, and ellipsises the model id inside it.
+  Wider screens are unchanged.
+
 ## [0.5.0] - 2026-10-26
 
 ### Breaking
@@ -919,7 +1077,8 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Contextator/Contextator/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Contextator/Contextator/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/Contextator/Contextator/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/Contextator/Contextator/compare/v0.4.0...v0.4.1

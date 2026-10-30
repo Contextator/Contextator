@@ -5,7 +5,7 @@ import { DEFAULT_DOCUMENT_FENCE } from './document-fence.js';
 import type { McpEra } from './era.js';
 import { registerPrompts } from './prompts.js';
 import { registerResources } from './resources.js';
-import { registerTools, structuredOutputFor, tokenIdOf } from './tools.js';
+import { registerTools, sourceScopeOf, structuredOutputFor, tokenIdOf } from './tools.js';
 
 /**
  * The sentence about the fence is the other half of [ADR-0066](../../.ssot/ADR.md#adr-0066), and it is
@@ -122,7 +122,14 @@ export function createProjectMcpServer(ctx: AppContext, { project, era, auth }: 
   // Only the three results that follow the project's index get its hint; `tools/call` is not cacheable,
   // and `server/discover` and `resources/templates/list` keep the SDK's default (`ttlMs: 0`, `private`).
   // The legacy codec has no cache fields to fill, but a legacy server is not given a hint at all.
-  const hint = era === 'modern' ? projectCacheHint(project) : undefined;
+  //
+  // A scoped credential's answers are cached `private` even on an `open` project, whose hint is `public`
+  // ([ADR-0133](../../.ssot/ADR.md#adr-0133) decision 7): a shared cache would hand the scoped list or
+  // document to a caller who presented no token. The server of a modern request is built from that
+  // request's own `authInfo`, so the scope read here is the one that will answer.
+  const scope = sourceScopeOf(auth);
+  const baseHint = era === 'modern' ? projectCacheHint(project) : undefined;
+  const hint = baseHint && scope !== null ? { ...baseHint, cacheScope: 'private' as const } : baseHint;
   const server = new McpServer(
     { name: `contextator-${project.name}`, version: ctx.version },
     {
@@ -130,8 +137,8 @@ export function createProjectMcpServer(ctx: AppContext, { project, era, auth }: 
       ...(hint ? { cacheHints: { 'tools/list': hint, 'resources/list': hint, 'resources/read': hint } } : {}),
     },
   );
-  registerTools(server, ctx, project, tokenIdOf(auth), era);
-  registerResources(server, ctx, project);
+  registerTools(server, ctx, project, tokenIdOf(auth), era, scope);
+  registerResources(server, ctx, project, { fallbackScope: scope });
   registerPrompts(server, project);
   return server;
 }

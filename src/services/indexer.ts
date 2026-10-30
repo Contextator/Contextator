@@ -17,7 +17,7 @@ import { expandsToManyDocuments, allowedExtensionsFor, type Flavor } from './fla
 import { readAndHash, walkMarkdown } from './fs-scan.js';
 import { recordIndexRun } from './index-runs.js';
 import type { KeyedMutex } from './locks.js';
-import { type IndexerObserver, startTimer } from './metrics.js';
+import { type IndexerObserver, type SourceThrottleObserver, startTimer } from './metrics.js';
 import { checkSpecSize, type DerivedDocument } from './openapi.js';
 import { getProjectById } from './projects.js';
 import { driverFor, type DocumentMeta } from './sources/driver.js';
@@ -125,12 +125,20 @@ export interface IndexerDeps {
     Partial<
       Pick<
         Config,
+        | 'SOURCE_ALLOWED_HOSTS'
         | 'CONFLUENCE_ALLOWED_HOSTS'
         | 'WEB_ALLOWED_HOSTS'
         | 'GIT_ALLOWED_HOSTS'
         | 'GIT_MAX_PACK_BYTES'
         | 'CONFLUENCE_MAX_PAGES'
         | 'NOTION_MAX_PAGES'
+        | 'S3_MAX_OBJECTS'
+        | 'GDRIVE_MAX_FILES'
+        | 'GITHUB_MAX_ISSUES'
+        | 'GITHUB_MAX_DISCUSSIONS'
+        | 'SYNC_MAX_SKIP_HOURS'
+        | 'NOTION_OAUTH_CLIENT_ID'
+        | 'NOTION_OAUTH_CLIENT_SECRET'
         | 'DATA_DIR_MIN_FREE_BYTES'
         | 'CONTEXTATOR_EMBEDDED_PGDATA'
         | 'CONVERSION_WORKER_MAX_HEAP_MB'
@@ -151,7 +159,7 @@ export interface IndexerDeps {
    * Where batch sizes, batch timings and queue waits go (`/metrics`). Optional, and unset it measures
    * nothing — the tests and the CLI build an indexer without one.
    */
-  metrics?: IndexerObserver;
+  metrics?: IndexerObserver & Partial<SourceThrottleObserver>;
   /**
    * Told once for each project whose index was **rebuilt because the embedding model changed** and
    * finished without a source error — the moment the project's relevance floor stops describing the
@@ -440,13 +448,19 @@ export class Indexer {
    * (e.g. the previous git checkout); only when nothing can be scanned are the source's documents
    * protected from deletion, so a transient error never wipes a source.
    */
-  private async collectSource(source: DocumentSourceRow, state: JobSourceState, files: SourceFile[], log: Logger): Promise<{ scanned: boolean }> {
+  private async collectSource(
+    source: DocumentSourceRow,
+    state: JobSourceState,
+    files: SourceFile[],
+    log: Logger,
+    force: boolean,
+  ): Promise<{ scanned: boolean }> {
     const { db, config } = this.deps;
     const flavor = source.flavor as Flavor;
     const extensions = (source.config as { extensions?: string[] }).extensions;
     const textSearchConfig = textSearchConfigFor((source.config as { language?: unknown }).language);
     const version = sourceVersion(source.config);
-    const driver = driverFor(source, { db, log, config });
+    const driver = driverFor(source, { db, log, config, force, ...(this.deps.metrics ? { metrics: this.deps.metrics } : {}) });
 
     let syncError: string | undefined;
     let configPatch: Record<string, unknown> | undefined;
@@ -606,7 +620,7 @@ export class Indexer {
         const protectedSources = new Set<string>();
         for (const source of sources) {
           const state = job.sources.find((s) => s.id === source.id)!;
-          const { scanned } = await this.collectSource(source, state, files, log);
+          const { scanned } = await this.collectSource(source, state, files, log, job.force);
           if (!scanned) protectedSources.add(source.id);
         }
         const failures = job.sources.filter((s) => s.status === 'error').map((s) => `${s.name}: ${s.error}`);

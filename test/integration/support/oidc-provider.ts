@@ -48,12 +48,32 @@ export interface IdTokenTampering {
   corruptSignature?: boolean;
 }
 
+/**
+ * What the ID token of one subject says about its groups (ADR-0134). The list is the ordinary case;
+ * the three strings are how providers say "none" or "too many to say": `omit` sends no claim at all
+ * (Keycloak and Okta for a person in no group), `empty-object` sends `{}` (a Keycloak mapper), and
+ * `overage` sends no claim and names it under `_claim_names` instead, the way Microsoft Entra ID does
+ * above 200 groups.
+ */
+export type GroupsClaimSetting = readonly string[] | 'omit' | 'empty-object' | 'overage';
+
+export interface StartLocalOidcProviderOptions {
+  /** The claim the groups travel in; must be the value the instance under test has in `OIDC_GROUPS_CLAIM`. Default `groups`. */
+  groupsClaim?: string;
+}
+
 export interface LocalOidcProvider {
   issuer: string;
   clientId: string;
   clientSecret: string;
   /** The identity the next successful `/authorize` redirect will carry through to the ID token. */
   setNextIdentity(identity: OidcProviderIdentity): void;
+  /**
+   * What this subject's ID tokens say about its groups from now on, until it is changed again — it
+   * persists across sign-ins, so a test moves a person between groups by calling it between two. A
+   * subject never configured sends no claim, the same as `'omit'`.
+   */
+  setGroups(sub: string, groups: GroupsClaimSetting): void;
   /** Makes the next `/authorize` request come back as `error=access_denied`, once. */
   denyNextAuthorization(): void;
   /** Applies to the very next `/token` exchange only, then clears itself — see {@link IdTokenTampering}. */
@@ -98,7 +118,17 @@ async function readBody(req: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-export async function startLocalOidcProvider(): Promise<LocalOidcProvider> {
+function groupsClaims(claim: string, setting: GroupsClaimSetting | undefined): Record<string, unknown> {
+  if (setting === undefined || setting === 'omit') return {};
+  if (setting === 'empty-object') return { [claim]: {} };
+  if (setting === 'overage')
+    return { _claim_names: { groups: 'src1' }, _claim_sources: { src1: { endpoint: 'https://graph.example.test/users/me/getMemberObjects' } } };
+  return { [claim]: [...setting] };
+}
+
+export async function startLocalOidcProvider(options: StartLocalOidcProviderOptions = {}): Promise<LocalOidcProvider> {
+  const groupsClaim = options.groupsClaim ?? 'groups';
+  const groupsOf = new Map<string, GroupsClaimSetting>();
   const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
   const kid = randomUUID();
   const jwk = { ...(publicKey.export({ format: 'jwk' }) as Record<string, unknown>), kid, alg: 'RS256', use: 'sig' };
@@ -205,6 +235,7 @@ export async function startLocalOidcProvider(): Promise<LocalOidcProvider> {
           email: pending.identity.email,
           preferred_username: pending.identity.preferred_username,
           name: pending.identity.name,
+          ...groupsClaims(groupsClaim, groupsOf.get(pending.identity.sub)),
         });
         if (applied?.corruptSignature) {
           const parts = idToken.split('.');
@@ -247,6 +278,9 @@ export async function startLocalOidcProvider(): Promise<LocalOidcProvider> {
     clientSecret,
     setNextIdentity(identity) {
       nextIdentity = identity;
+    },
+    setGroups(sub, groups) {
+      groupsOf.set(sub, groups);
     },
     denyNextAuthorization() {
       denyNext = true;

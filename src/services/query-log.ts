@@ -339,3 +339,22 @@ export async function sweepQueryLog(db: Db, retentionDays: number): Promise<numb
     .returning({ id: searchQueries.id });
   return deleted.length;
 }
+
+/**
+ * The reaper's query-log step: the sweep above, with the log line the maintenance timer writes for it.
+ *
+ * It takes the retention window and **nothing about the `SEARCH_QUERY_LOG` switch**, on purpose: the
+ * rows in `search_queries` are user content under a retention promise, and an instance that switched
+ * the log off must not thereby keep what the log collected until somebody switches it back on. That is
+ * the same reasoning the reaper applies to `reported_gaps` ([ADR-0125](../../.ssot/ADR.md#adr-0125)),
+ * and it is why this is its own function: the property is exercised by a test, not held by the order of
+ * lines in a closure. Resolves once the sweep has finished and never rejects (a failure is logged).
+ */
+export async function sweepQueryLogRetention(db: Db, retentionDays: number, log: Logger): Promise<void> {
+  try {
+    const deleted = await sweepQueryLog(db, retentionDays);
+    if (deleted > 0) log.info({ deleted, retentionDays }, 'swept expired query log rows');
+  } catch (err: unknown) {
+    log.warn({ err }, 'query log sweep failed');
+  }
+}

@@ -7,7 +7,7 @@ import { sourceCurrentDir } from '../data-dir.js';
 import { ValidationError } from '../projects.js';
 import { PROBE_TOKEN_KEY, parseSourceConfig, type ConfluenceConfig } from '../sources.js';
 import { checkDataCenterVersion, cqlFor, HttpConfluenceClient, type ConfluenceClient, type ConfluencePageSummary } from './confluence-client.js';
-import { confluenceEgress, type EgressOptions } from './confluence-egress.js';
+import { confluenceAllowedHosts, confluenceEgress, type EgressOptions } from './confluence-egress.js';
 import { ConfluenceRenderError, storageToMarkdown } from './confluence-render.js';
 import { registerDriver, type DocumentMeta, type DocumentMetaFile, type DriverContext, type SourceDriver, type SyncResult } from './driver.js';
 import { frontmatterMeta } from './frontmatter-meta.js';
@@ -105,7 +105,7 @@ export class ConfluenceDriver implements SourceDriver {
     const token = decryptSecret(this.source.secretEnc, keyringOf(this.ctx.config));
     this.built = new HttpConfluenceClient(
       { baseUrl: this.cfg.baseUrl, deployment: this.cfg.deployment, email: this.cfg.email, token },
-      confluenceEgress({ allowedHosts: this.ctx.config.CONFLUENCE_ALLOWED_HOSTS ?? [], ...this.egress }),
+      confluenceEgress({ allowedHosts: confluenceAllowedHosts(this.ctx.config), ...this.egress }),
       this.ctx.log.child({ source: this.source.name, type: 'confluence' }),
     );
     return this.built;

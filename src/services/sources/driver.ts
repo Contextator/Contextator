@@ -2,6 +2,7 @@ import type { Config, WebLimits } from '../../config.js';
 import type { Logger } from '../../context.js';
 import type { Db } from '../../db/client.js';
 import type { DocumentSourceRow } from '../../db/schema.js';
+import type { SourceThrottleObserver } from '../metrics.js';
 import { ValidationError } from '../projects.js';
 import type { SourceType } from '../sources.js';
 import { LocalDriver } from './local.js';
@@ -11,19 +12,50 @@ export interface DriverContext {
   db: Db;
   log: Logger;
   /**
-   * `CONFLUENCE_ALLOWED_HOSTS` is optional here only so that a context built for another driver need not
-   * carry it; absent reads as the empty list, which is the strictest the Confluence egress can be.
+   * Where a throttling answer from the source's remote is counted (`contextator_source_throttled_total`,
+   * [ADR-0126](../../../.ssot/ADR.md#adr-0126) decision 9). Optional: a context built by a test or the CLI counts nothing.
+   */
+  metrics?: Partial<SourceThrottleObserver>;
+  /**
+   * `true` when the run is a forced one (`POST …/index?force=1`, a rebuild): the user asked for everything to be read
+   * again. Optional, and a driver that has no cheaper way of reading less ignores it; `github` lists every issue number
+   * on such a run, which is when a deleted or transferred issue leaves the index ([ADR-0128](../../../.ssot/ADR.md#adr-0128) decision 6).
+   */
+  force?: boolean;
+  /**
+   * `SOURCE_ALLOWED_HOSTS` and the deprecated `CONFLUENCE_ALLOWED_HOSTS` are optional here only so that a
+   * context built for another driver need not carry them; absent reads as the empty list, which is the
+   * strictest the egress can be ([ADR-0126](../../../.ssot/ADR.md#adr-0126)). Confluence reads both
+   * (`confluenceAllowedHosts`); an `s3` or `github` source reads `SOURCE_ALLOWED_HOSTS` alone.
    * `WEB_ALLOWED_HOSTS` and `GIT_ALLOWED_HOSTS` are optional and read the same way for the web and git
    * sources' egress.
    * `GIT_MAX_PACK_BYTES` is optional for the same reason; absent reads as `GIT_MAX_PACK_BYTES_DEFAULT`.
    * `CONFLUENCE_MAX_PAGES` and `NOTION_MAX_PAGES` are optional for the same reason; absent reads as
-   * `SOURCE_PAGE_LIMIT_DEFAULTS`.
+   * `SOURCE_PAGE_LIMIT_DEFAULTS`. `S3_MAX_OBJECTS`, `GDRIVE_MAX_FILES`, `GITHUB_MAX_ISSUES`, `GITHUB_MAX_DISCUSSIONS`, `SYNC_MAX_SKIP_HOURS`,
+   * `MAX_CONVERTED_FILE_BYTES` and `DATA_DIR_MIN_FREE_BYTES`
+   * are optional likewise: an `s3`, `gdrive` or `github` sync reads them (a `github` source starts a full run when its last one is older than `SYNC_MAX_SKIP_HOURS`), and a context built for a probe or another driver need not
+   * carry them (the ceiling and size limit then read as their defaults, the disk check as off).
    */
   config: Pick<Config, 'ALLOWED_DOC_ROOTS' | 'DATA_DIR' | 'SECRET_KEY' | 'SECRET_KEY_PREVIOUS' | 'IGNORE_GLOBS'> &
     Partial<
       Pick<
         Config,
-        'CONFLUENCE_ALLOWED_HOSTS' | 'WEB_ALLOWED_HOSTS' | 'GIT_ALLOWED_HOSTS' | 'GIT_MAX_PACK_BYTES' | 'CONFLUENCE_MAX_PAGES' | 'NOTION_MAX_PAGES'
+        | 'SOURCE_ALLOWED_HOSTS'
+        | 'CONFLUENCE_ALLOWED_HOSTS'
+        | 'WEB_ALLOWED_HOSTS'
+        | 'GIT_ALLOWED_HOSTS'
+        | 'GIT_MAX_PACK_BYTES'
+        | 'CONFLUENCE_MAX_PAGES'
+        | 'NOTION_MAX_PAGES'
+        | 'S3_MAX_OBJECTS'
+        | 'GDRIVE_MAX_FILES'
+        | 'GITHUB_MAX_ISSUES'
+        | 'GITHUB_MAX_DISCUSSIONS'
+        | 'SYNC_MAX_SKIP_HOURS'
+        | 'MAX_CONVERTED_FILE_BYTES'
+        | 'DATA_DIR_MIN_FREE_BYTES'
+        | 'NOTION_OAUTH_CLIENT_ID'
+        | 'NOTION_OAUTH_CLIENT_SECRET'
       >
     > &
     WebLimits;

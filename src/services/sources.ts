@@ -1,19 +1,31 @@
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { PROJECT_NAME_RE, SYNC_MAX_INTERVAL_MINUTES, SYNC_MIN_INTERVAL_MINUTES } from '../config.js';
 import type { Db } from '../db/client.js';
 import { documents, documentSources, projects, type DocumentSourceRow } from '../db/schema.js';
 import { recordSourceRemoval } from './document-changes.js';
 import { decryptWebhookSecret, encryptSecret, encryptWebhookSecret, randomSecret, type SecretKeyring } from './crypto.js';
-import { isCredentialSourceType } from './encrypted-fields.js';
+import { CREDENTIAL_SOURCE_TYPES, isCredentialSourceType } from './encrypted-fields.js';
 import { allowedExtensionsFor, FLAVOR_ONLY_EXTENSIONS, FLAVORS, type Flavor } from './flavors.js';
 import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './fs-scan.js';
 import { ConflictError, NotFoundError, ValidationError } from './projects.js';
+import { S3_SECRET } from './s3/client.js';
+import { withinSourceScope } from './source-scope.js';
+import { GDRIVE_SECRET } from './sources/gdrive-client.js';
+import { canonicalGithubToken, GITHUB_API_DEFAULT } from './sources/github-client.js';
 import { sanitizeGitUrl } from './sources/git-auth.js';
+import type { SecretBlob } from './sources/secret-blob.js';
 import { TEXT_SEARCH_CONFIGS } from './text-search.js';
 
-export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion', 'confluence', 'web'] as const;
+export const SOURCE_TYPES = ['local', 'git', 'upload', 'notion', 'confluence', 'web', 's3', 'gdrive', 'github'] as const;
 export type SourceType = (typeof SOURCE_TYPES)[number];
+
+/**
+ * The credential types whose `secret_enc` is a JSON document rather than a single token
+ * ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 8). A type joins here with its own entry; the document is
+ * validated and stored in canonical form, and an error names the field, never a value.
+ */
+const SECRET_BLOBS: Readonly<Partial<Record<string, SecretBlob<unknown>>>> = { s3: S3_SECRET, gdrive: GDRIVE_SECRET };
 
 /**
  * Refuses a secret on a source type that never uses one ([ADR-0091](../../.ssot/ADR.md#adr-0091)).
@@ -22,12 +34,39 @@ export type SourceType = (typeof SOURCE_TYPES)[number];
  * be read, rather than find it stored and counted by the backup's key check. `null`, and the empty
  * string a form sends for "no secret", carry no secret and so pass on every type — on an update they
  * clear whatever secret is stored, which is how a source of a type that takes none gets rid of one
- * written before this check existed.
+ * written before this check existed. The message names the types from {@link CREDENTIAL_SOURCE_TYPES}
+ * ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 8), so it cannot go stale when a type joins.
  */
 function checkSecretAllowed(type: string, secret: string | null | undefined): void {
   if (!secret) return;
-  if (isCredentialSourceType(type)) return;
-  throw new ValidationError(`A ${type} source takes no secret; only git, notion and confluence sources use one.`);
+  if (!isCredentialSourceType(type)) {
+    const types = CREDENTIAL_SOURCE_TYPES;
+    const named = `${types.slice(0, -1).join(', ')} and ${types[types.length - 1]}`;
+    throw new ValidationError(`A ${type} source takes no secret; only ${named} sources use one.`);
+  }
+  // **The OAuth blob cannot be written through the API** ([ADR-0129](../../.ssot/ADR.md#adr-0129) §4).
+  // A Notion source's driver tells the two stored formats apart by the first character of the decrypted
+  // value, and an internal integration token never starts with `{`. A caller who could send one that
+  // does would be choosing which format the driver parses; only the OAuth callback and the driver's
+  // own refresh write that format, through `replaceSourceSecretIfUnchanged`, which does not come here.
+  if (type === 'notion' && secret.trim().startsWith('{')) {
+    throw new ValidationError(
+      'A Notion integration token never starts with "{". A Notion connection made with OAuth is created only through "Connect with Notion" in the dashboard.',
+    );
+  }
+}
+
+/**
+ * The string to encrypt for a source's secret: the token as given, or — for a type that keeps a JSON
+ * document — that document validated and re-serialised canonically (`SecretBlobError`, a `ValidationError`,
+ * when it is not one). `null` stays `null`.
+ */
+function secretToStore(type: string, secret: string | null | undefined): string | null {
+  if (!secret) return null;
+  // A GitHub token is one word that travels in a header ([ADR-0128](../../.ssot/ADR.md#adr-0128) decision 2); it is stored as given, trimmed.
+  if (type === 'github') return canonicalGithubToken(secret);
+  const blob = SECRET_BLOBS[type];
+  return blob ? blob.canonicalize(secret) : secret;
 }
 
 /**
@@ -181,9 +220,22 @@ export const UploadConfig = z.object({
   version: Version,
   syncProbeToken: ProbeToken,
 });
+/**
+ * What the dashboard may show about a Notion connection made with OAuth ([ADR-0129](../../.ssot/ADR.md#adr-0129)
+ * §4). Names and ids only — the tokens are in `secret_enc` and nowhere else.
+ */
+export const NotionOAuthInfo = z.object({
+  workspaceId: z.string().max(200),
+  workspaceName: z.string().max(500),
+  botId: z.string().max(200),
+});
+export type NotionOAuthInfo = z.infer<typeof NotionOAuthInfo>;
+
 export const NotionConfig = z.object({
   /** Page or database ids to start from; empty = everything shared with the integration. */
   rootIds: z.array(z.string().min(1).max(64)).max(50).default([]),
+  /** Present when the source was connected with OAuth instead of a pasted integration token. */
+  oauth: NotionOAuthInfo.optional(),
   extensions: Extensions.default(['md']),
   language: Language,
   version: Version,
@@ -265,6 +317,238 @@ export const WebConfig = z.object({
   syncProbeToken: ProbeToken,
 });
 
+/**
+ * An S3-compatible bucket ([ADR-0126](../../.ssot/ADR.md#adr-0126)): the objects under `prefix` whose
+ * extension the source reads, mirrored to `<source>/current/` with the prefix removed from their names.
+ * The key pair is not here: it is the source's one `secret_enc` document.
+ */
+export const S3Config = z.object({
+  /**
+   * Origin of an S3-compatible API (`https://minio.example.com:9000`, with a base path if it has one).
+   * Absent is AWS, `https://s3.<region>.amazonaws.com`, which takes `https` only; with an endpoint `http`
+   * is allowed too. A user or password in the URL is refused: the key pair has its own field, and a
+   * URL is what ends up in a log line. The empty string clears the setting (the form's blank field).
+   */
+  endpoint: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z
+      .url()
+      .max(2048)
+      .refine((value) => /^https?:\/\//i.test(value), 'must be an http:// or https:// URL')
+      .refine((value) => {
+        const url = new URL(value);
+        return url.username === '' && url.password === '';
+      }, 'must not carry a user or password; the access key goes in the credential')
+      .refine((value) => {
+        const url = new URL(value);
+        return url.search === '' && url.hash === '';
+      }, 'must not carry a query string or fragment')
+      .transform((value) => {
+        const url = new URL(value);
+        return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+      })
+      .optional(),
+  ),
+  /** Signs every request; AWS rejects a wrong one, most self-hosted servers accept any. */
+  region: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z
+      .string()
+      .max(64)
+      .regex(/^[a-z0-9-]+$/, 'must be a region name such as us-east-1')
+      .default('us-east-1'),
+  ),
+  bucket: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, 'must be a bucket name (3-63 lowercase letters, digits, dots and hyphens)'),
+  /**
+   * The "directory" in the bucket this source reads, without leading or trailing slash; empty is the whole
+   * bucket. Objects are mirrored with it removed from their names. A narrow prefix is cheaper: the probe lists
+   * every key under it.
+   */
+  prefix: z
+    .string()
+    .max(1024)
+    .default('')
+    .transform((value) => value.trim().replace(/^\/+|\/+$/g, ''))
+    .refine((value) => !value.includes('\0') && !value.split('/').some((segment) => segment === '.' || segment === '..'), {
+      message: 'must not contain "." or ".." segments',
+    }),
+  /**
+   * Path-style (`host/bucket/key`) or virtual-hosted (`bucket.host/key`) addressing. Unset takes the
+   * default of [ADR-0126](../../.ssot/ADR.md#adr-0126) decision 2 (path-style with an endpoint, and on AWS
+   * for a bucket name with a dot; otherwise virtual-hosted), computed where it is used. `null` — the form's
+   * "default" — clears it.
+   */
+  pathStyle: z
+    .boolean()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? undefined),
+  /** Only objects with one of these extensions are in scope, for the probe and the sync alike. */
+  extensions: Extensions.default(['md', 'mdx', 'txt']),
+  language: Language,
+  version: Version,
+  syncProbeToken: ProbeToken,
+});
+
+/**
+ * Google Drive ([ADR-0127](../../.ssot/ADR.md#adr-0127)): the trees under `folderIds`, folders shared with the
+ * source's service account. The key file is not here: it is the source's one `secret_enc` document.
+ *
+ * **Two keys are the server's.** `serviceAccountEmail` is written from the stored key when a credential is
+ * saved, so the panel can say whom to share the folders with, and `changesCursor` is the Drive change feed
+ * position the last successful sync took, which the probe compares against. Neither can be set by a client:
+ * `createSource` and `updateSource` overwrite them ({@link GDRIVE_SERVER_KEYS}), and an export leaves them out.
+ */
+export const GdriveConfig = z.object({
+  /** Folder ids, not URLs (the panel extracts the id from a pasted link). Each tree is walked; a folder reached twice is walked once. */
+  folderIds: z
+    .array(z.string().regex(/^[A-Za-z0-9_-]{10,128}$/, 'must be a Google Drive folder id (letters, digits, "-" and "_")'))
+    .min(1, 'name at least one folder')
+    .max(50)
+    .transform((ids) => [...new Set(ids)]),
+  serviceAccountEmail: z.string().max(320).optional(),
+  changesCursor: z.string().max(500).optional(),
+  /**
+   * Which files are read. A Google Doc is exported as `.md`, a Sheet as `.xlsx` and a Slides deck as `.pptx`
+   * ([ADR-0127](../../.ssot/ADR.md#adr-0127) decision 6), so each of those is in scope only while its extension is
+   * listed; a stored file is in scope by its own extension.
+   */
+  extensions: Extensions.default(['md', 'txt', 'pdf', 'docx', 'xlsx', 'pptx']),
+  language: Language,
+  version: Version,
+  syncProbeToken: ProbeToken,
+});
+
+/** The `gdrive` config keys only the server writes. */
+export const GDRIVE_SERVER_KEYS = ['serviceAccountEmail', 'changesCursor'] as const;
+
+/**
+ * GitHub Issues and Discussions ([ADR-0128](../../.ssot/ADR.md#adr-0128)): one repository, as documents
+ * `issues/<number>.md` and, with `includeDiscussions`, `discussions/<number>.md`. The token is not here: it is the
+ * source's one `secret_enc` string, and optional (an anonymous source reads a public repository's issues only).
+ *
+ * **Five keys are the server's.** `syncedSince` (when the last successful run started, the cursor of an
+ * incremental one), `lastFullRunAt` (when the last run that listed every number finished, which is when deletions were last found),
+ * `scope` (the settings those two were taken under, so that a changed one starts over), `issuesEtag` and
+ * `discussionsMark` (what the freshness check compares). None can be set by a client: `createSource` and
+ * `updateSource` overwrite them ({@link GITHUB_SERVER_KEYS}), replacing the token forgets them, and an export leaves them out.
+ */
+export const GithubConfig = z.object({
+  /** A user or organisation login: letters, digits and single hyphens, at most 39. */
+  owner: z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, 'must be a GitHub user or organisation name'),
+  /** A repository name: letters, digits, `.`, `_` and `-`; `.` and `..` are not names. */
+  repo: z
+    .string()
+    .regex(/^[A-Za-z0-9._-]{1,100}$/, 'must be a repository name (letters, digits, ".", "_" and "-")')
+    .refine((value) => value !== '.' && value !== '..', 'must be a repository name'),
+  /**
+   * `https://api.github.com`, or a GitHub Enterprise Server API base such as `https://ghe.example.com/api/v3`. `https`
+   * only — the token travels in a header — with no user, password, query or fragment. A server on a private address
+   * must be named in `SOURCE_ALLOWED_HOSTS`. The empty string clears the setting (the form's blank field).
+   */
+  apiBaseUrl: z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z
+      .url()
+      .max(2048)
+      .refine((value) => /^https:\/\//i.test(value), 'must be an https:// URL; the token is sent to it')
+      .refine((value) => {
+        const url = new URL(value);
+        return url.username === '' && url.password === '';
+      }, 'must not carry a user or password; the token goes in the credential')
+      .refine((value) => {
+        const url = new URL(value);
+        return url.search === '' && url.hash === '';
+      }, 'must not carry a query string or fragment')
+      .transform((value) => {
+        const url = new URL(value);
+        return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+      })
+      .default(GITHUB_API_DEFAULT),
+  ),
+  /** Closed issues are left out unless this is on ([ADR-0128](../../.ssot/ADR.md#adr-0128) decision 4). */
+  includeClosed: z.boolean().default(false),
+  /** Needs a token: Discussions are served by GraphQL, which answers no anonymous request. */
+  includeDiscussions: z.boolean().default(false),
+  /** Comments, issues and discussions written by bot accounts are kept unless this is off. */
+  includeBots: z.boolean().default(true),
+  syncedSince: z.string().max(40).optional(),
+  lastFullRunAt: z.string().max(40).optional(),
+  scope: z.string().max(2400).optional(),
+  issuesEtag: z.string().max(300).optional(),
+  discussionsMark: z.string().max(100).optional(),
+  /** The driver writes Markdown, so `['md']` is the default; see the note on {@link ConfluenceConfig}. */
+  extensions: Extensions.default(['md']),
+  language: Language,
+  version: Version,
+  syncProbeToken: ProbeToken,
+});
+
+/** The `github` config keys only the server writes. */
+export const GITHUB_SERVER_KEYS = ['syncedSince', 'lastFullRunAt', 'scope', 'issuesEtag', 'discussionsMark'] as const;
+
+/**
+ * The sources whose stored credential is sent to a host that an editor types into the settings, and the origin it goes
+ * to. Editing that origin without giving the credential again would send the stored one to a host the editor chose
+ * (a token read by anyone who may only write settings), so {@link checkSecretHostUnchanged} refuses it.
+ *
+ * `github` (`apiBaseUrl`), `s3` (`endpoint`; unset is AWS), `confluence` (`baseUrl`) and `git` (`url`) are here. A `gdrive`
+ * source is not: its hosts are pinned to Google's in the driver, so no setting can name another. A source with no
+ * stored credential is not asked for one (a public git repository has no token to redirect), which is the
+ * `hasStoredSecret` test in {@link checkSecretHostUnchanged}. A git server that answers `401` is enough to make
+ * isomorphic-git offer the token, so the git rule is as much a rule as the others, though no redirect is involved.
+ */
+const SECRET_HOST: Readonly<Partial<Record<string, { setting: string; originOf: (config: Record<string, unknown>) => string }>>> = {
+  github: { setting: 'apiBaseUrl', originOf: (config) => originOf(config.apiBaseUrl, GITHUB_API_DEFAULT) },
+  s3: { setting: 'endpoint', originOf: (config) => originOf(config.endpoint, 'aws') },
+  confluence: { setting: 'baseUrl', originOf: (config) => originOf(config.baseUrl, '') },
+  git: { setting: 'url', originOf: (config) => originOf(config.url, '') },
+};
+
+function originOf(value: unknown, fallback: string): string {
+  if (typeof value !== 'string' || value.trim() === '') return fallback;
+  try {
+    const url = new URL(value);
+    // A scheme the URL parser does not know (`ssh:`) has the opaque origin "null", which would make every host equal.
+    return url.origin === 'null' ? `${url.protocol}//${url.host}` : url.origin;
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Refuses an edit that moves the address a stored credential is sent to unless the same request supplies the
+ * credential again (or removes it). A change of path on the same origin, which Enterprise Server's `/api/v3` is, passes.
+ */
+function checkSecretHostUnchanged(
+  type: string,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  hasStoredSecret: boolean,
+  secretInput: string | null | undefined,
+): void {
+  const rule = SECRET_HOST[type];
+  if (!rule || !hasStoredSecret) return;
+  // A new credential, or none at all, leaves nothing stored to be sent anywhere.
+  if (secretInput !== undefined) return;
+  if (rule.originOf(before) === rule.originOf(after)) return;
+  throw new ValidationError(
+    `Changing ${rule.setting} would send the stored ${type} credential to a different host; enter the credential again in the same request (or remove it first)`,
+  );
+}
+
+/**
+ * Discussions are served by GraphQL, which answers only with a token ([ADR-0128](../../.ssot/ADR.md#adr-0128)
+ * decision 2), so asking for them with no token is refused up front, naming the reason, rather than failing every run.
+ */
+function checkGithubDiscussions(config: Record<string, unknown>, hasToken: boolean): void {
+  if (config.includeDiscussions === true && !hasToken) {
+    throw new ValidationError(
+      'includeDiscussions needs a token: GitHub serves Discussions through its GraphQL API, which does not answer anonymous requests',
+    );
+  }
+}
+
 export const SourceConfigByType = {
   local: LocalConfig,
   git: GitConfig,
@@ -272,6 +556,9 @@ export const SourceConfigByType = {
   notion: NotionConfig,
   confluence: ConfluenceConfig,
   web: WebConfig,
+  s3: S3Config,
+  gdrive: GdriveConfig,
+  github: GithubConfig,
 } as const;
 export type LocalConfig = z.infer<typeof LocalConfig>;
 export type GitConfig = z.infer<typeof GitConfig>;
@@ -279,6 +566,9 @@ export type UploadConfig = z.infer<typeof UploadConfig>;
 export type NotionConfig = z.infer<typeof NotionConfig>;
 export type ConfluenceConfig = z.infer<typeof ConfluenceConfig>;
 export type WebConfig = z.infer<typeof WebConfig>;
+export type S3Config = z.infer<typeof S3Config>;
+export type GdriveConfig = z.infer<typeof GdriveConfig>;
+export type GithubConfig = z.infer<typeof GithubConfig>;
 
 export interface SourceView {
   id: string;
@@ -456,8 +746,18 @@ export function slugifySourceName(input: string): string {
   return PROJECT_NAME_RE.test(name) ? name : '';
 }
 
-export async function listSources(db: Db, projectId: string): Promise<DocumentSourceRow[]> {
-  return db.select().from(documentSources).where(eq(documentSources.projectId, projectId)).orderBy(asc(documentSources.createdAt));
+/**
+ * The project's sources, oldest first. `sourceIds` is a token's source scope
+ * ([ADR-0133](../../.ssot/ADR.md#adr-0133)): `undefined` or `null` lists them all, and a list — an empty one
+ * included, which lists none — lists only those, so a scoped token is never told the name, type or label
+ * of a source outside it.
+ */
+export async function listSources(db: Db, projectId: string, sourceIds?: readonly string[] | null): Promise<DocumentSourceRow[]> {
+  return db
+    .select()
+    .from(documentSources)
+    .where(and(eq(documentSources.projectId, projectId), withinSourceScope(documentSources.id, sourceIds)))
+    .orderBy(asc(documentSources.createdAt));
 }
 
 export async function listAllSources(db: Db): Promise<DocumentSourceRow[]> {
@@ -498,6 +798,13 @@ export interface CreateSourceInput {
   label?: string;
   flavor?: Flavor;
   config?: unknown;
+  /**
+   * The workspace a Notion source was connected to with OAuth ([ADR-0129](../../.ssot/ADR.md#adr-0129)).
+   * **Written only through here**, by the OAuth callback: the same key inside `config` is dropped, so a
+   * client cannot make a source look connected (or not) by sending it. The admin API's bodies do not
+   * name this field, which is what keeps it out of their reach.
+   */
+  oauth?: NotionOAuthInfo;
   /** Plain token; encrypted before it is stored. */
   secret?: string | null;
   /**
@@ -536,6 +843,16 @@ async function validateConfig(type: SourceType, config: unknown, opts: SourceSer
   return parsed;
 }
 
+/**
+ * A client's `config` for a Notion source with `oauth` taken out, and the trusted one (the callback's) put
+ * in. Every other type has no such key and is returned as it came.
+ */
+function withoutClientOauth(type: SourceType, config: unknown, oauth: NotionOAuthInfo | undefined): unknown {
+  if (type !== 'notion') return config;
+  const { oauth: _fromClient, ...rest } = (config ?? {}) as Record<string, unknown>;
+  return oauth ? { ...rest, oauth } : rest;
+}
+
 export async function createSource(db: Db, projectId: string, input: CreateSourceInput, opts: SourceServiceOptions): Promise<DocumentSourceRow> {
   if (!SOURCE_TYPES.includes(input.type)) throw new ValidationError(`Unknown source type "${String(input.type)}"`);
   const name = input.name.trim();
@@ -544,10 +861,21 @@ export async function createSource(db: Db, projectId: string, input: CreateSourc
   }
   const flavor = input.flavor ?? 'plain';
   if (!FLAVORS.includes(flavor)) throw new ValidationError(`Unknown flavor "${String(flavor)}"`);
-  const config = await validateConfig(input.type, input.config, opts);
+  const config = await validateConfig(input.type, withoutClientOauth(input.type, input.config, input.oauth), opts);
   checkExtensions(flavor, config);
   checkSecretAllowed(input.type, input.secret);
-  const secretEnc = input.secret ? encryptSecret(input.secret, opts.keys) : null;
+  const stored = secretToStore(input.type, input.secret);
+  const secretEnc = stored ? encryptSecret(stored, opts.keys) : null;
+  if (input.type === 'gdrive') {
+    // Whatever the client sent for these two is dropped: the email comes from the key just validated.
+    for (const key of GDRIVE_SERVER_KEYS) delete config[key];
+    if (stored) config.serviceAccountEmail = GDRIVE_SECRET.parse(stored).clientEmail;
+  }
+  if (input.type === 'github') {
+    // The cursor and validators are the driver's: whatever the client sent for them is dropped.
+    for (const key of GITHUB_SERVER_KEYS) delete config[key];
+    checkGithubDiscussions(config, stored !== null);
+  }
   // Encrypted when the instance has a key and stored in the clear when it has none — a git source on a
   // public repository must not be the thing that forces SECRET_KEY on an operator (ADR-0017), and
   // `npm run rotate-secret` seals such a value the day a key appears.
@@ -581,6 +909,8 @@ export interface UpdateSourceInput {
   label?: string;
   flavor?: Flavor;
   config?: unknown;
+  /** As {@link CreateSourceInput.oauth}: set by the OAuth callback and by nothing a client can send. */
+  oauth?: NotionOAuthInfo;
   /** New plain token; `null` removes the stored one. */
   secret?: string | null;
   /** Minutes between scheduled syncs; `null` switches scheduling off. Omitted leaves it alone. */
@@ -619,6 +949,24 @@ export async function updateSource(
     // nothing changed into a re-sync of the source, and the route below reads exactly this comparison
     // to decide whether to queue a run at all.
     delete merged[PROBE_TOKEN_KEY];
+    // The server's own keys stay as stored, whatever the client sent ([ADR-0127](../../.ssot/ADR.md#adr-0127) decision 2).
+    if (existing.type === 'gdrive') {
+      for (const key of GDRIVE_SERVER_KEYS) {
+        if (existing.config[key] === undefined) delete merged[key];
+        else merged[key] = existing.config[key];
+      }
+    }
+    // Likewise a GitHub source's cursor and validators ([ADR-0128](../../.ssot/ADR.md#adr-0128)): the driver compares them with the settings they were taken under.
+    if (existing.type === 'github') {
+      for (const key of GITHUB_SERVER_KEYS) {
+        if (existing.config[key] === undefined) delete merged[key];
+        else merged[key] = existing.config[key];
+      }
+    }
+    // The workspace of an OAuth connection is not the client's to state either way: what is stored stays,
+    // whatever the body says (the callback sets it through `input.oauth`, below).
+    delete merged.oauth;
+    if (existing.config.oauth !== undefined) merged.oauth = existing.config.oauth;
     const nextConfig = await validateConfig(existing.type as SourceType, merged, opts);
     const previous = { ...existing.config };
     const token = previous[PROBE_TOKEN_KEY];
@@ -633,6 +981,7 @@ export async function updateSource(
     // the patch lands — the dashboard sends both in one save, and checking the stored one would refuse
     // the very edit that makes the extensions legal.
     checkExtensions(nextFlavor, patch.config as Record<string, unknown>);
+    checkSecretHostUnchanged(existing.type, existing.config, patch.config as Record<string, unknown>, existing.secretEnc !== null, input.secret);
   } else if (patch.flavor !== undefined) {
     // **A patch that moves only the content type may not be refused by a setting it did not send.**
     // Turning an `openapi` source back into a plain one would otherwise be impossible without also
@@ -655,7 +1004,44 @@ export async function updateSource(
   }
   if (input.secret !== undefined) {
     checkSecretAllowed(existing.type, input.secret);
-    patch.secretEnc = input.secret ? encryptSecret(input.secret, opts.keys) : null;
+    const stored = secretToStore(existing.type, input.secret);
+    patch.secretEnc = stored ? encryptSecret(stored, opts.keys) : null;
+    if (existing.type === 'gdrive') {
+      // A different key is a different view of Drive: the change-feed position and the token that rests on it
+      // belong to the account that took them, so the next scheduled check runs the source instead of trusting them.
+      const config = { ...((patch.config as Record<string, unknown> | undefined) ?? existing.config) };
+      delete config.changesCursor;
+      delete config[PROBE_TOKEN_KEY];
+      if (stored) config.serviceAccountEmail = GDRIVE_SECRET.parse(stored).clientEmail;
+      else delete config.serviceAccountEmail;
+      patch.config = config;
+    }
+    if (existing.type === 'github') {
+      // A different token may see different issues (a private repository, another account's access), so what the
+      // cursor and the validators were taken with no longer describes the source: the next run lists everything.
+      const config = { ...((patch.config as Record<string, unknown> | undefined) ?? existing.config) };
+      for (const key of GITHUB_SERVER_KEYS) delete config[key];
+      delete config[PROBE_TOKEN_KEY];
+      patch.config = config;
+    }
+  }
+  if (existing.type === 'github' && (input.config !== undefined || input.secret !== undefined)) {
+    const hasToken = input.secret !== undefined ? patch.secretEnc !== null && patch.secretEnc !== undefined : existing.secretEnc !== null;
+    checkGithubDiscussions((patch.config as Record<string, unknown> | undefined) ?? existing.config, hasToken);
+  }
+  // The OAuth workspace follows the credential ([ADR-0129](../../.ssot/ADR.md#adr-0129) §4): the callback
+  // sets it, and a secret that arrives any other way is never an OAuth connection (`checkSecretAllowed`),
+  // so the name of the workspace the source used to talk to goes with the token it replaces.
+  if (existing.type === 'notion' && (input.oauth !== undefined || input.secret !== undefined)) {
+    const next = { ...((patch.config ?? existing.config) as Record<string, unknown>) };
+    if (input.oauth !== undefined) {
+      next.oauth = NotionOAuthInfo.parse(input.oauth);
+      // A different workspace is a different question for the revision probe to have answered.
+      delete next[PROBE_TOKEN_KEY];
+    } else {
+      delete next.oauth;
+    }
+    patch.config = next;
   }
   if (input.syncIntervalMinutes !== undefined && input.syncIntervalMinutes !== existing.syncIntervalMinutes) {
     patch.syncIntervalMinutes = input.syncIntervalMinutes;
@@ -672,6 +1058,36 @@ export async function updateSource(
   if (Object.keys(patch).length === 0) return existing;
   const [row] = await db.update(documentSources).set(patch).where(eq(documentSources.id, sourceId)).returning();
   return row;
+}
+
+/**
+ * Replaces a source's stored secret **only if it is still the ciphertext the caller read**
+ * ([ADR-0129](../../.ssot/ADR.md#adr-0129) §5). `true` means this call wrote it; `false` means the row
+ * moved first (another run refreshed the same tokens, a reconnect landed, a rotation re-sealed it) and
+ * nothing was written.
+ *
+ * Compare-and-swap in the `WHERE` rather than a read followed by a write, because the value being
+ * protected is a rotating refresh token: a second writer that overwrote a newer pair with an older one
+ * would leave the source holding a token Notion has already retired. `expectedEnc` is `null` for a row
+ * that holds no secret yet (the OAuth callback creates the source and then seals its first pair).
+ *
+ * This is the only writer of the OAuth blob and does not go through `checkSecretAllowed` on purpose.
+ */
+export async function replaceSourceSecretIfUnchanged(
+  db: Db,
+  sourceId: string,
+  expectedEnc: string | null,
+  plain: string,
+  keys: SecretKeyring,
+): Promise<boolean> {
+  const rows = await db
+    .update(documentSources)
+    .set({ secretEnc: encryptSecret(plain, keys) })
+    .where(
+      and(eq(documentSources.id, sourceId), expectedEnc === null ? isNull(documentSources.secretEnc) : eq(documentSources.secretEnc, expectedEnc)),
+    )
+    .returning({ id: documentSources.id });
+  return rows.length === 1;
 }
 
 export async function regenerateWebhookSecret(db: Db, projectId: string, sourceId: string, opts: SourceServiceOptions): Promise<DocumentSourceRow> {
