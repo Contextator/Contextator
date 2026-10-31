@@ -28,7 +28,7 @@ on:
   workflow_dispatch:
 
 env:
-  CONTEXTATOR_IMAGE: contextator/contextator:0.6.0-slim
+  CONTEXTATOR_IMAGE: contextator/contextator:0.6.1-slim
 
 jobs:
   index:

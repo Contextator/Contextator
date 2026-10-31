@@ -8,7 +8,7 @@ is not a separate download; it is the version of the image you already run.
 ```bash
 docker run --rm \
   -e CONTEXTATOR_URL=https://docs.example.com -e CONTEXTATOR_TOKEN \
-  contextator/contextator:0.6.0-slim \
+  contextator/contextator:0.6.1-slim \
   contextator project create handbook --git https://github.com/acme/handbook --wait
 ```
 
