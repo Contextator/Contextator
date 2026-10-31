@@ -341,18 +341,91 @@ export async function projectStatus(ctx: CommandContext, options: ProjectStatusO
   return EXIT.ok;
 }
 
+export interface SourceAddOptions {
+  project: string;
+  type: string;
+  /** The source's name inside the project; the server requires one, and the caller defaults it to the type. */
+  name: string;
+  label?: string;
+  /** The `config` object of the admin API, as parsed by the caller. Sent as it is; the server validates it per type. */
+  config?: Record<string, unknown>;
+  /** The source's credential (ADR-0091), read by the caller from a variable, a file or stdin. Never printed. */
+  secret?: string;
+}
+
+interface SourceView {
+  id: string;
+  name: string;
+  type: string;
+  label?: string | null;
+  hasSecret?: boolean;
+}
+
+/**
+ * `source add`: any source type through `POST /api/projects/:id/sources` ([ADR-0131](../../.ssot/ADR.md#adr-0131)).
+ * The body is the admin API's own, so the server's validation is the only validation: its refusal (`400`
+ * with the per-field message) is printed as the server wrote it. Only a handful of fields of the answer
+ * are printed, because the full view carries a webhook secret an editor may see and a log should not.
+ */
+export async function sourceAdd(ctx: CommandContext, options: SourceAddOptions): Promise<number> {
+  const project = await resolveProject(ctx.client, options.project);
+  const source = await ctx.client.request<SourceView>('POST', `/api/projects/${project.id}/sources`, {
+    type: options.type,
+    name: options.name,
+    ...(options.label === undefined ? {} : { label: options.label }),
+    ...(options.config === undefined ? {} : { config: options.config }),
+    ...(options.secret === undefined ? {} : { secret: options.secret }),
+    // Queues a run in the same call, as `project create` does.
+    index: true,
+  });
+  if (ctx.json) {
+    ctx.io.stdout(
+      line(
+        JSON.stringify({
+          project: { id: project.id, name: project.name },
+          source: { id: source.id, name: source.name, type: source.type, label: source.label ?? null, hasSecret: source.hasSecret === true },
+          index: 'queued',
+        }),
+      ),
+    );
+  } else {
+    ctx.io.stdout(line(`project: ${project.name}`));
+    ctx.io.stdout(line(`source: ${source.name}`));
+    ctx.io.stdout(line(`id: ${source.id}`));
+    ctx.io.stdout(line(`type: ${source.type}`));
+    ctx.io.stdout(line('index: queued'));
+  }
+  return EXIT.ok;
+}
+
 export interface TokenCreateOptions {
   project: string;
   name?: string;
   expiresInDays?: number;
   allowedCidrs: string[];
+  /** Sources the token is bound to, by name or id ([ADR-0133](../../.ssot/ADR.md#adr-0133)); empty reads the whole project. */
+  sources: string[];
 }
 
-/** `token create`: another MCP token for a project (`POST /api/projects/:id/mcp-tokens`). */
+/**
+ * The names the token API takes, for the sources a caller named by name or by id. The server resolves names only,
+ * so an id is looked up in the project's source list; what matches nothing is sent as it was written and the
+ * server's `unknown_source` says which one (a name it does not have), rather than this command guessing.
+ */
+async function sourceNames(client: ApiClient, projectId: string, refs: string[]): Promise<string[]> {
+  const unique = [...new Set(refs)];
+  if (!unique.some((ref) => UUID.test(ref))) return unique;
+  const listed = await client.request<{ id: string; name: string }[]>('GET', `/api/projects/${projectId}/sources`);
+  return [...new Set(unique.map((ref) => (UUID.test(ref) ? (listed.find((s) => s.id.toLowerCase() === ref.toLowerCase())?.name ?? ref) : ref)))];
+}
+
+/** `token create`: another MCP token for a project (`POST /api/projects/:id/mcp-tokens`), optionally bound to some of its sources. */
 export async function tokenCreate(ctx: CommandContext, options: TokenCreateOptions): Promise<number> {
   const project = await resolveProject(ctx.client, options.project);
+  const sources = options.sources.length > 0 ? await sourceNames(ctx.client, project.id, options.sources) : [];
   const minted = await ctx.client.request<McpTokenResponse>('POST', `/api/projects/${project.id}/mcp-tokens`, {
     ...(options.name === undefined ? {} : { name: options.name }),
+    ...(sources.length > 0 ? { sources } : {}),
     ...(options.expiresInDays === undefined ? {} : { expiresInDays: options.expiresInDays }),
     ...(options.allowedCidrs.length > 0 ? { allowedCidrs: options.allowedCidrs } : {}),
   });
@@ -363,6 +436,7 @@ export async function tokenCreate(ctx: CommandContext, options: TokenCreateOptio
   } else {
     ctx.io.stdout(line(`project: ${project.name}`));
     ctx.io.stdout(line(`mcp-url: ${project.mcpUrl}`));
+    if (sources.length > 0) ctx.io.stdout(line(`sources: ${sources.join(', ')}`));
     ctx.io.stdout(line(`mcp-token-secret: ${minted.secret}`));
   }
   return EXIT.ok;
