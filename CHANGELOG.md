@@ -10,6 +10,27 @@ ships, that stops.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-31
+
+### Fixed
+
+- `restore` now refuses an archive whose manifest names a credential-bearing source type this build does not know
+  (`unknown_source_type`, ADR-0126 decision 8), before it checks the key, reads the dump or writes anything; `--check`
+  reports the same. Before, such an archive passed the type check and restored sources this build cannot sync. An
+  archive without the manifest field, taken before ADR-0091, is judged as before. The backup and restore messages (and
+  the README) no longer say only "git, Notion or Confluence" hold a sync credential: they name `git`, `notion`,
+  `confluence`, `s3`, `gdrive` and `github`.
+- An indexer job reaches `done` (or `error`) only after its `index_runs` row is written, so a caller that waits for
+  the job to finish no longer reads a run history that is one row short. This was the cause of the flaky
+  `delete-project-race` integration test.
+- With `LOG_LEVEL=debug` or `trace`, the request log no longer carries the `code` and `state` query values of the
+  OIDC sign-in and Notion OAuth callbacks, or of `GET /oauth/authorize`; they are logged as `[redacted]`, and the
+  path and the other parameters stay as they were.
+
+### Changed
+
+- Helm chart 2.1.1 (`appVersion` 0.6.1); no value changed.
+
 ## [0.6.0] - 2026-10-30
 
 ### Added
@@ -1077,7 +1098,8 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/Contextator/Contextator/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Contextator/Contextator/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Contextator/Contextator/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/Contextator/Contextator/compare/v0.4.1...v0.4.2
