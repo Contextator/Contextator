@@ -52,7 +52,8 @@ Rules that have bitten before:
 - Keep `syncProbeToken` in the schema if the driver has a `probe` (the others do).
 - A secret never goes in `config`. It goes in the `secret` field of the create/update body (step 8).
 - A URL a user types is untrusted input. If the driver opens connections, route them through an egress check
-  and add an `*_ALLOWED_HOSTS` setting like the web, git and Confluence drivers have.
+  and take the hosts an operator trusts from the shared `SOURCE_ALLOWED_HOSTS` list (ADR-0126). Web and git keep their own
+  lists (ADR-0107); a new list, or a new type under `SOURCE_ALLOWED_HOSTS`, is a decision for its own ADR.
 - If the type has per-type validation that needs I/O (the local type resolves its path), it goes in
   `validateConfig`.
 

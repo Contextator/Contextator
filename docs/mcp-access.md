@@ -58,7 +58,9 @@ and what it writes is a report in the query log's own table ([below](#reporting-
 
 `whats_new` takes `since` as an ISO 8601 date or date-time (a date alone is midnight UTC; a date-time without an
 offset is UTC; a time in the future is refused). It answers newest first, 50 changes by default and 200 at most, and
-every answer carries two statements about the record itself:
+every answer carries two statements about the record itself. When more changes match than were returned, the answer
+ends with a note saying the list was cut. At the 200 ceiling no larger `limit` exists, and a later `since` would hide
+the older changes rather than show them, so narrow the question with `source` (or `version`) to reach them.
 
 - `history_starts_at` (`historyStartsAt` in the structured answer) is the oldest moment the record can speak for:
   90 days ago, the moment this instance began recording, or the moment the project came to exist on this instance

@@ -199,6 +199,30 @@ config:
   # was indexed with a different embedding model than the one it now runs (and that has a source).
   # Off by default; `false` leaves the variable unset.
   reindexOnModelChange: false
+  # PII_SCAN (ADR-0130): whether stored documents are looked through for secrets and personal numbers and the
+  # findings recorded beside them (report only: nothing is masked or skipped). On in the application, so
+  # `true` (the default) leaves the variable unset; `false` sets PII_SCAN=0, which stops new scanning and
+  # leaves the findings that exist in place.
+  piiScan: true
+  # CONFLUENCE_MAX_PAGES / NOTION_MAX_PAGES: the most pages one Confluence or Notion source indexes in a run;
+  # the rest is not indexed and the run's note says so. Integers from 1 to 100000. Null leaves a variable
+  # unset, so the application default of 5000 applies.
+  confluenceMaxPages: null
+  notionMaxPages: null
+  # NOTION_OAUTH_CLIENT_ID / NOTION_OAUTH_REDIRECT_URI (ADR-0129): the Notion *public connection* this operator
+  # registered, which turns "Connect with Notion" on. There is no central connection: every instance brings its
+  # own. The client secret is not a value here; name the Secret that holds it in `notionOauthClientSecret`
+  # (or pass NOTION_OAUTH_CLIENT_SECRET through `envSecret`, not both). The application refuses to start with
+  # a client id and no secret, or the reverse. The redirect URI defaults to
+  # `<PUBLIC_BASE_URL>/api/sources/notion/oauth/callback`; with neither it nor `publicBaseUrl` set, startup is
+  # refused. Empty leaves each variable unset.
+  notionOauthClientId: ""
+  notionOauthRedirectUri: ""
+  # NOTION_OAUTH_CLIENT_SECRET, read from a Secret you manage. Both fields set adds the variable through
+  # `secretKeyRef`; both empty leaves it unset.
+  notionOauthClientSecret:
+    secretName: ""
+    secretKey: ""
 
 # -----------------------------------------------------------------------------------------------
 # Persistence

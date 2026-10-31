@@ -510,6 +510,58 @@
         "reindexOnModelChange": {
           "description": "REINDEX_ON_MODEL_CHANGE: true queues one re-index at start-up for every project indexed with a different embedding model than the server runs now and that has at least one source. Off by default; false leaves the variable unset.",
           "type": "boolean"
+        },
+        "piiScan": {
+          "description": "PII_SCAN (ADR-0130): true (the default) leaves the variable unset, so the application scans stored documents for secrets and personal numbers and records findings (report only); false sets PII_SCAN=0, which stops new scanning and leaves existing findings in place.",
+          "type": "boolean"
+        },
+        "confluenceMaxPages": {
+          "description": "CONFLUENCE_MAX_PAGES: the most pages a Confluence source indexes in one run; the rest is not indexed. An integer from 1 to 100000. Null or unset leaves the application default, 5000.",
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "notionMaxPages": {
+          "description": "NOTION_MAX_PAGES: the most pages a Notion source indexes in one run; the rest is not indexed. An integer from 1 to 100000. Null or unset leaves the application default, 5000.",
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "notionOauthClientId": {
+          "description": "NOTION_OAUTH_CLIENT_ID (ADR-0129): the client id of the Notion public connection this operator registered; turns on \"Connect with Notion\". The application needs the client secret with it (notionOauthClientSecret or envSecret). Empty leaves it unset.",
+          "type": "string"
+        },
+        "notionOauthRedirectUri": {
+          "description": "NOTION_OAUTH_REDIRECT_URI: the redirect URI registered on that connection. Unset, the application uses <PUBLIC_BASE_URL>/api/sources/notion/oauth/callback; with neither set it refuses to start. Empty leaves it unset.",
+          "type": "string"
+        },
+        "notionOauthClientSecret": {
+          "description": "NOTION_OAUTH_CLIENT_SECRET, read from a Secret you manage through secretKeyRef. The variable is added only when both fields are non-empty.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "secretName": {
+              "description": "Name of the existing Secret.",
+              "type": "string"
+            },
+            "secretKey": {
+              "description": "Key inside that Secret holding the client secret.",
+              "type": "string"
+            }
+          },
+          "if": {
+            "anyOf": [
+              { "properties": { "secretName": { "minLength": 1 } }, "required": ["secretName"] },
+              { "properties": { "secretKey": { "minLength": 1 } }, "required": ["secretKey"] }
+            ]
+          },
+          "then": {
+            "required": ["secretName", "secretKey"],
+            "properties": {
+              "secretName": { "minLength": 1 },
+              "secretKey": { "minLength": 1 }
+            }
+          }
         }
       }
     },
