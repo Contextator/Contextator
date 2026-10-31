@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createGunzip } from 'node:zlib';
 import * as tar from 'tar';
 import { z } from 'zod';
+import { describeCredentialSourceTypes } from '../src/services/encrypted-fields.js';
 
 /**
  * The shape of an instance backup, and every refusal that is decided from its manifest
@@ -100,8 +101,8 @@ const Manifest = z.object({
    * `encryptedSources` — still reads correctly here.
    *
    * `encryptedSourceTypes` names the source types `encryptedSources` was counted over. An archive
-   * written since [ADR-0091](../.ssot/ADR.md#adr-0091) counts `git`, `notion` and `confluence` only and
-   * says so here; an archive written before it has no such field and counted a `secret_enc` on every
+   * written since [ADR-0091](../.ssot/ADR.md#adr-0091) counts only the credential-bearing types
+   * (`CREDENTIAL_SOURCE_TYPES`; `git`, `notion` and `confluence` when it was written) and says so here; an archive written before it has no such field and counted a `secret_enc` on every
    * type, a `local`, `upload` or `web` row included. `restore` reads the absence as "the number may be
    * too large" and derives the credential-type count from the dump itself before it refuses. Added
    * rather than bumped, per the rule above: a build that predates the field still reads the archive,
@@ -188,6 +189,28 @@ export function parseManifest(raw: unknown): Manifest {
   return parsed.data;
 }
 
+/**
+ * Refuses an archive whose manifest counted a source type this build does not know
+ * ([ADR-0126](../.ssot/ADR.md#adr-0126) decision 8) — before anything is written to the target.
+ *
+ * `encryptedSourceTypes` names the types `encryptedSources` was counted over. A type this build has no
+ * entry for is a credential it cannot read, drop or count: restoring would bring the source back with a
+ * `secret_enc` nothing decrypts, which is a silent loss, and refusing costs one command with the right
+ * build. Only the archive's own claim is judged; an archive without the field (written before
+ * [ADR-0091](../.ssot/ADR.md#adr-0091)) says nothing about types and is left to the existing paths.
+ */
+export function checkSourceTypesKnown(manifest: Manifest, knownTypes: readonly string[]): void {
+  const unknown = (manifest.secretKey.encryptedSourceTypes ?? []).filter((type) => !knownTypes.includes(type));
+  if (unknown.length === 0) return;
+  throw new BackupRefused(
+    'unknown_source_type',
+    `This backup holds credentials for source type(s) this build does not know: ${unknown.join(', ')}. ` +
+      `It was taken by ${manifest.product.name} ${manifest.product.version}; restoring it here would bring those sources back ` +
+      `with credentials nothing can read. Restore it with ${manifest.product.name} ${manifest.product.version} or a newer release. ` +
+      'Nothing has been written.',
+  );
+}
+
 export type SecretKeyVerdict = { ok: true; note: string | null } | { ok: false; code: 'secret_key_missing' | 'secret_key_mismatch'; message: string };
 
 /**
@@ -216,10 +239,10 @@ export type SecretKeyVerdict = { ok: true; note: string | null } | { ok: false; 
  */
 export function checkSecretKey(manifest: Manifest, secretKey: string | undefined): SecretKeyVerdict {
   const { present, fingerprint, encryptedSources, regenerableSecrets } = manifest.secretKey;
-  // Named by type since ADR-0091: only a git, Notion or Confluence source's credential is counted, so
+  // Named by type since ADR-0091: only a credential-bearing source's credential is counted, so
   // the sentence says which sources an operator should expect to re-enter tokens for.
   const atStake =
-    `${encryptedSources} git, Notion or Confluence source${encryptedSources === 1 ? '' : 's'} in this backup ` +
+    `${encryptedSources} ${describeCredentialSourceTypes()} source${encryptedSources === 1 ? '' : 's'} in this backup ` +
     `${encryptedSources === 1 ? 'holds a sync credential' : 'hold sync credentials'} encrypted under it`;
   const remedy =
     'For a git source, regenerate the secret here and paste the new one into the repository; for a Notion source, ' +
@@ -248,7 +271,7 @@ export function checkSecretKey(manifest: Manifest, secretKey: string | undefined
       return {
         ok: true,
         note:
-          'This backup was taken under a SECRET_KEY and this environment has none; no git, Notion or Confluence source ' +
+          `This backup was taken under a SECRET_KEY and this environment has none; no ${describeCredentialSourceTypes()} source ` +
           'in it holds a sync credential, so nothing it carries is lost for good — but set the key before adding a private source.' +
           regenerable,
       };
@@ -270,7 +293,7 @@ export function checkSecretKey(manifest: Manifest, secretKey: string | undefined
       return {
         ok: true,
         note:
-          'The SECRET_KEY in this environment is not the one this backup was taken under; no git, Notion or Confluence ' +
+          `The SECRET_KEY in this environment is not the one this backup was taken under; no ${describeCredentialSourceTypes()} ` +
           'source in it holds a sync credential, so nothing it carries is lost for good — but any credential entered before ' +
           'this backup would not have survived.' +
           regenerable,
@@ -703,7 +726,7 @@ export function readmeFor(manifest: Manifest): string {
     '',
     'What is NOT in it, and will not be:',
     secretKey.present
-      ? `  - SECRET_KEY. The instance had one, and ${secretKey.encryptedSources} git, Notion or Confluence source(s) hold a sync credential ` +
+      ? `  - SECRET_KEY. The instance had one, and ${secretKey.encryptedSources} ${describeCredentialSourceTypes()} source(s) hold a sync credential ` +
         `encrypted under it, ${secretKey.regenerableSecrets} a webhook secret. ` +
         `Only a key check value travels (${secretKey.fingerprint}), which is enough for a restore to refuse the wrong key and ` +
         'nothing like enough to be the key. Keep the key somewhere this file is not: a backup carrying it would be the whole ' +

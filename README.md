@@ -372,7 +372,7 @@ in one file, on a volume with a weaker access story than the environment it came
 a fingerprint of the key — 128 bits of keyed HMAC — which is what lets `restore` **refuse a wrong or
 missing key before it writes anything, when that key would cost something real** — an archive whose
 sources hold no sync credential encrypted under it restores anyway, with a note, instead of stopping
-the one case that is unambiguously safe. Only `git`, `notion` and `confluence` sources hold a sync
+the one case that is unambiguously safe. Only `git`, `notion`, `confluence`, `s3`, `gdrive` and `github` sources hold a sync
 credential, so only their secrets count. An archive taken before the manifest recorded which types it
 counted is judged on the rows of its own dump, still before the target is touched: a secret stored on a
 `local`, `upload` or `web` source by an older release does not refuse the restore, and after the restore
@@ -382,7 +382,7 @@ where the archive is not.
 That key is rotatable — a four-step runbook (`npm run rotate-secret` is step 3) — which gives the paragraph
 above a second edge: **retiring the old key — removing
 `SECRET_KEY_PREVIOUS` — and then discarding it invalidates every archive taken before the rotation
-that carries a source's sync credential — a private git, Notion or Confluence token — encrypted under
+that carries a source's sync credential — a private git, Notion, Confluence or GitHub token, an S3 key pair or a Google service account key — encrypted under
 it.** The old archive's fingerprint names a key the environment no longer holds, and for that archive
 `restore` refuses, because the credential's ciphertext was written under the key that was retired and
 discarded and cannot be re-derived; an archive with no such credential restores anyway, and the

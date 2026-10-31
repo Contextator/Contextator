@@ -7,10 +7,11 @@ import * as tar from 'tar';
 import { loadConfig, type Config } from '../src/config.js';
 import { createDb, type Db } from '../src/db/client.js';
 import { documentSources } from '../src/db/schema.js';
-import { CREDENTIAL_SOURCE_TYPES } from '../src/services/encrypted-fields.js';
+import { CREDENTIAL_SOURCE_TYPES, describeCredentialSourceTypes } from '../src/services/encrypted-fields.js';
 import {
   BackupRefused,
   checkSecretKey,
+  checkSourceTypesKnown,
   checkServerVersion,
   connectionFromEnv,
   countSecretsInSourceData,
@@ -45,7 +46,7 @@ import { useEmbeddedDatabaseWhenNothingElseSays } from './embedded-database.js';
  * the safe way to ask "is this archive the one I think it is, and can this instance take it".
  *
  * **Only a credential stops it** ([ADR-0091](../.ssot/ADR.md#adr-0091)). The key refusal counts the
- * `git`, `notion` and `confluence` rows holding a `secret_enc`; a secret on a `local`, `upload` or
+ * credential-bearing rows (`CREDENTIAL_SOURCE_TYPES`) holding a `secret_enc`; a secret on a `local`, `upload` or
  * `web` row is one nothing ever read, and it is dropped after the restore — set to NULL, and the
  * number printed — rather than refusing over it. An archive written before the manifest said which
  * types it counted may have counted those rows too; when that archive would be refused, the restore
@@ -140,13 +141,17 @@ export async function runRestore(deps: RestoreDeps, archivePath: string, opts: {
   say(`  from PostgreSQL ${manifest.database.serverVersion} (${manifest.database.mode})`);
   say(topology.notice);
 
+  // ADR-0126 decision 8: before the key check and before `pg_restore` reads the dump, so an archive this
+  // build cannot fully read is refused whatever the key.
+  checkSourceTypesKnown(manifest, CREDENTIAL_SOURCE_TYPES);
+
   let key = checkSecretKey(manifest, secretKey);
   if (!key.ok && countsNonCredentialSecrets(manifest, CREDENTIAL_SOURCE_TYPES)) {
     // An archive from before ADR-0091 counted a secret on every source type. Judge it on its rows.
     const found = await secretsInDump(tools, archive);
     if (found) {
       say(
-        `  this backup predates per-type secret counts; its dump holds ${found.credential} git, Notion or Confluence ` +
+        `  this backup predates per-type secret counts; its dump holds ${found.credential} ${describeCredentialSourceTypes()} ` +
           `credential(s) and ${found.other} secret(s) on local, upload or web sources, which a restore drops.`,
       );
       key = checkSecretKey({ ...manifest, secretKey: { ...manifest.secretKey, encryptedSources: found.credential } }, secretKey);
