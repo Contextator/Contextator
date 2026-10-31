@@ -10,6 +10,18 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Fixed
+
+- A sync that finished after its source had been edited no longer writes the old settings back. The run's driver state
+  (`configPatch`) is merged into the source's current config under a row lock, so a `PATCH` made while a sync ran,
+  including a new host and credential, survives; when the host (or, for `github` and `gdrive`, the credential)
+  changed during the run, the run's cursor and validators are not stored at all and the log says so.
+- A Notion source that uses an internal integration token now fails the sync on a `401` in the middle of the page walk
+  instead of treating the page as inaccessible; a full sync no longer drops the pages it did not reach. `403` and `404`
+  still skip the one page. OAuth sources were already correct.
+- The `report_gap` `note` parameter description now matches the tool description: it asks what is missing from the
+  documentation, not what the pages got wrong.
+
 ## [0.6.1] - 2026-10-31
 
 ### Fixed

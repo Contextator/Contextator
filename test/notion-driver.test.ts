@@ -46,12 +46,20 @@ class StubNotion {
     if (this.failWith) throw new Error(this.failWith);
   }
 
+  /** Database ids whose `databases.retrieve` rejects with the given error. */
+  readonly databaseFailures = new Map<string, Error>();
+
+  /** Page ids whose `pages.retrieve` rejects with the given error, the way the API answers for one page. */
+  readonly retrieveFailures = new Map<string, Error>();
+
   readonly users = { me: async () => ({ name: 'Docs bot', type: 'bot' }) };
 
   readonly pages = {
     retrieve: async (args: { page_id: string }) => {
       this.calls.push(`pages:${args.page_id}`);
       this.guard();
+      const refused = this.retrieveFailures.get(args.page_id);
+      if (refused) throw refused;
       const p = this.page(args.page_id);
       if (!p) throw new Error('Could not find page');
       return {
@@ -69,6 +77,8 @@ class StubNotion {
     retrieve: async (args: { database_id: string }) => {
       this.calls.push(`databases:${args.database_id}`);
       this.guard();
+      const refused = this.databaseFailures.get(args.database_id);
+      if (refused) throw refused;
       throw new Error('Could not find database');
     },
   };
@@ -307,6 +317,96 @@ describe('notion source', () => {
     expect(result.note).toContain('1 removed');
     expect(await listFiles()).toEqual(['product-handbook--aaaaaaaa.md']);
   }, 30_000);
+
+  describe('a refused credential in the middle of a sync', () => {
+    /** The Notion SDK's `APIResponseError` carries `status` and `code`; this is that shape without importing the SDK. */
+    const apiError = (status: number, code: string): Error => Object.assign(new Error(`Notion answered ${status} ${code}`), { status, code });
+    const DATABASE_ID = '99998888777766665555444433332222';
+    const HOME_WITH_CHILD: StubPage = { ...HOME, blocks: [...HOME.blocks, { id: CHILD.id, type: 'child_page', child_page: { title: CHILD.title } }] };
+    const HOME_WITH_DATABASE: StubPage = {
+      ...HOME,
+      blocks: [...HOME.blocks, { id: DATABASE_ID, type: 'child_database', child_database: { title: 'Tasks' } }],
+    };
+
+    /** Each case owns a source id, so what one sync wrote is not what the next one starts from. */
+    let nextId = 3;
+    const newSourceId = (): string => `00000000-0000-4000-8000-${String(nextId++).padStart(12, '0')}`;
+    const drive = (stub: StubNotion, sid: string, rootIds: string[]): NotionDriver =>
+      new NotionDriver(
+        { ...source(sid, projectId), config: { rootIds, extensions: ['md'] } } as DocumentSourceRow,
+        {
+          db: null as never,
+          log,
+          config: { ...WEB_LIMIT_DEFAULTS, DATA_DIR: dataDir, SECRET_KEY: undefined, ALLOWED_DOC_ROOTS: [], IGNORE_GLOBS: [] },
+        },
+        stub as never,
+      );
+    const files = async (sid: string): Promise<string[]> => {
+      const out: string[] = [];
+      const walk = async (dir: string, rel: string[]): Promise<void> => {
+        for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+          if (e.isDirectory()) await walk(path.join(dir, e.name), [...rel, e.name]);
+          else out.push([...rel, e.name].join('/'));
+        }
+      };
+      await walk(sourceCurrentDir(dataDir, projectId, sid), []);
+      return out.sort();
+    };
+
+    /** Syncs once cleanly, lets `refuse` break the API, and asserts the next sync fails and removes nothing. */
+    const failsAndKeepsFiles = async (stub: StubNotion, rootIds: string[], expectedFiles: number, refuse: () => void): Promise<void> => {
+      const sid = newSourceId();
+      await drive(stub, sid, rootIds).sync();
+      const before = await files(sid);
+      expect(before).toHaveLength(expectedFiles);
+
+      refuse();
+      await expect(drive(stub, sid, rootIds).sync()).rejects.toThrow('401');
+      expect(await files(sid)).toEqual(before); // nothing the walk could not reach was taken for gone
+    };
+
+    it('fails the sync on a 401 for a sub-page, and deletes no page (internal integration token)', async () => {
+      const stub = new StubNotion([HOME_WITH_CHILD, CHILD]);
+      await failsAndKeepsFiles(stub, [HOME.id], 2, () => stub.retrieveFailures.set(CHILD.id, apiError(401, 'unauthorized')));
+    }, 30_000);
+
+    it('fails the sync on a 401 for one of several root pages, instead of counting it as a partial failure', async () => {
+      // Before, the 401 fell through to "maybe it is a database", was recorded in `rootFailures`, and — with the
+      // other root readable — the sync went on and removed every file under the root it could not read.
+      const stub = new StubNotion([HOME, CHILD]);
+      await failsAndKeepsFiles(stub, [HOME.id, CHILD.id], 2, () => stub.retrieveFailures.set(CHILD.id, apiError(401, 'unauthorized')));
+    }, 30_000);
+
+    it('fails the sync on a 401 for one of several root databases', async () => {
+      const stub = new StubNotion([HOME, CHILD]);
+      // `CHILD.id` is not a page here (404), so it is tried as a database, which is what answers 401.
+      await failsAndKeepsFiles(stub, [HOME.id, DATABASE_ID], 1, () => stub.databaseFailures.set(DATABASE_ID, apiError(401, 'unauthorized')));
+    }, 30_000);
+
+    it('fails the sync on a 401 for a database found while walking, which is not a required read', async () => {
+      const stub = new StubNotion([HOME_WITH_DATABASE]);
+      const sid = newSourceId();
+      await drive(stub, sid, [HOME.id]).sync();
+      const before = await files(sid);
+      expect(before).toHaveLength(1);
+
+      stub.databaseFailures.set(DATABASE_ID, apiError(401, 'unauthorized'));
+      await expect(drive(stub, sid, [HOME.id]).sync()).rejects.toThrow('401');
+      expect(await files(sid)).toEqual(before);
+    }, 30_000);
+
+    it('still skips a sub-page that answers 403 or 404, which is a page that is not shared', async () => {
+      for (const [status, code] of [
+        [403, 'restricted_resource'],
+        [404, 'object_not_found'],
+      ] as const) {
+        const stub = new StubNotion([HOME_WITH_CHILD, CHILD]);
+        stub.retrieveFailures.set(CHILD.id, apiError(status, code));
+        const result = await drive(stub, newSourceId(), [HOME.id]).sync();
+        expect(result.note).toContain('1 pages');
+      }
+    }, 30_000);
+  });
 
   describe('NOTION_MAX_PAGES', () => {
     const manyPages = (count: number): StubPage[] =>

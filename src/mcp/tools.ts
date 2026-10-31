@@ -410,7 +410,7 @@ const reportGapInput = {
     .string()
     .max(REPORT_GAP_NOTE_MAX_CHARS)
     .optional()
-    .describe('Optional: one or two sentences on what is missing or what the pages you read got wrong. Plain text.'),
+    .describe('Optional: one or two sentences on what is missing from the documentation. Plain text.'),
 };
 
 /**

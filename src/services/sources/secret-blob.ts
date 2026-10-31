@@ -26,7 +26,7 @@ export const SECRET_BLOB_MAX_BYTES = 64 * 1024;
 
 /** A rejected credential: names the type and the offending fields, never a value. Maps to `400 invalid_request`. */
 export class SecretBlobError extends ValidationError {
-  /** Dotted names of the fields the document got wrong; empty when the document as a whole is wrong. */
+  /** Dotted names of the fields that are wrong in the document; empty when the document as a whole is wrong. */
   readonly fields: readonly string[];
   constructor(message: string, fields: readonly string[] = []) {
     super(message);
