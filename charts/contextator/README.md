@@ -791,6 +791,20 @@ checks them:
 - `config.reindexOnModelChange` — `true` sets `REINDEX_ON_MODEL_CHANGE=1`: at start-up the server queues
   one re-index for every project that was indexed with a different embedding model than it now runs and
   that has at least one source. `false` (the default) leaves it unset.
+- `config.piiScan` — `true` (the default) leaves `PII_SCAN` unset, so the application scans stored documents for
+  secrets and personal numbers and records the findings (report only, ADR-0130); `false` sets `PII_SCAN=0`, which
+  stops new scanning and leaves the findings that exist in place.
+- `config.confluenceMaxPages`, `config.notionMaxPages` — integers from `1` to `100000`, set as
+  `CONFLUENCE_MAX_PAGES` and `NOTION_MAX_PAGES`: the most pages one Confluence or Notion source indexes in a run;
+  the rest is not indexed and the run's note says so. `null` (the default) leaves the variable unset, so the
+  application default of `5000` applies.
+- `config.notionOauthClientId`, `config.notionOauthRedirectUri`, `config.notionOauthClientSecret` — set
+  `NOTION_OAUTH_CLIENT_ID`, `NOTION_OAUTH_REDIRECT_URI` and `NOTION_OAUTH_CLIENT_SECRET` (ADR-0129): the Notion
+  public connection you registered, which turns "Connect with Notion" on. The secret is not a value but a
+  reference, `{secretName, secretKey}` of a Secret you manage, added through `secretKeyRef`; setting only one of the
+  two is refused by the schema (or pass `NOTION_OAUTH_CLIENT_SECRET` through `envSecret`, not both). The application refuses to start with
+  a client id and no secret, or the reverse, and with neither the redirect URI nor `config.publicBaseUrl` set.
+  Empty (the default) leaves each variable unset.
 
 ## Publishing
 

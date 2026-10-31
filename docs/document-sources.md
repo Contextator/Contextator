@@ -216,6 +216,10 @@ either. Add both when you want both; the dialog says so.
   answer. GitHub answers `304`, which does not count against the primary rate limit when the request carries a token,
   and the run is skipped. With Discussions on there is one more request, a GraphQL query for the most recently updated
   Discussion. A comment, an edit, a close or a new issue all move the newest-updated issue and wake the source.
+  GitHub's list `ETag` reflects a new comment with a delay of 5 to 30 seconds (measured), so a check made right after
+  a comment can still find nothing changed; the next check sees it. Deleting or transferring an issue also changes the
+  list's `ETag`, which costs one extra run that finds nothing to write; the document itself stays until a full run
+  (below).
 - **What a run costs.** The **first** run lists every issue (100 to a request), then every comment of the repository
   (100 to a request), so a repository costs about `issues/100 + comments/100` requests and no request per issue. An
   **incremental** run asks for the issues and the repository's comments updated since the last successful run began
@@ -327,6 +331,14 @@ databases you want indexed) turns each page into one Markdown file, nested by pa
 only when its `last_edited_time` moves. A rejected token or an unreadable root fails the source with that
 message rather than reporting an empty workspace — which would otherwise delete every page already
 imported.
+
+**The first sync can miss a page that was just shared.** When the source names no root pages, the run finds its
+pages through Notion's `search`, and Notion's search index can show a page that was shared with the integration a moment
+ago (a new child page, for instance) late. The first run may therefore index a few pages fewer than you see in
+Notion. The next run picks them up: *Sync now* at once, or the schedule within `SYNC_MAX_SKIP_HOURS` (24 hours by
+default) at the latest, because a scheduled check that sees no newer edit skips the run. With `SYNC_MAX_SKIP_HOURS=0`
+that bound is gone: a page that was shared but not edited then waits for the next edit or for *Sync now*. This is not an
+error and nothing is lost.
 
 Full setup steps, the rendered-block list and rate limiting: [Notion](https://contextator.com/en/docs/notion/).
 

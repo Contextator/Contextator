@@ -150,6 +150,35 @@ spec:
             - name: REINDEX_ON_MODEL_CHANGE
               value: "1"
             {{- end }}
+            {{- if eq (toString .Values.config.piiScan) "false" }}
+            - name: PII_SCAN
+              value: "0"
+            {{- end }}
+            {{- with .Values.config.confluenceMaxPages }}
+            - name: CONFLUENCE_MAX_PAGES
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.notionMaxPages }}
+            - name: NOTION_MAX_PAGES
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- with .Values.config.notionOauthClientId }}
+            - name: NOTION_OAUTH_CLIENT_ID
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.notionOauthRedirectUri }}
+            - name: NOTION_OAUTH_REDIRECT_URI
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.notionOauthClientSecret }}
+            {{- if and .secretName .secretKey }}
+            - name: NOTION_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName }}
+                  key: {{ .secretKey }}
+            {{- end }}
+            {{- end }}
             {{- range $key, $value := .Values.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}
