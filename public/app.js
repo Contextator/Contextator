@@ -281,17 +281,69 @@ function parseHash() {
   return { view: 'projects', selected: raw || null };
 }
 
+/**
+ * A project name from the hash that could not be resolved yet — the project list has not arrived, or the
+ * name is not in it (yet). `refresh()` settles it as soon as a list is in hand. `state.selectedId` only
+ * ever holds an id: every module that reads it looks projects up by id.
+ */
+let pendingProjectName = null;
+
+/** The one name -> id mapping, shared by applyHash() and refresh(). */
+function projectIdByName(name) {
+  return state.projects.find((p) => p.name === name)?.id ?? null;
+}
+
+/**
+ * Run after every project list: settles a name the hash parked before the list could say which project
+ * it is, then falls back to the first project if nothing valid is selected. The order matters — falling
+ * back first would overwrite the parked name.
+ */
+function reconcileSelection() {
+  if (pendingProjectName !== null) {
+    const id = projectIdByName(pendingProjectName);
+    pendingProjectName = null;
+    if (id) state.selectedId = id;
+  }
+  if (!state.projects.some((p) => p.id === state.selectedId)) {
+    // Nothing selected, or the selection is gone: fall back to the first project.
+    state.selectedId = state.projects[0]?.id ?? null;
+    const p = selectedProject();
+    // Only while the projects view is the one on screen — otherwise this would rewrite #/~users.
+    if (p && state.view === 'projects') history.replaceState(null, '', `#/${encodeURIComponent(p.name)}`);
+  }
+}
+
 function applyHash() {
   const { view, selected } = parseHash();
   const changed = view !== state.view;
   state.view = view;
-  if (view === 'projects' && selected) state.selectedId = selected;
+  let rendered = false;
+  if (view === 'projects' && selected) {
+    const id = projectIdByName(selected);
+    if (id) {
+      pendingProjectName = null;
+      // select() also reloads the panels, which a bare `state.selectedId = …` would leave on the old project.
+      if (id !== state.selectedId) {
+        select(id);
+        rendered = true;
+      }
+    } else {
+      // Not in the list (or no list yet): park the name. Once a list is loaded an unknown name means no
+      // selection rather than a stale one; the next poll falls back to the first project.
+      pendingProjectName = selected;
+      if (state.projects.length > 0 && state.selectedId !== null) {
+        state.selectedId = null;
+        renderAll();
+        rendered = true;
+      }
+    }
+  }
   // All three instance views are full-width: none of them is about the project in the list beside them.
   document.body.classList.toggle('no-sidebar', view === 'users' || view === 'audit' || view === 'tokens');
   if (view === 'users') void loadUsers();
   if (view === 'audit') void loadAudit();
   if (view === 'tokens') void loadApiTokens();
-  if (changed || view === 'users' || view === 'tokens') renderAll();
+  if (!rendered && (changed || view === 'users' || view === 'tokens')) renderAll();
 }
 
 function renderAll() {
@@ -316,6 +368,7 @@ function selectedProject() {
 function select(id) {
   state.view = 'projects';
   document.body.classList.remove('no-sidebar');
+  pendingProjectName = null;
   state.selectedId = id;
   state.connectTab = 0;
   state.confirmDelete = null;
@@ -1002,14 +1055,7 @@ async function refresh() {
 
   if (projectsRes.status === 'fulfilled') {
     state.projects = projectsRes.value;
-    if (!state.projects.some((p) => p.id === state.selectedId)) {
-      // A hash may carry the project *name* on first load; otherwise fall back to the first project.
-      const byName = state.projects.find((p) => p.name === state.selectedId);
-      state.selectedId = byName?.id ?? state.projects[0]?.id ?? null;
-      const p = selectedProject();
-      // Only while the projects view is the one on screen — otherwise this would rewrite #/~users.
-      if (p && state.view === 'projects') history.replaceState(null, '', `#/${encodeURIComponent(p.name)}`);
-    }
+    reconcileSelection();
     renderList();
     renderDetail();
     void loadRuns();
