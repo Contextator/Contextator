@@ -7,7 +7,16 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { APP_VERSION } from '../version.js';
 import { ApiClient, CliError, EXIT } from './api-client.js';
-import { type CliIo, type CommandContext, DEFAULT_WAIT_TIMEOUT_MS, parseDuration, projectCreate, projectStatus, tokenCreate } from './commands.js';
+import {
+  type CliIo,
+  type CommandContext,
+  DEFAULT_WAIT_TIMEOUT_MS,
+  parseDuration,
+  projectCreate,
+  projectStatus,
+  sourceAdd,
+  tokenCreate,
+} from './commands.js';
 
 /**
  * `contextator` — the admin API from a shell or a CI job, and the existing backup under the same name
@@ -23,7 +32,8 @@ const USAGE = `Usage: contextator <command> [options]
 Commands:
   project create <name> --git <url>   Create a project with a git source
   project status <name|id>            Show where a project's index stands
-  token create --project <name|id>    Mint an MCP token for a project
+  source add --project <p> --type <t> Add a source of any type to a project
+  token create --project <name|id>    Mint an MCP token, optionally bound to some sources
   backup [args]                       Run the backup (needs database access; full image only)
 
 Connection (every command except backup):
@@ -64,12 +74,32 @@ Creates the project, adds a git source of the same name and queues its first ind
   --url <url>             Server address instead of CONTEXTATOR_URL
   --token-file <path>     Read the token from a file instead of CONTEXTATOR_TOKEN
 `,
+  'source add': `Usage: contextator source add --project <name|id> --type <type> [options]
+
+Adds a source to an existing project and queues an index run. The settings are the admin API's own \`config\`
+object for the type (see docs/document-sources.md); the server validates them and its refusal is printed as is.
+
+  --project <name|id>     The project to add the source to
+  --type <type>           Source type, e.g. git, s3, notion, confluence, web (the server knows the full list)
+  --name <text>           The source's name in the project (default: the type)
+  --label <text>          A display label
+  --config-json <json>    The type's settings as a JSON object
+  --config-file <path>    The same, read from a file; \`-\` reads standard input
+  --secret-env <VAR>      Name of the environment variable that holds the source's credential
+  --json                  Print one JSON object: { project, source, index }
+  --url <url>             Server address instead of CONTEXTATOR_URL
+  --token-file <path>     Read the token from a file instead of CONTEXTATOR_TOKEN
+
+Keep credentials out of --config-json: an argument shows in the process list and in shell history. They belong in
+--secret-env, and settings that are long or sensitive in --config-file or on standard input.
+`,
   'token create': `Usage: contextator token create --project <name|id> (--json | --show-secret) [options]
 
 Mints an MCP token. Its secret exists only in this answer, so one of --json and --show-secret is required.
 
   --project <name|id>     The project the token opens
   --name <text>           A label for the token
+  --source <name|id>      Bind the token to this source of the project; repeat for several (default: the whole project)
   --expires-in-days <n>   30, 90 or 365 (default: never)
   --allowed-cidr <cidr>   Network allowed to present the token; repeat for several
   --url <url>             Server address instead of CONTEXTATOR_URL
@@ -85,6 +115,8 @@ export interface CliDeps {
   sleep: (ms: number) => Promise<void>;
   now: () => number;
   readFile: (file: string) => string;
+  /** Standard input, read to the end. Only called when an option asks for it (`-`). */
+  readStdin: () => Promise<string>;
   /** Runs `scripts/backup.ts` with these arguments and resolves to its exit code. */
   runBackup: (args: string[]) => Promise<number>;
   version: string;
@@ -158,7 +190,11 @@ function connectionFrom(values: { url?: string; 'token-file'?: string }, deps: C
   return { baseUrl, token, warnings };
 }
 
-async function runApiCommand(command: 'project create' | 'project status' | 'token create', rest: string[], deps: CliDeps): Promise<number> {
+async function runApiCommand(
+  command: 'project create' | 'project status' | 'source add' | 'token create',
+  rest: string[],
+  deps: CliDeps,
+): Promise<number> {
   const { io } = deps;
   const help = COMMAND_USAGE[command] ?? USAGE;
 
@@ -226,10 +262,58 @@ async function runApiCommand(command: 'project create' | 'project status' | 'tok
     return projectStatus(ctx, { ref, wait: values.wait === true, timeoutMs });
   }
 
+  if (command === 'source add') {
+    const { values, positionals } = parse(rest, {
+      ...COMMON_OPTIONS,
+      project: { type: 'string' },
+      type: { type: 'string' },
+      name: { type: 'string' },
+      label: { type: 'string' },
+      'config-json': { type: 'string' },
+      'config-file': { type: 'string' },
+      'secret-env': { type: 'string' },
+    });
+    if (values.help) {
+      io.stdout(help);
+      return EXIT.ok;
+    }
+    if (positionals.length > 0) throw usageError('source add takes no positional arguments');
+    if (!values.project) throw usageError('--project <name|id> is required');
+    if (!values.type) throw usageError('--type <type> is required');
+    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(values.type)) throw usageError('--type is a source type such as git, s3 or notion');
+    if (values.name !== undefined && (values.name.length === 0 || values.name.length > 63)) throw usageError('--name must be 1 to 63 characters');
+    if (values['config-json'] !== undefined && values['config-file'] !== undefined) throw usageError('pass --config-json or --config-file, not both');
+
+    // The text of the config is never quoted back: it may hold what the operator meant to keep off the screen.
+    let configText: string | undefined = values['config-json'];
+    if (values['config-file'] !== undefined) configText = await readInput(values['config-file'], '--config-file', deps);
+    let config: Record<string, unknown> | undefined;
+    if (configText !== undefined) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(configText);
+      } catch {
+        throw usageError(`${values['config-file'] !== undefined ? '--config-file' : '--config-json'} is not valid JSON`);
+      }
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw usageError(`${values['config-file'] !== undefined ? '--config-file' : '--config-json'} must be a JSON object`);
+      }
+      config = parsed as Record<string, unknown>;
+    }
+    let secret: string | undefined;
+    if (values['secret-env'] !== undefined) {
+      secret = deps.env[values['secret-env']];
+      if (!secret) throw usageError(`--secret-env names ${values['secret-env']}, which is not set or is empty`);
+    }
+    const ctx = await contextFor(connectionFrom(values, deps), deps, values.json === true, false);
+    return sourceAdd(ctx, { project: values.project, type: values.type, name: values.name ?? values.type, label: values.label, config, secret });
+  }
+
   const { values, positionals } = parse(rest, {
     ...COMMON_OPTIONS,
     project: { type: 'string' },
     name: { type: 'string' },
+    source: { type: 'string', multiple: true },
     'expires-in-days': { type: 'string' },
     'allowed-cidr': { type: 'string', multiple: true },
     'show-secret': { type: 'boolean' },
@@ -240,6 +324,8 @@ async function runApiCommand(command: 'project create' | 'project status' | 'tok
   }
   if (positionals.length > 0) throw usageError('token create takes no positional arguments');
   if (!values.project) throw usageError('--project <name|id> is required');
+  const sources = values.source ?? [];
+  if (sources.some((ref) => ref.length === 0 || ref.length > 100)) throw usageError('--source takes a source name or id (1 to 100 characters)');
   // Refused before the call: a token minted and not printed could never be read again.
   if (!values.json && !values['show-secret']) {
     throw usageError('a token secret is shown once and only on request: pass --json or --show-secret (nothing was created)');
@@ -250,7 +336,18 @@ async function runApiCommand(command: 'project create' | 'project status' | 'tok
     if (![30, 90, 365].includes(expiresInDays)) throw usageError('--expires-in-days must be 30, 90 or 365');
   }
   const ctx = await contextFor(connectionFrom(values, deps), deps, values.json === true, true);
-  return tokenCreate(ctx, { project: values.project, name: values.name, expiresInDays, allowedCidrs: values['allowed-cidr'] ?? [] });
+  return tokenCreate(ctx, { project: values.project, name: values.name, expiresInDays, allowedCidrs: values['allowed-cidr'] ?? [], sources });
+}
+
+/** A file's text, or standard input for `-`. A failure names the option and the error code, never the content. */
+async function readInput(file: string, option: string, deps: CliDeps): Promise<string> {
+  try {
+    return file === '-' ? await deps.readStdin() : deps.readFile(file);
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    const why = file === '-' && err instanceof CliError ? `: ${err.message}` : typeof code === 'string' ? ` (${code})` : '';
+    throw usageError(`could not read ${file === '-' ? 'standard input' : `${option} ${file}`}${why}`);
+  }
 }
 
 function timeoutFrom(text: string | undefined): number {
@@ -291,12 +388,13 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     }
     if (first === 'backup') return await deps.runBackup(argv.slice(1));
     if (first === 'project' && (second === 'create' || second === 'status')) return await runApiCommand(`project ${second}`, after, deps);
+    if (first === 'source' && second === 'add') return await runApiCommand('source add', after, deps);
     if (first === 'token' && second === 'create') return await runApiCommand('token create', after, deps);
-    if ((first === 'project' || first === 'token') && (second === '--help' || second === '-h')) {
+    if ((first === 'project' || first === 'source' || first === 'token') && (second === '--help' || second === '-h')) {
       io.stdout(USAGE);
       return EXIT.ok;
     }
-    if ((first === 'project' || first === 'token') && second === undefined) {
+    if ((first === 'project' || first === 'source' || first === 'token') && second === undefined) {
       io.stderr(USAGE);
       return EXIT.usage;
     }
@@ -336,6 +434,25 @@ function backupInChildProcess(args: string[]): Promise<number> {
   });
 }
 
+/** The most standard input may carry: a config document is a few kilobytes, so anything near this is a wrong pipe. */
+export const STDIN_LIMIT_BYTES = 1024 * 1024;
+
+/** A stream to the end, capped so a wrong pipe cannot fill memory. A terminal is refused rather than waited on. Exported for tests. */
+export async function readStream(stream: AsyncIterable<Buffer | string> & { isTTY?: boolean }, limit = STDIN_LIMIT_BYTES): Promise<string> {
+  if (stream.isTTY) throw new CliError('standard input is a terminal; pipe the content in', EXIT.usage);
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of stream) {
+    const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+    size += buffer.length;
+    if (size > limit) throw new CliError('standard input is larger than 1 MiB', EXIT.usage);
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+const readProcessStdin = (): Promise<string> => readStream(process.stdin);
+
 /** One invocation with the process's own environment, streams and clock; `src/cli.ts` is the only caller. */
 export function main(argv: string[]): Promise<number> {
   return runCli(argv, {
@@ -345,6 +462,7 @@ export function main(argv: string[]): Promise<number> {
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     now: () => Date.now(),
     readFile: (file) => readFileSync(file, 'utf8'),
+    readStdin: readProcessStdin,
     runBackup: backupInChildProcess,
     version: APP_VERSION,
   });
