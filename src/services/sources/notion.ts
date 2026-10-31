@@ -41,6 +41,22 @@ interface PageInfo {
 type AnyRecord = Record<string, unknown>;
 
 /**
+ * Whether a failed request says the **credential** is not accepted, as opposed to one page not being readable.
+ *
+ * An OAuth source's session turns a refused token into a {@link NotionAuthFailure} after its refresh attempt. An
+ * internal integration token has no session: Notion's `401` reaches discovery as the SDK's own error (`status` 401,
+ * code `unauthorized`), and without this check the walk below took it for "an inaccessible sub-page", skipped the
+ * page and finished — and a full sync then removed the file of every page it had not reached. `403` (not shared
+ * with the integration) and `404` (gone) stay per-page outcomes.
+ */
+function isAuthRefusal(err: unknown): boolean {
+  if (err instanceof NotionAuthFailure) return true;
+  if (typeof err !== 'object' || err === null) return false;
+  const { status, code } = err as { status?: unknown; code?: unknown };
+  return status === 401 || code === 'unauthorized';
+}
+
+/**
  * Notion integration (API) source: every page shared with the integration (or the configured roots and
  * their descendants) becomes one Markdown file under `<source>/current/`, nested by parent page.
  * Incremental: a page is re-rendered only when its `last_edited_time` changed.
@@ -184,14 +200,14 @@ export class NotionDriver implements SourceDriver {
         continue;
       } catch (err) {
         // A connection that cannot be made to work is not "not a page id": the run must fail, or every page the walk did not reach would be taken for gone and its file deleted (ADR-0129).
-        if (err instanceof NotionAuthFailure) throw err;
+        if (isAuthRefusal(err)) throw err;
         /* not a page id — it may name a database */
       }
       try {
         for (const page of await this.databasePages(client, clean, true))
           if (add(page)) queue.push({ id: page.id as string, kind: 'page', depth: 1 });
       } catch (err) {
-        if (err instanceof NotionAuthFailure) throw err;
+        if (isAuthRefusal(err)) throw err;
         rootFailures.push(`${clean.slice(0, 8)}… (${err instanceof Error ? err.message : String(err)})`);
       }
     }
@@ -215,7 +231,7 @@ export class NotionDriver implements SourceDriver {
             const page = (await this.throttle(() => client.pages.retrieve({ page_id: child.id }))) as AnyRecord;
             if (add(page)) queue.push({ id: child.id, kind: 'page', depth: item.depth + 1 });
           } catch (err) {
-            if (err instanceof NotionAuthFailure) throw err;
+            if (isAuthRefusal(err)) throw err;
             this.ctx.log.warn({ err, pageId: child.id }, 'notion child page not accessible');
           }
         } else if (child.type === 'child_database') {
@@ -243,7 +259,7 @@ export class NotionDriver implements SourceDriver {
       const db = await this.throttle(() => c.databases.retrieve({ database_id: databaseId }));
       dataSourceIds = ((db.data_sources as Array<{ id: string }> | undefined) ?? []).map((d) => d.id);
     } catch (err) {
-      if (required || err instanceof NotionAuthFailure) throw err;
+      if (required || isAuthRefusal(err)) throw err;
       this.ctx.log.warn({ err, databaseId }, 'notion database not accessible');
       this.partialFailures.push(`database ${databaseId.slice(0, 8)}… is not accessible`);
       return out;
