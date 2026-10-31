@@ -6,6 +6,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, inject, it } from 'vitest';
 
 import { WEB_LIMIT_DEFAULTS } from '../../src/config.js';
+import type { Logger } from '../../src/context.js';
 import { indexRuns } from '../../src/db/schema.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
 import { Indexer, type JobState } from '../../src/services/indexer.js';
@@ -203,6 +204,38 @@ describe('deleting a project while a re-index is on its way', () => {
     const settledJob = await settled(job);
     expect(settledJob.phase).toBe('error');
     expect(settledJob.error).toBe('Project no longer exists');
+    expect(await runsOf(target.id)).toBe(0);
+  });
+
+  it('still settles the job when the run row cannot be written, and says so in the log', async () => {
+    const errors: string[] = [];
+    const capturing: Logger = {
+      ...silentLogger,
+      error: ((_obj: unknown, message?: string) => void errors.push(message ?? '')) as Logger['error'],
+      child: () => capturing,
+    };
+    // A database whose write to `index_runs` is refused; everything else reaches the real one.
+    const failing = new Proxy(database.db, {
+      get(target, prop, receiver) {
+        if (prop === 'insert') {
+          return (table: unknown) => {
+            if (table === indexRuns) throw new Error('index_runs is unavailable');
+            return target.insert(table as typeof indexRuns);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    locks = new WatchedMutex();
+    indexer = new Indexer({ db: failing, embeddings, config: { ...indexerConfig, DATA_DIR: dataDir }, log: capturing, locks });
+    const target = await project();
+
+    const settledJob = await settled(indexer.enqueue(target.id));
+
+    // Not stuck in an active phase: the project can be indexed (and deleted) again, and nothing was recorded.
+    expect(settledJob.phase).toBe('done');
+    expect(indexer.isBusy(target.id)).toBe(false);
+    expect(errors).toContain('failed to record index run');
     expect(await runsOf(target.id)).toBe(0);
   });
 });
