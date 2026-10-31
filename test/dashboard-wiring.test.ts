@@ -269,3 +269,134 @@ describe('the dashboard markup and its modules agree', () => {
     }
   });
 });
+
+/**
+ * Hash routing: `#/<name>` carries the project *name*, `state.selectedId` holds an *id*. Editing only
+ * the hash of an open panel used to write the name into `selectedId`, which no project matched, so the
+ * detail stayed empty until the next list refresh. app.js cannot be imported (it boots on load), so the
+ * routing functions are cut out of the source and run against stubs.
+ */
+describe('hash routing', () => {
+  const PROJECTS = [
+    { id: 'id-alpha', name: 'alpha' },
+    { id: 'id-beta', name: 'beta' },
+  ];
+
+  async function router(hash: string, projects = PROJECTS) {
+    const app = await readFile(new URL('app.js', PUBLIC), 'utf8');
+    const from = app.indexOf('function parseHash()');
+    const to = app.indexOf('function renderAll()');
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    const calls: string[] = [];
+    const state = { view: 'projects', selectedId: null as string | null, projects: [...projects] };
+    const location = { hash };
+    const select = (id: string) => {
+      calls.push(`select:${id}`);
+      state.selectedId = id;
+    };
+    const replaced: string[] = [];
+    const history = { replaceState: (_s: unknown, _t: string, url: string) => replaced.push(url) };
+    const selectedProject = () => state.projects.find((p) => p.id === state.selectedId) ?? null;
+    const body = `${app.slice(from, to)}\nreturn { applyHash, projectIdByName, reconcileSelection, getPending: () => pendingProjectName };`;
+    const api = new Function(
+      'state',
+      'location',
+      'history',
+      'selectedProject',
+      'select',
+      'renderAll',
+      'document',
+      'loadUsers',
+      'loadAudit',
+      'loadApiTokens',
+      body,
+    )(
+      state,
+      location,
+      history,
+      selectedProject,
+      select,
+      () => calls.push('renderAll'),
+      { body: { classList: { toggle: () => undefined } } },
+      () => undefined,
+      () => undefined,
+      () => undefined,
+    ) as {
+      applyHash: () => void;
+      reconcileSelection: () => void;
+      projectIdByName: (name: string) => string | null;
+      getPending: () => string | null;
+    };
+    return { api, state, location, calls, replaced };
+  }
+
+  it('selects the project the hash names by its id, without a list refresh', async () => {
+    const { api, state, location, calls } = await router('#/alpha');
+    state.selectedId = 'id-beta';
+    location.hash = '#/alpha';
+    api.applyHash();
+    expect(state.selectedId).toBe('id-alpha');
+    expect(calls).toEqual(['select:id-alpha']);
+  });
+
+  it('decodes an encoded name and leaves an already-selected project alone', async () => {
+    const { api, state, location, calls } = await router('#/b%65ta');
+    api.applyHash();
+    expect(state.selectedId).toBe('id-beta');
+    calls.length = 0;
+    location.hash = '#/beta';
+    api.applyHash();
+    expect(calls).toEqual([]);
+  });
+
+  it('parks the name while the list is not loaded and never writes a name into selectedId', async () => {
+    const { api, state } = await router('#/beta', []);
+    api.applyHash();
+    expect(state.selectedId).toBeNull();
+    expect(api.getPending()).toBe('beta');
+  });
+
+  it('treats an unknown name as no selection, not an error', async () => {
+    const { api, state, location, calls } = await router('#/alpha');
+    api.applyHash();
+    calls.length = 0;
+    location.hash = '#/nope';
+    expect(() => api.applyHash()).not.toThrow();
+    expect(state.selectedId).toBeNull();
+    expect(calls).toEqual(['renderAll']);
+  });
+
+  it('settles a parked name through the same mapping when the list arrives', async () => {
+    const { api, state } = await router('#/beta', []);
+    api.applyHash();
+    expect(state.selectedId).toBeNull();
+    state.projects.push(...PROJECTS);
+    api.reconcileSelection();
+    expect(state.selectedId).toBe('id-beta');
+    expect(api.getPending()).toBeNull();
+    // A later list must not reselect it: the name was consumed.
+    state.selectedId = 'id-alpha';
+    api.reconcileSelection();
+    expect(state.selectedId).toBe('id-alpha');
+  });
+
+  it('falls back to the first project when the parked name is not in the list', async () => {
+    const { api, state, replaced } = await router('#/nope', []);
+    api.applyHash();
+    state.projects.push(...PROJECTS);
+    api.reconcileSelection();
+    expect(state.selectedId).toBe('id-alpha');
+    expect(api.getPending()).toBeNull();
+    expect(replaced).toEqual(['#/alpha']);
+  });
+
+  it('does not rewrite the hash of an instance view when it falls back', async () => {
+    const { api, state, replaced } = await router('#/~users', PROJECTS);
+    api.applyHash();
+    expect(state.view).toBe('users');
+    api.reconcileSelection();
+    expect(state.selectedId).toBe('id-alpha');
+    expect(replaced).toEqual([]);
+  });
+});
