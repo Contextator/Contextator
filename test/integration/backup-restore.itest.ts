@@ -24,7 +24,7 @@ import { createProjectVectorIndex, PROJECT_VECTOR_INDEX_PREFIX, projectVectorInd
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
 import { chunkMarkdown, embeddingText, estimateTokens } from '../../src/services/chunker.js';
 import { decryptSecret, encryptSecret, encryptWebhookSecret } from '../../src/services/crypto.js';
-import { CREDENTIAL_SOURCE_TYPES } from '../../src/services/encrypted-fields.js';
+import { CREDENTIAL_SOURCE_TYPES, describeCredentialSourceTypes } from '../../src/services/encrypted-fields.js';
 import type { EmbeddingProvider } from '../../src/services/embeddings/provider.js';
 import { type NewChunk, replaceDocument, searchChunks, type SearchHit } from '../../src/services/vector-store.js';
 import {
@@ -1334,7 +1334,7 @@ describe('the backup command, and the instance it is asked to bring back', () =>
       const rows = await cli.db.select({ type: documentSources.type, secretEnc: documentSources.secretEnc }).from(documentSources);
       expect(rows).toEqual([{ type: 'local', secretEnc: null }]);
       const output = said.join('\n');
-      expect(output).toContain('0 git, Notion or Confluence credential(s) and 1 secret(s) on local, upload or web sources');
+      expect(output).toContain(`0 ${describeCredentialSourceTypes()} credential(s) and 1 secret(s) on local, upload or web sources`);
       expect(output).toContain('1 secret(s) on local, upload or web sources dropped');
       // The staging the dump read used is gone; only the restore's own unpacking is left for main() to remove.
       expect(await fsp.readdir(scratch.local)).toContain('database.dump');
@@ -1357,7 +1357,7 @@ describe('the backup command, and the instance it is asked to bring back', () =>
       const calls: string[][] = [];
       await expect(runRestore({ ...restoreDeps(WRONG_KEY), tools: recording(calls) }, oldGitArchive)).rejects.toMatchObject({
         code: 'secret_key_mismatch',
-        message: expect.stringContaining('1 git, Notion or Confluence source in this backup holds a sync credential'),
+        message: expect.stringContaining(`1 ${describeCredentialSourceTypes()} source in this backup holds a sync credential`),
       });
       // Only the read-only look at the dump ran; nothing was restored into the target.
       expect(calls).toHaveLength(1);

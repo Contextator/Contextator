@@ -72,6 +72,21 @@ export type SecretRecovery = 'irrecoverable' | 'regenerable';
  */
 export const CREDENTIAL_SOURCE_TYPES = ['git', 'notion', 'confluence', 's3', 'gdrive', 'github'] as const;
 
+/**
+ * {@link CREDENTIAL_SOURCE_TYPES} as the phrase an operator-facing message uses, so no message carries
+ * its own copy of the list and goes stale when a type joins ([ADR-0126](../../.ssot/ADR.md#adr-0126)
+ * decision 8). With today's list: "git, notion, confluence, s3, gdrive or github".
+ *
+ * The conjunction is the caller's, because it changes what the sentence says: a count or a negation
+ * ("1 git, … or github source holds a credential", "no … or github source") means *any of them*, where
+ * "and" would read as one source that is all six at once. `'and'` is for a statement about the set
+ * ("only git, … and github sources use one").
+ */
+export function describeCredentialSourceTypes(conjunction: 'and' | 'or' = 'or'): string {
+  const types = CREDENTIAL_SOURCE_TYPES;
+  return types.length < 2 ? types.join('') : `${types.slice(0, -1).join(', ')} ${conjunction} ${types[types.length - 1]}`;
+}
+
 /** Whether a `document_sources.type` value is one of {@link CREDENTIAL_SOURCE_TYPES}. */
 export function isCredentialSourceType(type: string): boolean {
   return (CREDENTIAL_SOURCE_TYPES as readonly string[]).includes(type);

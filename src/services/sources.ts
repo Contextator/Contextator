@@ -5,7 +5,7 @@ import type { Db } from '../db/client.js';
 import { documents, documentSources, projects, type DocumentSourceRow } from '../db/schema.js';
 import { recordSourceRemoval } from './document-changes.js';
 import { decryptWebhookSecret, encryptSecret, encryptWebhookSecret, randomSecret, type SecretKeyring } from './crypto.js';
-import { CREDENTIAL_SOURCE_TYPES, isCredentialSourceType } from './encrypted-fields.js';
+import { describeCredentialSourceTypes, isCredentialSourceType } from './encrypted-fields.js';
 import { allowedExtensionsFor, FLAVOR_ONLY_EXTENSIONS, FLAVORS, type Flavor } from './flavors.js';
 import { DEFAULT_EXTENSIONS, SUPPORTED_EXTENSIONS, resolveProjectRoot } from './fs-scan.js';
 import { ConflictError, NotFoundError, ValidationError } from './projects.js';
@@ -40,9 +40,7 @@ const SECRET_BLOBS: Readonly<Partial<Record<string, SecretBlob<unknown>>>> = { s
 function checkSecretAllowed(type: string, secret: string | null | undefined): void {
   if (!secret) return;
   if (!isCredentialSourceType(type)) {
-    const types = CREDENTIAL_SOURCE_TYPES;
-    const named = `${types.slice(0, -1).join(', ')} and ${types[types.length - 1]}`;
-    throw new ValidationError(`A ${type} source takes no secret; only ${named} sources use one.`);
+    throw new ValidationError(`A ${type} source takes no secret; only ${describeCredentialSourceTypes('and')} sources use one.`);
   }
   // **The OAuth blob cannot be written through the API** ([ADR-0129](../../.ssot/ADR.md#adr-0129) §4).
   // A Notion source's driver tells the two stored formats apart by the first character of the decrypted

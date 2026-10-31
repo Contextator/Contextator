@@ -6,7 +6,7 @@ import * as tar from 'tar';
 import { loadConfig, type Config } from '../src/config.js';
 import { createDb, type Db } from '../src/db/client.js';
 import { documentSources } from '../src/db/schema.js';
-import { CREDENTIAL_SOURCE_TYPES, encryptedRowFilter } from '../src/services/encrypted-fields.js';
+import { CREDENTIAL_SOURCE_TYPES, describeCredentialSourceTypes, encryptedRowFilter } from '../src/services/encrypted-fields.js';
 import {
   BackupRefused,
   connectionFromEnv,
@@ -94,7 +94,7 @@ async function uploadSources(db: Db): Promise<UploadSource[]> {
  * repository with a webhook stops a restore that costs nothing, which is the case Faz 09 went out of
  * its way to let through.
  *
- * `encryptedSources` counts `git`, `notion` and `confluence` rows only
+ * `encryptedSources` counts only the rows of a credential-bearing type (`CREDENTIAL_SOURCE_TYPES`)
  * ([ADR-0091](../.ssot/ADR.md#adr-0091)). Those are the types that use a credential; a `secret_enc` on
  * a `local`, `upload` or `web` row is one nothing reads, and the restore drops it rather than refusing
  * over it. The manifest says which types were counted, which is how a restore tells this archive from
@@ -255,7 +255,7 @@ export function secretKeySentences(manifest: Manifest): string[] {
   const { encryptedSources, regenerableSecrets, fingerprint } = manifest.secretKey;
   return [
     `  SECRET_KEY is NOT in this file and never will be — only its fingerprint, ${fingerprint}.`,
-    `  ${encryptedSources} git, Notion or Confluence source(s) in the dump hold a sync credential encrypted under it — the token the provider` +
+    `  ${encryptedSources} ${describeCredentialSourceTypes()} source(s) in the dump hold a sync credential encrypted under it — the token the provider` +
       ' issued, which this instance cannot reissue. A restore without that exact key cannot decrypt any of them, and' +
       ' `restore` will refuse to start rather than leave you to find out.',
     `  ${regenerableSecrets} source(s) hold a webhook secret encrypted under it. Those a restore does not stop for.` +

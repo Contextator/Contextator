@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   BackupRefused,
   checkSecretKey,
+  checkSourceTypesKnown,
   checkServerVersion,
   connectionFromEnv,
   countSecretsInSourceData,
@@ -23,6 +24,7 @@ import {
   secretKeyFingerprint,
   type Manifest,
 } from '../scripts/backup-archive.js';
+import { CREDENTIAL_SOURCE_TYPES, describeCredentialSourceTypes } from '../src/services/encrypted-fields.js';
 import { archiveDestination, secretKeySentences } from '../scripts/backup.js';
 import { useEmbeddedDatabaseWhenNothingElseSays } from '../scripts/embedded-database.js';
 
@@ -113,7 +115,7 @@ describe('restoring with the wrong SECRET_KEY, or none', () => {
       const verdict = checkSecretKey(empty, key);
       expect(verdict.ok).toBe(true);
       if (!verdict.ok) throw new Error('unreachable');
-      expect(verdict.note).toContain('no git, Notion or Confluence source in it holds a sync credential');
+      expect(verdict.note).toContain('no git, notion, confluence, s3, gdrive or github source in it holds a sync credential');
     }
   });
 
@@ -154,7 +156,7 @@ describe('restoring with the wrong SECRET_KEY, or none', () => {
     expect(verdict.ok).toBe(false);
     if (verdict.ok) throw new Error('unreachable');
     expect(verdict.code).toBe('secret_key_mismatch');
-    expect(verdict.message).toContain('1 git, Notion or Confluence source in this backup holds a sync credential');
+    expect(verdict.message).toContain('1 git, notion, confluence, s3, gdrive or github source in this backup holds a sync credential');
     expect(verdict.message).toContain('issued again by its provider and re-entered here by hand');
     // ADR-0075 point 7: named in the refusal too, never only in the acceptance — with both remedies.
     expect(verdict.message).toContain('4 webhook secret(s)');
@@ -213,7 +215,7 @@ describe('what a backup says about SECRET_KEY on the way out', () => {
       manifest({ secretKey: { present: true, fingerprint: secretKeyFingerprint(KEY), encryptedSources: 3, regenerableSecrets: 2 } }),
     ).join('\n');
     expect(text).toContain(`only its fingerprint, ${secretKeyFingerprint(KEY)}`);
-    expect(text).toContain('3 git, Notion or Confluence source(s) in the dump hold a sync credential');
+    expect(text).toContain(`3 ${describeCredentialSourceTypes()} source(s) in the dump hold a sync credential`);
     expect(text).toContain('2 source(s) hold a webhook secret encrypted under it');
     expect(text).toContain('Those a restore does not stop for');
     expect(text).toContain('For a git source, regenerate the secret here and paste the new one into the repository');
@@ -278,6 +280,43 @@ describe('which secrets an archive counted, and what its dump actually holds', (
 
   it('counts an empty table as nothing at stake', () => {
     expect(countSecretsInSourceData(dumpOf(HEADER, []), CREDENTIAL)).toEqual({ credential: 0, other: 0 });
+  });
+});
+
+describe('refusing a source type this build does not know (ADR-0126 decision 8)', () => {
+  const secretKey = { present: true, fingerprint: secretKeyFingerprint(KEY), encryptedSources: 1, regenerableSecrets: 0 };
+
+  it('refuses a manifest that counted a type outside the known list, naming the type and the build that took it', () => {
+    const unknown = manifest({
+      product: { name: 'contextator', version: '0.7.0' },
+      secretKey: { ...secretKey, encryptedSourceTypes: ['git', 'gitlab'] },
+    });
+    let refusal: unknown;
+    try {
+      checkSourceTypesKnown(unknown, CREDENTIAL_SOURCE_TYPES);
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(BackupRefused);
+    expect(refusal).toMatchObject({ code: 'unknown_source_type' });
+    const message = (refusal as BackupRefused).message;
+    expect(message).toContain('gitlab');
+    expect(message).not.toContain('git,');
+    expect(message).toContain('0.7.0');
+    expect(message).toContain('Nothing has been written.');
+  });
+
+  it('lets a subset of the known types through', () => {
+    expect(() =>
+      checkSourceTypesKnown(manifest({ secretKey: { ...secretKey, encryptedSourceTypes: ['git', 'notion'] } }), CREDENTIAL_SOURCE_TYPES),
+    ).not.toThrow();
+    expect(() =>
+      checkSourceTypesKnown(manifest({ secretKey: { ...secretKey, encryptedSourceTypes: [...CREDENTIAL_SOURCE_TYPES] } }), CREDENTIAL_SOURCE_TYPES),
+    ).not.toThrow();
+  });
+
+  it('leaves an archive written before the field alone', () => {
+    expect(() => checkSourceTypesKnown(manifest({ secretKey }), CREDENTIAL_SOURCE_TYPES)).not.toThrow();
   });
 });
 
