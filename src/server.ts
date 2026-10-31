@@ -22,6 +22,7 @@ import type { AppContext } from './context.js';
 import { createDb, waitForDb } from './db/client.js';
 import { exposureWarning, httpServerOptions, warnAboutProxyConfiguration } from './http.js';
 import { bootstrapDatabase, SchemaMismatchError } from './db/bootstrap.js';
+import { serializeRequest } from './log-redact.js';
 import { oauthRoutes } from './mcp/oauth-routes.js';
 import { MCP_EXPOSED_HEADERS, mcpRoutes } from './mcp/router.js';
 import { SessionRegistry } from './mcp/sessions.js';
@@ -57,7 +58,8 @@ async function main(): Promise<void> {
   const verbose = config.LOG_LEVEL === 'debug' || config.LOG_LEVEL === 'trace';
 
   const app = Fastify({
-    logger: { level: config.LOG_LEVEL },
+    // `req` is Fastify's own serializer minus the OAuth `code`/`state` query values (ADR-0129 §3).
+    logger: { level: config.LOG_LEVEL, serializers: { req: serializeRequest } },
     // The dashboard polls; per-request log lines are noise unless debugging.
     logController: new LogController({ disableRequestLogging: !verbose }),
     ...httpServerOptions(config),

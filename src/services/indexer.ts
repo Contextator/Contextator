@@ -417,13 +417,19 @@ export class Indexer {
     );
   }
 
-  /** Persists a finished job to `index_runs`; failures are logged and never affect the indexing result. */
-  private async recordRun(job: JobState, runId: string, log: Logger): Promise<void> {
-    if (job.phase !== 'done' && job.phase !== 'error') return;
+  /**
+   * Persists a finished job to `index_runs`, then — and only then — publishes its terminal phase. Anything that
+   * waits for `done`/`error` (the CLI reading the run id, a test, a poller) must find the row the moment it sees
+   * the phase, so the phase is assigned after the write. A failed write is logged and never affects the indexing
+   * result, and the job still reaches its terminal phase.
+   */
+  private async recordRun(job: JobState, runId: string, log: Logger, phase: 'done' | 'error'): Promise<void> {
     try {
-      await recordIndexRun(this.deps.db, { ...job, phase: job.phase, runId });
+      await recordIndexRun(this.deps.db, { ...job, phase, runId });
     } catch (err) {
       log.error({ err }, 'failed to record index run');
+    } finally {
+      job.phase = phase;
     }
   }
 
@@ -1229,7 +1235,6 @@ export class Indexer {
         // failure here costs disk and nothing else, so it is logged and never fails the run.
         if (generation !== live) await this.sweep(project.id, generation, log);
 
-        job.phase = error ? 'error' : 'done';
         if (error) job.error = error;
         job.finishedAt = new Date().toISOString();
         log.info(
@@ -1250,7 +1255,7 @@ export class Indexer {
           },
           error ? 'indexing finished with source errors' : 'indexing finished',
         );
-        await this.recordRun(job, runId, log);
+        await this.recordRun(job, runId, log, error ? 'error' : 'done');
         if (modelChanged && !error) this.notifyModelChangeRebuilt(project.id, log);
         // After the swap or the writes are committed, and for a run that finished with source errors too: what
         // it published is served either way, so the golden set is asked of it.
@@ -1258,7 +1263,6 @@ export class Indexer {
         else if (await this.changedIndex(job, project.id, runId)) this.notifyIndexChanged(project.id, 'index_incremental', log);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        job.phase = 'error';
         job.error = message;
         if (err instanceof InsufficientDiskError || err instanceof QuotaExceededError) job.errorCode = err.code;
         job.finishedAt = new Date().toISOString();
@@ -1286,7 +1290,7 @@ export class Indexer {
         // Drop the half-built generation now rather than leaving it for the next run's sweep. Same
         // best-effort contract: if this fails the rows stay, and the next run collects them.
         if (generation !== live) await this.sweep(project.id, live, log);
-        await this.recordRun(job, runId, log);
+        await this.recordRun(job, runId, log, 'error');
         // An incremental run that failed part-way (a quota, a disk) wrote what it finished straight into the
         // live generation, so the index did change; a failed rebuild published nothing and says nothing.
         if (!rebuild && (job.chunksDone > 0 || job.filesRemoved > 0)) this.notifyIndexChanged(project.id, 'index_incremental', log);
