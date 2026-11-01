@@ -130,6 +130,58 @@ const COMMON_OPTIONS = {
   help: { type: 'boolean', short: 'h' },
 } as const;
 
+/**
+ * The flags of each API command, named and exported so `test/contracts/cli-surface.test.ts` can pin them
+ * ([ADR-0137](../../.ssot/ADR.md#adr-0137), Tier 1). They are what `parseArgs` is given: a flag added, removed
+ * or renamed here is the contract changing. `backup` takes none of these; its arguments are `scripts/backup.ts`'s.
+ */
+export const PROJECT_CREATE_OPTIONS = {
+  ...COMMON_OPTIONS,
+  git: { type: 'string' },
+  branch: { type: 'string' },
+  subdir: { type: 'string' },
+  'git-token-env': { type: 'string' },
+  wait: { type: 'boolean' },
+  timeout: { type: 'string' },
+  'exists-ok': { type: 'boolean' },
+  'show-secret': { type: 'boolean' },
+} as const;
+
+export const PROJECT_STATUS_OPTIONS = {
+  ...COMMON_OPTIONS,
+  wait: { type: 'boolean' },
+  timeout: { type: 'string' },
+} as const;
+
+export const SOURCE_ADD_OPTIONS = {
+  ...COMMON_OPTIONS,
+  project: { type: 'string' },
+  type: { type: 'string' },
+  name: { type: 'string' },
+  label: { type: 'string' },
+  'config-json': { type: 'string' },
+  'config-file': { type: 'string' },
+  'secret-env': { type: 'string' },
+} as const;
+
+export const TOKEN_CREATE_OPTIONS = {
+  ...COMMON_OPTIONS,
+  project: { type: 'string' },
+  name: { type: 'string' },
+  source: { type: 'string', multiple: true },
+  'expires-in-days': { type: 'string' },
+  'allowed-cidr': { type: 'string', multiple: true },
+  'show-secret': { type: 'boolean' },
+} as const;
+
+/** The API commands by the words that name them. */
+export const COMMAND_OPTIONS = {
+  'project create': PROJECT_CREATE_OPTIONS,
+  'project status': PROJECT_STATUS_OPTIONS,
+  'source add': SOURCE_ADD_OPTIONS,
+  'token create': TOKEN_CREATE_OPTIONS,
+} as const;
+
 const usageError = (message: string): CliError => new CliError(message, EXIT.usage);
 
 /** `parseArgs` over a command's options, its failures reported as usage errors. */
@@ -199,17 +251,7 @@ async function runApiCommand(
   const help = COMMAND_USAGE[command] ?? USAGE;
 
   if (command === 'project create') {
-    const { values, positionals } = parse(rest, {
-      ...COMMON_OPTIONS,
-      git: { type: 'string' },
-      branch: { type: 'string' },
-      subdir: { type: 'string' },
-      'git-token-env': { type: 'string' },
-      wait: { type: 'boolean' },
-      timeout: { type: 'string' },
-      'exists-ok': { type: 'boolean' },
-      'show-secret': { type: 'boolean' },
-    });
+    const { values, positionals } = parse(rest, PROJECT_CREATE_OPTIONS);
     if (values.help) {
       io.stdout(help);
       return EXIT.ok;
@@ -250,7 +292,7 @@ async function runApiCommand(
   }
 
   if (command === 'project status') {
-    const { values, positionals } = parse(rest, { ...COMMON_OPTIONS, wait: { type: 'boolean' }, timeout: { type: 'string' } });
+    const { values, positionals } = parse(rest, PROJECT_STATUS_OPTIONS);
     if (values.help) {
       io.stdout(help);
       return EXIT.ok;
@@ -263,16 +305,7 @@ async function runApiCommand(
   }
 
   if (command === 'source add') {
-    const { values, positionals } = parse(rest, {
-      ...COMMON_OPTIONS,
-      project: { type: 'string' },
-      type: { type: 'string' },
-      name: { type: 'string' },
-      label: { type: 'string' },
-      'config-json': { type: 'string' },
-      'config-file': { type: 'string' },
-      'secret-env': { type: 'string' },
-    });
+    const { values, positionals } = parse(rest, SOURCE_ADD_OPTIONS);
     if (values.help) {
       io.stdout(help);
       return EXIT.ok;
@@ -309,15 +342,7 @@ async function runApiCommand(
     return sourceAdd(ctx, { project: values.project, type: values.type, name: values.name ?? values.type, label: values.label, config, secret });
   }
 
-  const { values, positionals } = parse(rest, {
-    ...COMMON_OPTIONS,
-    project: { type: 'string' },
-    name: { type: 'string' },
-    source: { type: 'string', multiple: true },
-    'expires-in-days': { type: 'string' },
-    'allowed-cidr': { type: 'string', multiple: true },
-    'show-secret': { type: 'boolean' },
-  });
+  const { values, positionals } = parse(rest, TOKEN_CREATE_OPTIONS);
   if (values.help) {
     io.stdout(help);
     return EXIT.ok;

@@ -72,7 +72,7 @@ export function secretKeyFingerprint(secretKey: string): string {
   return createHmac('sha256', secretKey).update(FINGERPRINT_LABEL).digest('hex').slice(0, 32);
 }
 
-const Manifest = z.object({
+export const Manifest = z.object({
   kind: z.literal(MANIFEST_KIND),
   manifestVersion: z.number().int().min(1),
   createdAt: z.string().min(1).max(64),
