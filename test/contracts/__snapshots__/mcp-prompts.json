@@ -1,0 +1,20 @@
+[
+  {
+    "arguments": [
+      {
+        "name": "question",
+        "required": true
+      }
+    ],
+    "name": "answer_from_docs"
+  },
+  {
+    "arguments": [
+      {
+        "name": "topic",
+        "required": true
+      }
+    ],
+    "name": "explore_topic"
+  }
+]

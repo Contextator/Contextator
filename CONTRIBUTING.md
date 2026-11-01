@@ -329,16 +329,18 @@ public, on the [Contextator Roadmap](https://github.com/orgs/Contextator/project
 
 ## The pairs that are kept in sync
 
-Four places in this repository hold one statement in two files. Each has a check that fails when the two
+Five places in this repository hold one statement in two files. Each has a check that fails when the two
 stop agreeing, because none of them is something a compiler or a formatter can see.
 
 **`src/db/schema.ts` ↔ `drizzle/`**, guarded by `npm run db:check` (its own step in CI). The schema file
-is the source the migrations are generated from, and adding a column is four steps and no others:
+is the source the migrations are generated from, and adding a column is five steps and no others:
 
 1. Edit `src/db/schema.ts`.
 2. Run `npm run db:generate`.
 3. **Read the SQL** drizzle-kit wrote into `drizzle/` — this step is the review, not a formality.
-4. Commit both.
+4. Append the new migration to `test/contracts/migrations.lock.json` — the failing
+   `test/contracts/migrations.test.ts` prints the exact line to add.
+5. Commit all of it, and add a line under `[Unreleased]` in `CHANGELOG.md` (the lock is a contract file, see below).
 
 Nothing else creates or alters a table. Do not hand-write a migration, and do not edit a generated one
 after the fact; the snapshot in `drizzle/meta/` is what the next generate diffs against. Two things stay
@@ -370,6 +372,22 @@ report it as verified.
 **Which release the gate looks at:** the file committed here, at the version in its own `productVersion`
 field — so cutting a release means regenerating it in that release's commit, and the site picks it up
 from the released tag. A running instance also serves its own copy at `/product-facts.json`.
+
+**The public contracts ↔ `test/contracts/__snapshots__/`**, guarded by `test/contracts/` (the unit suite) and
+by the changelog check in CI. What a client or an operator can depend on — the MCP tools, prompts and
+resource template, the HTTP routes and the access each asks for, the applied migrations (a hash lock that
+only grows), and the other surfaces under `test/contracts/` — is written out sorted into one snapshot file
+each, and a test compares the code with it. A change to one is therefore a visible diff, never an accident.
+To change one on purpose, run `npx vitest run --project unit test/contracts -u`, read the diff of the
+snapshot files like code (never edit them by hand), and add a line under `[Unreleased]` in `CHANGELOG.md` in
+the same pull request. The migration lock is the exception to `-u`: it is not regenerated, a new migration is
+appended to it by hand (the failing test prints the line). CI looks at the pull request's own diff: if it
+changes a file under `test/contracts/__snapshots__/` or `test/contracts/migrations.lock.json` and does not add
+a new `- ` entry to the `[Unreleased]` section of `CHANGELOG.md`, the check is red — an entry left there by an
+earlier pull request does not count, and neither does rewording one that is already there. A pull request
+that changes neither (a dependency bump, say) is not checked. Whether the diff is an addition or a break is judged in review; a break is labelled **BREAKING** in the changelog and
+waits for a major release. Tool and prompt descriptions and titles are left out of the snapshots on purpose:
+their wording is tuned for agents and is not a contract.
 
 ## Commits and pull requests
 
