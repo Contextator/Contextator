@@ -1,9 +1,9 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { EXIT } from '../src/cli/api-client.js';
+import { CliError, EXIT } from '../src/cli/api-client.js';
 import { parseDuration } from '../src/cli/commands.js';
-import { type CliDeps, runCli } from '../src/cli/main.js';
+import { type CliDeps, readStream, runCli } from '../src/cli/main.js';
 
 /**
  * The `contextator` command ([ADR-0131](../.ssot/ADR.md#adr-0131)) against a stub of the admin API on a
@@ -174,6 +174,9 @@ async function run(argv: string[], overrides: Partial<CliDeps> & { env?: Record<
     now: () => clock,
     readFile: () => {
       throw Object.assign(new Error('no file'), { code: 'ENOENT' });
+    },
+    readStdin: async () => {
+      throw new Error('standard input was not expected to be read');
     },
     runBackup: async () => 0,
     version: SERVER_VERSION,
@@ -698,6 +701,245 @@ describe('token create', () => {
     stub.mcpToken = { status: 403, body: { error: 'forbidden', message: 'This token cannot do that' } };
     const out = await run(['token', 'create', '--project', 'docs', '--json']);
     expect(out.code).toBe(EXIT.auth);
+  });
+});
+
+describe('source add', () => {
+  const S3_CONFIG = { bucket: 'handbook', region: 'eu-central-1', prefix: 'docs' };
+  const S3_KEYS = '{"accessKeyId":"AKIAEXAMPLE","secretAccessKey":"s3-secret-key"}';
+  const sourcePath = `/api/projects/${PROJECT_ID}/sources`;
+  const added = {
+    id: 'src-9',
+    name: 's3',
+    type: 's3',
+    label: null,
+    hasSecret: false,
+    webhookSecret: 'whsec_must-not-be-printed',
+  };
+
+  beforeEach(() => {
+    stub.createSource = { status: 201, body: added };
+  });
+
+  it('sends --type and --config-json as the config of the admin API and queues an index run', async () => {
+    const out = await run(['source', 'add', '--project', 'docs', '--type', 's3', '--config-json', JSON.stringify(S3_CONFIG)]);
+    expect(out.code).toBe(EXIT.ok);
+    const call = stub.calls.find((c) => c.method === 'POST' && c.path === sourcePath);
+    expect(call?.body).toEqual({ type: 's3', name: 's3', config: S3_CONFIG, index: true });
+    expect(out.stdout).toContain('source: s3');
+    expect(out.stdout).toContain('id: src-9');
+    expect(out.stdout).toContain('index: queued');
+    // The view the server answers with carries a webhook secret; it is not echoed.
+    expect(out.stdout + out.stderr).not.toContain('whsec_');
+  });
+
+  it('prints a trimmed JSON object with --json, and takes --name and --label', async () => {
+    const out = await run([
+      'source',
+      'add',
+      '--project',
+      PROJECT_ID,
+      '--type',
+      's3',
+      '--name',
+      'bucket',
+      '--label',
+      'Bucket',
+      '--config-json',
+      '{}',
+      '--json',
+    ]);
+    expect(out.code).toBe(EXIT.ok);
+    expect(stub.calls.find((c) => c.path === sourcePath && c.method === 'POST')?.body).toEqual({
+      type: 's3',
+      name: 'bucket',
+      label: 'Bucket',
+      config: {},
+      index: true,
+    });
+    expect(JSON.parse(out.stdout)).toEqual({
+      project: { id: PROJECT_ID, name: 'docs' },
+      source: { id: 'src-9', name: 's3', type: 's3', label: null, hasSecret: false },
+      index: 'queued',
+    });
+  });
+
+  it('reads the config from --config-file', async () => {
+    const readFile = (file: string) => {
+      expect(file).toBe('/etc/ctx/s3.json');
+      return JSON.stringify(S3_CONFIG);
+    };
+    const out = await run(['source', 'add', '--project', 'docs', '--type', 's3', '--config-file', '/etc/ctx/s3.json'], { readFile });
+    expect(out.code).toBe(EXIT.ok);
+    expect(stub.calls.find((c) => c.path === sourcePath && c.method === 'POST')?.body).toMatchObject({ config: S3_CONFIG });
+  });
+
+  it('reads the config from standard input with --config-file -', async () => {
+    const out = await run(['source', 'add', '--project', 'docs', '--type', 's3', '--config-file', '-'], {
+      readStdin: async () => JSON.stringify(S3_CONFIG),
+    });
+    expect(out.code).toBe(EXIT.ok);
+    expect(stub.calls.find((c) => c.path === sourcePath && c.method === 'POST')?.body).toMatchObject({ config: S3_CONFIG });
+  });
+
+  it('sends the credential from --secret-env as the secret and never prints it', async () => {
+    const fromEnv = await run(['source', 'add', '--project', 'docs', '--type', 's3', '--config-json', '{}', '--secret-env', 'S3_KEYS'], {
+      env: { S3_KEYS },
+    });
+    expect(fromEnv.code).toBe(EXIT.ok);
+    expect(stub.calls.find((c) => c.path === sourcePath && c.method === 'POST')?.body).toMatchObject({ secret: S3_KEYS });
+    expect(fromEnv.stdout + fromEnv.stderr).not.toContain('s3-secret-key');
+  });
+
+  it('exits 2 for invalid JSON, without quoting it and without calling the source route', async () => {
+    const out = await run(['source', 'add', '--project', 'docs', '--type', 's3', '--config-json', '{"secretAccessKey":"oops-leak']);
+    expect(out.code).toBe(EXIT.usage);
+    expect(out.stderr).toContain('--config-json is not valid JSON');
+    expect(out.stderr).not.toContain('oops-leak');
+    expect(stub.count('POST', sourcePath)).toBe(0);
+  });
+
+  it('exits 2 for a config that is not an object, from a file that cannot be read, and for conflicting options', async () => {
+    const notObject = await run(['source', 'add', '--project', 'docs', '--type', 's3', '--config-json', '[1]']);
+    expect(notObject.code).toBe(EXIT.usage);
+    expect(notObject.stderr).toContain('must be a JSON object');
+
+    const missing = await run(['source', 'add', '--project', 'docs', '--type', 's3', '--config-file', '/nope.json']);
+    expect(missing.code).toBe(EXIT.usage);
+    expect(missing.stderr).toContain('(ENOENT)');
+
+    const badFileJson = await run(['source', 'add', '--project', 'docs', '--type', 's3', '--config-file', 'c.json'], { readFile: () => '{nope' });
+    expect(badFileJson.stderr).toContain('--config-file is not valid JSON');
+
+    const both = await run(['source', 'add', '--project', 'docs', '--type', 's3', '--config-json', '{}', '--config-file', 'c.json']);
+    expect(both.code).toBe(EXIT.usage);
+
+    const secretFile = await run(['source', 'add', '--project', 'docs', '--type', 's3', '--secret-file', '/run/secrets/s3']);
+    expect(secretFile.code).toBe(EXIT.usage);
+
+    const noEnv = await run(['source', 'add', '--project', 'docs', '--type', 's3', '--secret-env', 'UNSET_VAR']);
+    expect(noEnv.code).toBe(EXIT.usage);
+    expect(noEnv.stderr).toContain('UNSET_VAR');
+    expect(stub.count('POST', sourcePath)).toBe(0);
+  });
+
+  it('exits 2 without --project or --type, and for a stray argument', async () => {
+    expect((await run(['source', 'add', '--type', 's3'])).code).toBe(EXIT.usage);
+    expect((await run(['source', 'add', '--project', 'docs'])).code).toBe(EXIT.usage);
+    expect((await run(['source', 'add', '--project', 'docs', '--type', 's3', 'extra'])).code).toBe(EXIT.usage);
+    expect((await run(['source', 'add', '--project', 'docs', '--type', 'S3 bucket'])).code).toBe(EXIT.usage);
+  });
+
+  it("prints the server's validation message and exits 1", async () => {
+    stub.createSource = {
+      status: 400,
+      body: { error: 'validation_failed', message: '✖ Invalid input: expected string, received number\n  → at config.bucket', issues: [] },
+    };
+    const out = await run(['source', 'add', '--project', 'docs', '--type', 's3', '--config-json', '{"bucket":1}']);
+    expect(out.code).toBe(EXIT.failure);
+    expect(out.stderr).toContain('400');
+    expect(out.stderr).toContain('at config.bucket');
+  });
+
+  it('exits 3 when the credential may not add sources, and 4 for a project that is not there', async () => {
+    stub.createSource = { status: 403, body: { error: 'forbidden', message: 'This token cannot do that' } };
+    expect((await run(['source', 'add', '--project', 'docs', '--type', 's3', '--config-json', '{}'])).code).toBe(EXIT.auth);
+    expect((await run(['source', 'add', '--project', 'ghost', '--type', 's3', '--config-json', '{}'])).code).toBe(EXIT.notFound);
+  });
+
+  it('exits 2 when standard input cannot be read, naming why and not the content', async () => {
+    const out = await run(['source', 'add', '--project', 'docs', '--type', 's3', '--config-file', '-'], {
+      readStdin: async () => {
+        throw new CliError('standard input is a terminal; pipe the content in', EXIT.usage);
+      },
+    });
+    expect(out.code).toBe(EXIT.usage);
+    expect(out.stderr).toContain('standard input is a terminal');
+    expect(stub.count('POST', sourcePath)).toBe(0);
+  });
+
+  it('--help lists the new options and needs no server', async () => {
+    const out = await run(['source', 'add', '--help'], { env: {} });
+    expect(out.code).toBe(EXIT.ok);
+    for (const flag of ['--type', '--config-json', '--config-file', '--secret-env', '--project']) expect(out.stdout).toContain(flag);
+    expect(stub.calls).toHaveLength(0);
+  });
+});
+
+describe('readStream (standard input)', () => {
+  const chunks = async function* (...parts: (Buffer | string)[]) {
+    for (const part of parts) yield part;
+  };
+
+  it('reads a pipe to the end', async () => {
+    expect(await readStream(chunks('{"a":', Buffer.from('1}')))).toBe('{"a":1}');
+  });
+
+  it('refuses a terminal instead of waiting on it', async () => {
+    const terminal = Object.assign(chunks('never read'), { isTTY: true });
+    await expect(readStream(terminal)).rejects.toMatchObject({ exitCode: EXIT.usage, message: expect.stringContaining('terminal') });
+  });
+
+  it('refuses more than the cap, and accepts exactly the cap', async () => {
+    await expect(readStream(chunks(Buffer.alloc(6), Buffer.alloc(6)), 10)).rejects.toMatchObject({
+      exitCode: EXIT.usage,
+      message: expect.stringContaining('larger than'),
+    });
+    expect(await readStream(chunks(Buffer.alloc(5, 97), Buffer.alloc(5, 98)), 10)).toBe('aaaaabbbbb');
+  });
+});
+
+describe('token create --source', () => {
+  const SOURCE_ID = '9b1d2c3e-4f5a-4b6c-8d7e-0123456789ab';
+
+  it('binds the token to one source by name', async () => {
+    const out = await run(['token', 'create', '--project', 'docs', '--source', 'handbook', '--json']);
+    expect(out.code).toBe(EXIT.ok);
+    expect(stub.calls.at(-1)?.body).toEqual({ sources: ['handbook'] });
+    // A name needs no lookup: the server resolves it.
+    expect(stub.count('GET', `/api/projects/${PROJECT_ID}/sources`)).toBe(0);
+  });
+
+  it('binds the token to two sources and lists them in the text output', async () => {
+    const out = await run(['token', 'create', '--project', 'docs', '--source', 'handbook', '--source', 'wiki', '--show-secret']);
+    expect(out.code).toBe(EXIT.ok);
+    expect(stub.calls.at(-1)?.body).toEqual({ sources: ['handbook', 'wiki'] });
+    expect(out.stdout).toContain('sources: handbook, wiki');
+    expect(out.stdout).toContain('mcp-token-secret: ctxm_second-secret');
+  });
+
+  it('turns a source id into the name the API takes, and drops a repeat', async () => {
+    stub.sources = [
+      { id: SOURCE_ID, name: 'handbook' },
+      { id: 'other', name: 'wiki' },
+    ];
+    const out = await run(['token', 'create', '--project', 'docs', '--source', SOURCE_ID, '--source', 'handbook', '--json']);
+    expect(out.code).toBe(EXIT.ok);
+    expect(stub.calls.at(-1)?.body).toEqual({ sources: ['handbook'] });
+  });
+
+  it("exits 1 with the server's message for a source the project does not have", async () => {
+    stub.mcpToken = { status: 400, body: { error: 'unknown_source', message: 'This project has no source named: ghost.' } };
+    const out = await run(['token', 'create', '--project', 'docs', '--source', 'ghost', '--json']);
+    expect(out.code).toBe(EXIT.failure);
+    expect(out.stderr).toContain('This project has no source named: ghost.');
+    expect(out.stdout).toBe('');
+  });
+
+  it('sends an id that matches nothing as it was written, so the server names it', async () => {
+    stub.sources = [{ id: 'other', name: 'wiki' }];
+    stub.mcpToken = { status: 400, body: { error: 'unknown_source', message: `This project has no source named: ${SOURCE_ID}.` } };
+    const out = await run(['token', 'create', '--project', 'docs', '--source', SOURCE_ID, '--json']);
+    expect(out.code).toBe(EXIT.failure);
+    expect(stub.calls.at(-1)?.body).toEqual({ sources: [SOURCE_ID] });
+    expect(out.stderr).toContain(SOURCE_ID);
+  });
+
+  it('keeps the other options beside --source and lists --source in --help', async () => {
+    await run(['token', 'create', '--project', 'docs', '--name', 'ci', '--source', 'handbook', '--allowed-cidr', '10.0.0.0/8', '--json']);
+    expect(stub.calls.at(-1)?.body).toEqual({ name: 'ci', sources: ['handbook'], allowedCidrs: ['10.0.0.0/8'] });
+    const help = await run(['token', 'create', '--help'], { env: {} });
+    expect(help.stdout).toContain('--source');
   });
 });
 

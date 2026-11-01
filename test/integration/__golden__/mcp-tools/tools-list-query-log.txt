@@ -188,7 +188,7 @@
               "description": "What you were looking for and did not find, as a question or keywords, the way you would have searched for it"
             },
             "note": {
-              "description": "Optional: one or two sentences on what is missing or what the pages you read got wrong. Plain text.",
+              "description": "Optional: one or two sentences on what is missing from the documentation. Plain text.",
               "type": "string",
               "maxLength": 1000
             }

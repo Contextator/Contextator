@@ -1,0 +1,130 @@
+[
+  {
+    "tag": "0000_baseline",
+    "sha256": "30e807ea7dbe92372a727547df2dfb93ef881955196beba51595b4a31480f0d7"
+  },
+  {
+    "tag": "0001_index_generations",
+    "sha256": "f634892fc68782b1d64c2767d49c6d1539fe075ed32754cead9f3f6b7dcb2e08"
+  },
+  {
+    "tag": "0002_hybrid_search",
+    "sha256": "9cec569a2e32d77bcd970bec9e3af53b6d79c5902e1a50990f131714bf983147"
+  },
+  {
+    "tag": "0003_chunk_neighbours",
+    "sha256": "58decc8cac3d0348a6125cd0cad3caa05f5fee369f7f70dfef2d9a734f15ce07"
+  },
+  {
+    "tag": "0004_document_content",
+    "sha256": "612ac6babb0351c3b5155733764dcd2a771adcd5be580c6b2b8544813cb90d59"
+  },
+  {
+    "tag": "0005_query_log",
+    "sha256": "44cacf07a5e6f4dd1fec43f67c99e5c76ab3ff93e5028305bb08e41671bf7f02"
+  },
+  {
+    "tag": "0006_scheduled_sync",
+    "sha256": "71e184ebd4437d4d7f68a3576f452b30bd7e9ca203b3849d452eaeb221ff3c7e"
+  },
+  {
+    "tag": "0007_notion_webhook",
+    "sha256": "cea40bd681b6ea4296f23c0844791a5184472f788600d689c2254bf063e9ecd9"
+  },
+  {
+    "tag": "0008_mcp_oauth",
+    "sha256": "db9b484e5949a49f4749fd54c92c6a1a9da9ef908af51e0fc2c830c75094535a"
+  },
+  {
+    "tag": "0009_document_versions",
+    "sha256": "2fc2fa0a3524428ef91072716fd98915ccef639004a8b22b39ae267984799719"
+  },
+  {
+    "tag": "0010_audit_events",
+    "sha256": "c3a6aa6f1d4de881da6af774c09ddde9a51942660480e0210aa113e322470fa2"
+  },
+  {
+    "tag": "0011_audit_panel_indexes",
+    "sha256": "307a552ae88665e45fa4bb11a270e4adaf54e4ed7b93d07113e07a1af3be1559"
+  },
+  {
+    "tag": "0012_mcp_auth_default_token",
+    "sha256": "3cc78291355f7a52418375909ff286d334128475ebfd93b723fd28175c61a035"
+  },
+  {
+    "tag": "0013_lexical_configurations",
+    "sha256": "41bbd614feaada866a8980c909e6c9f890d951cc1edfcd0bf344a62264e0d7d7"
+  },
+  {
+    "tag": "0014_api_tokens",
+    "sha256": "08888728bfed2eb58c582fd3a39bab56ee374a09b41c77c91ef30f5480cc7488"
+  },
+  {
+    "tag": "0015_oidc_federated_identities",
+    "sha256": "01e502b0b2974ff4d53e2a197100cf4b3b8f866de0d95e7f7c7e5c58cfd7557d"
+  },
+  {
+    "tag": "0016_session_auth_method",
+    "sha256": "a9296d71f4b5d80695666856cfd4eea9a92034a886cf9146b983a9610f3cf842"
+  },
+  {
+    "tag": "0017_project_score_floor",
+    "sha256": "e6a25b9a38fb8cfcd3479e040c5d09efa096001917456abd7755beabe67641e7"
+  },
+  {
+    "tag": "0018_user_mcp_credentials_epoch",
+    "sha256": "f51c5c3f2d7e555b44877c3502358369bfd16483f490a6a4d213c5a19b004ce2"
+  },
+  {
+    "tag": "0019_project_last_legacy_sse",
+    "sha256": "b4fc116809a60bbd1fa154228c8a7ccfa31cced9f9f783f7b2b87d7cb90a99ef"
+  },
+  {
+    "tag": "0020_git_source_url_credentials",
+    "sha256": "663a80f7ac79777db2a9c319b2106444b77f5a820c23256639d7c73b361ee92c"
+  },
+  {
+    "tag": "0021_document_source_url",
+    "sha256": "4b71d0b496412f9a07060232154b2ee47d1dd93eabe4aa42962540d11266e822"
+  },
+  {
+    "tag": "0022_project_quotas",
+    "sha256": "8b80e7a8324e577954c6b5d28b1c7ac95a3739fc3b4969ae63213051fcb916ce"
+  },
+  {
+    "tag": "0023_rate_limit_allowlist",
+    "sha256": "a3e0a30f77f456a61fc9720d89ac9766578cb8d214496a7545ca41decbc649e0"
+  },
+  {
+    "tag": "0024_floor_suggestions",
+    "sha256": "8a17fed57520ee618157ecc35bc54428d2d5c53fb462c31147f3afb9884155e5"
+  },
+  {
+    "tag": "0025_golden_questions",
+    "sha256": "1354ec1dbe25fbd1f90c9b1fea98bdf0f3febc81f76b20056acd83b28b8d2574"
+  },
+  {
+    "tag": "0026_document_changes",
+    "sha256": "215c3c76d8b3f8cb2caf9f4c7c4d49d365e091ae76176f856eb546fda8daa53c"
+  },
+  {
+    "tag": "0027_eval_runs",
+    "sha256": "1b524c9cbbe0f8b5ef707bb9f2e0f3fd139ff6e3139d3f9d375c2c889420d1ee"
+  },
+  {
+    "tag": "0028_reported_gaps",
+    "sha256": "79bb08fb2ffc940fe287278d092887d51b68c75b0f93e4975f40c4c8540a820f"
+  },
+  {
+    "tag": "0029_document_findings",
+    "sha256": "bfda5f3a6253808e82c3a598830b2ad1c280fc3aca296a44d89084cfe35e38f6"
+  },
+  {
+    "tag": "0030_mcp_token_scope",
+    "sha256": "5a47987066bcc80341f55cecb3e9b5c2d22274e4cc6e686092759b227e222d46"
+  },
+  {
+    "tag": "0031_oidc_group_mappings",
+    "sha256": "227acf1b1cbf34eb7d0c9c330efe14b6e8c6bfd7fb72527bad9ec20bd51b0bb7"
+  }
+]

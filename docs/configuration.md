@@ -255,6 +255,7 @@ value and says whether it was found, and nothing is on the MCP surface.
 holds them, with the generation a rebuild replaces and with the project. A project export leaves them out (its
 manifest counts them under `excluded.documentFindings`); a backup is a full database dump and contains them, as the
 masked preview and the keyed HMAC, never the value. `/metrics` counts documents scanned by outcome and findings by rule.
+On Helm the switch is `config.piiScan` (`false` sets `PII_SCAN=0`).
 
 ## MCP rate limits and token networks
 
@@ -290,8 +291,9 @@ both are set with neither `NOTION_OAUTH_REDIRECT_URI` nor `PUBLIC_BASE_URL` (the
 from a request), or when both are set without `SECRET_KEY` (the tokens are stored encrypted with it). With none
 of them set nothing changes and the dashboard shows no button.
 
-On Helm, put the id in `env` and the secret in `envSecret` (`NOTION_OAUTH_CLIENT_SECRET`), like the other
-secrets the chart does not model one by one. What the connection does, how it differs from a token and how to
+On Helm they are `config.notionOauthClientId`, `config.notionOauthRedirectUri` and `config.notionOauthClientSecret`
+(a `{secretName, secretKey}` reference to a Secret you manage; `envSecret.NOTION_OAUTH_CLIENT_SECRET` works too, but
+use one of the two, not both, and do not also put these names in `env`). What the connection does, how it differs from a token and how to
 register it: [Two ways to authorise a Notion source](document-sources.md#two-ways-to-authorise-a-notion-source).
 
 ## Single sign-on groups

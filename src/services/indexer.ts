@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import type { Config, WebLimits } from '../config.js';
 import type { Logger } from '../context.js';
 import type { Db } from '../db/client.js';
-import { projects, type DocumentSourceRow } from '../db/schema.js';
+import { documentSources, projects, type DocumentSourceRow } from '../db/schema.js';
 import { chunkReserveTokens } from './chunk-budget.js';
 import { chunkMarkdown, embeddingText } from './chunker.js';
 import { ConversionService } from './conversion/client.js';
@@ -22,7 +22,7 @@ import { checkSpecSize, type DerivedDocument } from './openapi.js';
 import { getProjectById } from './projects.js';
 import { driverFor, type DocumentMeta } from './sources/driver.js';
 import { resolveStoredMeta, type StoredSourceMeta, sourceMetaDiffers } from './source-url.js';
-import { listSources, recountSources, setSourceStatus, sourceVersion } from './sources.js';
+import { listSources, mergeRunConfigPatch, recountSources, setSourceStatus, sourceVersion } from './sources.js';
 import { textSearchConfigFor, type TextSearchConfig } from './text-search.js';
 import {
   deleteDocuments,
@@ -532,14 +532,46 @@ export class Indexer {
       await setSourceStatus(db, source.id, { status: 'error', lastError: syncError.slice(0, 2000) }).catch(() => undefined);
     } else {
       state.status = 'synced';
-      await setSourceStatus(db, source.id, {
-        status: 'idle',
-        lastError: null,
-        lastSyncedAt: new Date(),
-        ...(configPatch ? { config: { ...source.config, ...configPatch } } : {}),
-      });
+      await this.recordSyncedSource(source, configPatch, log);
     }
     return { scanned };
+  }
+
+  /**
+   * Marks a source as synced and persists the driver's `configPatch`, **against the row as it is now**.
+   *
+   * `source` was read when the job started, and a sync can run for minutes; the settings can be edited in
+   * that time (a `PATCH` of the source, a changed host together with its credential). Writing
+   * `{ ...source.config, ...configPatch }` put the job-start settings back over the edit. Here the row is read
+   * under `FOR UPDATE` and only the patch's own keys are merged into what is stored ({@link mergeRunConfigPatch}
+   * says when even those are left out).
+   *
+   * **The lock orders run-end writes against each other and against an `UPDATE` of the row; it does not make a
+   * `PATCH` atomic.** `updateSource` reads the row, validates, and writes without a lock, so a `PATCH` that read
+   * the row before this commit writes its own view afterwards and wins. That only loses this run's cursor and
+   * validators (the next run does more work, or the probe says "changed"); it cannot put old settings back.
+   */
+  private async recordSyncedSource(source: DocumentSourceRow, configPatch: Record<string, unknown> | undefined, log: Logger): Promise<void> {
+    await this.deps.db.transaction(async (tx) => {
+      const [current] = await tx.select().from(documentSources).where(eq(documentSources.id, source.id)).for('update');
+      if (!current) return; // deleted while the run was reading it
+      let config: Record<string, unknown> | undefined;
+      if (configPatch) {
+        const merged = mergeRunConfigPatch(source, current, configPatch);
+        if ('dropped' in merged) {
+          log.warn(
+            { source: source.name, reason: merged.dropped },
+            'source settings changed during the run; its state was not saved and the next run starts over',
+          );
+        } else {
+          config = merged.config;
+        }
+      }
+      await tx
+        .update(documentSources)
+        .set({ status: 'idle', lastError: null, lastSyncedAt: new Date(), ...(config ? { config } : {}) })
+        .where(eq(documentSources.id, source.id));
+    });
   }
 
   private async indexProject(job: JobState): Promise<void> {

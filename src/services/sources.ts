@@ -536,6 +536,45 @@ function checkSecretHostUnchanged(
 }
 
 /**
+ * What a finished run may write back into `config`, given that the row can have moved while the run was reading
+ * ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 8: a changed host asks for the credential again).
+ *
+ * `before` is the row as the run's driver was built from it, `current` the row as it is now, under a lock on it.
+ * The patch is merged into `current.config` and never into `before.config`: the run took minutes and an edit may
+ * have landed in them, and writing `before` back over it silently undid the edit, host and credential included.
+ * A key whose value is `undefined` is removed, which is what dropping it from the stored JSON always meant.
+ *
+ * **Two cases write nothing**, because the patch describes a source that no longer exists. A host that changed
+ * (`SECRET_HOST`) makes the cursor and the validators the answers of another server; and for `github` and `gdrive`,
+ * a replaced credential is a different view of the same remote, which is why {@link updateSource} clears those
+ * keys when it stores one. Writing the old run's cursor back would undo that clearing. A third case writes
+ * the patch **without the probe token**: some other setting moved, and the edit deleted that token on purpose
+ * ([ADR-0048](../../.ssot/ADR.md#adr-0048)), so the token of the run that read the old settings must not return.
+ */
+export function mergeRunConfigPatch(
+  before: Pick<DocumentSourceRow, 'type' | 'config' | 'secretEnc'>,
+  current: Pick<DocumentSourceRow, 'type' | 'config' | 'secretEnc'>,
+  patch: Record<string, unknown>,
+): { config: Record<string, unknown> } | { dropped: string } {
+  const host = SECRET_HOST[before.type];
+  if (host && host.originOf(before.config) !== host.originOf(current.config)) return { dropped: `${host.setting} changed during the run` };
+  if ((before.type === 'github' || before.type === 'gdrive') && before.secretEnc !== current.secretEnc) {
+    return { dropped: 'the credential was replaced during the run' };
+  }
+  const driverOwned = new Set([...Object.keys(patch), PROBE_TOKEN_KEY]);
+  const settings = (config: Record<string, unknown>): string =>
+    canonicalConfig(Object.fromEntries(Object.entries(config).filter(([key]) => !driverOwned.has(key))));
+  const settingsMoved = settings(before.config) !== settings(current.config);
+  const config: Record<string, unknown> = { ...current.config };
+  for (const [key, value] of Object.entries(patch)) {
+    if (key === PROBE_TOKEN_KEY && settingsMoved) continue;
+    if (value === undefined) delete config[key];
+    else config[key] = value;
+  }
+  return { config };
+}
+
+/**
  * Discussions are served by GraphQL, which answers only with a token ([ADR-0128](../../.ssot/ADR.md#adr-0128)
  * decision 2), so asking for them with no token is refused up front, naming the reason, rather than failing every run.
  */

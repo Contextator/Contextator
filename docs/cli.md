@@ -2,13 +2,13 @@
 
 The `contextator` command is in the image, both the default one and `-slim`. It is a small client of the
 [admin API](admin-api.md) for what you would otherwise write as four `curl` calls and a polling loop in a CI
-job: create a project from a git repository, wait for its index, mint an MCP token. It is not on npm and
+job: create a project from a git repository, add a source of any type, wait for its index, mint an MCP token. It is not on npm and
 is not a separate download; it is the version of the image you already run.
 
 ```bash
 docker run --rm \
   -e CONTEXTATOR_URL=https://docs.example.com -e CONTEXTATOR_TOKEN \
-  contextator/contextator:0.6.1-slim \
+  contextator/contextator:0.7.0-slim \
   contextator project create handbook --git https://github.com/acme/handbook --wait
 ```
 
@@ -74,6 +74,44 @@ Where the project's index stands: the job in flight, or the newest recorded run.
 in flight to end (`--timeout` as above) and exits `5` if the run failed; without it, it reports and exits `0`.
 A project that has never been indexed has nothing to wait for and exits `1`.
 
+### `source add --project <name|id> --type <type>`
+
+Adds a source of any type to an existing project and queues an index run (`POST /api/projects/:id/sources`).
+`project create --git` stays the shortcut for a project and its git source; this is the general form, for `s3`,
+`notion`, `confluence`, `web`, `gdrive`, `github` and the rest ([document sources](document-sources.md)).
+
+| Option | |
+|---|---|
+| `--type <type>` | The source type, e.g. `git`, `s3`, `notion`. The server owns the list: a type it does not know is refused as invalid (exit `1`), and one it knows but cannot run on this instance answers `409` (exit `4`). |
+| `--name <text>` | The source's name in the project (default: the type). Names are unique within a project. |
+| `--label <text>` | A display label. |
+| `--config-json <json>` | The type's settings, the `config` object of the admin API, as a JSON object. |
+| `--config-file <path>` | The same, read from a file. `-` reads standard input. Not together with `--config-json`. |
+| `--secret-env <VAR>` | The *name* of the variable holding the source's credential (an access key pair, a token, a key file's content). |
+| `--json` | One JSON object on stdout: `{ project: { id, name }, source: { id, name, type, label, hasSecret }, index: "queued" }`. |
+
+The settings are sent as they are and **the server validates them**, per type: a refusal comes back as the
+server wrote it (which field, what was expected) and the command exits `1`. A project that is not visible to the
+credential exits `4`, a credential that may not add sources `3`.
+
+**Keep credentials out of `--config-json`.** An argument shows in the process list and in shell history. A
+credential is not part of `config` anyway (the server stores `config` in clear and the credential encrypted), so
+pass it with `--secret-env`; settings you would rather not put on a command line go in
+`--config-file` or on standard input. The command never prints a credential, and when the config is not valid JSON
+it says so without quoting it.
+
+```bash
+# s3: the bucket in the config, the key pair as the credential
+export S3_KEYS='{"accessKeyId":"…","secretAccessKey":"…"}'
+contextator source add --project handbook --type s3 --name bucket \
+  --config-json '{"bucket":"acme-handbook","region":"eu-central-1","prefix":"docs"}' \
+  --secret-env S3_KEYS
+
+# a config kept in a file, or piped in
+contextator source add --project handbook --type web --config-file web.json
+generate-config | contextator source add --project handbook --type web --config-file -
+```
+
 ### `token create --project <name|id>`
 
 Mints an MCP token for the project (`POST /api/projects/:id/mcp-tokens`).
@@ -81,6 +119,7 @@ Mints an MCP token for the project (`POST /api/projects/:id/mcp-tokens`).
 | Option | |
 |---|---|
 | `--name <text>` | A label. |
+| `--source <name\|id>` | Bind the token to this source of the project, so it reads only that source ([MCP access](mcp-access.md), [admin API](admin-api.md)). Repeat for several. Omitted, the token reads the whole project. A source id is translated to its name; a source the project does not have is refused by the server, naming it (exit `1`), and no token is created. |
 | `--expires-in-days <30\|90\|365>` | Default: never. |
 | `--allowed-cidr <cidr>` | A network allowed to present the token; repeat for several. |
 | `--json` or `--show-secret` | **One is required**: the secret is shown once, and a token minted and not printed could never be read. The command refuses before it creates anything. |

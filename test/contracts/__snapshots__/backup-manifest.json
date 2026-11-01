@@ -1,0 +1,200 @@
+{
+  "entries": {
+    "dataPrefix": "data",
+    "database": "database.dump",
+    "manifest": "manifest.json",
+    "readme": "README.txt"
+  },
+  "kind": "contextator.instance-backup",
+  "manifestVersion": 1,
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "counts": {
+        "properties": {
+          "chunks": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "databaseDumpBytes": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "documents": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "projects": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "uploadBytes": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "uploadFiles": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "uploadSources": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": ["chunks", "databaseDumpBytes", "documents", "projects", "uploadBytes", "uploadFiles", "uploadSources"],
+        "type": "object"
+      },
+      "createdAt": {
+        "maxLength": 64,
+        "minLength": 1,
+        "type": "string"
+      },
+      "database": {
+        "properties": {
+          "dumpToolVersion": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "mode": {
+            "enum": ["embedded", "external"],
+            "type": "string"
+          },
+          "serverVersion": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["dumpToolVersion", "mode", "serverVersion", "target"],
+        "type": "object"
+      },
+      "kind": {
+        "const": "contextator.instance-backup",
+        "type": "string"
+      },
+      "manifestVersion": {
+        "maximum": 9007199254740991,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "product": {
+        "properties": {
+          "name": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "version": {
+            "maxLength": 200,
+            "type": "string"
+          }
+        },
+        "required": ["name", "version"],
+        "type": "object"
+      },
+      "schema": {
+        "properties": {
+          "migrations": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "maxLength": 64,
+            "type": "string"
+          }
+        },
+        "required": ["migrations", "version"],
+        "type": "object"
+      },
+      "secretKey": {
+        "properties": {
+          "encryptedSourceTypes": {
+            "items": {
+              "maxLength": 32,
+              "type": "string"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "encryptedSources": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fingerprint": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "present": {
+            "type": "boolean"
+          },
+          "regenerableSecrets": {
+            "default": 0,
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": ["encryptedSources", "fingerprint", "present"],
+        "type": "object"
+      },
+      "uploads": {
+        "items": {
+          "properties": {
+            "bytes": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "files": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "path": {
+              "maxLength": 4096,
+              "type": "string"
+            },
+            "project": {
+              "maxLength": 200,
+              "type": "string"
+            },
+            "source": {
+              "maxLength": 200,
+              "type": "string"
+            }
+          },
+          "required": ["bytes", "files", "path", "project", "source"],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": ["counts", "createdAt", "database", "kind", "manifestVersion", "product", "schema", "secretKey", "uploads"],
+    "type": "object"
+  }
+}

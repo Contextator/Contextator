@@ -1,0 +1,196 @@
+{
+  "commands": {
+    "backup": {
+      "arguments": "those of scripts/backup.ts"
+    },
+    "project create": {
+      "flags": {
+        "branch": {
+          "type": "string"
+        },
+        "exists-ok": {
+          "type": "boolean"
+        },
+        "git": {
+          "type": "string"
+        },
+        "git-token-env": {
+          "type": "string"
+        },
+        "help": {
+          "short": "h",
+          "type": "boolean"
+        },
+        "json": {
+          "type": "boolean"
+        },
+        "show-secret": {
+          "type": "boolean"
+        },
+        "subdir": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "string"
+        },
+        "token-file": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "wait": {
+          "type": "boolean"
+        }
+      }
+    },
+    "project status": {
+      "flags": {
+        "help": {
+          "short": "h",
+          "type": "boolean"
+        },
+        "json": {
+          "type": "boolean"
+        },
+        "timeout": {
+          "type": "string"
+        },
+        "token-file": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "wait": {
+          "type": "boolean"
+        }
+      }
+    },
+    "source add": {
+      "flags": {
+        "config-file": {
+          "type": "string"
+        },
+        "config-json": {
+          "type": "string"
+        },
+        "help": {
+          "short": "h",
+          "type": "boolean"
+        },
+        "json": {
+          "type": "boolean"
+        },
+        "label": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "secret-env": {
+          "type": "string"
+        },
+        "token-file": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "token create": {
+      "flags": {
+        "allowed-cidr": {
+          "multiple": true,
+          "type": "string"
+        },
+        "expires-in-days": {
+          "type": "string"
+        },
+        "help": {
+          "short": "h",
+          "type": "boolean"
+        },
+        "json": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "show-secret": {
+          "type": "boolean"
+        },
+        "source": {
+          "multiple": true,
+          "type": "string"
+        },
+        "token-file": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "exit": {
+    "auth": 3,
+    "failure": 1,
+    "notFound": 4,
+    "ok": 0,
+    "runFailed": 5,
+    "timeout": 6,
+    "unreachable": 7,
+    "usage": 2
+  },
+  "json": {
+    "project create": [
+      "mcpToken",
+      "mcpToken.secret",
+      "mcpToken.token",
+      "project",
+      "project.id",
+      "project.mcpUrl",
+      "project.name",
+      "run",
+      "run.error",
+      "run.id",
+      "run.status"
+    ],
+    "project status": [
+      "index",
+      "index.error",
+      "index.state",
+      "project",
+      "project.id",
+      "project.mcpUrl",
+      "project.name",
+      "run",
+      "run.id",
+      "run.status"
+    ],
+    "source add": [
+      "index",
+      "project",
+      "project.id",
+      "project.name",
+      "source",
+      "source.hasSecret",
+      "source.id",
+      "source.label",
+      "source.name",
+      "source.type"
+    ],
+    "token create": ["project", "project.id", "project.mcpUrl", "project.name", "secret", "token"]
+  }
+}

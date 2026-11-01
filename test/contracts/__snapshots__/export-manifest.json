@@ -1,0 +1,294 @@
+{
+  "entries": {
+    "dataPrefix": "data/sources",
+    "documents": "documents.ndjson",
+    "goldenQuestions": "golden-questions.ndjson",
+    "manifest": "manifest.json",
+    "readme": "README.txt",
+    "sources": "sources.ndjson"
+  },
+  "kind": "contextator.project-export",
+  "manifestVersion": 1,
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "counts": {
+        "properties": {
+          "chunks": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "documents": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "goldenQuestions": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sources": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "uploadBytes": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "uploadFiles": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": ["chunks", "documents", "sources", "uploadBytes", "uploadFiles"],
+        "type": "object"
+      },
+      "createdAt": {
+        "maxLength": 64,
+        "minLength": 1,
+        "type": "string"
+      },
+      "embedding": {
+        "anyOf": [
+          {
+            "properties": {
+              "dimensions": {
+                "maximum": 2000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "id": {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": ["dimensions", "id"],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "excluded": {
+        "properties": {
+          "documentFindings": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "indexRuns": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mcpTokens": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "projectMembers": {
+            "properties": {
+              "editor": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "viewer": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": ["editor", "viewer"],
+            "type": "object"
+          },
+          "reportedGaps": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "searchQueries": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "searchQueryHits": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": ["indexRuns", "mcpTokens", "projectMembers", "searchQueries", "searchQueryHits"],
+        "type": "object"
+      },
+      "instance": {
+        "properties": {
+          "id": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "publicBaseUrl": {
+            "anyOf": [
+              {
+                "maxLength": 2048,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["id", "publicBaseUrl"],
+        "type": "object"
+      },
+      "kind": {
+        "const": "contextator.project-export",
+        "type": "string"
+      },
+      "manifestVersion": {
+        "maximum": 9007199254740991,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "product": {
+        "properties": {
+          "name": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "version": {
+            "maxLength": 200,
+            "type": "string"
+          }
+        },
+        "required": ["name", "version"],
+        "type": "object"
+      },
+      "project": {
+        "properties": {
+          "exportedGeneration": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lastIndexedAt": {
+            "type": ["string", "null"]
+          },
+          "maxChunks": {
+            "anyOf": [
+              {
+                "maximum": 2147483647,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "maxDocuments": {
+            "anyOf": [
+              {
+                "maximum": 2147483647,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "maxUploadBytes": {
+            "anyOf": [
+              {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mcpAuth": {
+            "enum": ["open", "token", "account"],
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 63,
+            "minLength": 1,
+            "type": "string"
+          },
+          "queryLogEnabled": {
+            "type": "boolean"
+          },
+          "scoreFloor": {
+            "anyOf": [
+              {
+                "maximum": 1,
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["exportedGeneration", "lastIndexedAt", "mcpAuth", "name", "queryLogEnabled"],
+        "type": "object"
+      },
+      "schema": {
+        "properties": {
+          "migrations": {
+            "maximum": 9007199254740991,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "version": {
+            "maxLength": 64,
+            "type": "string"
+          }
+        },
+        "required": ["migrations", "version"],
+        "type": "object"
+      },
+      "sources": {
+        "items": {
+          "properties": {
+            "name": {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            "needs": {
+              "items": {
+                "enum": ["credential", "webhook-secret", "files-carried", "path-on-this-host", "never-scheduled"],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": {
+              "enum": ["local", "git", "upload", "notion", "confluence", "web", "s3", "gdrive", "github"],
+              "type": "string"
+            }
+          },
+          "required": ["name", "needs", "type"],
+          "type": "object"
+        },
+        "type": "array"
+      }
+    },
+    "required": ["counts", "createdAt", "embedding", "excluded", "instance", "kind", "manifestVersion", "product", "project", "schema", "sources"],
+    "type": "object"
+  },
+  "sourceNeeds": ["credential", "webhook-secret", "files-carried", "path-on-this-host", "never-scheduled"]
+}
