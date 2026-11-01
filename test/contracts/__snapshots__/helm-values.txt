@@ -1,0 +1,209 @@
+(root): object (additionalProperties:false) (requires-at-root: backup, config, database, env, envSecret, image, ingress, metrics, persistence, probes, resources, secretKey, service, serviceAccount, tests)
+affinity: object
+backup: object (required) (additionalProperties:false)
+backup.activeDeadlineSeconds: integer {minimum=0} (required)
+backup.affinity: object (required)
+backup.backoffLimit: integer {minimum=0} (required)
+backup.enabled: boolean (required)
+backup.failedJobsHistoryLimit: integer {minimum=0} (required)
+backup.image: object (required) (additionalProperties:false)
+backup.image.repository: string (required)
+backup.image.tag: string (required)
+backup.keep: integer {minimum=1, maximum=999999} (required)
+backup.nodeSelector: object (required) (additionalProperties:*)
+backup.nodeSelector.*: string
+backup.podAnnotations: object (required) (additionalProperties:*)
+backup.podAnnotations.*: string
+backup.resources: object (required)
+backup.s3: object (required) (additionalProperties:false)
+backup.s3.accessKeyId: string (required)
+backup.s3.accessKeyIdKey: string {minLength=1} (required)
+backup.s3.bucket: string (required)
+backup.s3.endpoint: string {pattern="^(https?://[^@/]+(/.*)?)?$"} (required)
+backup.s3.existingSecret: string (required)
+backup.s3.prefix: string (required)
+backup.s3.region: string {pattern="^[A-Za-z0-9-]*$"} (required)
+backup.s3.secretAccessKey: string (required)
+backup.s3.secretAccessKeyKey: string {minLength=1} (required)
+backup.s3.sessionTokenKey: string (required)
+backup.schedule: string {minLength=1} (required)
+backup.stagingSizeLimit: string (required)
+backup.successfulJobsHistoryLimit: integer {minimum=0} (required)
+backup.suspend: boolean (required)
+backup.timeZone: string (required)
+backup.tolerations: array (required)
+backup.tolerations[]: object
+config: object (required) (additionalProperties:false)
+config.confluenceAllowedHosts: array {uniqueItems=true} (required)
+config.confluenceAllowedHosts[]: string
+config.confluenceAllowedHosts[]|anyOf[0]: (any) {pattern="^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?(\\.[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?)*\\.?$"}
+config.confluenceAllowedHosts[]|anyOf[1]: (any) {pattern="^(\\[[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*\\]|[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*)$"}
+config.confluenceMaxPages: integer|null {minimum=1, maximum=100000}
+config.gdriveMaxFiles: integer|null {minimum=1, maximum=100000}
+config.gitAllowedHosts: array {uniqueItems=true} (required)
+config.gitAllowedHosts[]: string
+config.gitAllowedHosts[]|anyOf[0]: (any) {pattern="^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?(\\.[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?)*\\.?$"}
+config.gitAllowedHosts[]|anyOf[1]: (any) {pattern="^(\\[[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*\\]|[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*)$"}
+config.gitMaxPackBytes: integer|null {minimum=1048576}
+config.githubMaxDiscussions: integer|null {minimum=1, maximum=100000}
+config.githubMaxIssues: integer|null {minimum=1, maximum=100000}
+config.mcpRateLimitAnonPerMinute: integer|null {minimum=0}
+config.mcpRateLimitFailOpen: boolean
+config.mcpRateLimitPerMinute: integer|null {minimum=0}
+config.mcpRateLimitTools: string {pattern="^$|^[a-z_]+=[0-9]+(,[a-z_]+=[0-9]+)*$"}
+config.mcpReportGapPerHour: integer|null {minimum=0}
+config.mcpStructuredOutput: boolean (required)
+config.notionMaxPages: integer|null {minimum=1, maximum=100000}
+config.notionOauthClientId: string
+config.notionOauthClientSecret: object (additionalProperties:false)
+config.notionOauthClientSecret.secretKey: string
+config.notionOauthClientSecret.secretName: string
+config.notionOauthClientSecret|if: (any)
+config.notionOauthClientSecret|if|anyOf[0]: (any)
+config.notionOauthClientSecret|if|anyOf[0].secretName: (any) {minLength=1} (required)
+config.notionOauthClientSecret|if|anyOf[1]: (any)
+config.notionOauthClientSecret|if|anyOf[1].secretKey: (any) {minLength=1} (required)
+config.notionOauthClientSecret|then: (any)
+config.notionOauthClientSecret|then.secretKey: (any) {minLength=1} (required)
+config.notionOauthClientSecret|then.secretName: (any) {minLength=1} (required)
+config.notionOauthRedirectUri: string
+config.oidcGroupsClaim: string {pattern="^([A-Za-z0-9_:.\\-/]{1,128})?$"} (required)
+config.piiScan: boolean
+config.projectMaxChunks: integer|null {minimum=0}
+config.projectMaxDocuments: integer|null {minimum=0}
+config.projectMaxUploadBytes: integer|null {minimum=0}
+config.publicBaseUrl: string (required)
+config.reindexOnModelChange: boolean
+config.s3MaxObjects: integer|null {minimum=1, maximum=100000}
+config.sourceAllowedHosts: array {uniqueItems=true} (required)
+config.sourceAllowedHosts[]: string
+config.sourceAllowedHosts[]|anyOf[0]: (any) {pattern="^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?(\\.[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?)*\\.?$"}
+config.sourceAllowedHosts[]|anyOf[1]: (any) {pattern="^(\\[[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*\\]|[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*)$"}
+config.trustProxy: string (required)
+config.trustProxy|not: (any) {pattern="^[\\s\\x0b]*([1]|[Tt][Rr][Uu][Ee])[\\s\\x0b]*$"}
+config.webAllowedHosts: array {uniqueItems=true} (required)
+config.webAllowedHosts[]: string
+config.webAllowedHosts[]|anyOf[0]: (any) {pattern="^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?(\\.[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?)*\\.?$"}
+config.webAllowedHosts[]|anyOf[1]: (any) {pattern="^(\\[[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*\\]|[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*)$"}
+database: object (required) (additionalProperties:false)
+database.existingSecret: string (required)
+database.existingSecretKey: string {minLength=1} (required)
+database.url: string (required)
+env: object (required) (additionalProperties:*)
+env.*: string
+envSecret: object (required) (additionalProperties:*)
+envSecret.*: object (additionalProperties:false)
+envSecret.*.secretKey: string {minLength=1} (required)
+envSecret.*.secretName: string {minLength=1} (required)
+extraVolumeMounts: array
+extraVolumeMounts[]: object
+extraVolumes: array
+extraVolumes[]: object
+fullnameOverride: string
+global: object
+image: object (required) (additionalProperties:false)
+image.pullPolicy: string [Always, IfNotPresent, Never] (required)
+image.repository: string {minLength=1} (required)
+image.tag: string (required)
+imagePullSecrets: array
+imagePullSecrets[]: object (additionalProperties:false)
+imagePullSecrets[].name: string {minLength=1} (required)
+ingress: object (required) (additionalProperties:false)
+ingress.annotations: object (required) (additionalProperties:*)
+ingress.annotations.*: string
+ingress.className: string (required)
+ingress.enabled: boolean (required)
+ingress.hosts: array (required)
+ingress.hosts[]: object (additionalProperties:false)
+ingress.hosts[].host: string {minLength=1} (required)
+ingress.hosts[].paths: array {minItems=1} (required)
+ingress.hosts[].paths[]: object (additionalProperties:false)
+ingress.hosts[].paths[].path: string {minLength=1} (required)
+ingress.hosts[].paths[].pathType: string [Exact, Prefix, ImplementationSpecific] (required)
+ingress.tls: array (required)
+ingress.tls[]: object (additionalProperties:false)
+ingress.tls[].hosts: array
+ingress.tls[].hosts[]: string
+ingress.tls[].secretName: string
+metrics: object (required) (additionalProperties:false)
+metrics.serviceMonitor: object (required) (additionalProperties:false)
+metrics.serviceMonitor.annotations: object (additionalProperties:*)
+metrics.serviceMonitor.annotations.*: string
+metrics.serviceMonitor.enabled: boolean (required)
+metrics.serviceMonitor.honorLabels: boolean
+metrics.serviceMonitor.interval: string {minLength=2, pattern="^(([0-9]+)y)?(([0-9]+)w)?(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?(([0-9]+)ms)?$"} (required)
+metrics.serviceMonitor.labels: object (additionalProperties:*)
+metrics.serviceMonitor.labels.*: string
+metrics.serviceMonitor.metricRelabelings: array
+metrics.serviceMonitor.metricRelabelings[]: object
+metrics.serviceMonitor.relabelings: array
+metrics.serviceMonitor.relabelings[]: object
+metrics.serviceMonitor.scrapeTimeout: string {minLength=2, pattern="^(([0-9]+)y)?(([0-9]+)w)?(([0-9]+)d)?(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?(([0-9]+)ms)?$"} (required)
+nameOverride: string
+nodeSelector: object (additionalProperties:*)
+nodeSelector.*: string
+persistence: object (required) (additionalProperties:false)
+persistence.data: object (required) (additionalProperties:false)
+persistence.data.accessModes: array {minItems=1} (required)
+persistence.data.accessModes[]: string [ReadWriteOnce, ReadOnlyMany, ReadWriteMany, ReadWriteOncePod]
+persistence.data.annotations: object (required) (additionalProperties:*)
+persistence.data.annotations.*: string
+persistence.data.enabled: boolean (required)
+persistence.data.existingClaim: string (required)
+persistence.data.size: string {minLength=1} (required)
+persistence.data.storageClassName: string (required)
+persistence.models: object (required) (additionalProperties:false)
+persistence.models.accessModes: array {minItems=1} (required)
+persistence.models.accessModes[]: string [ReadWriteOnce, ReadOnlyMany, ReadWriteMany, ReadWriteOncePod]
+persistence.models.annotations: object (required) (additionalProperties:*)
+persistence.models.annotations.*: string
+persistence.models.enabled: boolean (required)
+persistence.models.existingClaim: string (required)
+persistence.models.size: string {minLength=1} (required)
+persistence.models.storageClassName: string (required)
+persistence.retainOnUninstall: boolean (required)
+podAnnotations: object (additionalProperties:*)
+podAnnotations.*: string
+podLabels: object (additionalProperties:*)
+podLabels.*: string
+podSecurityContext: object
+probes: object (required) (additionalProperties:false)
+probes.liveness: object (required) (additionalProperties:false)
+probes.liveness.enabled: boolean (required)
+probes.liveness.failureThreshold: integer {minimum=1} (required)
+probes.liveness.initialDelaySeconds: integer {minimum=0} (required)
+probes.liveness.periodSeconds: integer {minimum=1} (required)
+probes.liveness.timeoutSeconds: integer {minimum=1} (required)
+probes.readiness: object (required) (additionalProperties:false)
+probes.readiness.enabled: boolean (required)
+probes.readiness.failureThreshold: integer {minimum=1} (required)
+probes.readiness.initialDelaySeconds: integer {minimum=0} (required)
+probes.readiness.periodSeconds: integer {minimum=1} (required)
+probes.readiness.timeoutSeconds: integer {minimum=1} (required)
+probes.startup: object (required) (additionalProperties:false)
+probes.startup.enabled: boolean (required)
+probes.startup.failureThreshold: integer {minimum=1} (required)
+probes.startup.initialDelaySeconds: integer {minimum=0} (required)
+probes.startup.periodSeconds: integer {minimum=1} (required)
+probes.startup.timeoutSeconds: integer {minimum=1} (required)
+resources: object (required)
+secretKey: object (required) (additionalProperties:false)
+secretKey.existingSecret: string (required)
+secretKey.existingSecretKey: string {minLength=1} (required)
+secretKey.value: string (required)
+securityContext: object
+service: object (required) (additionalProperties:false)
+service.annotations: object (required) (additionalProperties:*)
+service.annotations.*: string
+service.port: integer {minimum=1, maximum=65535} (required)
+service.targetPort: integer {minimum=1, maximum=65535} (required)
+service.type: string [ClusterIP, NodePort, LoadBalancer] (required)
+serviceAccount: object (required) (additionalProperties:false)
+serviceAccount.annotations: object (required) (additionalProperties:*)
+serviceAccount.annotations.*: string
+serviceAccount.create: boolean (required)
+serviceAccount.name: string (required)
+tests: object (required) (additionalProperties:false)
+tests.enabled: boolean (required)
+tolerations: array
+tolerations[]: object

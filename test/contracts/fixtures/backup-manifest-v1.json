@@ -1,0 +1,44 @@
+{
+  "kind": "contextator.instance-backup",
+  "manifestVersion": 1,
+  "createdAt": "2026-11-01T03:36:33.087Z",
+  "product": {
+    "name": "contextator",
+    "version": "0.6.1"
+  },
+  "database": {
+    "mode": "external",
+    "target": "localhost:55180/fixture_gen",
+    "serverVersion": "16.15 (Debian 16.15-1.pgdg12+2)",
+    "dumpToolVersion": "pg_dump (PostgreSQL) 16.15 (Debian 16.15-1.pgdg12+2)"
+  },
+  "schema": {
+    "version": "5",
+    "migrations": 32
+  },
+  "secretKey": {
+    "present": true,
+    "fingerprint": "ee88e6da39c503973e7ba408219b9f90",
+    "encryptedSources": 1,
+    "regenerableSecrets": 1,
+    "encryptedSourceTypes": ["git", "notion", "confluence", "s3", "gdrive", "github"]
+  },
+  "counts": {
+    "projects": 1,
+    "documents": 1,
+    "chunks": 1,
+    "uploadSources": 1,
+    "uploadFiles": 1,
+    "uploadBytes": 30,
+    "databaseDumpBytes": 79204
+  },
+  "uploads": [
+    {
+      "project": "handbook",
+      "source": "manuals",
+      "path": "projects/f7d777e1-ed6b-4ad8-9c0a-7c0e614b6262/sources/80841ce1-b546-4b80-9e7a-6d9a2738b0fd/current",
+      "files": 1,
+      "bytes": 30
+    }
+  ]
+}

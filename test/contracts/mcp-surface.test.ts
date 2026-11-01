@@ -9,6 +9,7 @@ import type { McpEra } from '../../src/mcp/era.js';
 import { registerPrompts } from '../../src/mcp/prompts.js';
 import { registerResources } from '../../src/mcp/resources.js';
 import { registerTools, type ToolContext } from '../../src/mcp/tools.js';
+import { recordJson, sortKeys, withoutWording } from '../support/contract-json.js';
 
 /**
  * **The MCP surface as a contract** ([ADR-0137](../../.ssot/ADR.md#adr-0137), Tier 1): what a client is
@@ -103,46 +104,14 @@ async function listings(era: McpEra, methods: string[]): Promise<Listing[]> {
 }
 
 /** Tier 3 out, order out: see the header. Pure, so a mutation of the input is never the cause of a diff. */
-function normalise(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalise);
-  if (value === null || typeof value !== 'object') return value;
-  const out: Record<string, unknown> = {};
-  for (const key of Object.keys(value).sort()) {
-    const inner = (value as Record<string, unknown>)[key];
-    if ((key === 'title' || key === 'description') && typeof inner === 'string') continue;
-    out[key] = key === 'required' && Array.isArray(inner) ? [...(inner as string[])].sort() : normalise(inner);
-  }
-  return out;
-}
+const normalise = (value: unknown): unknown => sortKeys(withoutWording(value));
 
 /** By code unit, not `localeCompare`: the order must not depend on the locale of whoever records the snapshot. */
 const keyOf = (item: { name?: string; uriTemplate?: string }): string => item.name ?? item.uriTemplate ?? '';
 const byName = (items: unknown): unknown[] =>
   [...(items as Array<{ name?: string; uriTemplate?: string }>)].sort((a, b) => (keyOf(a) < keyOf(b) ? -1 : keyOf(a) > keyOf(b) ? 1 : 0));
 
-/**
- * Two-space JSON in the shape Biome's formatter keeps (`npm run lint` checks these files too): objects
- * always one key per line, an array of scalars on one line while it fits, anything else one item per line.
- */
-function render(value: unknown, depth = 0): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  const pad = '  '.repeat(depth + 1);
-  const close = '  '.repeat(depth);
-  if (Array.isArray(value)) {
-    if (value.length === 0) return '[]';
-    if (value.every((item) => item === null || typeof item !== 'object')) {
-      const inline = `[${value.map((item) => JSON.stringify(item)).join(', ')}]`;
-      if (inline.length + close.length + 2 <= 140) return inline;
-    }
-    return `[\n${value.map((item) => `${pad}${render(item, depth + 1)}`).join(',\n')}\n${close}]`;
-  }
-  // What JSON would drop (`undefined`) is dropped here too, as `JSON.stringify` always did.
-  const entries = Object.entries(value).filter(([, inner]) => inner !== undefined);
-  if (entries.length === 0) return '{}';
-  return `{\n${entries.map(([key, inner]) => `${pad}${JSON.stringify(key)}: ${render(inner, depth + 1)}`).join(',\n')}\n${close}}`;
-}
-
-const record = (items: unknown): string => `${render(normalise(byName(items)))}\n`;
+const record = (items: unknown): string => recordJson(withoutWording(byName(items)));
 
 describe('the MCP surface is a contract', () => {
   it('records the tools the legacy era is told about, without structured output', async () => {
