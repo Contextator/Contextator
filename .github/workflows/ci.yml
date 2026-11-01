@@ -130,12 +130,14 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
-  # A reminder, not a gate: a pull request that changes `src/` while `[Unreleased]` has no entry gets
-  # a warning on the run, never a red check — plenty of `src/` changes have nothing a user would
-  # notice. A release pull request, which turns `[Unreleased]` into a version section and leaves it
-  # empty on purpose, is recognised by the version heading it adds and left alone.
+  # Two checks on the changelog, of different strength. The first step is a reminder: a pull request that
+  # changes `src/` while `[Unreleased]` has no entry gets a warning on the run, never a red check — plenty
+  # of `src/` changes have nothing a user would notice. The second is a gate (ADR-0137): a pull request that
+  # changes a contract snapshot or the migration lock must itself add a line to `[Unreleased]`, or the check
+  # is red. A release pull request, which turns `[Unreleased]` into a version section and leaves it empty
+  # on purpose, is recognised by the version heading it adds and left alone by both.
   changelog:
-    name: Changelog reminder
+    name: Changelog
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -163,6 +165,56 @@ jobs:
           else
             echo "[Unreleased] has $entries entries."
           fi
+
+      # A public contract is frozen from 1.0.0 (ADR-0137) and these two paths are where it is written
+      # down, so unlike the reminder above this one is a failure. It looks at what *this pull request*
+      # adds, not at whether `[Unreleased]` happens to be non-empty: an entry left by an earlier change
+      # would otherwise excuse every later one. The entry is a net new "- " line in the `[Unreleased]`
+      # section of CHANGELOG.md in the diff (lines added there minus lines removed from it, so rewording an
+      # existing entry is not a new one); a pull request that leaves the snapshots alone (a dependency
+      # bump included) is not checked.
+      - name: Fail when a contract snapshot changed and this pull request adds no [Unreleased] entry
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # Every diff below is "base...HEAD", which needs the history back to the merge base. Without it
+          # git exits 128 and each of them would read as "nothing changed" or "no entry added": a red check
+          # blaming the changelog for what is a checkout problem.
+          base=$(git merge-base "$BASE_SHA" HEAD) || {
+            echo "::error title=Changelog::The checkout has no history back to the pull request's base commit (check fetch-depth), so the changelog cannot be compared."
+            exit 1
+          }
+          if git diff --quiet "$base" HEAD -- test/contracts/__snapshots__/ test/contracts/migrations.lock.json; then
+            echo "No contract snapshot or migration lock changed, nothing to check."
+            exit 0
+          fi
+          if git diff "$base" HEAD -- CHANGELOG.md | grep -qE '^\+## \[[0-9]+\.[0-9]+\.[0-9]+\]'; then
+            echo "This pull request adds a release section; [Unreleased] may be empty."
+            exit 0
+          fi
+          # Where [Unreleased] sits in a changelog: first line after its heading up to the next version
+          # heading (or the end of the file). Asked of the file as the base has it and as this pull request
+          # leaves it, because the diff's removed lines are numbered in the one and its added lines in the other.
+          section='/^## \[Unreleased\]/ { start = NR + 1; next } /^## \[/ && start && !end { end = NR } END { if (!end) end = NR + 1; print start + 0, end }'
+          old_range=$(git show "$base":CHANGELOG.md | awk "$section")
+          new_range=$(awk "$section" CHANGELOG.md)
+          # -U0, so a hunk header's "-A" and "+C" are the numbers of the first removed and first added line.
+          net=$(git diff -U0 "$base" HEAD -- CHANGELOG.md | awk -v old="$old_range" -v new="$new_range" '
+            BEGIN { split(old, o, " "); split(new, n, " ") }
+            /^@@/ {
+              match($0, /-[0-9]+/); oldline = substr($0, RSTART + 1, RLENGTH - 1) + 0
+              match($0, /\+[0-9]+/); newline = substr($0, RSTART + 1, RLENGTH - 1) + 0
+              next
+            }
+            /^(\+\+\+|---)/ { next }
+            /^\+/ { if (n[1] > 0 && newline >= n[1] && newline < n[2] && substr($0, 2, 2) == "- ") net++; newline++; next }
+            /^-/ { if (o[1] > 0 && oldline >= o[1] && oldline < o[2] && substr($0, 2, 2) == "- ") net--; oldline++ }
+            END { print net + 0 }')
+          if [ "$net" -le 0 ]; then
+            echo "::error file=CHANGELOG.md,title=Changelog::A contract snapshot or the migration lock changed but this pull request adds no new entry under [Unreleased] (rewording an existing one does not count). Describe the change there; label a breaking one BREAKING."
+            exit 1
+          fi
+          echo "This pull request adds $net new entries under [Unreleased]."
 
   integration:
     name: Integration tests against PostgreSQL

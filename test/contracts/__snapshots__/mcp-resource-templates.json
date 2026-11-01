@@ -1,0 +1,7 @@
+[
+  {
+    "mimeType": "text/markdown",
+    "name": "document",
+    "uriTemplate": "contextator://fixture-project/{+path}"
+  }
+]

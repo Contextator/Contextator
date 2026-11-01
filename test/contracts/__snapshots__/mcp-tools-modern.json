@@ -1,0 +1,465 @@
+[
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "cursor": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "limit": {
+          "default": 200,
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "name": "list_topics",
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "after": {
+          "type": ["string", "null"]
+        },
+        "chunkCount": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "documentCount": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "documents": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "chunkCount": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "path": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": ["chunkCount", "path", "title"],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "guidance": {
+          "type": "string"
+        },
+        "nextCursor": {
+          "type": ["string", "null"]
+        },
+        "project": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "label": {
+                "type": ["string", "null"]
+              },
+              "language": {
+                "type": ["string", "null"]
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string"
+              }
+            },
+            "required": ["label", "language", "name", "type"],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "versions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": ["after", "chunkCount", "documentCount", "documents", "nextCursor", "project"],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "from": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "heading": {
+          "maxLength": 512,
+          "type": "string"
+        },
+        "max_tokens": {
+          "default": 4000,
+          "maximum": 20000,
+          "minimum": 200,
+          "type": "integer"
+        },
+        "path": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "to": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["path"],
+      "type": "object"
+    },
+    "name": "read_document",
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "chunks": {
+          "additionalProperties": false,
+          "properties": {
+            "first": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "last": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "total": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": ["first", "last", "total"],
+          "type": "object"
+        },
+        "continueFrom": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "guidance": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "section": {
+          "type": "string"
+        },
+        "sourceModifiedAt": {
+          "type": ["string", "null"]
+        },
+        "sourceUrl": {
+          "type": ["string", "null"]
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "storedTextTruncated": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "tokens": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": ["guidance", "path", "sourceModifiedAt", "sourceUrl", "stale", "storedTextTruncated", "text", "title", "truncated"],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "note": {
+          "maxLength": 1000,
+          "type": "string"
+        },
+        "query": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["query"],
+      "type": "object"
+    },
+    "name": "report_gap",
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "const": "received",
+          "type": "string"
+        }
+      },
+      "required": ["status"],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "limit": {
+          "default": 5,
+          "maximum": 20,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path_prefix": {
+          "maxLength": 512,
+          "type": "string"
+        },
+        "query": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["query"],
+      "type": "object"
+    },
+    "name": "search_docs",
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "closestScore": {
+          "type": "number"
+        },
+        "floor": {
+          "type": "number"
+        },
+        "guidance": {
+          "type": "string"
+        },
+        "omitted": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "project": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "results": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "headingPath": {
+                "type": "string"
+              },
+              "rank": {
+                "maximum": 9007199254740991,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "score": {
+                "type": "number"
+              },
+              "sourceModifiedAt": {
+                "type": ["string", "null"]
+              },
+              "sourceUrl": {
+                "type": ["string", "null"]
+              },
+              "stale": {
+                "type": "boolean"
+              },
+              "text": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              }
+            },
+            "required": ["file", "headingPath", "rank", "score", "sourceModifiedAt", "sourceUrl", "stale", "text", "title"],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "status": {
+          "enum": ["results", "no_match", "below_floor", "not_indexed"],
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": ["guidance", "omitted", "project", "query", "results", "status", "truncated"],
+      "type": "object"
+    }
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "limit": {
+          "default": 50,
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "since": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["since"],
+      "type": "object"
+    },
+    "name": "whats_new",
+    "outputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "changes": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "change": {
+                "enum": ["added", "modified", "removed"],
+                "type": "string"
+              },
+              "changedAt": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              },
+              "sourceModifiedAt": {
+                "type": ["string", "null"]
+              },
+              "sourceUrl": {
+                "type": ["string", "null"]
+              },
+              "title": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": ["change", "changedAt", "path", "title"],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "guidance": {
+          "type": "string"
+        },
+        "historyStartsAt": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "since": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": ["changes", "complete", "historyStartsAt", "project", "since", "truncated"],
+      "type": "object"
+    }
+  }
+]
