@@ -1,6 +1,6 @@
 {
   "generator": "scripts/build-product-facts.ts",
-  "productVersion": "0.6.1",
+  "productVersion": "0.7.0",
   "sourceTypes": ["local", "git", "upload", "notion", "confluence", "web", "s3", "gdrive", "github"],
   "sourceFlavors": ["plain", "obsidian", "notion-export", "openapi"],
   "fileExtensions": {

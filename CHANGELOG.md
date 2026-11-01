@@ -10,17 +10,48 @@ ships, that stops.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-01
+
+### Added
+
+- **`contextator source add`** adds a source of any type to an existing project (`s3`, `notion`, `confluence`, `web`,
+  `gdrive`, `github` and the rest) with `--type` and the type's settings from `--config-json`, `--config-file` or
+  standard input. A source credential is passed only through `--secret-env`, the name of a variable, never on the
+  command line (ADR-0131). The server validates the settings; the command never prints a credential.
+- **`contextator token create --source <name|id>`**, repeatable, issues an MCP token bound to those sources of the
+  project (ADR-0133). Omitted, the token reads the whole project.
+- **Public contracts are pinned by tests** (ADR-0137): the MCP tools (both protocol eras), prompts and resource
+  templates, the HTTP route table, the migration files, the environment variables the server reads, the Helm values
+  tree, the CLI commands and flags, the backup and export manifests (with `manifestVersion` 1 fixtures that must keep
+  reading) and the metric names and labels. A change to one fails the test until the snapshot is re-recorded on purpose,
+  and CI fails a pull request that changes a snapshot without adding an entry under `[Unreleased]`. Nothing at run time
+  changes.
+- Helm chart: `config.piiScan` (`PII_SCAN`, ADR-0130), `config.confluenceMaxPages` and `config.notionMaxPages`
+  (`CONFLUENCE_MAX_PAGES`, `NOTION_MAX_PAGES`), and `config.notionOauthClientId`, `config.notionOauthRedirectUri` and
+  `config.notionOauthClientSecret` (a reference to a Secret you manage, ADR-0129). Each is written to the environment only
+  when set; the defaults leave the application's own.
+
 ### Fixed
 
 - A sync that finished after its source had been edited no longer writes the old settings back. The run's driver state
   (`configPatch`) is merged into the source's current config under a row lock, so a `PATCH` made while a sync ran,
   including a new host and credential, survives; when the host (or, for `github` and `gdrive`, the credential)
-  changed during the run, the run's cursor and validators are not stored at all and the log says so.
+  changed during the run, the run's cursor and validators are not stored at all and the log says so (ADR-0135).
 - A Notion source that uses an internal integration token now fails the sync on a `401` in the middle of the page walk
   instead of treating the page as inaccessible; a full sync no longer drops the pages it did not reach. `403` and `404`
   still skip the one page. OAuth sources were already correct.
 - The `report_gap` `note` parameter description now matches the tool description: it asks what is missing from the
   documentation, not what the pages got wrong.
+- The dashboard selects the project a changed URL hash names. Changing only the hash used to leave the detail pane empty
+  until the project list refreshed; the name in the hash is now resolved to the project, held until the list arrives if
+  needed, and switching from another view to a project hash selects it.
+
+### Changed
+
+- Documentation: the Notion search index delay on a first sync and the GitHub list `ETag` delay are described;
+  `report_gap` is documented as writing to `reported_gaps`, not to the query log; the connector guide names the single
+  `SOURCE_ALLOWED_HOSTS` list; the `whats_new` 200-entry ceiling and its truncation note are explained.
+- Helm chart 2.2.0 (`appVersion` 0.7.0); the new values above are optional and change nothing for an existing release.
 
 ## [0.6.1] - 2026-10-31
 
@@ -1110,7 +1141,8 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Contextator/Contextator/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/Contextator/Contextator/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Contextator/Contextator/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/Contextator/Contextator/compare/v0.4.2...v0.5.0
