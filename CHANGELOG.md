@@ -15,6 +15,8 @@ ships, that stops.
 - **Node.js 24 is now required** (ADR-0138). Both images (`full` and `slim`) are built on `node:24-bookworm-slim`,
   CI runs 24, and `engines.node` is `>=24`. Nothing changes for anyone running the image; an operator running the
   application outside the container on Node 22 has to move to 24.
+- **`unpdf` 2** reads PDFs. Text extraction, the page-count cap and the title taken from the document's metadata
+  work as before; the new major needs Node.js 24, which is why it follows the runtime move.
 
 ## [0.7.0] - 2026-11-01
 
