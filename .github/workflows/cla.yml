@@ -96,9 +96,9 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          # The same floor as ci.yml and the image: ADR-0056. Unlike the Action this replaced, which
+          # The same floor as ci.yml and the image: ADR-0138. Unlike the Action this replaced, which
           # declared a runtime GitHub had already stopped honouring, this number is ours to move.
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - run: npm ci --no-audit --no-fund

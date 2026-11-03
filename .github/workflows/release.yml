@@ -65,7 +65,7 @@ jobs:
   # One job, not two. It used to be `verify` building amd64 and asserting against it, then a
   # separate `publish` job building both architectures over again and pushing that — connected only
   # by `cache-from: type=gha`, and a remote cache is allowed to evict between two jobs, and
-  # `Dockerfile`'s base images (`node:22-bookworm-slim`, `pgvector/pgvector:pg16`) are mutable tags
+  # `Dockerfile`'s base images (`node:24-bookworm-slim`, `pgvector/pgvector:pg16`) are mutable tags
   # that can move between them too. Either one meant the image actually pushed to Docker Hub was
   # never, itself, the image the assertions below ran against — only one built the same way.
   #
@@ -194,7 +194,7 @@ jobs:
       # Only reached once every check above has passed. `docker/login-action` is pinned to a commit
       # and not a tag for the same reason `cla.yml` pins the actions in its own token-holding job: it
       # is handed `DOCKERHUB_TOKEN`, a personal access token scoped read/write/delete against the
-      # `contextator` Docker Hub organisation, and a tag is a name its owner can move. Resolve `v4.6.0`
+      # `contextator` Docker Hub organisation, and a tag is a name its owner can move. Resolve `v4.7.0`
       # again to move this, and read the diff first.
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:

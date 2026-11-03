@@ -9,7 +9,7 @@
     "contextator": "dist/cli.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=24"
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
@@ -69,7 +69,7 @@
     "@modelcontextprotocol/client": "~2.4.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@testcontainers/postgresql": "^12.2.1",
-    "@types/node": "^22.0.0",
+    "@types/node": "^24.0.0",
     "@types/pg": "^8.15.0",
     "@types/picomatch": "^4.0.0",
     "@types/turndown": "^5.0.6",

@@ -34,8 +34,8 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          # The image runs node:22-bookworm-slim, and since ADR-0056 so does the engines floor.
-          node-version: 22
+          # The image runs node:24-bookworm-slim, and since ADR-0138 so does the engines floor.
+          node-version: 24
           cache: npm
 
       - run: npm ci --no-audit --no-fund
@@ -75,8 +75,8 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          # The image runs node:22-bookworm-slim, and since ADR-0056 so does the engines floor.
-          node-version: 22
+          # The image runs node:24-bookworm-slim, and since ADR-0138 so does the engines floor.
+          node-version: 24
           cache: npm
 
       - run: npm ci --no-audit --no-fund
@@ -231,7 +231,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - run: npm ci --no-audit --no-fund
@@ -498,7 +498,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: steps.relevant.outputs.run == 'true'
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       # Keyed on the model and the dtype, and deliberately not on package-lock.json: the contents of
