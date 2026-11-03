@@ -104,7 +104,7 @@ describe('Dockerfile', () => {
   const fullStageAt = dockerfile.indexOf('FROM pgvector/pgvector:pg16 AS full');
 
   it('gives the slim stage no PostgreSQL, and tells its entrypoint so', () => {
-    const slim = dockerfile.slice(dockerfile.indexOf('FROM node:22-bookworm-slim AS slim'), dockerfile.indexOf('# ---- full runtime'));
+    const slim = dockerfile.slice(dockerfile.indexOf('FROM node:24-bookworm-slim AS slim'), dockerfile.indexOf('# ---- full runtime'));
     expect(slim).toContain('CONTEXTATOR_EMBEDDED_POSTGRES=0');
     // The base image is the plain Node one; the postgres base belongs to `full` alone.
     expect(slim).not.toContain('pgvector/pgvector');
@@ -328,7 +328,7 @@ describe('the contextator command in the image', () => {
   });
 
   it('is on PATH in both image targets, running the same file the entrypoint runs', () => {
-    const slim = dockerfile.slice(dockerfile.indexOf('FROM node:22-bookworm-slim AS slim'), dockerfile.indexOf('# ---- full runtime'));
+    const slim = dockerfile.slice(dockerfile.indexOf('FROM node:24-bookworm-slim AS slim'), dockerfile.indexOf('# ---- full runtime'));
     const full = dockerfile.slice(dockerfile.indexOf('FROM pgvector/pgvector:pg16 AS full'));
     for (const stage of [slim, full]) {
       expect(stage).toContain('exec node /app/dist/cli.js "$@"');

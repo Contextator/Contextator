@@ -163,7 +163,7 @@ Everything else — the protocol eras, the source types, access modes and file t
 
 ## How It Works
 
-Stack: TypeScript · Node.js 22+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/server` (MCP TypeScript SDK 2.x) · `@huggingface/transformers` · `unpdf` / `mammoth` / `turndown`.
+Stack: TypeScript · Node.js 24+ · Fastify 5 · PostgreSQL 16 + pgvector · Drizzle ORM · `@modelcontextprotocol/server` (MCP TypeScript SDK 2.x) · `@huggingface/transformers` · `unpdf` / `mammoth` / `turndown`.
 
 Each run syncs every source, hashes files to skip what has not changed, converts and chunks what has
 (frontmatter-aware, split at headings, a breadcrumb kept per chunk), then embeds each chunk and writes it

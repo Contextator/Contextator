@@ -12,7 +12,7 @@ Read [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) too. Security problems do not go
 
 ## Running it
 
-You need Node.js 22 or newer — what the image runs and what CI has always used — and a container runtime for the database.
+You need Node.js 24 or newer — what the image runs and what CI has always used — and a container runtime for the database.
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d   # PostgreSQL 16 + pgvector on localhost:5432, nothing else
@@ -228,7 +228,7 @@ SECURITY.md                   how to report a vulnerability, and what is documen
 CODE_OF_CONDUCT.md            Contributor Covenant 2.1
 LICENSE                       AGPL-3.0-or-later, verbatim; copied into the image and served at /license.txt
 docs/demo/                    sample documentation (English, Turkish, MDX)
-Dockerfile                    two images over one build: `full` (postgres:16 + pgvector + Node 22 + the app, the default target) and `slim` (the app alone)
+Dockerfile                    two images over one build: `full` (postgres:16 + pgvector + Node 24 + the app, the default target) and `slim` (the app alone)
 docker/entrypoint.sh          starts PostgreSQL unless DATABASE_URL names one, then the app; stops both in order on SIGTERM
 docker-compose.yml            the `contextator` container and its volumes; embedded PostgreSQL, or an external one when .env names it
 docker-compose.build.yml      overlay for docker-compose.yml that builds the image from source instead of pulling it

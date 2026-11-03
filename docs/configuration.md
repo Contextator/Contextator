@@ -412,7 +412,7 @@ uses), in a fresh process, against a build of `dist/`. *Peak RSS* is `process.re
 process with no cap set, which includes the thread, its libraries and the server-side client but not the rest of
 the server. *Smallest cap that converts* is the lowest of a ladder (4, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192,
 256, 384, 512 MiB, whichever apply) at which the same file came back converted instead of refused, so it is an
-upper bound within one step. Measured on macOS arm64 with Node 24.20 (the image runs Node 22; expect the same order
+upper bound within one step. Measured on macOS arm64 with Node 24.20 (the image runs Node 24 too; expect the same order
 of magnitude, not the same digits).
 
 | File | Input | Markdown out | Peak RSS (no cap) | Smallest cap that converts | Time (no cap) |

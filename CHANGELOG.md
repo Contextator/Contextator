@@ -10,6 +10,12 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Changed
+
+- **Node.js 24 is now required** (ADR-0138). Both images (`full` and `slim`) are built on `node:24-bookworm-slim`,
+  CI runs 24, and `engines.node` is `>=24`. Nothing changes for anyone running the image; an operator running the
+  application outside the container on Node 22 has to move to 24.
+
 ## [0.7.0] - 2026-11-01
 
 ### Added
