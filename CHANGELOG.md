@@ -10,6 +10,8 @@ could change a public contract in a minor version.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-04
+
 ### Added
 
 - **A major image tag** (`1`, `1-slim`) follows the newest release of that major, for installations that take every
@@ -20,6 +22,10 @@ could change a public contract in a minor version.
   from a `registry` job after the images, signing in with the run's GitHub OIDC identity instead of a maintainer's
   personal token. The job stops when `server.json`'s `version` does not match the tag; a pre-release tag publishes
   nothing to the registry.
+- **1.0.0 fixtures for the compatibility promise** (ADR-0137). `test/integration/fixtures/schema-1.0.sql` is the database
+  a 1.0.0 start leaves behind, with a few rows; the integration suite loads it, runs the bootstrap and requires the
+  schema a fresh database gets. `test/contracts/fixtures/` gains the backup and export manifests 1.0.0 writes, beside
+  the ones 0.7 wrote, which stay. Tests only; nothing at run time changes.
 
 ### Changed
 
@@ -1191,7 +1197,8 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Contextator/Contextator/compare/v0.7.0...v1.0.0
 [0.7.0]: https://github.com/Contextator/Contextator/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/Contextator/Contextator/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Contextator/Contextator/compare/v0.5.0...v0.6.0

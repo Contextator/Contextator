@@ -17,10 +17,11 @@ import { recordJson, withoutWording } from '../support/contract-json.js';
  *   `manifestVersion`, the names of the entries inside the tarball, and `z.toJSONSchema(Manifest, { io:
  *   'input' })`: every field, its type, bounds, whether it is optional or has a default. `title` and
  *   `description` are dropped (Tier 3). Keys are sorted.
- * - `fixtures/backup-manifest-v1.json` and `fixtures/export-manifest-v1.json` — **read-compatibility.**
- *   One real manifest of each, `manifestVersion: 1`, written by the code as it stands. Each must be read by
- *   today's parser *and come back whole*: the parsed value equals the file, so a field the schema stopped
- *   knowing (which zod would strip without a word) fails here even though the file still "parses".
+ * - `fixtures/backup-manifest-v1*.json` and `fixtures/export-manifest-v1*.json` — **read-compatibility.**
+ *   One real manifest of each per release that wrote them, `manifestVersion: 1`: `…-v1.json` as the 0.7
+ *   development line wrote it, `…-v1-1.0.0.json` as 1.0.0 wrote it. Each must be read by today's parser *and
+ *   come back whole*: the parsed value equals the file, so a field the schema stopped knowing (which zod would
+ *   strip without a word) fails here even though the file still "parses".
  *
  * **How the fixtures were made — they are not hand-written.** Against a PostgreSQL 16 + pgvector database
  * from the integration harness, with one project (`handbook`), an upload source with one Markdown file, a
@@ -31,8 +32,14 @@ import { recordJson, withoutWording } from '../support/contract-json.js';
  * product version of the checkout that wrote them (`0.6.1`, in the 0.7 development line) and the
  * database/instance facts of that run. Nothing was edited by hand.
  *
- * **They are kept for the whole of 1.x.** At 1.0.0 the archives that release writes are added beside these
- * (`…-v1.json` stay: they are what 0.7 wrote and 1.x promises to read); this file only builds the mechanism.
+ * **The `…-v1-1.0.0.json` pair was made the same way, with the same seed, from the 1.0.0 checkout** (product
+ * version `1.0.0`, PostgreSQL 16.15 container, a project `handbook` with an upload source `manuals` holding one
+ * 30-byte Markdown file and one indexed document, and a git source `private-repo` with an encrypted token and
+ * webhook secret); only the identifiers and timestamps of that run differ.
+ *
+ * **They are kept for the whole of 1.x.** The archives 1.0.0 writes sit beside the ones 0.7 wrote
+ * (`…-v1.json` stay: they are what 0.7 wrote and 1.x promises to read). A later 1.x that writes a new
+ * archive shape adds its own pair; no fixture is replaced.
  *
  * Re-record the schema snapshots after a deliberate change, then review the diff like any other change:
  *
@@ -57,7 +64,7 @@ const schemaOf = (manifest: z.ZodType): unknown => withoutWording(z.toJSONSchema
 describe('the read-compatibility fixtures are pinned', () => {
   it('records the hash of every fixture file', async () => {
     const names = readdirSync(FIXTURES).sort();
-    expect(names).toEqual(['backup-manifest-v1.json', 'export-manifest-v1.json']);
+    expect(names).toEqual(['backup-manifest-v1-1.0.0.json', 'backup-manifest-v1.json', 'export-manifest-v1-1.0.0.json', 'export-manifest-v1.json']);
     const hashes = Object.fromEntries(
       names.map((name) => [
         name,
@@ -84,8 +91,11 @@ describe('the backup manifest is a contract', () => {
     ).toMatchFileSnapshot(path.join(SNAPSHOTS, 'backup-manifest.json'));
   });
 
-  it('reads the manifestVersion 1 archive 0.7 wrote, and loses no field of it', () => {
-    const raw = fixture('backup-manifest-v1.json') as { kind: string; manifestVersion: number };
+  it.each([
+    ['0.7', 'backup-manifest-v1.json'],
+    ['1.0.0', 'backup-manifest-v1-1.0.0.json'],
+  ])('reads the manifestVersion 1 archive %s wrote, and loses no field of it', (_release, name) => {
+    const raw = fixture(name) as { kind: string; manifestVersion: number };
     expect(raw.kind).toBe(backup.MANIFEST_KIND);
     expect(raw.manifestVersion).toBe(1);
     expect(backup.parseManifest(raw)).toEqual(raw);
@@ -114,8 +124,11 @@ describe('the project export manifest is a contract', () => {
     ).toMatchFileSnapshot(path.join(SNAPSHOTS, 'export-manifest.json'));
   });
 
-  it('reads the manifestVersion 1 export 0.7 wrote, and loses no field of it', () => {
-    const raw = fixture('export-manifest-v1.json') as { kind: string; manifestVersion: number };
+  it.each([
+    ['0.7', 'export-manifest-v1.json'],
+    ['1.0.0', 'export-manifest-v1-1.0.0.json'],
+  ])('reads the manifestVersion 1 export %s wrote, and loses no field of it', (_release, name) => {
+    const raw = fixture(name) as { kind: string; manifestVersion: number };
     expect(raw.kind).toBe(transfer.MANIFEST_KIND);
     expect(raw.manifestVersion).toBe(1);
     expect(transfer.Manifest.parse(raw)).toEqual(raw);
