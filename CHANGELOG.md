@@ -10,6 +10,17 @@ ships, that stops.
 
 ## [Unreleased]
 
+### Added
+
+- **A major image tag** (`1`, `1-slim`) follows the newest release of that major, for installations that take every
+  `1.x` update under the compatibility policy (ADR-0137), whose announced exceptions still apply — the deprecated
+  legacy HTTP+SSE transport and, for an installation run outside the container, the Node.js base. It is
+  published from `1.0.0` on; `0.x` releases get none, since a `0.y.z` minor may still change a public contract.
+- **The MCP Registry entry is published by the release workflow.** A final-release tag now publishes `server.json`
+  from a `registry` job after the images, signing in with the run's GitHub OIDC identity instead of a maintainer's
+  personal token. The job stops when `server.json`'s `version` does not match the tag; a pre-release tag publishes
+  nothing to the registry.
+
 ### Changed
 
 - **The legacy HTTP+SSE transport now announces its removal date** (ADR-0139). Every legacy SSE response — the
