@@ -105,10 +105,44 @@ const requestIdOf = (body: unknown): string | number | null => {
 };
 
 /**
- * Response headers a cross-origin browser MCP client may read (CORS `exposedHeaders`, src/server.ts).
- * `deprecation` is there so a browser client of the legacy SSE transport sees the ADR-0096 signal too.
+ * When the legacy HTTP+SSE transport was announced deprecated and when it is scheduled to go
+ * ([ADR-0139](../../.ssot/ADR.md#adr-0139), building on ADR-0096). One place: the response headers below,
+ * the dashboard notice (`public/legacy-sse.js` carries the same two values, and `test/legacy-sse-sunset.test.ts`
+ * fails if the copies drift) and the tests all read these.
  */
-export const MCP_EXPOSED_HEADERS = ['mcp-session-id', 'mcp-protocol-version', 'deprecation', 'retry-after'];
+export const LEGACY_SSE_DEPRECATED_AT = '2026-10-02T00:00:00Z';
+export const LEGACY_SSE_SUNSET_AT = '2027-10-02T00:00:00Z';
+/** `docs/compatibility.md` at its public address; the anchor is the "Legacy HTTP+SSE" section heading. */
+export const LEGACY_SSE_DOCS_URL = 'https://github.com/Contextator/Contextator/blob/main/docs/compatibility.md#legacy-httpsse';
+
+/**
+ * The three headers every legacy SSE response carries: `Deprecation` as an RFC 9745 structured-field date
+ * (`@` + Unix seconds), `Sunset` as an RFC 8594 HTTP-date, and `Link` pointing both relations at the docs.
+ */
+export const legacySseHeaders = (): { deprecation: string; sunset: string; link: string } => ({
+  deprecation: `@${Math.floor(Date.parse(LEGACY_SSE_DEPRECATED_AT) / 1000)}`,
+  sunset: new Date(LEGACY_SSE_SUNSET_AT).toUTCString(),
+  link: `<${LEGACY_SSE_DOCS_URL}>; rel="deprecation", <${LEGACY_SSE_DOCS_URL}>; rel="sunset"`,
+});
+
+/**
+ * Response headers a cross-origin browser MCP client may read (CORS `exposedHeaders`, src/server.ts).
+ * `deprecation`, `sunset` and `link` are there so a browser client of the legacy SSE transport sees the
+ * ADR-0096 / ADR-0139 signal too.
+ */
+export const MCP_EXPOSED_HEADERS = ['mcp-session-id', 'mcp-protocol-version', 'deprecation', 'sunset', 'link', 'retry-after'];
+
+/**
+ * The CORS options `src/server.ts` registers `@fastify/cors` with, built in one place so the integration
+ * instance (`test/integration/support/mcp-instance.ts`) exercises the product's own setting and not a copy.
+ * No `credentials: true`: ALLOWED_ORIGINS exists for browser MCP clients, and granting them credentialed
+ * reads of /api/* would hand them the dashboard of whoever is signed in.
+ */
+export const mcpCorsOptions = (allowedOrigins: string[]) => ({
+  origin: allowedOrigins.length > 0 ? allowedOrigins : false,
+  exposedHeaders: MCP_EXPOSED_HEADERS,
+  allowedHeaders: ['content-type', 'authorization', 'accept', 'mcp-session-id', 'mcp-protocol-version', 'last-event-id'],
+});
 
 export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { ctx }) => {
   const { config, sessions, log } = ctx;
@@ -132,9 +166,14 @@ export const mcpRoutes: FastifyPluginAsync<{ ctx: AppContext }> = async (app, { 
     // [ADR-0096](../../.ssot/ADR.md#adr-0096): every legacy SSE response says it is deprecated — the
     // 200 stream, the 202 of `/messages` and the 401/403/404 of this hook alike. Set on the raw
     // response so it survives `reply.hijack()`: Node merges it into whichever `writeHead` follows,
-    // the SDK's or Fastify's. No `Sunset`: there is no date to announce, and the behaviour is unchanged.
+    // the SDK's or Fastify's. [ADR-0139](../../.ssot/ADR.md#adr-0139) adds the date: `Deprecation` is the
+    // announcement instant, `Sunset` the removal instant, `Link` the page that explains both. Only the headers
+    // and the dashboard text carry the date; the behaviour is unchanged until the sunset release.
     if (isLegacySseRequest(req.method, req.routeOptions.url, headerValue(req.headers['mcp-session-id']))) {
-      reply.raw.setHeader('Deprecation', 'true');
+      const legacy = legacySseHeaders();
+      reply.raw.setHeader('Deprecation', legacy.deprecation);
+      reply.raw.setHeader('Sunset', legacy.sunset);
+      reply.raw.setHeader('Link', legacy.link);
     }
 
     const origin = req.headers.origin;

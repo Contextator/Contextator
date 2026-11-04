@@ -24,7 +24,7 @@ import { exposureWarning, httpServerOptions, warnAboutProxyConfiguration } from 
 import { bootstrapDatabase, SchemaMismatchError } from './db/bootstrap.js';
 import { serializeRequest } from './log-redact.js';
 import { oauthRoutes } from './mcp/oauth-routes.js';
-import { MCP_EXPOSED_HEADERS, mcpRoutes } from './mcp/router.js';
+import { mcpCorsOptions, mcpRoutes } from './mcp/router.js';
 import { SessionRegistry } from './mcp/sessions.js';
 import { newChunkBudgetState, verifyChunkBudget } from './services/chunk-budget.js';
 import { createEmbeddingProvider, loadEmbeddingTokenizer } from './services/embeddings/index.js';
@@ -163,13 +163,8 @@ async function main(): Promise<void> {
     startedAt: Date.now(),
   };
 
-  // No `credentials: true`: ALLOWED_ORIGINS exists for browser MCP clients, and granting them
-  // credentialed reads of /api/* would hand them the dashboard of whoever is signed in.
-  await app.register(cors, {
-    origin: config.ALLOWED_ORIGINS.length > 0 ? config.ALLOWED_ORIGINS : false,
-    exposedHeaders: MCP_EXPOSED_HEADERS,
-    allowedHeaders: ['content-type', 'authorization', 'accept', 'mcp-session-id', 'mcp-protocol-version', 'last-event-id'],
-  });
+  // Options live beside `MCP_EXPOSED_HEADERS` (src/mcp/router.ts); the integration instance registers the same ones.
+  await app.register(cors, mcpCorsOptions(config.ALLOWED_ORIGINS));
   await app.register(cookie); // the session cookie; registered on the root app so every plugin can read it
   await app.register(fastifyStatic, {
     root: fileURLToPath(new URL('../public', import.meta.url)), // works from src/ (tsx) and dist/ (node)

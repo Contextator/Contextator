@@ -16,15 +16,31 @@ import { seedProject, startMcpInstance, type LiveInstance } from './support/mcp-
  *
  * 1. A static MCP token may be minted with a lifetime. Once it has passed, a `token` project answers
  *    `401` — and a token minted without one keeps working. The list says when each one ends.
- * 2. Every legacy HTTP+SSE response says `Deprecation: true` and no Streamable HTTP response does;
- *    nothing says `Sunset` ([ADR-0096](../../.ssot/ADR.md#adr-0096)). The legacy transport otherwise
- *    behaves exactly as before: a client connects, lists the tools and calls one.
+ * 2. Every legacy HTTP+SSE response carries `Deprecation`, `Sunset` and `Link` (RFC 9745 / RFC 8594) and no
+ *    Streamable HTTP response does ([ADR-0096](../../.ssot/ADR.md#adr-0096), ADR-0139). The legacy transport
+ *    otherwise behaves exactly as before: a client connects, lists the tools and calls one.
  * 3. After a legacy SSE client has been seen, the admin API says when, per project — the signal the
  *    dashboard warns from. Streamable HTTP traffic never sets it.
  */
 
 const baseUrl = inject('postgresBaseUrl');
 const ADMIN_TOKEN = 'an-admin-token-for-the-token-expiry-suite';
+/** An allowed browser origin, to read what CORS lets a cross-origin MCP client see. */
+const CLIENT_ORIGIN = 'https://client.example';
+
+/** The exact values ADR-0139 announces; literals here, so a change of the constants has to change this test too. */
+const DEPRECATION = '@1790899200';
+const SUNSET = 'Sat, 02 Oct 2027 00:00:00 GMT';
+const LINK =
+  '<https://github.com/Contextator/Contextator/blob/main/docs/compatibility.md#legacy-httpsse>; rel="deprecation", ' +
+  '<https://github.com/Contextator/Contextator/blob/main/docs/compatibility.md#legacy-httpsse>; rel="sunset"';
+
+/** Asserts the three legacy headers, with their full values. */
+function expectLegacyHeaders(res: Response): void {
+  expect(res.headers.get('deprecation')).toBe(DEPRECATION);
+  expect(res.headers.get('sunset')).toBe(SUNSET);
+  expect(res.headers.get('link')).toBe(LINK);
+}
 
 const HANDBOOK = `# Delivery guide
 
@@ -116,7 +132,7 @@ beforeAll(async () => {
   legacy = await seedProject(database.db, 'legacy', { path: 'handbook/guide.md', body: HANDBOOK });
   modern = await seedProject(database.db, 'modern', { path: 'handbook/guide.md', body: HANDBOOK });
 
-  live = await startMcpInstance(database, { dataDir: path.join(root, '.data'), docRoot: root, env: { ADMIN_TOKEN } });
+  live = await startMcpInstance(database, { dataDir: path.join(root, '.data'), docRoot: root, env: { ADMIN_TOKEN, ALLOWED_ORIGINS: CLIENT_ORIGIN } });
 });
 
 afterAll(async () => {
@@ -186,12 +202,13 @@ describe('a static MCP token with a lifetime', () => {
   });
 });
 
-describe('the legacy SSE transport (ADR-0096)', () => {
+describe('the legacy SSE transport (ADR-0096, ADR-0139)', () => {
   it('Streamable HTTP answers carry neither Deprecation nor Sunset', async () => {
     const init = await initialize(modern);
     expect(init.status).toBe(200);
     expect(init.headers.get('deprecation')).toBeNull();
     expect(init.headers.get('sunset')).toBeNull();
+    expect(init.headers.get('link')).toBeNull();
     const sessionId = init.headers.get('mcp-session-id')!;
     expect(sessionId).toBeTruthy();
     await init.text();
@@ -205,6 +222,7 @@ describe('the legacy SSE transport (ADR-0096)', () => {
     expect(stream.status).toBe(200);
     expect(stream.headers.get('deprecation')).toBeNull();
     expect(stream.headers.get('sunset')).toBeNull();
+    expect(stream.headers.get('link')).toBeNull();
     controller.abort();
 
     const end = await fetch(`${live.origin}/mcp/${modern.name}`, {
@@ -213,15 +231,15 @@ describe('the legacy SSE transport (ADR-0096)', () => {
     });
     expect(end.headers.get('deprecation')).toBeNull();
     expect(end.headers.get('sunset')).toBeNull();
+    expect(end.headers.get('link')).toBeNull();
   });
 
-  it('marks the SSE stream and its /messages answers Deprecation: true, and nothing Sunset', async () => {
+  it('marks the SSE stream and its /messages answers Deprecation, Sunset and Link', async () => {
     const { res, endpoint, abort } = await openSseStream(legacy);
     try {
       expect(res.status).toBe(200);
       expect(res.headers.get('content-type')).toMatch(/^text\/event-stream/);
-      expect(res.headers.get('deprecation')).toBe('true');
-      expect(res.headers.get('sunset')).toBeNull();
+      expectLegacyHeaders(res);
 
       const message = await fetch(new URL(endpoint, live.origin), {
         method: 'POST',
@@ -229,8 +247,7 @@ describe('the legacy SSE transport (ADR-0096)', () => {
         body: JSON.stringify(INITIALIZE),
       });
       expect(message.status).toBe(202);
-      expect(message.headers.get('deprecation')).toBe('true');
-      expect(message.headers.get('sunset')).toBeNull();
+      expectLegacyHeaders(message);
     } finally {
       abort();
     }
@@ -242,21 +259,26 @@ describe('the legacy SSE transport (ADR-0096)', () => {
       body: JSON.stringify(INITIALIZE),
     });
     expect(unknown.status).toBe(404);
-    expect(unknown.headers.get('deprecation')).toBe('true');
-    expect(unknown.headers.get('sunset')).toBeNull();
+    expectLegacyHeaders(unknown);
 
     const refused = await fetch(`${live.origin}/mcp/${guarded.name}`, { headers: { accept: 'text/event-stream' } });
     expect(refused.status).toBe(401);
-    expect(refused.headers.get('deprecation')).toBe('true');
-    expect(refused.headers.get('sunset')).toBeNull();
+    expectLegacyHeaders(refused);
+  });
+
+  it('lets an allowed browser origin read Deprecation, Sunset and Link across origins', async () => {
+    const refused = await fetch(`${live.origin}/mcp/${guarded.name}`, { headers: { accept: 'text/event-stream', origin: CLIENT_ORIGIN } });
+    expect(refused.status).toBe(401);
+    expectLegacyHeaders(refused);
+    const exposed = (refused.headers.get('access-control-expose-headers') ?? '').split(',').map((h) => h.trim().toLowerCase());
+    expect(exposed).toEqual(expect.arrayContaining(['deprecation', 'sunset', 'link']));
   });
 
   it('answers a HEAD of the SSE stream with its head alone, and does not count it as a legacy client', async () => {
     const probe = await fetch(`${live.origin}/mcp/${modern.name}`, { method: 'HEAD' });
     expect(probe.status).toBe(200);
     expect(probe.headers.get('content-type')).toMatch(/^text\/event-stream/);
-    expect(probe.headers.get('deprecation')).toBe('true');
-    expect(probe.headers.get('sunset')).toBeNull();
+    expectLegacyHeaders(probe);
 
     // A stamp is written in the background; give one the time it would need before asserting none came.
     await new Promise((resolve) => setTimeout(resolve, 500));
