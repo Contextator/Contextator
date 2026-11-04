@@ -29,6 +29,11 @@ Point `EMBEDDING_BASE_URL` at it, with the path, and name the model that server 
 `OPENAI_EMBEDDING_MODEL`. `OPENAI_API_KEY` is optional with a base URL; when set it is sent as a bearer
 token. `EMBEDDING_DIMENSIONS` must match the model's vector size.
 
+`OPENAI_BASE_URL` is **deprecated** (from `1.0.0`): it still routes the requests when `EMBEDDING_BASE_URL` is empty,
+but the server logs one warning at startup while that is what it does. Set `EMBEDDING_BASE_URL` instead. Moving
+changes the embedding model id once (unless the URL is `api.openai.com`), so each project has to be re-indexed. The
+variable is removed no sooner than `2.0`.
+
 ```bash
 # Ollama
 EMBEDDING_PROVIDER=openai
@@ -165,13 +170,11 @@ the rule and the host, and the list that would admit it.
 | `SOURCE_ALLOWED_HOSTS` | Confluence, S3 and the GitHub Enterprise Server host of a GitHub source | The list for sources whose host an operator names and which call an API |
 | `WEB_ALLOWED_HOSTS` | web sources | A host trusted for an API call is not, by that fact, a host an editor may crawl |
 | `GIT_ALLOWED_HOSTS` | git sources | Independent of the other lists; a GitHub Enterprise Server host that is both cloned and read through the API is listed in both |
-| `CONFLUENCE_ALLOWED_HOSTS` | Confluence only | **Deprecated**: see below |
 
-`CONFLUENCE_ALLOWED_HOSTS` keeps working: a Confluence source may reach every host in it and every host in
-`SOURCE_ALLOWED_HOSTS`. While it is non-empty the server logs one deprecation warning at startup. Move its hosts
-to `SOURCE_ALLOWED_HOSTS`; the old setting is removed no earlier than `1.0.0`, and from then a non-empty value
-stops the server from starting, with a message naming `SOURCE_ALLOWED_HOSTS`. With the Helm chart the settings
-are `config.sourceAllowedHosts` and `config.confluenceAllowedHosts`.
+`CONFLUENCE_ALLOWED_HOSTS` was **removed in `1.0.0`**. A non-empty value stops the server from starting, with a
+message naming `SOURCE_ALLOWED_HOSTS`; move its hosts there before upgrading. An empty or unset value is accepted.
+With the Helm chart the setting is `config.sourceAllowedHosts`; the chart's `config.confluenceAllowedHosts` was
+removed in chart `3.0.0`.
 
 ## Object ceiling for S3 sources
 
@@ -444,3 +447,11 @@ Two things in the measurements are worth knowing before choosing a number:
   is what the 400 MiB allowance in the formula is for, and why a cap alone does not make a 512 MiB container safe.
 
 [File types](file-types.md) lists what each type keeps and drops.
+
+## Where a backup stages its files
+
+`BACKUP_STAGING_DIR` is a supported setting. `npm run backup` builds the dump in a scratch directory before it
+writes the archive, and this variable names the directory that scratch directory is created in. Unset or empty, it is
+`DATA_DIR`. The scheduled-backup sidecar in `docker-compose.backup.yml` and the chart's backup Job set it to a
+directory of their own, so that cleaning up after an interrupted run never touches a manual backup's files; the
+[README](../README.md#data-and-persistence) shows when to clear it for an on-demand backup.

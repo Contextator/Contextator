@@ -60,7 +60,7 @@ it once; make the endpoint **open** from the project page if its documents shoul
 anyone who can reach the URL.
 
 Full walkthrough — what to set in `.env` before the first start, and what each line of that command
-does: [wiki/Installation](https://github.com/Contextator/Contextator/wiki/Installation).
+does: [Installation](https://contextator.com/en/docs/installation/).
 
 **Create the first account.** Open `http://localhost:3444/setup` and enter the `SETUP_CODE` — set
 with `-e SETUP_CODE=...` in the `docker run` command above, or as a line in `.env` for Compose. The
@@ -74,11 +74,12 @@ start's log will not work.
 | Tag | Meaning |
 |-----|---------|
 | `latest` | The most recent stable release. Never points at a pre-release (`-rc.*`, `-beta.*`, …). |
-| `0.7` | The latest patch release inside the `0.7.x` minor line. Moves as `0.7.x` releases ship. |
-| `0.7.0` | One exact release. Immutable — always the same image. |
-| `…-slim` | The same release **without the embedded PostgreSQL** — `latest-slim`, `0.7-slim`, `0.7.0-slim`. Every tag from `0.2.0` on has one. |
+| `1` | From `1.0.0` on: the newest release of the `1.x` major line. Moves as `1.x` releases ship, and the public contracts of the [compatibility policy](https://github.com/Contextator/Contextator/blob/main/docs/compatibility.md) hold across it, with that policy's announced exception, the deprecated legacy HTTP+SSE transport; pin an exact tag if you depend on it; `0.x` has no such tag. |
+| `1.0` | The latest patch release inside the `1.0.x` minor line. Moves as `1.0.x` releases ship. |
+| `1.0.0` | One exact release. Immutable — always the same image. |
+| `…-slim` | The same release **without the embedded PostgreSQL** — `latest-slim`, `1-slim`, `1.0-slim`, `1.0.0-slim`. Every tag from `0.2.0` on has one. |
 
-Pin `0.7.0`-style tags for anything you upgrade deliberately; use `latest` only where an unattended
+Pin `1.0.0`-style tags for anything you upgrade deliberately; use `latest` only where an unattended
 minor/patch bump is acceptable.
 
 ## Bringing your own PostgreSQL
@@ -135,7 +136,7 @@ ones most installs touch first.
 | `AUTH_COOKIE_SECURE` | `auto` | Set `1` behind HTTPS, `0` for a plain-HTTP LAN install, or the browser drops the session cookie. |
 
 Every variable, including search tuning, upload limits, the audit log and running behind a reverse
-proxy: [wiki/Configuration](https://github.com/Contextator/Contextator/wiki/Configuration).
+proxy: [Configuration](https://contextator.com/en/docs/configuration/).
 
 ## License
 
@@ -152,8 +153,8 @@ license.
 ## More
 
 - Something not starting, not indexing, or not answering the way you expect:
-  [wiki/Troubleshooting](https://github.com/Contextator/Contextator/wiki/Troubleshooting) and
-  [wiki/FAQ](https://github.com/Contextator/Contextator/wiki/FAQ).
+  [Troubleshooting](https://contextator.com/en/docs/troubleshooting/) and
+  [FAQ](https://contextator.com/en/docs/faq/).
 - What shipped in this tag and every one before it:
   [CHANGELOG.md](https://github.com/Contextator/Contextator/blob/main/CHANGELOG.md).
 - Full README, source, issues and discussions:

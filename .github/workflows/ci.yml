@@ -166,7 +166,7 @@ jobs:
             echo "[Unreleased] has $entries entries."
           fi
 
-      # A public contract is frozen from 1.0.0 (ADR-0137) and these two paths are where it is written
+      # A public contract is frozen from 1.0.0 (ADR-0137) and these three paths are where it is written
       # down, so unlike the reminder above this one is a failure. It looks at what *this pull request*
       # adds, not at whether `[Unreleased]` happens to be non-empty: an entry left by an earlier change
       # would otherwise excuse every later one. The entry is a net new "- " line in the `[Unreleased]`
@@ -184,7 +184,7 @@ jobs:
             echo "::error title=Changelog::The checkout has no history back to the pull request's base commit (check fetch-depth), so the changelog cannot be compared."
             exit 1
           }
-          if git diff --quiet "$base" HEAD -- test/contracts/__snapshots__/ test/contracts/migrations.lock.json; then
+          if git diff --quiet "$base" HEAD -- test/contracts/__snapshots__/ test/contracts/fixtures/ test/contracts/migrations.lock.json; then
             echo "No contract snapshot or migration lock changed, nothing to check."
             exit 0
           fi
@@ -211,7 +211,7 @@ jobs:
             /^-/ { if (o[1] > 0 && oldline >= o[1] && oldline < o[2] && substr($0, 2, 2) == "- ") net--; oldline++ }
             END { print net + 0 }')
           if [ "$net" -le 0 ]; then
-            echo "::error file=CHANGELOG.md,title=Changelog::A contract snapshot or the migration lock changed but this pull request adds no new entry under [Unreleased] (rewording an existing one does not count). Describe the change there; label a breaking one BREAKING."
+            echo "::error file=CHANGELOG.md,title=Changelog::A contract snapshot, a contract fixture or the migration lock changed but this pull request adds no new entry under [Unreleased] (rewording an existing one does not count). Describe the change there; label a breaking one BREAKING."
             exit 1
           fi
           echo "This pull request adds $net new entries under [Unreleased]."

@@ -4,13 +4,13 @@ import { describe, expect, it } from 'vitest';
 
 import { CreateBody, expiryFromDays, TOKEN_LIFETIME_DAYS } from '../src/admin/mcp-routes.js';
 import type { Db } from '../src/db/client.js';
-import { isLegacySseRequest, MCP_EXPOSED_HEADERS } from '../src/mcp/router.js';
+import { isLegacySseRequest, legacySseHeaders, mcpCorsOptions } from '../src/mcp/router.js';
 import { recordLegacySseActivity } from '../src/services/projects.js';
 
 /**
  * The pure halves of 0.2.1 Faz 05: what a static MCP token's lifetime may be, the moment it ends, and
- * which requests are the legacy SSE transport that answers with `Deprecation: true` (ADR-0096). The
- * behaviour on the wire is test/integration/token-expiry-and-sse.itest.ts.
+ * which requests are the legacy SSE transport that answers with `Deprecation`, `Sunset` and `Link` (ADR-0096,
+ * ADR-0139). The behaviour on the wire is test/integration/token-expiry-and-sse.itest.ts.
  */
 describe('POST /api/projects/:id/mcp-tokens body', () => {
   it('defaults to a token that never expires', () => {
@@ -62,13 +62,13 @@ describe('isLegacySseRequest', () => {
 describe('the Deprecation header across origins', () => {
   it('is readable by an allowed browser origin', async () => {
     const app = Fastify({ logger: false });
-    await app.register(cors, { origin: ['https://client.example'], exposedHeaders: MCP_EXPOSED_HEADERS });
-    app.get('/legacy', async (_req, reply) => reply.header('deprecation', 'true').send('ok'));
+    await app.register(cors, mcpCorsOptions(['https://client.example']));
+    app.get('/legacy', async (_req, reply) => reply.header('deprecation', legacySseHeaders().deprecation).send('ok'));
     const res = await app.inject({ method: 'GET', url: '/legacy', headers: { origin: 'https://client.example' } });
     const exposed = String(res.headers['access-control-expose-headers'])
       .split(',')
       .map((h) => h.trim().toLowerCase());
-    expect(exposed).toEqual(expect.arrayContaining(['deprecation', 'mcp-session-id', 'mcp-protocol-version']));
+    expect(exposed).toEqual(expect.arrayContaining(['deprecation', 'sunset', 'link', 'mcp-session-id', 'mcp-protocol-version']));
     await app.close();
   });
 });

@@ -120,14 +120,15 @@ docker run -d --name contextator -p 127.0.0.1:3444:3444 \
 ```
 
 Building the image from source instead of pulling it:
-[wiki/Installation#build-the-image-yourself](https://github.com/Contextator/Contextator/wiki/Installation#build-the-image-yourself).
+[Build the image yourself](https://contextator.com/en/docs/installation/#build-the-image-yourself).
 
-**Tags.** `latest` is the newest stable release; `0.7` tracks the latest patch inside the `0.7.x`
-line; `0.7.0` is one exact, immutable release. Pin a versioned tag for anything you upgrade
-deliberately by setting `CONTEXTATOR_TAG` in `.env` (e.g. `CONTEXTATOR_TAG=0.7.0`) and running
-`docker compose up -d` — this reads at every start, not only the first. Every one of those tags from
-`0.2.0` on has a `-slim` twin — `latest-slim`, `0.7-slim`, `0.7.0-slim` — which is described in [Bringing your
-own PostgreSQL](docs/deployment.md#bringing-your-own-postgresql).
+**Tags.** `latest` is the newest stable release; `1` (from `1.0.0` on) tracks the newest release of the
+`1.x` major line; `1.0` tracks the latest patch inside the `1.0.x` line; `1.0.0` is one exact, immutable
+release. Pin a versioned tag for anything you upgrade deliberately by setting `CONTEXTATOR_TAG` in `.env`
+(e.g. `CONTEXTATOR_TAG=1.0.0`) and running `docker compose up -d` — this reads at every start, not only
+the first. Every one of those tags from `0.2.0` on has a `-slim` twin — `latest-slim`, `1-slim`,
+`1.0-slim`, `1.0.0-slim` — which is described in [Bringing your own
+PostgreSQL](docs/deployment.md#bringing-your-own-postgresql).
 
 ## Usage
 
@@ -600,18 +601,20 @@ do not repeat the commands.
 - [Deployment topologies](docs/deployment.md) — external PostgreSQL, Kubernetes
 - [Admin API](docs/admin-api.md) and scaling signals
 - [Where your data goes](docs/where-your-data-goes.md), [Security notes](docs/security-notes.md), [Troubleshooting](docs/troubleshooting.md), [License](docs/license.md)
-- The full guides are on [contextator.com](https://contextator.com/en/docs/), and installing from source is on the [wiki](https://github.com/Contextator/Contextator/wiki/Installation#build-the-image-yourself).
+- The full guides are on [contextator.com](https://contextator.com/en/docs/), and installing from source is under [Installation](https://contextator.com/en/docs/installation/#build-the-image-yourself).
+- [Compatibility policy](docs/compatibility.md) — what `1.x` promises not to break
 
 ## Project Status
 
-**Beta.** Contextator is at `0.7.x`; it is not yet stable. Before `1.0.0` a minor version may change a public
-contract — the HTTP and MCP APIs, the MCP tool names and their parameters, environment variable names — without
-a major bump. Breaking changes are listed in [`CHANGELOG.md`](CHANGELOG.md).
+**Stable from `1.0.0`.** The public contracts — the MCP and admin APIs, environment variables, the CLI, the
+migrations and the backup archives — change in a major version only. What is covered, how a deprecation runs, the
+stated exceptions and what is deprecated now are in [`docs/compatibility.md`](docs/compatibility.md). Changes are
+listed in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Contributing
 
 Contributions are welcome. [`CONTRIBUTING.md`](CONTRIBUTING.md) is the whole of how this project is worked on:
-getting it running, the four checks a change has to pass, the three places where one statement is kept in two
+getting it running, the four checks a change has to pass, the five places where one statement is kept in two
 files, and the commit register. It also explains the licence grant an outside contribution is asked for
 ([`CLA.md`](CLA.md), signed on the pull request), which exists because the commercial license below depends on
 the copyright being held in full. [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) is the Contributor Covenant, and it

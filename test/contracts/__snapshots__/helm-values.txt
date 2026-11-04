@@ -34,10 +34,6 @@ backup.timeZone: string (required)
 backup.tolerations: array (required)
 backup.tolerations[]: object
 config: object (required) (additionalProperties:false)
-config.confluenceAllowedHosts: array {uniqueItems=true} (required)
-config.confluenceAllowedHosts[]: string
-config.confluenceAllowedHosts[]|anyOf[0]: (any) {pattern="^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?(\\.[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?)*\\.?$"}
-config.confluenceAllowedHosts[]|anyOf[1]: (any) {pattern="^(\\[[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*\\]|[0-9A-Fa-f]*:[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*)$"}
 config.confluenceMaxPages: integer|null {minimum=1, maximum=100000}
 config.gdriveMaxFiles: integer|null {minimum=1, maximum=100000}
 config.gitAllowedHosts: array {uniqueItems=true} (required)

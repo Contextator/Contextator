@@ -3,26 +3,28 @@
 ## Supported versions
 
 Security fixes land on the **latest release only**. There is no long-term support line, and an older
-release is not patched — upgrading is the fix.
+release is not patched — upgrading is the fix. The same window is part of the
+[compatibility policy](docs/compatibility.md), which also says what a release promises not to break.
 
 | Version | Supported |
 |---------|-----------|
-| `0.7.0` (tagged `v0.7.0`) | Yes — it is the latest release |
-| `0.6.1` (tagged `v0.6.1`) | No — upgrade to `0.7.0` |
-| `0.6.0` (tagged `v0.6.0`) | No — upgrade to `0.7.0` |
-| `0.5.0` (tagged `v0.5.0`) | No — upgrade to `0.7.0` |
-| `0.4.2` (tagged `v0.4.2`) | No — upgrade to `0.7.0` |
-| `0.4.1` (tagged `v0.4.1`) | No — upgrade to `0.7.0` |
-| `0.4.0` (tagged `v0.4.0`) | No — upgrade to `0.7.0` |
-| `0.3.2` (tagged `v0.3.2`) | No — upgrade to `0.7.0` |
-| `0.3.1` (tagged `v0.3.1`) | No — upgrade to `0.7.0` |
-| `0.3.0` (tagged `v0.3.0`) | No — upgrade to `0.7.0` |
-| `0.2.1` (tagged `v0.2.1`) | No — upgrade to `0.7.0` |
-| `0.2.0` (tagged `v0.2.0`) | No — upgrade to `0.7.0` |
-| `0.1.0` (tagged `v0.1.0`) | No — upgrade to `0.7.0` |
+| `1.0.0` (tagged `v1.0.0`) | Yes — it is the latest release |
+| `0.7.0` (tagged `v0.7.0`) | No — upgrade to `1.0.0` |
+| `0.6.1` (tagged `v0.6.1`) | No — upgrade to `1.0.0` |
+| `0.6.0` (tagged `v0.6.0`) | No — upgrade to `1.0.0` |
+| `0.5.0` (tagged `v0.5.0`) | No — upgrade to `1.0.0` |
+| `0.4.2` (tagged `v0.4.2`) | No — upgrade to `1.0.0` |
+| `0.4.1` (tagged `v0.4.1`) | No — upgrade to `1.0.0` |
+| `0.4.0` (tagged `v0.4.0`) | No — upgrade to `1.0.0` |
+| `0.3.2` (tagged `v0.3.2`) | No — upgrade to `1.0.0` |
+| `0.3.1` (tagged `v0.3.1`) | No — upgrade to `1.0.0` |
+| `0.3.0` (tagged `v0.3.0`) | No — upgrade to `1.0.0` |
+| `0.2.1` (tagged `v0.2.1`) | No — upgrade to `1.0.0` |
+| `0.2.0` (tagged `v0.2.0`) | No — upgrade to `1.0.0` |
+| `0.1.0` (tagged `v0.1.0`) | No — upgrade to `1.0.0` |
 
 Fixes land on `main` first and stay there until the next release is tagged — check `main` if you are
-reproducing a report against a fix that is not in `v0.7.0` yet.
+reproducing a report against a fix that is not in `v1.0.0` yet.
 
 ## Response
 

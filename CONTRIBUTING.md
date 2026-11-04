@@ -385,9 +385,10 @@ appended to it by hand (the failing test prints the line). CI looks at the pull 
 changes a file under `test/contracts/__snapshots__/` or `test/contracts/migrations.lock.json` and does not add
 a new `- ` entry to the `[Unreleased]` section of `CHANGELOG.md`, the check is red — an entry left there by an
 earlier pull request does not count, and neither does rewording one that is already there. A pull request
-that changes neither (a dependency bump, say) is not checked. Whether the diff is an addition or a break is judged in review; a break is labelled **BREAKING** in the changelog and
-waits for a major release. Tool and prompt descriptions and titles are left out of the snapshots on purpose:
-their wording is tuned for agents and is not a contract.
+that changes neither (a dependency bump, say) is not checked. Whether the diff is an addition or a break is judged in review; a break is labelled **BREAKING**
+in the changelog and waits for a major release. What counts as a break, and how a deprecation runs, is in
+[`docs/compatibility.md`](docs/compatibility.md): read it before changing a snapshot. Tool and prompt descriptions
+and titles are left out of the snapshots on purpose: their wording is tuned for agents and is not a contract.
 
 ## Commits and pull requests
 

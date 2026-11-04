@@ -387,6 +387,90 @@ describe('a 0.1 database, along the route ADR-0033 documents', () => {
   });
 });
 
+/**
+ * **The 1.0.0 database, carried forward** ([ADR-0137](../../.ssot/ADR.md#adr-0137), Tier 1). 1.x promises
+ * that an installation started on 1.0.0 starts on every later 1.x with nothing to run; this is that
+ * promise as a test. `fixtures/schema-1.0.sql` is a database as the 1.0.0 bootstrap left it — journal
+ * and all — with a few rows in it. The test loads it, runs the bootstrap of the checkout, and asks for
+ * two things: that the result is the schema a database built from nothing gets (the migrations since
+ * 1.0.0, applied on top of the file, land where the whole ladder lands), and that the rows survived.
+ *
+ * The two projects each carry the one per-project HNSW index, named after the project's id, so the
+ * comparison swaps the ids for a placeholder; that the index exists, is valid and has the NFR-02
+ * parameters is asserted by name afterwards.
+ *
+ * The file is never re-recorded to make this pass. With no migration since 1.0.0 the bootstrap does
+ * nothing here, and that is the case this test starts as.
+ */
+describe('a 1.0.0 database', () => {
+  /** The migrations `drizzle/` held at 1.0.0 (`0000_baseline` to `0031_oidc_group_mappings`) and so the journal rows of `schema-1.0.sql`. */
+  const MIGRATIONS_AT_1_0_0 = 32;
+
+  const projectIdsOf = async (db: TestDatabase['db']): Promise<string[]> => {
+    const rows = await db.execute(sql`SELECT id FROM projects ORDER BY name`);
+    return rows.rows.map((r) => (r as { id: string }).id);
+  };
+  const normalised = (snapshot: Awaited<ReturnType<typeof captureSchema>>, projectIds: string[]): string =>
+    projectIds.reduce((text, id) => text.replaceAll(id, '<project>').replaceAll(id.replaceAll('-', ''), '<project>'), renderSchemaSnapshot(snapshot));
+
+  it('is carried to the schema a fresh database gets, keeps its rows and its vector index, and a second start is a no-op', async () => {
+    const database = await freshDatabase('schema_load_1_0');
+    await runSqlScript(database, await readFile(join(here, 'fixtures', 'schema-1.0.sql'), 'utf8'));
+    const { db } = database;
+
+    const [projectId] = await projectIdsOf(db);
+    expect(projectId).toBeDefined();
+    const journalBefore = await db.execute(sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`);
+    // Exactly what 1.0.0 wrote: a file re-recorded from a later bootstrap would carry more rows and stop
+    // testing the upgrade from 1.0.0. A later migration changes MIGRATION_COUNT, never this number.
+    expect((journalBefore.rows[0] as { n: number }).n).toBe(MIGRATIONS_AT_1_0_0);
+
+    await applySchema(database);
+
+    // The same schema as a database the bootstrap built from nothing, with a project of its own.
+    const fresh = await freshDatabase('schema_fresh_for_1_0');
+    await applySchema(fresh);
+    await createProject(fresh.db, { name: 'handbook' }, []);
+    const loadedProjects = await projectIdsOf(db);
+    const loaded = await captureSchema(db);
+    expect(normalised(loaded, loadedProjects)).toBe(normalised(await captureSchema(fresh.db), await projectIdsOf(fresh.db)));
+
+    // Every migration is in the journal, once.
+    const journal = await db.execute(sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`);
+    expect((journal.rows[0] as { n: number }).n).toBe(MIGRATION_COUNT);
+
+    // The rows the file carried are the rows that are there.
+    const counts = await db.execute(sql`
+      SELECT (SELECT count(*)::int FROM projects) AS projects, (SELECT count(*)::int FROM users) AS users,
+             (SELECT count(*)::int FROM document_sources) AS sources, (SELECT count(*)::int FROM documents) AS documents,
+             (SELECT count(*)::int FROM chunks) AS chunks`);
+    expect(counts.rows[0]).toEqual({ projects: 1, users: 1, sources: 1, documents: 1, chunks: 2 });
+    const handbook = await db.execute(sql`SELECT name, mcp_auth, live_generation FROM projects WHERE id = ${projectId}`);
+    expect(handbook.rows).toEqual([{ name: 'handbook', mcp_auth: 'token', live_generation: 0 }]);
+    const owner = await db.execute(sql`SELECT username, role FROM users`);
+    expect(owner.rows).toEqual([{ username: 'root', role: 'root' }]);
+    const settings = await db.execute(sql`SELECT value FROM settings WHERE key = 'schema_version'`);
+    expect((settings.rows[0] as { value: string }).value).toBe('5');
+
+    // The project's own HNSW index came through intact — a valid index with the NFR-02 parameters.
+    const index = await db.execute(sql`
+      SELECT am.amname, c.reloptions, i.indisvalid AS valid
+      FROM pg_class c JOIN pg_am am ON am.oid = c.relam JOIN pg_index i ON i.indexrelid = c.oid
+      WHERE c.relname = ${projectVectorIndexName(projectId as string)}`);
+    expect(index.rows).toHaveLength(1);
+    const row = index.rows[0] as { amname: string; reloptions: string[] | null; valid: boolean };
+    expect(row.amname).toBe('hnsw');
+    expect(row.valid).toBe(true);
+    expect([...(row.reloptions ?? [])].sort()).toEqual(['ef_construction=64', 'm=16']);
+
+    // A second start changes nothing.
+    await expect(applySchema(database)).resolves.toBeUndefined();
+    expect(await captureSchema(db)).toEqual(loaded);
+    const again = await db.execute(sql`SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations`);
+    expect((again.rows[0] as { n: number }).n).toBe(MIGRATION_COUNT);
+  });
+});
+
 describe('the container', () => {
   it('reports the pgvector version the image shipped', async () => {
     const database = await freshDatabase('schema_pgvector_version');

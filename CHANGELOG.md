@@ -4,19 +4,67 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and version numbers follow
 [Semantic Versioning](https://semver.org/).
 
-**Before `1.0.0`, a minor version may change a public contract** — the HTTP and MCP APIs, the MCP
-tool names and their parameters, environment variable names — without a major bump. Once `1.0.0`
-ships, that stops.
+From `1.0.0` on, what counts as a public contract, what breaking one means, and how long a deprecated
+thing lives are set out in the [compatibility policy](docs/compatibility.md). Releases before `1.0.0`
+could change a public contract in a minor version.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-04
+
+### Added
+
+- **A major image tag** (`1`, `1-slim`) follows the newest release of that major, for installations that take every
+  `1.x` update under the compatibility policy (ADR-0137), whose announced exceptions still apply — the deprecated
+  legacy HTTP+SSE transport and, for an installation run outside the container, the Node.js base. It is
+  published from `1.0.0` on; `0.x` releases get none, since a `0.y.z` minor may still change a public contract.
+- **The MCP Registry entry is published by the release workflow.** A final-release tag now publishes `server.json`
+  from a `registry` job after the images, signing in with the run's GitHub OIDC identity instead of a maintainer's
+  personal token. The job stops when `server.json`'s `version` does not match the tag; a pre-release tag publishes
+  nothing to the registry.
+- **1.0.0 fixtures for the compatibility promise** (ADR-0137). `test/integration/fixtures/schema-1.0.sql` is the database
+  a 1.0.0 start leaves behind, with a few rows; the integration suite loads it, runs the bootstrap and requires the
+  schema a fresh database gets. `test/contracts/fixtures/` gains the backup and export manifests 1.0.0 writes, beside
+  the ones 0.7 wrote, which stay. Tests only; nothing at run time changes.
+
 ### Changed
 
+- **The legacy HTTP+SSE transport now announces its removal date** (ADR-0139). Every legacy SSE response — the
+  stream and its `/messages` channel, refusals included — carries `Deprecation: @1790899200` (RFC 9745, announced
+  2026-10-02), `Sunset: Sat, 02 Oct 2027 00:00:00 GMT` (RFC 8594) and `Link` with `rel="deprecation"` and
+  `rel="sunset"` pointing at `docs/compatibility.md`. `Deprecation` was `true` before. `sunset` and `link` are
+  added to the CORS exposed headers, and the dashboard notice for a project with a recent legacy client now
+  names the date and links the page instead of saying no date is set. Behaviour is unchanged: SSE keeps working
+  until it is removed, and Streamable HTTP responses carry none of these headers.
 - **Node.js 24 is now required** (ADR-0138). Both images (`full` and `slim`) are built on `node:24-bookworm-slim`,
   CI runs 24, and `engines.node` is `>=24`. Nothing changes for anyone running the image; an operator running the
   application outside the container on Node 22 has to move to 24.
 - **`unpdf` 2** reads PDFs. Text extraction, the page-count cap and the title taken from the document's metadata
   work as before; the new major needs Node.js 24, which is why it follows the runtime move.
+- **Two variables are classified before the contracts freeze** (ADR-0140). `CONTEXTATOR_EMBEDDED_PGDATA`, which the
+  image's entrypoint hands to the application, is internal: it is not part of the supported environment, and the
+  contract snapshot records it in a separate `internal` block. `BACKUP_STAGING_DIR`, which the README tells operators
+  to set for the scheduled-backup sidecar and the chart sets, is a supported setting. The snapshot also records the
+  cross-key startup refusals (for example `SECRET_KEY_PREVIOUS` without `SECRET_KEY`); they refuse what they refused.
+- The CI changelog gate now also watches `test/contracts/fixtures/`: a pull request that changes an archive fixture
+  must add a line under `[Unreleased]`, as one that changes a contract snapshot does.
+
+### Deprecated
+
+- `OPENAI_BASE_URL` (ADR-0140). It still sets where `EMBEDDING_PROVIDER=openai` sends requests when
+  `EMBEDDING_BASE_URL` is empty, and nothing about that changes, but the server now logs one warning at startup while
+  that is what it does. Set `EMBEDDING_BASE_URL` instead; moving changes the embedding model id once, so each project
+  is re-indexed (see the notes beside `EMBEDDING_BASE_URL` in `.env.example`). It is removed no sooner than `2.0`.
+
+### Removed
+
+- **BREAKING: `CONFLUENCE_ALLOWED_HOSTS`** (deprecated in `0.6.0`; ADR-0140, ADR-0126 decision 7). A non-empty value
+  now stops the server from starting, with a message that names `SOURCE_ALLOWED_HOSTS`; an empty or unset value is
+  accepted. Move its hosts to `SOURCE_ALLOWED_HOSTS` before upgrading, which Confluence, S3 and GitHub Enterprise
+  Server sources share.
+- **BREAKING (Helm): `config.confluenceAllowedHosts`.** The chart's strict values schema now rejects the key, so
+  `helm upgrade` stops on it; use `config.sourceAllowedHosts`. This is Helm chart 3.0.0 ("Upgrading to 3.0.0" in the
+  chart README).
 
 ## [0.7.0] - 2026-11-01
 
@@ -1149,7 +1197,8 @@ First published release. `0.1.0` describes what the product does, not what chang
   PostgreSQL and the app. The schema updates itself on startup, and `npm run reset-password` ships
   inside the image as a last-resort recovery tool.
 
-[Unreleased]: https://github.com/Contextator/Contextator/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Contextator/Contextator/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Contextator/Contextator/compare/v0.7.0...v1.0.0
 [0.7.0]: https://github.com/Contextator/Contextator/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/Contextator/Contextator/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Contextator/Contextator/compare/v0.5.0...v0.6.0

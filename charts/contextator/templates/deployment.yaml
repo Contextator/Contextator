@@ -78,10 +78,6 @@ spec:
             - name: SOURCE_ALLOWED_HOSTS
               value: {{ join "," . | quote }}
             {{- end }}
-            {{- with .Values.config.confluenceAllowedHosts }}
-            - name: CONFLUENCE_ALLOWED_HOSTS
-              value: {{ join "," . | quote }}
-            {{- end }}
             {{- with .Values.config.webAllowedHosts }}
             - name: WEB_ALLOWED_HOSTS
               value: {{ join "," . | quote }}

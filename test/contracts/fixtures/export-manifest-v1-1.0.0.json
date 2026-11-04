@@ -1,0 +1,64 @@
+{
+  "kind": "contextator.project-export",
+  "manifestVersion": 1,
+  "createdAt": "2026-11-04T10:36:58.722Z",
+  "product": {
+    "name": "contextator",
+    "version": "1.0.0"
+  },
+  "schema": {
+    "version": "5",
+    "migrations": 32
+  },
+  "instance": {
+    "id": "2e6ac4bf-3889-4644-84a2-c97b7d2f18f1",
+    "publicBaseUrl": null
+  },
+  "embedding": {
+    "id": "local:stub-bag-of-words:fp32",
+    "dimensions": 384
+  },
+  "project": {
+    "name": "handbook",
+    "exportedGeneration": 0,
+    "mcpAuth": "token",
+    "queryLogEnabled": true,
+    "scoreFloor": null,
+    "maxDocuments": null,
+    "maxChunks": null,
+    "maxUploadBytes": null,
+    "lastIndexedAt": "2026-10-30T08:00:00.000Z"
+  },
+  "counts": {
+    "sources": 2,
+    "documents": 1,
+    "chunks": 1,
+    "uploadFiles": 1,
+    "uploadBytes": 30,
+    "goldenQuestions": 0
+  },
+  "excluded": {
+    "searchQueries": 0,
+    "searchQueryHits": 0,
+    "reportedGaps": 0,
+    "documentFindings": 0,
+    "mcpTokens": 0,
+    "indexRuns": 0,
+    "projectMembers": {
+      "viewer": 0,
+      "editor": 0
+    }
+  },
+  "sources": [
+    {
+      "name": "manuals",
+      "type": "upload",
+      "needs": ["files-carried"]
+    },
+    {
+      "name": "private-repo",
+      "type": "git",
+      "needs": ["credential", "webhook-secret"]
+    }
+  ]
+}

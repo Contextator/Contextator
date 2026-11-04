@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
+import cors from '@fastify/cors';
 import { eq } from 'drizzle-orm';
 
 import { loadConfig } from '../../../src/config.js';
@@ -10,7 +11,7 @@ import { documentSources, projects, type ProjectRow } from '../../../src/db/sche
 import { adminRoutes } from '../../../src/admin/routes.js';
 import type { ClientMetadataResolver } from '../../../src/mcp/cimd.js';
 import { oauthRoutes } from '../../../src/mcp/oauth-routes.js';
-import { mcpRoutes } from '../../../src/mcp/router.js';
+import { mcpCorsOptions, mcpRoutes } from '../../../src/mcp/router.js';
 import { SessionRegistry } from '../../../src/mcp/sessions.js';
 import { KeyedMutex } from '../../../src/services/locks.js';
 import { McpRateLimiter, SlidingWindow } from '../../../src/services/rate-limit.js';
@@ -183,6 +184,9 @@ export async function startMcpInstance(
   // its own `trustProxy: true`, which is what let a spoofed header pass a test while the server it was
   // standing in for could have been configured any other way.
   const app = Fastify({ logger: false, ...httpServerOptions(config) });
+  // The product's own CORS options (`src/server.ts`), registered only when a suite sets ALLOWED_ORIGINS:
+  // with none, the product's setting adds no header to any response, and other suites stay as they were.
+  if (config.ALLOWED_ORIGINS.length > 0) await app.register(cors, mcpCorsOptions(config.ALLOWED_ORIGINS));
   await app.register(cookie);
 
   // Built before the context so the writer can report into the registry, exactly as `src/server.ts`
