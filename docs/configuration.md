@@ -447,3 +447,11 @@ Two things in the measurements are worth knowing before choosing a number:
   is what the 400 MiB allowance in the formula is for, and why a cap alone does not make a 512 MiB container safe.
 
 [File types](file-types.md) lists what each type keeps and drops.
+
+## Where a backup stages its files
+
+`BACKUP_STAGING_DIR` is a supported setting. `npm run backup` builds the dump in a scratch directory before it
+writes the archive, and this variable names the directory that scratch directory is created in. Unset or empty, it is
+`DATA_DIR`. The scheduled-backup sidecar in `docker-compose.backup.yml` and the chart's backup Job set it to a
+directory of their own, so that cleaning up after an interrupted run never touches a manual backup's files; the
+[README](../README.md#data-and-persistence) shows when to clear it for an on-demand backup.

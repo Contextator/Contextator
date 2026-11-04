@@ -4,9 +4,9 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and version numbers follow
 [Semantic Versioning](https://semver.org/).
 
-**Before `1.0.0`, a minor version may change a public contract** — the HTTP and MCP APIs, the MCP
-tool names and their parameters, environment variable names — without a major bump. Once `1.0.0`
-ships, that stops.
+From `1.0.0` on, what counts as a public contract, what breaking one means, and how long a deprecated
+thing lives are set out in the [compatibility policy](docs/compatibility.md). Releases before `1.0.0`
+could change a public contract in a minor version.
 
 ## [Unreleased]
 

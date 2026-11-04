@@ -3,7 +3,8 @@
 ## Supported versions
 
 Security fixes land on the **latest release only**. There is no long-term support line, and an older
-release is not patched — upgrading is the fix.
+release is not patched — upgrading is the fix. The same window is part of the
+[compatibility policy](docs/compatibility.md), which also says what a release promises not to break.
 
 | Version | Supported |
 |---------|-----------|
