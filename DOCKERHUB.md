@@ -74,9 +74,10 @@ start's log will not work.
 | Tag | Meaning |
 |-----|---------|
 | `latest` | The most recent stable release. Never points at a pre-release (`-rc.*`, `-beta.*`, …). |
+| `1` | From `1.0.0` on: the newest release of the `1.x` major line. Moves as `1.x` releases ship, and the public contracts of the compatibility policy hold across it, with that policy's announced exception, the deprecated legacy HTTP+SSE transport; pin an exact tag if you depend on it; `0.x` has no such tag. |
 | `0.7` | The latest patch release inside the `0.7.x` minor line. Moves as `0.7.x` releases ship. |
 | `0.7.0` | One exact release. Immutable — always the same image. |
-| `…-slim` | The same release **without the embedded PostgreSQL** — `latest-slim`, `0.7-slim`, `0.7.0-slim`. Every tag from `0.2.0` on has one. |
+| `…-slim` | The same release **without the embedded PostgreSQL** — `latest-slim`, `1-slim`, `0.7-slim`, `0.7.0-slim`. Every tag from `0.2.0` on has one. |
 
 Pin `0.7.0`-style tags for anything you upgrade deliberately; use `latest` only where an unattended
 minor/patch bump is acceptable.

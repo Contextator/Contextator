@@ -204,6 +204,18 @@ jobs:
       # Turns one tag into the set of tags the image is actually published under. `latest` is excluded
       # on a pre-release (`v0.2.0-rc.1` has a `-` in `github.ref_name`) so that publishing a release
       # candidate never moves the tag every plain `docker pull contextator/contextator` resolves to.
+      #
+      # The bare major (`1`, `1-slim`) follows the newest release of that major, so it is the tag a
+      # person pins to take every `1.x` update under the compatibility policy (ADR-0137: once `1.0.0`
+      # ships, a public contract only changes in a major, bar the policy's announced exceptions —
+      # the legacy HTTP+SSE transport, which a `1.x` minor may still remove; the Node.js base moves
+      # only to a line both images already run, so an image user is not affected, ADR-0140).
+      # `docker/metadata-action` does not skip it for `0.x` by itself — its README only says it
+      # "should not" be generated and leaves the rule to the workflow — and `0` would promise the
+      # compatibility that `0.y.z` explicitly does not, so `enable` switches it off for a `v0.`
+      # tag. A pre-release needs no rule of its own: the action gives `{{major}}` the full
+      # pre-release version there (`1.0.0-rc.1`), which `{{version}}` already produced, so a
+      # release candidate never moves `1`.
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -212,11 +224,12 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref_name, 'v0.') }}
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
-      # The same three rules with `-slim` on the end of every one of them (ADR-0069): `0.1.0-slim`,
-      # `0.1-slim`, `latest-slim`. `suffix` with `onlatest=true` is what puts it on the raw `latest`
-      # tag as well as on the two semver ones — without it `latest` would publish the slim image
+      # The same rules with `-slim` on the end of every one of them (ADR-0069): `1.0.0-slim`,
+      # `1.0-slim`, `1-slim`, `latest-slim`. `suffix` with `onlatest=true` is what puts it on the raw
+      # `latest` tag as well as on the semver ones — without it `latest` would publish the slim image
       # under the tag a plain `docker pull contextator/contextator` resolves to, which is the one
       # mistake in this file that would be felt by every installation at once.
       #
@@ -232,6 +245,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref_name, 'v0.') }}
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -380,3 +394,74 @@ jobs:
           mark_as_latest: false
         env:
           CR_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+
+  # The MCP Registry entry (`server.json`, `io.github.Contextator/contextator`). It used to be a
+  # manual `mcp-publisher login github --token ...` from a maintainer's machine; a release the
+  # pipeline cannot finish by itself is one that is forgotten, and a long-lived personal token is
+  # the credential this replaces. `github-oidc` exchanges the run's own OIDC token for a short-lived
+  # registry token, so no secret is stored for it anywhere and `id-token: write` is the whole grant.
+  #
+  # Only for a final release: a `-` in the tag (`v1.0.0-rc.1`) is a pre-release, which must not become
+  # the version the registry advertises, the same condition `latest` is gated on above. After `publish`
+  # because the registry entry points people at a release whose image has to exist and have passed its
+  # checks; independent of `chart`, which is the Helm repository and has nothing to do with this.
+  #
+  # The registry rejects a version it already has, so re-running a run whose publish step succeeded
+  # fails there and is not a way to fix anything; a failure before that step is infrastructure and
+  # "Re-run failed jobs" is right.
+  registry:
+    name: Publish to the MCP Registry
+    needs: publish
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Required to request the OIDC token `mcp-publisher login github-oidc` presents.
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `server.json` is what is published, and its `version` is edited by hand, so a tag pushed
+      # without that edit would publish the previous version's entry — or be refused as a
+      # duplicate — after the image is already out. Checked before anything is downloaded, and it
+      # fails the job rather than warning: the registry never sees the file.
+      - name: Require server.json to match the tag
+        run: |
+          set -euo pipefail
+          server_version=$(jq -r '.version' server.json)
+          if [ "$server_version" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "::error file=server.json,title=server.json version does not match the tag::server.json has version \"$server_version\", but this release is ${GITHUB_REF_NAME}. Nothing was sent to the MCP Registry. Set \"version\" in server.json to \"${GITHUB_REF_NAME#v}\", commit it and push a tag on that commit; re-running this run checks the same commit and fails the same way."
+            exit 1
+          fi
+          echo "server.json version $server_version matches ${GITHUB_REF_NAME}."
+
+      # The binary is pinned to a release and to the sha256 of its linux/amd64 archive, the same
+      # approach as `cr` in `chart` and for the same reason: this job holds an identity the registry
+      # trusts to publish under this namespace, and a release asset can be replaced by its owner just
+      # as a tag can be moved, so the archive is checked before anything is extracted, let alone run.
+      # The sha256 is the one the release lists for that asset (also in its `registry_1.8.7_checksums.txt`,
+      # read 2026-11-04). Moving `MCP_PUBLISHER_VERSION` means reading the new release's checksums
+      # and updating `MCP_PUBLISHER_SHA256` in the same change. A binary that is too old for the
+      # registry deployment fails login with "invalid audience"; that is the signal to move it.
+      - name: Install mcp-publisher (checksum-verified)
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.7
+          MCP_PUBLISHER_SHA256: 00b21004149a4ce66f0782508ae4a2bce67d1bea395a8da0bd8028159fb59579
+        run: |
+          set -euo pipefail
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$archive" "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/${archive}"
+          echo "${MCP_PUBLISHER_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          mkdir "$RUNNER_TEMP/mcp-publisher"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/mcp-publisher" mcp-publisher
+          rm -f "$RUNNER_TEMP/$archive"
+          test -x "$RUNNER_TEMP/mcp-publisher/mcp-publisher"
+
+      - name: Authenticate to the MCP Registry (GitHub OIDC)
+        run: '"$RUNNER_TEMP/mcp-publisher/mcp-publisher" login github-oidc'
+
+      - name: Publish server.json
+        run: '"$RUNNER_TEMP/mcp-publisher/mcp-publisher" publish'
