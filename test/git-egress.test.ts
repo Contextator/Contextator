@@ -280,11 +280,11 @@ describe('GIT_ALLOWED_HOSTS as configuration', () => {
     expect(parse('https://git.corp.example/').success).toBe(false);
   });
 
-  it('is independent of the web and Confluence lists', () => {
+  it('is independent of the web and source lists', () => {
     const result = EnvSchema.safeParse({
       DATABASE_URL: 'postgres://unused/unused',
       WEB_ALLOWED_HOSTS: 'docs.corp',
-      CONFLUENCE_ALLOWED_HOSTS: 'wiki.corp',
+      SOURCE_ALLOWED_HOSTS: 'wiki.corp',
     });
     expect(result.success && result.data.GIT_ALLOWED_HOSTS).toEqual([]);
   });

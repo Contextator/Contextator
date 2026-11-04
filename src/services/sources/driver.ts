@@ -23,10 +23,9 @@ export interface DriverContext {
    */
   force?: boolean;
   /**
-   * `SOURCE_ALLOWED_HOSTS` and the deprecated `CONFLUENCE_ALLOWED_HOSTS` are optional here only so that a
-   * context built for another driver need not carry them; absent reads as the empty list, which is the
-   * strictest the egress can be ([ADR-0126](../../../.ssot/ADR.md#adr-0126)). Confluence reads both
-   * (`confluenceAllowedHosts`); an `s3` or `github` source reads `SOURCE_ALLOWED_HOSTS` alone.
+   * `SOURCE_ALLOWED_HOSTS` is optional here only so that a context built for another driver need not
+   * carry it; absent reads as the empty list, which is the strictest the egress can be
+   * ([ADR-0126](../../../.ssot/ADR.md#adr-0126)). A `confluence`, `s3` or `github` source reads it.
    * `WEB_ALLOWED_HOSTS` and `GIT_ALLOWED_HOSTS` are optional and read the same way for the web and git
    * sources' egress.
    * `GIT_MAX_PACK_BYTES` is optional for the same reason; absent reads as `GIT_MAX_PACK_BYTES_DEFAULT`.
@@ -41,7 +40,6 @@ export interface DriverContext {
       Pick<
         Config,
         | 'SOURCE_ALLOWED_HOSTS'
-        | 'CONFLUENCE_ALLOWED_HOSTS'
         | 'WEB_ALLOWED_HOSTS'
         | 'GIT_ALLOWED_HOSTS'
         | 'GIT_MAX_PACK_BYTES'

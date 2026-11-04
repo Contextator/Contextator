@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { deprecatedSettingWarnings, EnvSchema, WEB_LIMIT_DEFAULTS } from '../src/config.js';
 import type { DocumentSourceRow } from '../src/db/schema.js';
-import { confluenceAllowedHosts, confluenceEgress, EgressRefusedError, sourceEgress } from '../src/services/sources/confluence-egress.js';
+import { confluenceEgress, EgressRefusedError, sourceEgress } from '../src/services/sources/confluence-egress.js';
 import { GitDriver } from '../src/services/sources/git.js';
 import { WebDriver } from '../src/services/sources/web.js';
 import { fakeResolver, renamed, routeToLoopback } from './support/egress-seams.js';
@@ -94,15 +94,6 @@ describe('sourceEgress', () => {
   });
 });
 
-describe('confluenceAllowedHosts', () => {
-  it('is the union of the shared and the deprecated list, and empty when neither is set', () => {
-    expect(confluenceAllowedHosts({})).toEqual([]);
-    expect(confluenceAllowedHosts({ SOURCE_ALLOWED_HOSTS: ['a.corp'] })).toEqual(['a.corp']);
-    expect(confluenceAllowedHosts({ CONFLUENCE_ALLOWED_HOSTS: ['b.corp'] })).toEqual(['b.corp']);
-    expect(confluenceAllowedHosts({ SOURCE_ALLOWED_HOSTS: ['a.corp'], CONFLUENCE_ALLOWED_HOSTS: ['b.corp'] })).toEqual(['a.corp', 'b.corp']);
-  });
-});
-
 describe('SOURCE_ALLOWED_HOSTS as configuration', () => {
   const parse = (extra: Record<string, string>) => EnvSchema.safeParse({ DATABASE_URL: 'postgres://unused/unused', ...extra });
 
@@ -126,7 +117,6 @@ describe('SOURCE_ALLOWED_HOSTS as configuration', () => {
     const result = parse({ SOURCE_ALLOWED_HOSTS: 'minio.corp' });
     expect(result.success && result.data.WEB_ALLOWED_HOSTS).toEqual([]);
     expect(result.success && result.data.GIT_ALLOWED_HOSTS).toEqual([]);
-    expect(result.success && result.data.CONFLUENCE_ALLOWED_HOSTS).toEqual([]);
   });
 });
 
@@ -137,21 +127,28 @@ describe('deprecatedSettingWarnings', () => {
     return result.data;
   };
 
-  it('says nothing while CONFLUENCE_ALLOWED_HOSTS is unset', () => {
+  it('says nothing while OPENAI_BASE_URL is unset', () => {
     expect(deprecatedSettingWarnings(parse({}))).toEqual([]);
     expect(deprecatedSettingWarnings(parse({ SOURCE_ALLOWED_HOSTS: 'minio.corp' }))).toEqual([]);
   });
 
-  it('warns once, naming the replacement, when CONFLUENCE_ALLOWED_HOSTS is non-empty', () => {
-    const warnings = deprecatedSettingWarnings(parse({ CONFLUENCE_ALLOWED_HOSTS: 'wiki.corp' }));
+  // ADR-0140 decision 6: warned "when it is read", which is the openai provider with EMBEDDING_BASE_URL empty.
+  it('warns once, naming the replacement, when OPENAI_BASE_URL is what routes the requests', () => {
+    const warnings = deprecatedSettingWarnings(parse({ EMBEDDING_PROVIDER: 'openai', OPENAI_BASE_URL: 'http://localhost:11434/v1' }));
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain('CONFLUENCE_ALLOWED_HOSTS is deprecated');
-    expect(warnings[0]).toContain('SOURCE_ALLOWED_HOSTS');
-    expect(warnings[0]).toContain('no earlier than 1.0.0');
+    expect(warnings[0]).toContain('OPENAI_BASE_URL is deprecated');
+    expect(warnings[0]).toContain('EMBEDDING_BASE_URL');
+    expect(warnings[0]).toContain('no sooner than 2.0');
   });
 
-  it('warns also when both lists are set', () => {
-    expect(deprecatedSettingWarnings(parse({ CONFLUENCE_ALLOWED_HOSTS: 'wiki.corp', SOURCE_ALLOWED_HOSTS: 'minio.corp' }))).toHaveLength(1);
+  it('stays silent when OPENAI_BASE_URL is not read: another provider, or EMBEDDING_BASE_URL set', () => {
+    expect(deprecatedSettingWarnings(parse({ OPENAI_BASE_URL: 'http://localhost:11434/v1' }))).toEqual([]);
+    expect(deprecatedSettingWarnings(parse({ EMBEDDING_PROVIDER: 'local', OPENAI_BASE_URL: 'http://localhost:11434/v1' }))).toEqual([]);
+    expect(
+      deprecatedSettingWarnings(
+        parse({ EMBEDDING_PROVIDER: 'openai', EMBEDDING_BASE_URL: 'http://localhost:11434/v1', OPENAI_BASE_URL: 'http://localhost:11434/v1' }),
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -160,7 +157,7 @@ describe('deprecatedSettingWarnings', () => {
 describe('SOURCE_ALLOWED_HOSTS does not admit a host for a web or git source', () => {
   const log = { warn: () => undefined, info: () => undefined, debug: () => undefined, error: () => undefined, child: () => log } as never;
   const KEY = 'k'.repeat(64);
-  const shared = { SOURCE_ALLOWED_HOSTS: ['docs.corp', 'git.corp', '10.0.0.1'], CONFLUENCE_ALLOWED_HOSTS: ['docs.corp', 'git.corp'] };
+  const shared = { SOURCE_ALLOWED_HOSTS: ['docs.corp', 'git.corp', '10.0.0.1'] };
   const ids = { id: '00000000-0000-4000-8000-000000000051', projectId: '00000000-0000-4000-8000-000000000052', name: 'guarded' };
 
   it('refuses a web source on a listed private host, naming WEB_ALLOWED_HOSTS, and connects to nothing', async () => {

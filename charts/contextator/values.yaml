@@ -131,10 +131,6 @@ config:
   sourceAllowedHosts: []
   #   - wiki.corp.example
   #   - minio.corp.example
-  # DEPRECATED (ADR-0126): CONFLUENCE_ALLOWED_HOSTS. Still admits its hosts for Confluence sources only, and the
-  # application logs one deprecation warning at startup while it is non-empty. Move its hosts to
-  # `sourceAllowedHosts`. Removed no earlier than application 1.0.0. Empty leaves the variable unset.
-  confluenceAllowedHosts: []
   # WEB_ALLOWED_HOSTS (ADR-0107): the same for a web source (pages, robots.txt, sitemap, redirects).
   # Independent of the lists above. Loopback, link-local and the reserved 240.0.0.0/4 range stay
   # refused whatever is listed. Empty leaves the variable unset.
