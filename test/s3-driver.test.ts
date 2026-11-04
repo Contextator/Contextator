@@ -679,14 +679,6 @@ describe('the s3 driver', () => {
     await expect(unlisted.test()).rejects.toThrow(`list \`${HOST}\` in SOURCE_ALLOWED_HOSTS`);
   });
 
-  it('is not widened by the deprecated CONFLUENCE_ALLOWED_HOSTS', async () => {
-    const d = new S3Driver(row(), context({ CONFLUENCE_ALLOWED_HOSTS: [HOST] }), {
-      resolve: fakeResolver({ [HOST]: '10.9.8.7' }),
-      route: routeToLoopback('10.9.8.7'),
-    });
-    await expect(d.test()).rejects.toThrow(/SOURCE_ALLOWED_HOSTS/);
-  });
-
   it('always refuses loopback and link-local, even for a listed host', async () => {
     for (const address of ['127.0.0.1', '169.254.169.254']) {
       const d = new S3Driver(row({ endpoint: 'http://meta.corp' }), context({ SOURCE_ALLOWED_HOSTS: ['meta.corp'] }), {

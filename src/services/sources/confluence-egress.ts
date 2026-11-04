@@ -36,7 +36,7 @@ export type Resolver = (hostname: string) => Promise<Array<{ address: string; fa
 
 export interface EgressOptions {
   /**
-   * `SOURCE_ALLOWED_HOSTS` (with `CONFLUENCE_ALLOWED_HOSTS` for Confluence), `WEB_ALLOWED_HOSTS` or
+   * `SOURCE_ALLOWED_HOSTS`, `WEB_ALLOWED_HOSTS` or
    * `GIT_ALLOWED_HOSTS`: host names allowed to resolve to a **private**
    * address. It never lifts loopback, link-local, unspecified, multicast or reserved.
    */
@@ -233,22 +233,6 @@ function refusal(host: string, rule: RefusedRule, literal: boolean, redirected: 
 const systemResolver: Resolver = (hostname) => dns.promises.lookup(hostname, { all: true, verbatim: true });
 
 /**
- * The hosts a Confluence source may reach on a private address: `SOURCE_ALLOWED_HOSTS` and the deprecated
- * `CONFLUENCE_ALLOWED_HOSTS`, joined ([ADR-0126](../../../.ssot/ADR.md#adr-0126) decision 7). The old list
- * admits its hosts for Confluence only, which is why this union is taken here and not in the config:
- * an `s3` or `github` source reads {@link SourceHostsConfig.SOURCE_ALLOWED_HOSTS} alone.
- */
-export function confluenceAllowedHosts(config: SourceHostsConfig): string[] {
-  return [...(config.SOURCE_ALLOWED_HOSTS ?? []), ...(config.CONFLUENCE_ALLOWED_HOSTS ?? [])];
-}
-
-/** The slice of `Config` that names egress hosts; every key is optional so a context built for another driver need not carry it. */
-export interface SourceHostsConfig {
-  SOURCE_ALLOWED_HOSTS?: readonly string[];
-  CONFLUENCE_ALLOWED_HOSTS?: readonly string[];
-}
-
-/**
  * A `fetch` for a source whose host an operator names and which calls an API (`s3`, the GitHub
  * Enterprise Server host of `github`): {@link egressFetch} with the shared allowlist,
  * `SOURCE_ALLOWED_HOSTS` ([ADR-0126](../../../.ssot/ADR.md#adr-0126) decision 7). A refusal names it.
@@ -261,8 +245,7 @@ export function sourceEgress(options: EgressOptions): EgressFetch {
 
 /**
  * A `fetch` for Confluence that connects only to addresses ADR-0088 allows: {@link sourceEgress} with
- * Confluence's name and its "base URL" wording. A refusal names `SOURCE_ALLOWED_HOSTS`; pass
- * {@link confluenceAllowedHosts} as `allowedHosts` so the deprecated list keeps working.
+ * Confluence's name and its "base URL" wording. A refusal names `SOURCE_ALLOWED_HOSTS`.
  */
 export function confluenceEgress(options: EgressOptions): EgressFetch {
   return sourceEgress({ label: 'Confluence', subject: 'the base URL', ...options });

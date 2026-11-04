@@ -14,7 +14,7 @@ const csv = (value: string): string[] =>
 
 /**
  * A comma-separated list of host names for an egress allowlist (`SOURCE_ALLOWED_HOSTS`,
- * `CONFLUENCE_ALLOWED_HOSTS`, `WEB_ALLOWED_HOSTS`, `GIT_ALLOWED_HOSTS`): lower-cased, brackets and a trailing dot dropped, and refused at startup when
+ * `WEB_ALLOWED_HOSTS`, `GIT_ALLOWED_HOSTS`): lower-cased, brackets and a trailing dot dropped, and refused at startup when
  * an entry is not a name or an address (a scheme, port or path would never match the host a request is
  * made to, so it would silently allow nothing).
  */
@@ -345,6 +345,14 @@ export const OAUTH_REGISTER_MAX_PER_HOST = 60;
 export const OAUTH_REGISTER_WINDOW_MS = 60 * 60_000;
 
 /** Same test as `endpointIdSegment` in services/embeddings/openai.ts; an unparsable value is reported elsewhere. */
+/**
+ * Whether `OPENAI_BASE_URL`, the legacy name, is the setting that routes embedding requests: only the openai provider
+ * reads it, and only while `EMBEDDING_BASE_URL` is empty. Shared by the `superRefine` (which validates it only then)
+ * and {@link deprecatedSettingWarnings} (which warns only then), so the two cannot disagree about when it is read.
+ */
+const readsLegacyOpenAIBaseUrl = (c: { EMBEDDING_PROVIDER: string; EMBEDDING_BASE_URL?: string; OPENAI_BASE_URL?: string }): boolean =>
+  c.EMBEDDING_PROVIDER === 'openai' && c.EMBEDDING_BASE_URL === undefined && c.OPENAI_BASE_URL !== undefined;
+
 const isOpenAIHost = (value: string): boolean => URL.canParse(value) && new URL(value).host === 'api.openai.com';
 
 /**
@@ -674,13 +682,26 @@ export const EnvSchema = z
      */
     SOURCE_ALLOWED_HOSTS: allowedHostsSetting(),
     /**
-     * **Deprecated** ([ADR-0126](../../.ssot/ADR.md#adr-0126) decision 7): use `SOURCE_ALLOWED_HOSTS`.
-     * It still admits its hosts on a private address, for Confluence only; Confluence's list is the
-     * union of the two. A non-empty value logs one deprecation warning at startup
-     * ({@link deprecatedSettingWarnings}). Removed no earlier than `1.0.0`; from then a non-empty value
-     * refuses startup with a message that names `SOURCE_ALLOWED_HOSTS`.
+     * **Removed in `1.0.0`** ([ADR-0140](../../.ssot/ADR.md#adr-0140) decision 5, in the form
+     * [ADR-0126](../../.ssot/ADR.md#adr-0126) decision 7 announced in `0.6.0`): the key is still read, but only
+     * to refuse it. A non-empty value stops startup with a message that names `SOURCE_ALLOWED_HOSTS`, because
+     * silently ignoring it would turn a Confluence source on a private host into a source that is refused at
+     * its first sync; an empty or unset value is accepted. It never reaches `Config` as a value.
      */
-    CONFLUENCE_ALLOWED_HOSTS: allowedHostsSetting(),
+    CONFLUENCE_ALLOWED_HOSTS: z
+      .string()
+      .optional()
+      .transform((value, ctx) => {
+        if (value !== undefined && value.trim() !== '') {
+          ctx.addIssue({
+            code: 'custom',
+            message:
+              'CONFLUENCE_ALLOWED_HOSTS was removed in 1.0.0 (ADR-0140). Move its hosts to SOURCE_ALLOWED_HOSTS, ' +
+              'which Confluence, S3 and GitHub sources share, and unset CONFLUENCE_ALLOWED_HOSTS.',
+          });
+        }
+        return undefined;
+      }),
     /**
      * Pages one Confluence sync indexes at most. A space past it is indexed up to the ceiling, the run
      * logs a warning and its note says in capitals that the rest was not indexed — a partial index that
@@ -1062,7 +1083,7 @@ export const EnvSchema = z
      * nothing else is. Every request a web source makes — pages, `robots.txt`, the sitemap, `llms.txt`
      * and every redirect hop — goes through the same check as Confluence's. Loopback, link-local,
      * unspecified, multicast and the reserved 240.0.0.0/4 stay refused whatever the list says, and there
-     * is no switch that turns the check off. Same shape as `CONFLUENCE_ALLOWED_HOSTS`: names, not URLs.
+     * is no switch that turns the check off. Same shape as `SOURCE_ALLOWED_HOSTS`: names, not URLs.
      */
     WEB_ALLOWED_HOSTS: allowedHostsSetting(),
 
@@ -1115,6 +1136,9 @@ export const EnvSchema = z
      * request URL when `EMBEDDING_BASE_URL` is empty, but never enters the id, so an installation that
      * relied on it keeps its index. It is validated only when it is read — `EMBEDDING_PROVIDER=openai`
      * with `EMBEDDING_BASE_URL` empty; otherwise it may belong to an unrelated tool.
+     *
+     * **Deprecated in `1.0.0`** ([ADR-0140](../../.ssot/ADR.md#adr-0140) decision 6): reading it logs a startup warning
+     * ({@link deprecatedSettingWarnings}); behaviour is unchanged. Removed no sooner than `2.0`.
      */
     EMBEDDING_BASE_URL: embeddingBaseUrl.optional(),
     OPENAI_BASE_URL: z.string().optional(),
@@ -1469,7 +1493,7 @@ export const EnvSchema = z
   .superRefine((c, ctx) => {
     // The legacy name is only read when the new one is empty; a stale value left for another tool is
     // not this server's business otherwise.
-    if (c.EMBEDDING_PROVIDER === 'openai' && c.EMBEDDING_BASE_URL === undefined && c.OPENAI_BASE_URL !== undefined) {
+    if (readsLegacyOpenAIBaseUrl(c)) {
       const legacy = embeddingBaseUrl.safeParse(c.OPENAI_BASE_URL);
       if (!legacy.success) {
         for (const issue of legacy.error.issues) {
@@ -1621,12 +1645,16 @@ export type WebLimits = Pick<Config, 'WEB_MAX_PAGES' | 'WEB_MAX_DEPTH' | 'WEB_RE
  * ([ADR-0126](../.ssot/ADR.md#adr-0126) decision 7). Kept here, next to the settings it names, so that
  * the wording and the condition cannot drift apart and a test can pin both.
  */
-export function deprecatedSettingWarnings(config: Pick<Config, 'CONFLUENCE_ALLOWED_HOSTS'>): string[] {
+export function deprecatedSettingWarnings(config: Pick<Config, 'EMBEDDING_PROVIDER' | 'EMBEDDING_BASE_URL' | 'OPENAI_BASE_URL'>): string[] {
   const warnings: string[] = [];
-  if (config.CONFLUENCE_ALLOWED_HOSTS.length > 0) {
+  // "When it is read" (ADR-0140 decision 6): `OPENAI_BASE_URL` routes requests only for the openai provider
+  // with `EMBEDDING_BASE_URL` empty. Set beside anything else it may belong to an unrelated tool, and a warning
+  // there would be about a variable this server never looked at.
+  if (readsLegacyOpenAIBaseUrl(config)) {
     warnings.push(
-      'CONFLUENCE_ALLOWED_HOSTS is deprecated and will be removed no earlier than 1.0.0; move its hosts to SOURCE_ALLOWED_HOSTS. ' +
-        'Until then it still admits its hosts for Confluence sources only.',
+      'OPENAI_BASE_URL is deprecated and will be removed no sooner than 2.0; set EMBEDDING_BASE_URL instead. ' +
+        'Until then it still routes embedding requests when EMBEDDING_BASE_URL is empty. Moving to EMBEDDING_BASE_URL ' +
+        'changes the embedding model id once (unless the URL is api.openai.com), so each project has to be re-indexed.',
     );
   }
   return warnings;

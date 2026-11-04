@@ -525,6 +525,27 @@ and `true` into a number and a boolean, which the schema already rejected as a t
 the form that tests this rule. A `TRUST_PROXY` set through the free-form `env` map is not seen by the
 schema, but the application refuses it the same way when the Pod starts.
 
+### Upgrading to 3.0.0
+
+Chart 3.0.0 is a major version because the values schema newly rejects a key (ADR-0092):
+`config.confluenceAllowedHosts`, which was deprecated alongside the application's `0.6.0` and is removed together with the application's
+`CONFLUENCE_ALLOWED_HOSTS` in 1.0.0 (ADR-0140). `helm upgrade` stops on the old key, before anything changes.
+
+Before upgrading, if your values file or `--set` flags set it, move its hosts to `config.sourceAllowedHosts`, which
+Confluence, S3 and GitHub Enterprise Server sources share (a host listed there is not admitted for a web or git
+source), and delete the old key:
+
+```yaml
+config:
+  sourceAllowedHosts:
+    - wiki.corp.example   # was config.confluenceAllowedHosts
+```
+
+`helm template t charts/contextator --set 'config.confluenceAllowedHosts={wiki.corp.example}'` shows the refusal.
+A `CONFLUENCE_ALLOWED_HOSTS` set through the free-form `env` map is not seen by the schema, but the application
+refuses a non-empty value at startup with a message that names `SOURCE_ALLOWED_HOSTS`, so the Pod would not become
+ready.
+
 ## Persistence
 
 Two `ReadWriteOnce` PVCs, both enabled by default:
@@ -748,9 +769,6 @@ checks them:
 - `config.sourceAllowedHosts` — a list of host names (not URLs), joined into `SOURCE_ALLOWED_HOSTS`: the hosts
   a Confluence, S3 or GitHub Enterprise Server source may reach on a private address (ADR-0126). It does not
   admit a host for a web or git source. Empty leaves the variable unset.
-- `config.confluenceAllowedHosts` — **deprecated**, use `config.sourceAllowedHosts`. A list of host names (not
-  URLs), joined into `CONFLUENCE_ALLOWED_HOSTS`, which still admits its hosts for Confluence only; the
-  application logs one deprecation warning at startup while it is set. Empty leaves the variable unset.
 - `config.webAllowedHosts` — the same for a web source, joined into `WEB_ALLOWED_HOSTS`. Empty leaves the
   variable unset.
 - `config.gitAllowedHosts` — the same for a git source, joined into `GIT_ALLOWED_HOSTS`. Empty leaves the

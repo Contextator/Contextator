@@ -4,8 +4,8 @@ import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { EnvSchema, WEB_LIMIT_DEFAULTS } from '../src/config.js';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { EnvSchema, loadConfig, WEB_LIMIT_DEFAULTS } from '../src/config.js';
 import type { DocumentSourceRow } from '../src/db/schema.js';
 import { encryptSecret } from '../src/services/crypto.js';
 import { HttpConfluenceClient } from '../src/services/sources/confluence-client.js';
@@ -237,7 +237,7 @@ describe('confluenceEgress', () => {
     });
   });
 
-  describe('CONFLUENCE_ALLOWED_HOSTS', () => {
+  describe('allowedHosts', () => {
     it('lets a listed host reach its private address', async () => {
       const fetch = guarded({
         allowedHosts: ['Wiki.Corp.'],
@@ -486,23 +486,47 @@ describe('confluenceEgress', () => {
   });
 });
 
+// ADR-0140 decision 5: the key is removed in 1.0.0, in the form ADR-0126 decision 7 announced.
 describe('CONFLUENCE_ALLOWED_HOSTS as configuration', () => {
   const parse = (value: string) => EnvSchema.safeParse({ DATABASE_URL: 'postgres://unused/unused', CONFLUENCE_ALLOWED_HOSTS: value });
 
-  it('defaults to allowing no private host', () => {
-    const result = EnvSchema.safeParse({ DATABASE_URL: 'postgres://unused/unused' });
-    expect(result.success && result.data.CONFLUENCE_ALLOWED_HOSTS).toEqual([]);
+  it.each(['wiki.corp.example', ' Wiki.Corp.Example. , 10.0.4.12,[fd00::1]', '*', 'https://wiki.corp', ','])(
+    'refuses %j, naming SOURCE_ALLOWED_HOSTS',
+    (value) => {
+      const result = parse(value);
+      expect(result.success).toBe(false);
+      const messages = result.error?.issues.map((issue) => issue.message) ?? [];
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toContain('CONFLUENCE_ALLOWED_HOSTS was removed in 1.0.0');
+      expect(messages[0]).toContain('SOURCE_ALLOWED_HOSTS');
+    },
+  );
+
+  it.each([undefined, '', '  '])('accepts %j and carries no value into the configuration', (value) => {
+    const result = EnvSchema.safeParse({
+      DATABASE_URL: 'postgres://unused/unused',
+      ...(value === undefined ? {} : { CONFLUENCE_ALLOWED_HOSTS: value }),
+    });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.CONFLUENCE_ALLOWED_HOSTS).toBeUndefined();
   });
 
-  it('reads a comma-separated list of names and addresses', () => {
-    const result = parse(' Wiki.Corp.Example. , 10.0.4.12,[fd00::1]');
-    expect(result.success && result.data.CONFLUENCE_ALLOWED_HOSTS).toEqual(['wiki.corp.example', '10.0.4.12', 'fd00::1']);
-  });
-
-  it.each(['https://wiki.corp', 'wiki.corp:8090', 'wiki.corp/confluence', '*'])('rejects %s rather than silently allowing nothing', (value) => {
-    const result = parse(value);
-    expect(result.success).toBe(false);
-    expect(JSON.stringify(result.error?.issues)).toContain('without scheme, port or path');
+  /** What `npm run start` does with it: the process ends with a non-zero code on the message above. */
+  it('ends loadConfig with a non-zero exit and a message that names SOURCE_ALLOWED_HOSTS', () => {
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('exit');
+    }) as never);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      expect(() => loadConfig({ DATABASE_URL: 'postgres://unused/unused', CONFLUENCE_ALLOWED_HOSTS: 'x' })).toThrow('exit');
+      expect(exit).toHaveBeenLastCalledWith(1);
+      expect(String(error.mock.calls[0]?.[0])).toContain('SOURCE_ALLOWED_HOSTS');
+      // An empty assignment is "unset" to loadConfig, so a compose file that blanks the variable still starts.
+      expect(loadConfig({ DATABASE_URL: 'postgres://unused/unused', CONFLUENCE_ALLOWED_HOSTS: '' }).SOURCE_ALLOWED_HOSTS).toEqual([]);
+    } finally {
+      exit.mockRestore();
+      error.mockRestore();
+    }
   });
 });
 
@@ -512,7 +536,7 @@ describe('the Confluence driver behind the guard', () => {
   let dataDir: string;
   let server: DataCenterServer;
 
-  const driver = (baseUrl: string, allowed: string[] | undefined, egress?: Pick<EgressOptions, 'resolve' | 'route'>, sourceAllowed?: string[]) =>
+  const driver = (baseUrl: string, sourceAllowed: string[] | undefined, egress?: Pick<EgressOptions, 'resolve' | 'route'>) =>
     new ConfluenceDriver(
       {
         id: '00000000-0000-4000-8000-000000000031',
@@ -531,7 +555,6 @@ describe('the Confluence driver behind the guard', () => {
           SECRET_KEY: KEY,
           ALLOWED_DOC_ROOTS: [],
           IGNORE_GLOBS: [],
-          ...(allowed ? { CONFLUENCE_ALLOWED_HOSTS: allowed } : {}),
           ...(sourceAllowed ? { SOURCE_ALLOWED_HOSTS: sourceAllowed } : {}),
         },
       },
@@ -575,22 +598,12 @@ describe('the Confluence driver behind the guard', () => {
     expect(server.requests.length).toBeGreaterThan(0);
   });
 
-  // ADR-0126 decision 7: the deprecated list keeps its effect for Confluence, and the shared one does too.
-  it('still reaches a private host named only in the deprecated CONFLUENCE_ALLOWED_HOSTS', async () => {
+  it('reaches a private host named in SOURCE_ALLOWED_HOSTS', async () => {
     const seams = { resolve: fakeResolver({ 'wiki.corp': '10.20.30.40' }), route: routeToLoopback('10.20.30.40') };
     const baseUrl = renamed(server.baseUrl, 'wiki.corp');
 
-    expect(await driver(baseUrl, ['wiki.corp'], seams, []).test()).toMatch(/^Connected to Confluence Data Center/);
-    expect(server.requests.length).toBeGreaterThan(0);
-  });
-
-  it('reaches a private host named only in SOURCE_ALLOWED_HOSTS, and the two lists are joined', async () => {
-    const seams = { resolve: fakeResolver({ 'wiki.corp': '10.20.30.40' }), route: routeToLoopback('10.20.30.40') };
-    const baseUrl = renamed(server.baseUrl, 'wiki.corp');
-
-    expect(await driver(baseUrl, undefined, seams, ['wiki.corp']).test()).toMatch(/^Connected to Confluence Data Center/);
-    expect(await driver(baseUrl, ['other.corp'], seams, ['wiki.corp']).test()).toMatch(/^Connected to Confluence Data Center/);
-    expect(await driver(baseUrl, ['wiki.corp'], seams, ['other.corp']).test()).toMatch(/^Connected to Confluence Data Center/);
+    expect(await driver(baseUrl, ['wiki.corp'], seams).test()).toMatch(/^Connected to Confluence Data Center/);
+    expect(await driver(baseUrl, ['other.corp', 'wiki.corp'], seams).test()).toMatch(/^Connected to Confluence Data Center/);
   });
 
   it('guards a client built without an explicit fetch', async () => {

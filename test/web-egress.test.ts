@@ -339,8 +339,8 @@ describe('WEB_ALLOWED_HOSTS as configuration', () => {
     expect(result.success && result.data.WEB_ALLOWED_HOSTS).toEqual(['docs.corp.example', '10.0.4.12', 'fd00::1']);
   });
 
-  it('is independent of CONFLUENCE_ALLOWED_HOSTS', () => {
-    const result = EnvSchema.safeParse({ DATABASE_URL: 'postgres://unused/unused', CONFLUENCE_ALLOWED_HOSTS: 'wiki.corp' });
+  it('is independent of SOURCE_ALLOWED_HOSTS', () => {
+    const result = EnvSchema.safeParse({ DATABASE_URL: 'postgres://unused/unused', SOURCE_ALLOWED_HOSTS: 'wiki.corp' });
     expect(result.success && result.data.WEB_ALLOWED_HOSTS).toEqual([]);
   });
 

@@ -17,6 +17,30 @@ ships, that stops.
   application outside the container on Node 22 has to move to 24.
 - **`unpdf` 2** reads PDFs. Text extraction, the page-count cap and the title taken from the document's metadata
   work as before; the new major needs Node.js 24, which is why it follows the runtime move.
+- **Two variables are classified before the contracts freeze** (ADR-0140). `CONTEXTATOR_EMBEDDED_PGDATA`, which the
+  image's entrypoint hands to the application, is internal: it is not part of the supported environment, and the
+  contract snapshot records it in a separate `internal` block. `BACKUP_STAGING_DIR`, which the README tells operators
+  to set for the scheduled-backup sidecar and the chart sets, is a supported setting. The snapshot also records the
+  cross-key startup refusals (for example `SECRET_KEY_PREVIOUS` without `SECRET_KEY`); they refuse what they refused.
+- The CI changelog gate now also watches `test/contracts/fixtures/`: a pull request that changes an archive fixture
+  must add a line under `[Unreleased]`, as one that changes a contract snapshot does.
+
+### Deprecated
+
+- `OPENAI_BASE_URL` (ADR-0140). It still sets where `EMBEDDING_PROVIDER=openai` sends requests when
+  `EMBEDDING_BASE_URL` is empty, and nothing about that changes, but the server now logs one warning at startup while
+  that is what it does. Set `EMBEDDING_BASE_URL` instead; moving changes the embedding model id once, so each project
+  is re-indexed (see the notes beside `EMBEDDING_BASE_URL` in `.env.example`). It is removed no sooner than `2.0`.
+
+### Removed
+
+- **BREAKING: `CONFLUENCE_ALLOWED_HOSTS`** (deprecated in `0.6.0`; ADR-0140, ADR-0126 decision 7). A non-empty value
+  now stops the server from starting, with a message that names `SOURCE_ALLOWED_HOSTS`; an empty or unset value is
+  accepted. Move its hosts to `SOURCE_ALLOWED_HOSTS` before upgrading, which Confluence, S3 and GitHub Enterprise
+  Server sources share.
+- **BREAKING (Helm): `config.confluenceAllowedHosts`.** The chart's strict values schema now rejects the key, so
+  `helm upgrade` stops on it; use `config.sourceAllowedHosts`. This is Helm chart 3.0.0 ("Upgrading to 3.0.0" in the
+  chart README).
 
 ## [0.7.0] - 2026-11-01
 

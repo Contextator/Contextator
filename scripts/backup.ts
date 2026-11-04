@@ -348,7 +348,8 @@ export async function runBackupCommand(args: BackupArgs, deps: BackupCommandDeps
   await fs.mkdir(config.DATA_DIR, { recursive: true });
   // The scheduled sidecar owns a separate scratch root, so it can clean up after SIGKILL
   // without deleting a manual backup's staging directory on the shared data volume.
-  // BACKUP_STAGING_DIR is an internal sidecar knob, not a supported user setting.
+  // BACKUP_STAGING_DIR is a supported setting (ADR-0140 decision 3): the README names it for the scheduled-backup
+  // sidecar and the chart sets it. Unset, the backup stages under DATA_DIR.
   const stagingRoot = env.BACKUP_STAGING_DIR || config.DATA_DIR;
   await fs.mkdir(stagingRoot, { recursive: true });
   const staging = await fs.mkdtemp(path.join(stagingRoot, `${STAGING}-`));
