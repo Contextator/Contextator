@@ -41,6 +41,7 @@ import { loadQuerySummary, renderQueries } from './queries.js';
 import { renderSourceFreshness } from './freshness.js';
 import { loadEval, renderEval } from './eval.js';
 import { loadFindings, renderFindings } from './findings.js';
+import { LEGACY_SSE_DOCS_URL, LEGACY_SSE_SUNSET_AT, legacySseSunsetLabel } from './legacy-sse.js';
 import { initGoldenUi, loadGolden, renderGolden } from './golden.js';
 import { describeApiError, initQuotasUi, loadQuotas, renderQuotas } from './quotas.js';
 import { captureSearchFocus, renderSearch } from './search.js';
@@ -739,8 +740,8 @@ function renderDetail() {
     );
   }
 
-  // Legacy SSE is deprecated with no removal date (ADR-0096), so this informs and points the way; it
-  // names no deadline, and it is not a warning: the client still works.
+  // Legacy SSE is deprecated and leaves on a published date (ADR-0096, ADR-0139): the same one its responses
+  // carry as `Sunset`. This informs and points the way; it is not a warning, because the client still works.
   if (seesLegacySse(p)) {
     main.append(
       el('div', { class: 'callout' }, [
@@ -748,7 +749,11 @@ function renderDetail() {
         el('span', {}, [
           'A client reached this project over the legacy HTTP+SSE transport ',
           el('time', { datetime: p.lastLegacySseAt, title: new Date(p.lastLegacySseAt).toLocaleString(), text: relativeTime(p.lastLegacySseAt) }),
-          '. It keeps working, but the transport is deprecated: point that client at the same URL with Streamable HTTP — the snippets under Connect an agent use it. No removal date has been set.',
+          '. It keeps working for now, but the transport is deprecated and is scheduled for removal on ',
+          el('time', { datetime: LEGACY_SSE_SUNSET_AT, text: legacySseSunsetLabel() }),
+          ': point that client at the same URL with Streamable HTTP — the snippets under Connect an agent use it. ',
+          el('a', { href: LEGACY_SSE_DOCS_URL, target: '_blank', rel: 'noopener noreferrer', text: 'Compatibility notes' }),
+          '.',
         ]),
       ]),
     );

@@ -12,6 +12,13 @@ ships, that stops.
 
 ### Changed
 
+- **The legacy HTTP+SSE transport now announces its removal date** (ADR-0139). Every legacy SSE response — the
+  stream and its `/messages` channel, refusals included — carries `Deprecation: @1790899200` (RFC 9745, announced
+  2026-10-02), `Sunset: Sat, 02 Oct 2027 00:00:00 GMT` (RFC 8594) and `Link` with `rel="deprecation"` and
+  `rel="sunset"` pointing at `docs/compatibility.md`. `Deprecation` was `true` before. `sunset` and `link` are
+  added to the CORS exposed headers, and the dashboard notice for a project with a recent legacy client now
+  names the date and links the page instead of saying no date is set. Behaviour is unchanged: SSE keeps working
+  until it is removed, and Streamable HTTP responses carry none of these headers.
 - **Node.js 24 is now required** (ADR-0138). Both images (`full` and `slim`) are built on `node:24-bookworm-slim`,
   CI runs 24, and `engines.node` is `>=24`. Nothing changes for anyone running the image; an operator running the
   application outside the container on Node 22 has to move to 24.
