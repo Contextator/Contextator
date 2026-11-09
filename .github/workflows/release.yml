@@ -194,7 +194,7 @@ jobs:
       # Only reached once every check above has passed. `docker/login-action` is pinned to a commit
       # and not a tag for the same reason `cla.yml` pins the actions in its own token-holding job: it
       # is handed `DOCKERHUB_TOKEN`, a personal access token scoped read/write/delete against the
-      # `contextator` Docker Hub organisation, and a tag is a name its owner can move. Resolve `v4.7.0`
+      # `contextator` Docker Hub organisation, and a tag is a name its owner can move. Resolve `v4.8.0`
       # again to move this, and read the diff first.
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
