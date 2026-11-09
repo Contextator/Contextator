@@ -26,6 +26,10 @@ updates:
       # resolve when they move together, so only patch releases are proposed automatically.
       - dependency-name: "@opentelemetry/*"
         update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      # The runtime is Node.js 24 (`engines`, CI, Dockerfile), and the type definitions follow it: a
+      # newer major would type APIs the runtime does not have. They move with the next runtime bump.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "docker"
     directory: "/"
